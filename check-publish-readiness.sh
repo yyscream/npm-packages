@@ -1,0 +1,456 @@
+#!/usr/bin/env bash
+set -u
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TARGET="all"
+PUBLISHER="auto"        # auto|bun|npm
+CHECK_AUTH=1
+STRICT_AUTH=0
+CHECK_REGISTRY=1
+CHECK_HARDCODE=1
+CHECK_ALT_CLIENT=0       # run extra dry-run check with the non-primary client when available
+
+usage() {
+  cat <<'EOF'
+Usage:
+  check-publish-readiness.sh [package-dir-name]
+  check-publish-readiness.sh [options]
+
+Options:
+  --publisher <auto|bun|npm>   Select publishing client (default: auto)
+  --target <name|all>          Check one package folder or all (default: all)
+  --all                        Force checking all package folders
+  --check-alt-client           Also run dry-run with the other client if installed
+
+  --skip-auth                  Skip auth check
+  --strict-auth                Treat missing auth as failure (default: warn only)
+  --skip-registry              Skip npm registry name/version checks
+  --skip-hardcode              Skip hardcoded-value heuristic scan
+
+  -h, --help                   Show this help
+
+Examples:
+  ./check-publish-readiness.sh
+  ./check-publish-readiness.sh pi-extension-notes
+  ./check-publish-readiness.sh --publisher bun --check-alt-client
+  ./check-publish-readiness.sh --target pi-extension-brave-search --strict-auth
+  ./check-publish-readiness.sh --all
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --publisher)
+      PUBLISHER="${2:-}"
+      shift 2
+      ;;
+    --target)
+      TARGET="${2:-}"
+      shift 2
+      ;;
+    --all)
+      TARGET="all"
+      shift
+      ;;
+    --check-alt-client)
+      CHECK_ALT_CLIENT=1
+      shift
+      ;;
+    --skip-auth)
+      CHECK_AUTH=0
+      shift
+      ;;
+    --strict-auth)
+      STRICT_AUTH=1
+      shift
+      ;;
+    --skip-registry)
+      CHECK_REGISTRY=0
+      shift
+      ;;
+    --skip-hardcode)
+      CHECK_HARDCODE=0
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --*)
+      echo "ERROR: unknown option '$1'" >&2
+      usage
+      exit 1
+      ;;
+    *)
+      if [[ "$TARGET" != "all" ]]; then
+        echo "ERROR: multiple positional targets provided: '$TARGET' and '$1'" >&2
+        exit 1
+      fi
+      TARGET="$1"
+      shift
+      ;;
+  esac
+done
+
+if [[ "$PUBLISHER" != "auto" && "$PUBLISHER" != "bun" && "$PUBLISHER" != "npm" ]]; then
+  echo "ERROR: --publisher must be auto, bun, or npm" >&2
+  exit 1
+fi
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "ERROR: node is required but not found in PATH." >&2
+  exit 1
+fi
+
+HAS_NPM=0
+HAS_BUN=0
+command -v npm >/dev/null 2>&1 && HAS_NPM=1
+command -v bun >/dev/null 2>&1 && HAS_BUN=1
+
+if [[ "$PUBLISHER" == "auto" ]]; then
+  if [[ $HAS_BUN -eq 1 ]]; then
+    PRIMARY_CLIENT="bun"
+  elif [[ $HAS_NPM -eq 1 ]]; then
+    PRIMARY_CLIENT="npm"
+  else
+    echo "ERROR: neither bun nor npm is installed." >&2
+    exit 1
+  fi
+else
+  PRIMARY_CLIENT="$PUBLISHER"
+fi
+
+if [[ "$PRIMARY_CLIENT" == "bun" && $HAS_BUN -ne 1 ]]; then
+  echo "ERROR: --publisher bun selected, but bun is not installed." >&2
+  exit 1
+fi
+if [[ "$PRIMARY_CLIENT" == "npm" && $HAS_NPM -ne 1 ]]; then
+  echo "ERROR: --publisher npm selected, but npm is not installed." >&2
+  exit 1
+fi
+
+SECONDARY_CLIENT=""
+if [[ "$PRIMARY_CLIENT" == "bun" && $HAS_NPM -eq 1 ]]; then
+  SECONDARY_CLIENT="npm"
+elif [[ "$PRIMARY_CLIENT" == "npm" && $HAS_BUN -eq 1 ]]; then
+  SECONDARY_CLIENT="bun"
+fi
+
+color() {
+  local code="$1"; shift
+  printf "\033[%sm%s\033[0m" "$code" "$*"
+}
+ok() { color "32" "PASS"; }
+warn() { color "33" "WARN"; }
+fail() { color "31" "FAIL"; }
+
+print_check() {
+  local status="$1"; shift
+  local msg="$*"
+  printf "  - [%s] %s\n" "$status" "$msg"
+}
+
+json_get() {
+  local file="$1"
+  local expr="$2"
+  node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));const v=(function(){return ${expr}})();if(v===undefined||v===null){process.exit(2)};if(typeof v==='object')console.log(JSON.stringify(v));else console.log(String(v));" "$file" 2>/dev/null
+}
+
+gather_packages() {
+  if [[ "$TARGET" != "all" ]]; then
+    if [[ -d "$ROOT_DIR/$TARGET" && -f "$ROOT_DIR/$TARGET/package.json" ]]; then
+      printf "%s\n" "$ROOT_DIR/$TARGET"
+      return
+    fi
+    echo "ERROR: package '$TARGET' not found under $ROOT_DIR" >&2
+    exit 1
+  fi
+
+  find "$ROOT_DIR" -mindepth 1 -maxdepth 1 -type d \
+    ! -name ".*" \
+    -exec test -f "{}/package.json" ';' -print | sort
+}
+
+check_auth() {
+  local client="$1"
+  if [[ "$client" == "npm" ]]; then
+    if npm whoami >/dev/null 2>&1; then
+      echo "npm auth: $(ok) logged in as $(npm whoami 2>/dev/null)"
+      return 0
+    fi
+    echo "npm auth: $(warn) not logged in (run: npm login)"
+    return 1
+  fi
+
+  if [[ "$client" == "bun" ]]; then
+    # bun pm whoami may require being inside a package directory.
+    if [[ -f "$ROOT_DIR/package.json" ]] && bun pm whoami >/dev/null 2>&1; then
+      echo "bun auth: $(ok) logged in as $(bun pm whoami 2>/dev/null)"
+      return 0
+    fi
+
+    # npm auth is compatible with bun publishing against npm registry.
+    if command -v npm >/dev/null 2>&1 && npm whoami >/dev/null 2>&1; then
+      echo "bun auth: $(ok) npm credentials detected via npm whoami ($(npm whoami 2>/dev/null))"
+      return 0
+    fi
+
+    if [[ -n "${NPM_CONFIG_TOKEN:-}" ]]; then
+      echo "bun auth: $(ok) NPM_CONFIG_TOKEN is set"
+      return 0
+    fi
+
+    echo "bun auth: $(warn) not logged in (run: npm whoami / set token in ~/.npmrc or NPM_CONFIG_TOKEN)"
+    return 1
+  fi
+
+  return 1
+}
+
+registry_check_with_npm() {
+  local name="$1"
+  local version="$2"
+
+  if npm view "$name" version >/dev/null 2>&1; then
+    local latest
+    latest="$(npm view "$name" version 2>/dev/null | tail -n1)"
+    echo "exists|$latest"
+    if npm view "$name@$version" version >/dev/null 2>&1; then
+      echo "version_exists|$version"
+    else
+      echo "version_free|$version"
+    fi
+  else
+    echo "missing|"
+    echo "version_free|$version"
+  fi
+}
+
+registry_check_with_bun() {
+  local name="$1"
+  local version="$2"
+
+  if bun pm view "$name" version >/dev/null 2>&1; then
+    local latest
+    latest="$(bun pm view "$name" version 2>/dev/null | tail -n1 | tr -d '[:space:]')"
+    echo "exists|$latest"
+    if bun pm view "$name@$version" version >/dev/null 2>&1; then
+      echo "version_exists|$version"
+    else
+      echo "version_free|$version"
+    fi
+  else
+    echo "missing|"
+    echo "version_free|$version"
+  fi
+}
+
+run_publish_dry_run() {
+  local client="$1"
+  local dir="$2"
+
+  if [[ "$client" == "npm" ]]; then
+    (cd "$dir" && npm publish --dry-run >/dev/null 2>&1)
+    return $?
+  fi
+
+  if [[ "$client" == "bun" ]]; then
+    (cd "$dir" && bun publish --dry-run >/dev/null 2>&1)
+    return $?
+  fi
+
+  return 1
+}
+
+has_fail=0
+pkg_count=0
+
+echo "Primary publisher client: $PRIMARY_CLIENT"
+if [[ -n "$SECONDARY_CLIENT" ]]; then
+  echo "Secondary client available: $SECONDARY_CLIENT"
+fi
+
+PRIMARY_AUTH_OK=0
+if [[ $CHECK_AUTH -eq 1 ]]; then
+  if check_auth "$PRIMARY_CLIENT"; then
+    PRIMARY_AUTH_OK=1
+  fi
+  if [[ $STRICT_AUTH -eq 1 && $PRIMARY_AUTH_OK -ne 1 ]]; then
+    echo "Auth policy: $(fail) strict auth enabled and primary client is not authenticated"
+    has_fail=1
+  fi
+else
+  echo "Auth check: $(warn) skipped (--skip-auth)"
+fi
+
+echo
+
+for pkg_dir in $(gather_packages); do
+  pkg_count=$((pkg_count+1))
+  echo "$(color "36" "==>") $(basename "$pkg_dir")"
+
+  pkg_json="$pkg_dir/package.json"
+  pkg_fail=0
+
+  if node -e "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'))" "$pkg_json" >/dev/null 2>&1; then
+    print_check "$(ok)" "package.json is valid JSON"
+  else
+    print_check "$(fail)" "package.json is invalid JSON"
+    pkg_fail=1
+  fi
+
+  name="$(json_get "$pkg_json" 'p.name' || true)"
+  version="$(json_get "$pkg_json" 'p.version' || true)"
+  license="$(json_get "$pkg_json" 'p.license' || true)"
+
+  [[ -n "$name" ]] && print_check "$(ok)" "name: $name" || { print_check "$(fail)" "missing package name"; pkg_fail=1; }
+  [[ -n "$version" ]] && print_check "$(ok)" "version: $version" || { print_check "$(fail)" "missing version"; pkg_fail=1; }
+  [[ -n "$license" ]] && print_check "$(ok)" "license: $license" || { print_check "$(fail)" "missing license"; pkg_fail=1; }
+
+  if json_get "$pkg_json" 'Array.isArray(p.keywords) ? p.keywords.includes("pi-package") : false' | grep -q '^true$'; then
+    print_check "$(ok)" "keywords include 'pi-package'"
+  else
+    print_check "$(warn)" "keywords missing 'pi-package' (recommended for discoverability)"
+  fi
+
+  if [[ -f "$pkg_dir/README.md" ]]; then
+    print_check "$(ok)" "README.md exists"
+  else
+    print_check "$(fail)" "README.md missing"
+    pkg_fail=1
+  fi
+
+  if [[ -f "$pkg_dir/LICENSE" ]]; then
+    print_check "$(ok)" "LICENSE exists"
+  else
+    print_check "$(warn)" "LICENSE missing"
+  fi
+
+  extensions_json="$(json_get "$pkg_json" 'p.pi && Array.isArray(p.pi.extensions) ? p.pi.extensions : null' || true)"
+  if [[ -z "$extensions_json" ]]; then
+    print_check "$(fail)" "pi.extensions missing or empty"
+    pkg_fail=1
+  else
+    print_check "$(ok)" "pi.extensions configured: $extensions_json"
+
+    while IFS= read -r ext_path; do
+      [[ -z "$ext_path" ]] && continue
+      ext_clean="${ext_path#./}"
+
+      if [[ "$ext_clean" == *"*"* || "$ext_clean" == *"?"* || "$ext_clean" == *"["* ]]; then
+        shopt -s nullglob
+        matches=("$pkg_dir"/$ext_clean)
+        shopt -u nullglob
+        if [[ ${#matches[@]} -gt 0 ]]; then
+          print_check "$(ok)" "extension glob matches ${#matches[@]} file(s): $ext_path"
+        else
+          print_check "$(fail)" "extension glob has no matches: $ext_path"
+          pkg_fail=1
+        fi
+      else
+        if [[ -f "$pkg_dir/$ext_clean" ]]; then
+          print_check "$(ok)" "extension entry exists: $ext_path"
+        else
+          print_check "$(fail)" "extension entry missing: $ext_path"
+          pkg_fail=1
+        fi
+      fi
+    done < <(node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));for(const e of (p.pi?.extensions||[])) console.log(e);" "$pkg_json")
+  fi
+
+  if [[ $CHECK_HARDCODE -eq 1 && -f "$pkg_dir/index.ts" ]]; then
+    if grep -qE '(^|[^A-Za-z0-9_])(/home/firstpick|Europe/Zurich|/usr/sbin/fish)($|[^A-Za-z0-9_])' "$pkg_dir/index.ts"; then
+      print_check "$(warn)" "index.ts contains potentially user-specific hardcoded values"
+    else
+      print_check "$(ok)" "no obvious user-specific hardcoded paths/timezone"
+    fi
+  fi
+
+  if run_publish_dry_run "$PRIMARY_CLIENT" "$pkg_dir"; then
+    print_check "$(ok)" "$PRIMARY_CLIENT publish --dry-run succeeds"
+  else
+    if [[ $STRICT_AUTH -eq 0 && $CHECK_AUTH -eq 1 && $PRIMARY_AUTH_OK -eq 0 ]]; then
+      print_check "$(warn)" "$PRIMARY_CLIENT publish --dry-run failed (likely auth-related; non-strict auth mode)"
+    else
+      print_check "$(fail)" "$PRIMARY_CLIENT publish --dry-run failed"
+      pkg_fail=1
+    fi
+  fi
+
+  if [[ $CHECK_ALT_CLIENT -eq 1 ]]; then
+    if [[ -n "$SECONDARY_CLIENT" ]]; then
+      if run_publish_dry_run "$SECONDARY_CLIENT" "$pkg_dir"; then
+        print_check "$(ok)" "$SECONDARY_CLIENT publish --dry-run succeeds"
+      else
+        print_check "$(warn)" "$SECONDARY_CLIENT publish --dry-run failed"
+      fi
+    else
+      print_check "$(warn)" "alternate client not available"
+    fi
+  fi
+
+  if [[ $CHECK_REGISTRY -eq 1 && -n "$name" && -n "$version" ]]; then
+    if [[ "$PRIMARY_CLIENT" == "npm" || $HAS_NPM -eq 1 ]]; then
+      while IFS='|' read -r status payload; do
+        case "$status" in
+          exists)
+            print_check "$(warn)" "package name already exists on npm (latest: ${payload:-unknown})"
+            ;;
+          missing)
+            print_check "$(ok)" "package name appears available on npm"
+            ;;
+          version_exists)
+            print_check "$(fail)" "version $payload is already published"
+            pkg_fail=1
+            ;;
+          version_free)
+            print_check "$(ok)" "version $payload is publishable"
+            ;;
+        esac
+      done < <(registry_check_with_npm "$name" "$version")
+    elif [[ "$PRIMARY_CLIENT" == "bun" || $HAS_BUN -eq 1 ]]; then
+      while IFS='|' read -r status payload; do
+        case "$status" in
+          exists)
+            print_check "$(warn)" "package name already exists on npm (latest: ${payload:-unknown})"
+            ;;
+          missing)
+            print_check "$(ok)" "package name appears available on npm"
+            ;;
+          version_exists)
+            print_check "$(fail)" "version $payload is already published"
+            pkg_fail=1
+            ;;
+          version_free)
+            print_check "$(ok)" "version $payload is publishable"
+            ;;
+        esac
+      done < <(registry_check_with_bun "$name" "$version")
+    else
+      print_check "$(warn)" "registry check skipped (no npm/bun registry client available)"
+    fi
+  elif [[ $CHECK_REGISTRY -eq 0 ]]; then
+    print_check "$(warn)" "registry checks skipped (--skip-registry)"
+  fi
+
+  if [[ $pkg_fail -eq 1 ]]; then
+    has_fail=1
+    echo "  Result: $(fail)"
+  else
+    echo "  Result: $(ok)"
+  fi
+
+  echo
+done
+
+if [[ $pkg_count -eq 0 ]]; then
+  echo "No packages found under $ROOT_DIR" >&2
+  exit 1
+fi
+
+if [[ $has_fail -eq 1 ]]; then
+  echo "Summary: $(fail) readiness check failed for one or more packages."
+  exit 1
+fi
+
+echo "Summary: $(ok) all checked packages are publish-ready."

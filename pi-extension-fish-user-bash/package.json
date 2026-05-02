@@ -1,0 +1,25 @@
+{
+  "name": "@firstpick/pi-extension-fish-user-bash",
+  "version": "0.1.0",
+  "description": "Use fish shell backend for Pi user bash commands (! and !!).",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "extension"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*"
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ]
+}

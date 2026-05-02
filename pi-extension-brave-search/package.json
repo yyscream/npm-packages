@@ -1,0 +1,26 @@
+{
+  "name": "@firstpick/pi-extension-brave-search",
+  "version": "0.1.0",
+  "description": "Brave Search tool for Pi with API key resolution from env and .env files.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "extension"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ]
+}
