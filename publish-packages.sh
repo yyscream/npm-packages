@@ -119,6 +119,13 @@ if [[ "$PRIMARY_CLIENT" == "npm" && $HAS_NPM -ne 1 ]]; then
   exit 1
 fi
 
+SECONDARY_CLIENT=""
+if [[ "$PRIMARY_CLIENT" == "bun" && $HAS_NPM -eq 1 ]]; then
+  SECONDARY_CLIENT="npm"
+elif [[ "$PRIMARY_CLIENT" == "npm" && $HAS_BUN -eq 1 ]]; then
+  SECONDARY_CLIENT="bun"
+fi
+
 REGISTRY_CLIENT=""
 if [[ $HAS_NPM -eq 1 ]]; then
   REGISTRY_CLIENT="npm"
@@ -267,6 +274,7 @@ if [[ ${#PACKAGE_DIRS[@]} -eq 0 ]]; then
 fi
 
 echo "Publisher client: $PRIMARY_CLIENT"
+echo "Fallback client: ${SECONDARY_CLIENT:-none}"
 echo "Registry check client: ${REGISTRY_CLIENT:-none}"
 echo "Mode: $([[ $APPLY -eq 1 ]] && echo "apply" || echo "plan")"
 echo
@@ -374,22 +382,30 @@ for pkg_dir in "${PACKAGE_DIRS[@]}"; do
         exists)
           pkg_exists=1
           latest="$payload"
-          print_check "$(warn)" "package exists on npm (latest: ${latest:-unknown})"
           ;;
         missing)
           pkg_exists=0
-          print_check "$(ok)" "package not found on npm (first publish)"
           ;;
         version_exists)
           version_exists=1
-          print_check "$(ok)" "version $payload already published"
           ;;
         version_free)
           version_exists=0
-          print_check "$(ok)" "version $payload not published yet"
           ;;
       esac
     done < <(registry_check "$name" "$version")
+
+    if [[ $pkg_exists -eq 1 ]]; then
+      print_check "$(ok)" "package exists on npm (latest: ${latest:-unknown})"
+    else
+      print_check "$(ok)" "package not found on npm (first publish)"
+    fi
+
+    if [[ $version_exists -eq 1 ]]; then
+      print_check "$(info "INFO")" "version $version already published"
+    else
+      print_check "$(ok)" "version $version not published yet"
+    fi
   else
     print_check "$(warn)" "registry checks skipped"
     pkg_fail=1
@@ -417,7 +433,7 @@ for pkg_dir in "${PACKAGE_DIRS[@]}"; do
     HAS_FAIL=1
     echo "  Result: $(fail)"
   elif [[ "$action" == "skip" ]]; then
-    echo "  Result: $(warn) no publish needed"
+    echo "  Result: $(info "INFO") up-to-date (already published)"
   else
     echo "  Result: $(ok) ready"
   fi
@@ -446,14 +462,19 @@ fi
 echo "Starting publish phase with $PRIMARY_CLIENT..."
 PUBLISH_FAIL=0
 PUBLISHED_COUNT=0
+PUBLISHED_PRIMARY_COUNT=0
+PUBLISHED_FALLBACK_COUNT=0
 SKIPPED_COUNT=0
+FAILED_COUNT=0
+FALLBACK_ATTEMPT_COUNT=0
+FAILED_ITEMS=()
 
 for item in "${PLANS[@]}"; do
   IFS='|' read -r dir name version action <<< "$item"
 
   if [[ "$action" == "skip" ]]; then
     SKIPPED_COUNT=$((SKIPPED_COUNT+1))
-    echo "$(warn) Skipping $name@$version (already published)"
+    echo "$(info "INFO") Skipping $name@$version (already published)"
     continue
   fi
 
@@ -467,16 +488,47 @@ for item in "${PLANS[@]}"; do
   echo "$(info "Publishing") $name@$version ($action)"
   if run_publish "$PRIMARY_CLIENT" "$dir" "$ACCESS"; then
     PUBLISHED_COUNT=$((PUBLISHED_COUNT+1))
-    echo "$(ok) Published $name@$version"
+    PUBLISHED_PRIMARY_COUNT=$((PUBLISHED_PRIMARY_COUNT+1))
+    echo "$(ok) Published $name@$version via $PRIMARY_CLIENT"
   else
-    PUBLISH_FAIL=1
-    echo "$(fail) Failed to publish $name@$version"
+    if [[ -n "$SECONDARY_CLIENT" ]]; then
+      FALLBACK_ATTEMPT_COUNT=$((FALLBACK_ATTEMPT_COUNT+1))
+      echo "$(warn) $PRIMARY_CLIENT publish failed for $name@$version, trying fallback: $SECONDARY_CLIENT"
+      if run_publish "$SECONDARY_CLIENT" "$dir" "$ACCESS"; then
+        PUBLISHED_COUNT=$((PUBLISHED_COUNT+1))
+        PUBLISHED_FALLBACK_COUNT=$((PUBLISHED_FALLBACK_COUNT+1))
+        echo "$(ok) Published $name@$version via fallback $SECONDARY_CLIENT"
+      else
+        PUBLISH_FAIL=1
+        FAILED_COUNT=$((FAILED_COUNT+1))
+        FAILED_ITEMS+=("$name@$version")
+        echo "$(fail) Failed to publish $name@$version via both $PRIMARY_CLIENT and $SECONDARY_CLIENT"
+      fi
+    else
+      PUBLISH_FAIL=1
+      FAILED_COUNT=$((FAILED_COUNT+1))
+      FAILED_ITEMS+=("$name@$version")
+      echo "$(fail) Failed to publish $name@$version via $PRIMARY_CLIENT"
+    fi
   fi
 
 done
 
 echo
-echo "Publish summary: published=$PUBLISHED_COUNT skipped=$SKIPPED_COUNT"
+echo "Publish summary:"
+echo "  - published total: $PUBLISHED_COUNT"
+echo "  - published via primary ($PRIMARY_CLIENT): $PUBLISHED_PRIMARY_COUNT"
+echo "  - published via fallback (${SECONDARY_CLIENT:-none}): $PUBLISHED_FALLBACK_COUNT"
+echo "  - fallback attempts: $FALLBACK_ATTEMPT_COUNT"
+echo "  - skipped: $SKIPPED_COUNT"
+echo "  - failed: $FAILED_COUNT"
+
+if [[ ${#FAILED_ITEMS[@]} -gt 0 ]]; then
+  echo "  - failed packages:"
+  for item in "${FAILED_ITEMS[@]}"; do
+    echo "    * $item"
+  done
+fi
 
 if [[ $PUBLISH_FAIL -eq 1 || $HAS_FAIL -eq 1 ]]; then
   echo "Final result: $(fail) completed with errors"

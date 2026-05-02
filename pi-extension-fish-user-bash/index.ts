@@ -1,11 +1,31 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { createLocalBashOperations, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
+
+function resolveFromPath(binName: string): string | undefined {
+  const envPath = process.env.PATH ?? "";
+  for (const dir of envPath.split(":").filter(Boolean)) {
+    const candidate = path.join(dir, binName);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return undefined;
+}
 
 function resolveShellPath(): string {
   const configured = process.env.PI_USER_BASH_SHELL_PATH?.trim();
-  if (configured) return configured;
+  if (configured) {
+    if (configured.startsWith("/") && fs.existsSync(configured)) return configured;
 
-  // Portable default: rely on PATH lookup instead of distro-specific absolute paths.
-  return "fish";
+    const resolvedConfigured = resolveFromPath(configured);
+    if (resolvedConfigured) return resolvedConfigured;
+  }
+
+  // Prefer fish when available, but always return an absolute existing binary path.
+  return (
+    resolveFromPath("fish") ??
+    ["/usr/bin/fish", "/bin/fish", "/usr/local/bin/fish"].find((p) => fs.existsSync(p)) ??
+    "/bin/bash"
+  );
 }
 
 export default function fishUserBash(pi: ExtensionAPI) {
