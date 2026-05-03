@@ -1,16 +1,13 @@
 # pi-extension-fish-user-bash
 
-Use fish (or a chosen shell) for Pi `!` / `!!` command execution.
+Use fish (or a custom shell) for Pi `!` and `!!` command execution.
 
-## Goal
+## What it does
 
-Align Pi shell execution with your real interactive shell environment, especially for users who work in fish.
-
-## Why it works this way
-
-- Prioritizes explicit configuration (`PI_USER_BASH_SHELL_PATH`) for deterministic behavior.
-- Auto-detects fish when not configured, so most fish users get the right shell with zero setup.
-- Falls back to `/bin/bash` as a safe baseline if fish is unavailable.
+- Overrides Pi `user_bash` operations to use your preferred shell.
+- Prefers explicit shell configuration via env var.
+- Auto-detects fish if not configured.
+- Falls back to `/bin/bash` when fish is unavailable.
 
 ## Install
 
@@ -18,33 +15,17 @@ Align Pi shell execution with your real interactive shell environment, especiall
 pi install npm:@firstpick/pi-extension-fish-user-bash
 ```
 
-Local testing:
-
-```bash
-pi install /absolute/path/to/pi-extension-fish-user-bash
-```
-
 ## Configuration
 
 - `PI_USER_BASH_SHELL_PATH`
   - absolute path (example: `/usr/bin/fish`), or
-  - binary name on `PATH` (example: `fish`)
+  - executable name resolvable on `PATH` (example: `fish`)
   - if unset: tries fish automatically, then `/bin/bash`
 
 ## Commands
 
-- `/user-bash-shell` — prints the resolved shell binary used for `!` and `!!`.
+- `/user-bash-shell` — print the currently resolved shell path.
 
 ## Tools
 
 None.
-
-## Publish
-
-```bash
-bun publish --access public
-```
-
-```bash
-npm publish --access public
-```

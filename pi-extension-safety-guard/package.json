@@ -1,7 +1,7 @@
 {
-  "name": "@firstpick/pi-extension-brave-search",
-  "version": "0.1.2",
-  "description": "Brave Search tool for Pi with API key resolution from env and .env files.",
+  "name": "@firstpick/pi-extension-safety-guard",
+  "version": "0.1.0",
+  "description": "Interactive guardrails for dangerous bash commands and protected file edits in Pi.",
   "license": "MIT",
   "keywords": [
     "pi-package",
@@ -15,8 +15,7 @@
     ]
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*",
-    "typebox": "*"
+    "@mariozechner/pi-coding-agent": "*"
   },
   "files": [
     "index.ts",

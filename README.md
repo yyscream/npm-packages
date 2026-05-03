@@ -39,10 +39,39 @@ Adds local notes management inside Pi.
 - Fuzzy note lookup and quick status command
 - Optional rule-note injection into prompt
 
+### `@firstpick/pi-extension-git-footer-status`
+Enhanced footer/status line for Pi sessions.
+
+- Git status snapshot (branch, dirty state, sync, operations)
+- Token/cost/context usage telemetry in footer
+- `/git-footer-refresh` command
+
+### `@firstpick/pi-extension-reverse-last`
+Undo support for Pi `write`/`edit` file mutations.
+
+- Per-session undo stack
+- `/reverse-last [count]` command
+- Optional state directory override via env var
+
+### `@firstpick/pi-extension-safety-guard`
+Protective confirmation layer for risky operations.
+
+- Confirmation prompts for dangerous bash commands
+- Protected-path checks for `write`/`edit`
+- Auto-block behavior in non-interactive mode
+
+### `@firstpick/pi-extension-stats`
+Usage analytics command for Pi session history.
+
+- Daily token graph (`/stats`, `/stats N`, `/stats all`)
+- Input/output/cache breakdown
+- Top model usage summary
+
 ## Utility scripts
 
 - `check-publish-readiness.sh` – validates package metadata, extension entries, dry-run publish, and registry/version status
 - `publish-packages.sh` – plans/applies publish actions dynamically for all package folders
+- `sync-dotfiles-extension-symlinks.sh` – ensures `~/.dotfiles/.pi/agent/extensions/*.ts` are symlinks to canonical `pi-extension-*/index.ts` files; renames non-symlink files to `.hardcoded.<timestamp>.bak`
 
 ## Publish model
 

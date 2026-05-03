@@ -1,27 +1,21 @@
 # pi-extension-brave-search
 
-Brave Search integration for Pi.
+Brave Search tool integration for Pi.
 
-## Goal
+## What it does
 
-Provide a reliable web-search tool for up-to-date facts, docs, and references directly from Pi.
-
-## Why it works this way
-
-- Resolves API key in practical order (`env` -> local `.env` -> agent `.env`) to reduce setup friction.
-- Exposes a real tool (`brave_search`) so the agent can use it during normal task execution.
-- Applies result/size limits for stable output and safer context usage.
+- Adds the `brave_search` tool for live web search from Pi.
+- Returns formatted results plus structured metadata.
+- Applies sane limits to keep output stable and context-safe.
+- Resolves API key in this order:
+  1. `process.env.BRAVE_SEARCH_API_KEY`
+  2. `./.env` (current working directory)
+  3. `PI_CODING_AGENT_DIR/.env`
 
 ## Install
 
 ```bash
 pi install npm:@firstpick/pi-extension-brave-search
-```
-
-Local testing:
-
-```bash
-pi install /absolute/path/to/pi-extension-brave-search
 ```
 
 ## Configuration
@@ -30,21 +24,11 @@ pi install /absolute/path/to/pi-extension-brave-search
 
 ## Commands
 
-- `/brave-search-status` — checks whether Brave Search is configured and where the key was found.
-- `/brave-search-test <query>` — runs a direct test query and prints formatted results.
+- `/brave-search-status` — show whether Brave Search is configured and where key resolution succeeded.
+- `/brave-search-test <query>` — run a direct test query.
 
-## Tool
+## Tools
 
 - `brave_search`
   - Inputs: `query`, optional `count`, `country`, `search_lang`, `freshness`, `safesearch`
-  - Output: formatted search results + structured metadata
-
-## Publish
-
-```bash
-bun publish --access public
-```
-
-```bash
-npm publish --access public
-```
+  - Output: formatted search results + metadata
