@@ -31,7 +31,11 @@ function resolveShellPath(): string {
 export default function fishUserBash(pi: ExtensionAPI) {
   const shellPath = resolveShellPath();
 
-  pi.on("user_bash", () => {
+  pi.on("user_bash", (event) => {
+    // Emit for companion extensions (e.g. bang autocomplete learning), because
+    // user_bash short-circuits on first non-undefined handler result.
+    pi.events.emit("fish-user-bash:executed", { command: event.command });
+
     return {
       operations: createLocalBashOperations({ shellPath }),
     };

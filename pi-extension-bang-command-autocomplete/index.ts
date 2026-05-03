@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
-type CommandSource = "common" | "history";
+type CommandSource = "common" | "history" | "runtime";
 
 function envFlag(name: string, fallback: boolean): boolean {
   const raw = process.env[name]?.trim().toLowerCase();
@@ -125,6 +125,28 @@ function buildCommandIndex(includeHistory: boolean): Array<{ command: string; so
   return Array.from(merged.entries()).map(([command, source]) => ({ command, source }));
 }
 
+function addRuntimeCommand(
+  index: Array<{ command: string; source: CommandSource }>,
+  command: string,
+): Array<{ command: string; source: CommandSource }> {
+  const normalized = command.trim();
+  if (!normalized) return index;
+
+  const existingIndex = index.findIndex((entry) => entry.command === normalized);
+  if (existingIndex === -1) {
+    return [...index, { command: normalized, source: "runtime" }];
+  }
+
+  const existing = index[existingIndex];
+  if (existing?.source === "runtime") {
+    return index;
+  }
+
+  const next = [...index];
+  next[existingIndex] = { command: normalized, source: "runtime" };
+  return next;
+}
+
 function rankCommands(commands: Array<{ command: string; source: CommandSource }>, query: string) {
   const q = query.toLowerCase();
 
@@ -138,10 +160,23 @@ function rankCommands(commands: Array<{ command: string; source: CommandSource }
 
 export default function bangCommandAutocomplete(pi: ExtensionAPI) {
   const includeHistory = envFlag("PI_BANG_AUTOCOMPLETE_INCLUDE_HISTORY", false);
+  const runtimeLearned = new Set<string>();
   let commandIndex = buildCommandIndex(includeHistory);
+
+  const learnFromCommandLine = (commandLine: string | undefined) => {
+    if (!commandLine) return;
+    const executable = extractExecutable(commandLine);
+    if (!executable) return;
+
+    runtimeLearned.add(executable);
+    commandIndex = addRuntimeCommand(commandIndex, executable);
+  };
 
   const refreshIndex = () => {
     commandIndex = buildCommandIndex(includeHistory);
+    for (const command of runtimeLearned) {
+      commandIndex = addRuntimeCommand(commandIndex, command);
+    }
   };
 
   pi.on("session_start", (_event, ctx) => {
@@ -166,7 +201,12 @@ export default function bangCommandAutocomplete(pi: ExtensionAPI) {
           items: ranked.map((entry) => ({
             value: `!${entry.command}`,
             label: `!${entry.command}`,
-            description: entry.source === "history" ? "shell history" : "common command",
+            description:
+              entry.source === "history"
+                ? "shell history"
+                : entry.source === "runtime"
+                  ? "current session"
+                  : "common command",
           })),
         };
       },
@@ -190,12 +230,25 @@ export default function bangCommandAutocomplete(pi: ExtensionAPI) {
     }));
   });
 
+  pi.on("user_bash", (event) => {
+    learnFromCommandLine(event.command);
+  });
+
+  // Compatibility with extensions that intercept user_bash and short-circuit
+  // subsequent handlers (e.g. fish-user-bash).
+  pi.events.on("fish-user-bash:executed", (payload: unknown) => {
+    if (!payload || typeof payload !== "object") return;
+    const command = (payload as { command?: unknown }).command;
+    if (typeof command !== "string") return;
+    learnFromCommandLine(command);
+  });
+
   pi.registerCommand("bang-refresh", {
     description: "Refresh !command autocomplete index",
     handler: async (_args, ctx) => {
       refreshIndex();
       ctx.ui.notify(
-        `Bang autocomplete refreshed (${commandIndex.length} commands, history ${includeHistory ? "enabled" : "disabled"})`,
+        `Bang autocomplete refreshed (${commandIndex.length} commands, history ${includeHistory ? "enabled" : "disabled"}, runtime learned ${runtimeLearned.size})`,
         "info",
       );
     },
@@ -205,7 +258,7 @@ export default function bangCommandAutocomplete(pi: ExtensionAPI) {
     description: "Show !command autocomplete configuration",
     handler: async (_args, ctx) => {
       ctx.ui.notify(
-        `Bang autocomplete: ${commandIndex.length} commands · history ${includeHistory ? "enabled" : "disabled"} (${includeHistory ? "PI_BANG_AUTOCOMPLETE_INCLUDE_HISTORY=1" : "set PI_BANG_AUTOCOMPLETE_INCLUDE_HISTORY=1 to enable"})`,
+        `Bang autocomplete: ${commandIndex.length} commands · history ${includeHistory ? "enabled" : "disabled"} · runtime learned ${runtimeLearned.size} (${includeHistory ? "PI_BANG_AUTOCOMPLETE_INCLUDE_HISTORY=1" : "set PI_BANG_AUTOCOMPLETE_INCLUDE_HISTORY=1 to enable"})`,
         "info",
       );
     },
