@@ -6,7 +6,7 @@ Autocomplete for `!<command>` in Pi.
 
 - Suggests command names while typing `!<command>`.
 - Uses a built-in common-command index out of the box.
-- Learns commands you run via `!`/`!!` in the current Pi session and suggests them immediately.
+- Learns commands you run via `!`/`!!` and persists them across Pi sessions.
 - Optionally adds commands from shell history for personalized suggestions.
 - Keeps scope intentionally narrow (command-name completion only, no argument prediction).
 
@@ -21,6 +21,9 @@ pi install npm:@firstpick/pi-extension-bang-command-autocomplete
 - `PI_BANG_AUTOCOMPLETE_INCLUDE_HISTORY`
   - `1|true|yes|on`: include commands from `~/.bash_history` and fish history.
   - unset/other: use built-in command list only (default).
+- `PI_BANG_AUTOCOMPLETE_RUNTIME_STORE_PATH`
+  - optional absolute/relative file path for persisted learned commands.
+  - default: `~/.pi/agent/state/bang-command-autocomplete-runtime.json`.
 
 ## Commands
 

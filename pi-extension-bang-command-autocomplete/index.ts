@@ -5,6 +5,14 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
 type CommandSource = "common" | "history" | "runtime";
 
+const DEFAULT_RUNTIME_STORE_PATH = path.join(
+  os.homedir(),
+  ".pi",
+  "agent",
+  "state",
+  "bang-command-autocomplete-runtime.json",
+);
+
 function envFlag(name: string, fallback: boolean): boolean {
   const raw = process.env[name]?.trim().toLowerCase();
   if (!raw) return fallback;
@@ -102,6 +110,36 @@ function readBashHistoryExecutables(): string[] {
     .filter((v): v is string => Boolean(v));
 }
 
+function getRuntimeStorePath(): string {
+  const configured = process.env.PI_BANG_AUTOCOMPLETE_RUNTIME_STORE_PATH?.trim();
+  return configured ? path.resolve(configured) : DEFAULT_RUNTIME_STORE_PATH;
+}
+
+function readRuntimeCommands(storePath: string): string[] {
+  if (!fs.existsSync(storePath)) return [];
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(storePath, "utf8")) as unknown;
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed
+      .map((item) => (typeof item === "string" ? item.trim() : ""))
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function writeRuntimeCommands(storePath: string, commands: Set<string>): void {
+  try {
+    fs.mkdirSync(path.dirname(storePath), { recursive: true });
+    const sorted = Array.from(commands).sort((a, b) => a.localeCompare(b));
+    fs.writeFileSync(storePath, `${JSON.stringify(sorted, null, 2)}\n`, "utf8");
+  } catch {
+    // Ignore persistence errors; autocomplete should still work in-memory.
+  }
+}
+
 function buildCommandIndex(includeHistory: boolean): Array<{ command: string; source: CommandSource }> {
   const merged = new Map<string, CommandSource>();
 
@@ -160,7 +198,8 @@ function rankCommands(commands: Array<{ command: string; source: CommandSource }
 
 export default function bangCommandAutocomplete(pi: ExtensionAPI) {
   const includeHistory = envFlag("PI_BANG_AUTOCOMPLETE_INCLUDE_HISTORY", false);
-  const runtimeLearned = new Set<string>();
+  const runtimeStorePath = getRuntimeStorePath();
+  const runtimeLearned = new Set<string>(readRuntimeCommands(runtimeStorePath));
   let commandIndex = buildCommandIndex(includeHistory);
 
   const learnFromCommandLine = (commandLine: string | undefined) => {
@@ -168,8 +207,13 @@ export default function bangCommandAutocomplete(pi: ExtensionAPI) {
     const executable = extractExecutable(commandLine);
     if (!executable) return;
 
+    const beforeSize = runtimeLearned.size;
     runtimeLearned.add(executable);
     commandIndex = addRuntimeCommand(commandIndex, executable);
+
+    if (runtimeLearned.size !== beforeSize) {
+      writeRuntimeCommands(runtimeStorePath, runtimeLearned);
+    }
   };
 
   const refreshIndex = () => {
@@ -258,7 +302,7 @@ export default function bangCommandAutocomplete(pi: ExtensionAPI) {
     description: "Show !command autocomplete configuration",
     handler: async (_args, ctx) => {
       ctx.ui.notify(
-        `Bang autocomplete: ${commandIndex.length} commands · history ${includeHistory ? "enabled" : "disabled"} · runtime learned ${runtimeLearned.size} (${includeHistory ? "PI_BANG_AUTOCOMPLETE_INCLUDE_HISTORY=1" : "set PI_BANG_AUTOCOMPLETE_INCLUDE_HISTORY=1 to enable"})`,
+        `Bang autocomplete: ${commandIndex.length} commands · history ${includeHistory ? "enabled" : "disabled"} · runtime learned ${runtimeLearned.size} (${includeHistory ? "PI_BANG_AUTOCOMPLETE_INCLUDE_HISTORY=1" : "set PI_BANG_AUTOCOMPLETE_INCLUDE_HISTORY=1 to enable"}) · store ${runtimeStorePath}`,
         "info",
       );
     },
