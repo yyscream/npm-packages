@@ -65,19 +65,33 @@ const COMMON_COMMANDS = [
   "btop",
 ] as const;
 
-function extractExecutable(commandLine: string): string | undefined {
+function parseCommandLine(commandLine: string): { executable?: string; flags: string[] } {
   const trimmed = commandLine.trim();
-  if (!trimmed || trimmed.startsWith("#")) return undefined;
+  if (!trimmed || trimmed.startsWith("#")) return { flags: [] };
 
   const tokens = trimmed.split(/\s+/).filter(Boolean);
-  if (tokens.length === 0) return undefined;
+  if (tokens.length === 0) return { flags: [] };
 
-  let executable = tokens[0] ?? "";
-  if (executable === "sudo") executable = tokens[1] ?? "";
+  let startIndex = 0;
+  let executable = tokens[startIndex] ?? "";
+
+  if (executable === "sudo") {
+    startIndex += 1;
+    executable = tokens[startIndex] ?? "";
+  }
+
   if (executable.startsWith("!")) executable = executable.slice(1);
+  if (!executable) return { flags: [] };
 
-  if (!executable) return undefined;
-  return executable;
+  const flags = tokens
+    .slice(startIndex + 1)
+    .filter((token) => token.startsWith("-") && token !== "-");
+
+  return { executable, flags };
+}
+
+function extractExecutable(commandLine: string): string | undefined {
+  return parseCommandLine(commandLine).executable;
 }
 
 function readFishHistoryExecutables(): string[] {
@@ -115,26 +129,87 @@ function getRuntimeStorePath(): string {
   return configured ? path.resolve(configured) : DEFAULT_RUNTIME_STORE_PATH;
 }
 
-function readRuntimeCommands(storePath: string): string[] {
-  if (!fs.existsSync(storePath)) return [];
+type RuntimeStoreData = {
+  commands: Set<string>;
+  flagsByCommand: Map<string, Set<string>>;
+  lines: Set<string>;
+};
+
+function readRuntimeData(storePath: string): RuntimeStoreData {
+  const empty: RuntimeStoreData = { commands: new Set<string>(), flagsByCommand: new Map<string, Set<string>>(), lines: new Set<string>() };
+  if (!fs.existsSync(storePath)) return empty;
 
   try {
     const parsed = JSON.parse(fs.readFileSync(storePath, "utf8")) as unknown;
-    if (!Array.isArray(parsed)) return [];
 
-    return parsed
-      .map((item) => (typeof item === "string" ? item.trim() : ""))
-      .filter(Boolean);
+    // Backward compatibility with older format: string[]
+    if (Array.isArray(parsed)) {
+      for (const item of parsed) {
+        if (typeof item === "string" && item.trim()) {
+          const normalized = item.trim();
+          empty.commands.add(normalized);
+          empty.lines.add(normalized);
+        }
+      }
+      return empty;
+    }
+
+    if (!parsed || typeof parsed !== "object") return empty;
+
+    const commandsRaw = (parsed as { commands?: unknown }).commands;
+    if (Array.isArray(commandsRaw)) {
+      for (const item of commandsRaw) {
+        if (typeof item === "string" && item.trim()) {
+          empty.commands.add(item.trim());
+        }
+      }
+    }
+
+    const flagsRaw = (parsed as { flags?: unknown }).flags;
+    if (flagsRaw && typeof flagsRaw === "object") {
+      for (const [command, flags] of Object.entries(flagsRaw)) {
+        if (!command.trim() || !Array.isArray(flags)) continue;
+        const normalizedFlags = flags
+          .map((flag) => (typeof flag === "string" ? flag.trim() : ""))
+          .filter(Boolean);
+        if (normalizedFlags.length === 0) continue;
+        empty.flagsByCommand.set(command.trim(), new Set(normalizedFlags));
+      }
+    }
+
+    const linesRaw = (parsed as { lines?: unknown }).lines;
+    if (Array.isArray(linesRaw)) {
+      for (const item of linesRaw) {
+        if (typeof item === "string" && item.trim()) {
+          empty.lines.add(item.trim());
+        }
+      }
+    }
+
+    return empty;
   } catch {
-    return [];
+    return empty;
   }
 }
 
-function writeRuntimeCommands(storePath: string, commands: Set<string>): void {
+function writeRuntimeData(storePath: string, data: RuntimeStoreData): void {
   try {
     fs.mkdirSync(path.dirname(storePath), { recursive: true });
-    const sorted = Array.from(commands).sort((a, b) => a.localeCompare(b));
-    fs.writeFileSync(storePath, `${JSON.stringify(sorted, null, 2)}\n`, "utf8");
+
+    const commands = Array.from(data.commands).sort((a, b) => a.localeCompare(b));
+    const flags: Record<string, string[]> = {};
+    const sortedCommands = Array.from(data.flagsByCommand.keys()).sort((a, b) => a.localeCompare(b));
+
+    for (const command of sortedCommands) {
+      const commandFlags = Array.from(data.flagsByCommand.get(command) ?? []).sort((a, b) => a.localeCompare(b));
+      if (commandFlags.length > 0) {
+        flags[command] = commandFlags;
+      }
+    }
+
+    const lines = Array.from(data.lines).sort((a, b) => a.localeCompare(b));
+
+    fs.writeFileSync(storePath, `${JSON.stringify({ commands, flags, lines }, null, 2)}\n`, "utf8");
   } catch {
     // Ignore persistence errors; autocomplete should still work in-memory.
   }
@@ -196,23 +271,71 @@ function rankCommands(commands: Array<{ command: string; source: CommandSource }
   return [...startsWith, ...includes].slice(0, 24);
 }
 
+function rankFlags(flags: string[], query: string): string[] {
+  const q = query.toLowerCase();
+  const startsWith = flags.filter((flag) => flag.toLowerCase().startsWith(q));
+  const includes = flags.filter((flag) => !flag.toLowerCase().startsWith(q) && flag.toLowerCase().includes(q));
+  return [...startsWith, ...includes].slice(0, 24);
+}
+
+function rankLineCandidates(lines: string[], query: string): string[] {
+  const q = query.toLowerCase();
+  const startsWith = lines.filter((line) => line.toLowerCase().startsWith(q));
+  const includes = lines.filter((line) => !line.toLowerCase().startsWith(q) && line.toLowerCase().includes(q));
+  return [...startsWith, ...includes].slice(0, 24);
+}
+
 export default function bangCommandAutocomplete(pi: ExtensionAPI) {
   const includeHistory = envFlag("PI_BANG_AUTOCOMPLETE_INCLUDE_HISTORY", false);
   const runtimeStorePath = getRuntimeStorePath();
-  const runtimeLearned = new Set<string>(readRuntimeCommands(runtimeStorePath));
+  const runtimeData = readRuntimeData(runtimeStorePath);
+  const runtimeLearned = runtimeData.commands;
+  const runtimeFlagsByCommand = runtimeData.flagsByCommand;
+  const runtimeLearnedLines = runtimeData.lines;
   let commandIndex = buildCommandIndex(includeHistory);
 
   const learnFromCommandLine = (commandLine: string | undefined) => {
     if (!commandLine) return;
-    const executable = extractExecutable(commandLine);
+    const normalizedLine = commandLine.trim().replace(/^!+/, "");
+    if (!normalizedLine) return;
+
+    const parsed = parseCommandLine(commandLine);
+    const executable = parsed.executable;
     if (!executable) return;
+
+    let changed = false;
 
     const beforeSize = runtimeLearned.size;
     runtimeLearned.add(executable);
     commandIndex = addRuntimeCommand(commandIndex, executable);
-
     if (runtimeLearned.size !== beforeSize) {
-      writeRuntimeCommands(runtimeStorePath, runtimeLearned);
+      changed = true;
+    }
+
+    const beforeLines = runtimeLearnedLines.size;
+    runtimeLearnedLines.add(normalizedLine);
+    if (runtimeLearnedLines.size !== beforeLines) {
+      changed = true;
+    }
+
+    if (parsed.flags.length > 0) {
+      const flagSet = runtimeFlagsByCommand.get(executable) ?? new Set<string>();
+      const beforeFlags = flagSet.size;
+      for (const flag of parsed.flags) {
+        flagSet.add(flag);
+      }
+      if (flagSet.size !== beforeFlags) {
+        runtimeFlagsByCommand.set(executable, flagSet);
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      writeRuntimeData(runtimeStorePath, {
+        commands: runtimeLearned,
+        flagsByCommand: runtimeFlagsByCommand,
+        lines: runtimeLearnedLines,
+      });
     }
   };
 
@@ -231,6 +354,46 @@ export default function bangCommandAutocomplete(pi: ExtensionAPI) {
         const line = lines[cursorLine] ?? "";
         const beforeCursor = line.slice(0, cursorCol);
 
+        const flagMatch = beforeCursor.match(/(?:^|[ \t])!([^\s!]+)\s+([^\s]*)$/);
+        if (flagMatch) {
+          const command = flagMatch[1] ?? "";
+          const partialFlag = flagMatch[2] ?? "";
+
+          if (partialFlag === "" || partialFlag.startsWith("-")) {
+            const knownFlags = Array.from(runtimeFlagsByCommand.get(command) ?? []);
+            const rankedFlags = rankFlags(knownFlags, partialFlag);
+
+            if (rankedFlags.length > 0) {
+              return {
+                prefix: partialFlag,
+                items: rankedFlags.map((flag) => ({
+                  value: flag,
+                  label: flag,
+                  description: `learned for ${command}`,
+                })),
+              };
+            }
+          }
+        }
+
+        const fullLineMatch = beforeCursor.match(/(?:^|[ \t])!(.*)$/);
+        if (fullLineMatch) {
+          const partialLine = fullLineMatch[1] ?? "";
+          if (partialLine.includes(" ")) {
+            const rankedLines = rankLineCandidates(Array.from(runtimeLearnedLines), partialLine);
+            if (rankedLines.length > 0) {
+              return {
+                prefix: `!${partialLine}`,
+                items: rankedLines.map((lineCandidate) => ({
+                  value: `!${lineCandidate}`,
+                  label: `!${lineCandidate}`,
+                  description: "learned full line",
+                })),
+              };
+            }
+          }
+        }
+
         // Trigger on `!<command>` in the current token.
         const match = beforeCursor.match(/(?:^|[ \t])!([^\s!]*)$/);
         if (!match) {
@@ -240,18 +403,37 @@ export default function bangCommandAutocomplete(pi: ExtensionAPI) {
         const partial = match[1] ?? "";
         const ranked = rankCommands(commandIndex, partial);
 
+        const commandItems = ranked.map((entry) => ({
+          value: `!${entry.command}`,
+          label: `!${entry.command}`,
+          description:
+            entry.source === "history"
+              ? "shell history"
+              : entry.source === "runtime"
+                ? "current session"
+                : "common command",
+        }));
+
+        const commandWithFlagItems = ranked.flatMap((entry) => {
+          const knownFlags = Array.from(runtimeFlagsByCommand.get(entry.command) ?? []);
+          return knownFlags.slice(0, 3).map((flag) => ({
+            value: `!${entry.command} ${flag}`,
+            label: `!${entry.command} ${flag}`,
+            description: "learned command + flag",
+          }));
+        });
+
+        const fullLineItems = rankLineCandidates(Array.from(runtimeLearnedLines), partial)
+          .map((lineCandidate) => ({
+            value: `!${lineCandidate}`,
+            label: `!${lineCandidate}`,
+            description: "learned full line",
+          }))
+          .filter((item) => item.value.startsWith(`!${partial}`));
+
         return {
           prefix: `!${partial}`,
-          items: ranked.map((entry) => ({
-            value: `!${entry.command}`,
-            label: `!${entry.command}`,
-            description:
-              entry.source === "history"
-                ? "shell history"
-                : entry.source === "runtime"
-                  ? "current session"
-                  : "common command",
-          })),
+          items: [...fullLineItems, ...commandItems, ...commandWithFlagItems].slice(0, 24),
         };
       },
 
@@ -265,7 +447,10 @@ export default function bangCommandAutocomplete(pi: ExtensionAPI) {
 
         // Allow Tab-forced autocomplete for bang commands (editor reserves auto-popups
         // for /, @, # contexts by default).
-        if (beforeCursor.match(/(?:^|[ \t])![^\s!]*$/)) {
+        if (
+          beforeCursor.match(/(?:^|[ \t])![^\s!]*$/) ||
+          beforeCursor.match(/(?:^|[ \t])![^\s!]+\s+[^\s]*$/)
+        ) {
           return true;
         }
 
@@ -292,7 +477,7 @@ export default function bangCommandAutocomplete(pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       refreshIndex();
       ctx.ui.notify(
-        `Bang autocomplete refreshed (${commandIndex.length} commands, history ${includeHistory ? "enabled" : "disabled"}, runtime learned ${runtimeLearned.size})`,
+        `Bang autocomplete refreshed (${commandIndex.length} commands, history ${includeHistory ? "enabled" : "disabled"}, runtime learned commands ${runtimeLearned.size}, learned lines ${runtimeLearnedLines.size}, learned flags ${Array.from(runtimeFlagsByCommand.values()).reduce((acc, set) => acc + set.size, 0)})`,
         "info",
       );
     },
@@ -302,7 +487,7 @@ export default function bangCommandAutocomplete(pi: ExtensionAPI) {
     description: "Show !command autocomplete configuration",
     handler: async (_args, ctx) => {
       ctx.ui.notify(
-        `Bang autocomplete: ${commandIndex.length} commands · history ${includeHistory ? "enabled" : "disabled"} · runtime learned ${runtimeLearned.size} (${includeHistory ? "PI_BANG_AUTOCOMPLETE_INCLUDE_HISTORY=1" : "set PI_BANG_AUTOCOMPLETE_INCLUDE_HISTORY=1 to enable"}) · store ${runtimeStorePath}`,
+        `Bang autocomplete: ${commandIndex.length} commands · history ${includeHistory ? "enabled" : "disabled"} · runtime learned commands ${runtimeLearned.size} · learned lines ${runtimeLearnedLines.size} · learned flags ${Array.from(runtimeFlagsByCommand.values()).reduce((acc, set) => acc + set.size, 0)} (${includeHistory ? "PI_BANG_AUTOCOMPLETE_INCLUDE_HISTORY=1" : "set PI_BANG_AUTOCOMPLETE_INCLUDE_HISTORY=1 to enable"}) · store ${runtimeStorePath}`,
         "info",
       );
     },

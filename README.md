@@ -71,6 +71,7 @@ Usage analytics command for Pi session history.
 
 - `check-publish-readiness.sh` – validates package metadata, extension entries, dry-run publish, and registry/version status
 - `publish-packages.sh` – plans/applies publish actions dynamically for all package folders
+- `bump-package-versions.sh` – checks npm published versions first and enforces `local == npm_latest + 1` patch for already-published packages (bumps up or reduces down only when needed)
 - `sync-dotfiles-extension-symlinks.sh` – ensures `~/.dotfiles/.pi/agent/extensions/*.ts` are symlinks to canonical `pi-extension-*/index.ts` files; renames non-symlink files to `.hardcoded.<timestamp>.bak`
 
 ## Publish model
