@@ -464,6 +464,8 @@ PUBLISH_FAIL=0
 PUBLISHED_COUNT=0
 PUBLISHED_PRIMARY_COUNT=0
 PUBLISHED_FALLBACK_COUNT=0
+PUBLISHED_FIRST_COUNT=0
+PUBLISHED_UPDATE_COUNT=0
 SKIPPED_COUNT=0
 FAILED_COUNT=0
 FALLBACK_ATTEMPT_COUNT=0
@@ -489,6 +491,11 @@ for item in "${PLANS[@]}"; do
   if run_publish "$PRIMARY_CLIENT" "$dir" "$ACCESS"; then
     PUBLISHED_COUNT=$((PUBLISHED_COUNT+1))
     PUBLISHED_PRIMARY_COUNT=$((PUBLISHED_PRIMARY_COUNT+1))
+    if [[ "$action" == "publish-first" ]]; then
+      PUBLISHED_FIRST_COUNT=$((PUBLISHED_FIRST_COUNT+1))
+    elif [[ "$action" == "publish-update" ]]; then
+      PUBLISHED_UPDATE_COUNT=$((PUBLISHED_UPDATE_COUNT+1))
+    fi
     echo "$(ok) Published $name@$version via $PRIMARY_CLIENT"
   else
     if [[ -n "$SECONDARY_CLIENT" ]]; then
@@ -497,6 +504,11 @@ for item in "${PLANS[@]}"; do
       if run_publish "$SECONDARY_CLIENT" "$dir" "$ACCESS"; then
         PUBLISHED_COUNT=$((PUBLISHED_COUNT+1))
         PUBLISHED_FALLBACK_COUNT=$((PUBLISHED_FALLBACK_COUNT+1))
+        if [[ "$action" == "publish-first" ]]; then
+          PUBLISHED_FIRST_COUNT=$((PUBLISHED_FIRST_COUNT+1))
+        elif [[ "$action" == "publish-update" ]]; then
+          PUBLISHED_UPDATE_COUNT=$((PUBLISHED_UPDATE_COUNT+1))
+        fi
         echo "$(ok) Published $name@$version via fallback $SECONDARY_CLIENT"
       else
         PUBLISH_FAIL=1
@@ -517,6 +529,8 @@ done
 echo
 echo "Publish summary:"
 echo "  - published total: $PUBLISHED_COUNT"
+echo "    - first-time publishes: $PUBLISHED_FIRST_COUNT"
+echo "    - updates: $PUBLISHED_UPDATE_COUNT"
 echo "  - published via primary ($PRIMARY_CLIENT): $PUBLISHED_PRIMARY_COUNT"
 echo "  - published via fallback (${SECONDARY_CLIENT:-none}): $PUBLISHED_FALLBACK_COUNT"
 echo "  - fallback attempts: $FALLBACK_ATTEMPT_COUNT"
