@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-extension-git-footer-status",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Enhanced Pi footer with git status, token usage, context usage, and model telemetry.",
   "license": "MIT",
   "keywords": [

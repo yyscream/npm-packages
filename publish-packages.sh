@@ -3,7 +3,7 @@ set -u
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="all"
-PUBLISHER="auto"   # auto|bun|npm
+PUBLISHER="npm"    # auto|bun|npm
 ACCESS="public"
 APPLY=0
 STRICT_AUTH=0
@@ -15,7 +15,7 @@ Usage:
   publish-packages.sh [package-dir-name]
 
 Options:
-  --publisher <auto|bun|npm>   Publishing client (default: auto)
+  --publisher <auto|bun|npm>   Publishing client (default: npm)
   --target <name|all>          Publish one package dir or all (default: all)
   --all                        Same as --target all
   --access <public|restricted> Publish access level (default: public)
