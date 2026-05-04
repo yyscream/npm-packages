@@ -39,6 +39,13 @@ Adds local notes management inside Pi.
 - Fuzzy note lookup and quick status command
 - Optional rule-note injection into prompt
 
+### `@firstpick/pi-extension-plan-mode-toggle`
+Adds quick commands to toggle plan mode in Pi.
+
+- `/plan-on` to enable plan mode
+- `/plan-off` to disable plan mode
+- `/plan-toggle` to switch current state
+
 ### `@firstpick/pi-extension-git-footer-status`
 Enhanced footer/status line for Pi sessions.
 
