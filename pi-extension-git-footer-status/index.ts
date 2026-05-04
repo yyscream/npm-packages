@@ -495,8 +495,17 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
           const branch = footerData.getGitBranch();
           const cwdWithBranch = `${formatCwd(ctx.cwd)}${branch ? ` (${branch})` : ""}`;
           const cwdText = theme.fg("muted", cwdWithBranch);
-          const status = footerData.getExtensionStatuses().get("git-footer");
-          const pathGitLine = status ? `${cwdText}${theme.fg("dim", " │ ")}${status}` : cwdText;
+
+          const statuses = footerData.getExtensionStatuses();
+          const gitStatus = statuses.get("git-footer");
+          const otherStatuses = Array.from(statuses.entries())
+            .filter(([key, value]) => key !== "git-footer" && Boolean(value))
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([, value]) => value as string);
+
+          const combinedStatusParts = [gitStatus, ...otherStatuses].filter(Boolean) as string[];
+          const combinedStatus = combinedStatusParts.join(` ${theme.fg("dim", "·")} `);
+          const pathGitLine = combinedStatus ? `${cwdText}${theme.fg("dim", " │ ")}${combinedStatus}` : cwdText;
 
           // Keep default subtle-grey look even when parts contain their own ANSI colors.
           // Wrapping the whole line once is not enough because inner color resets cancel outer dim.

@@ -361,15 +361,11 @@ for pkg_dir in "${PACKAGE_DIRS[@]}"; do
     done < <(node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));for(const e of (p.pi?.extensions||[])) console.log(e);" "$pkg_json")
   fi
 
+  dry_run_ok=1
   if run_publish_dry_run "$PRIMARY_CLIENT" "$pkg_dir" "$ACCESS"; then
     print_check "$(ok)" "$PRIMARY_CLIENT publish --dry-run succeeds"
   else
-    if [[ $AUTH_OK -eq 0 && $STRICT_AUTH -eq 0 ]]; then
-      print_check "$(warn)" "$PRIMARY_CLIENT publish --dry-run failed (likely auth-related)"
-    else
-      print_check "$(fail)" "$PRIMARY_CLIENT publish --dry-run failed"
-      pkg_fail=1
-    fi
+    dry_run_ok=0
   fi
 
   pkg_exists=0
@@ -409,6 +405,17 @@ for pkg_dir in "${PACKAGE_DIRS[@]}"; do
   else
     print_check "$(warn)" "registry checks skipped"
     pkg_fail=1
+  fi
+
+  if [[ $dry_run_ok -eq 0 ]]; then
+    if [[ $version_exists -eq 1 ]]; then
+      print_check "$(info "INFO")" "$PRIMARY_CLIENT publish --dry-run failed because version is already published"
+    elif [[ $AUTH_OK -eq 0 && $STRICT_AUTH -eq 0 ]]; then
+      print_check "$(warn)" "$PRIMARY_CLIENT publish --dry-run failed (likely auth-related)"
+    else
+      print_check "$(fail)" "$PRIMARY_CLIENT publish --dry-run failed"
+      pkg_fail=1
+    fi
   fi
 
   if [[ $pkg_fail -eq 0 ]]; then

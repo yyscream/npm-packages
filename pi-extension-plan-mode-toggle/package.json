@@ -1,13 +1,14 @@
 {
-  "name": "@firstpick/pi-extension-brave-search",
-  "version": "0.1.4",
-  "description": "Brave Search tool for Pi with API key resolution from env and .env files.",
+  "name": "@firstpick/pi-extension-plan-mode-toggle",
+  "version": "0.1.0",
+  "description": "Toggleable planning mode extension for Pi with model switching, mandatory planning survey, and PLAN.md quality guards.",
   "license": "MIT",
   "keywords": [
     "pi-package",
     "pi",
     "pi-coding-agent",
-    "extension"
+    "extension",
+    "planning"
   ],
   "pi": {
     "extensions": [
@@ -16,7 +17,7 @@
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*",
-    "typebox": "*"
+    "@mariozechner/pi-ai": "*"
   },
   "files": [
     "index.ts",
