@@ -296,6 +296,7 @@ echo
 # plans: each item is "dir|name|version|action"
 PLANS=()
 HAS_FAIL=0
+FAILED_CHECK_ITEMS=()
 
 for pkg_dir in "${PACKAGE_DIRS[@]}"; do
   echo "$(info "==>") $(basename "$pkg_dir")"
@@ -438,6 +439,7 @@ for pkg_dir in "${PACKAGE_DIRS[@]}"; do
 
   if [[ "$action" == "error" ]]; then
     HAS_FAIL=1
+    FAILED_CHECK_ITEMS+=("$name@$version")
     echo "  Result: $(fail)"
   elif [[ "$action" == "skip" ]]; then
     echo "  Result: $(info "INFO") up-to-date (already published)"
@@ -458,6 +460,13 @@ echo
 
 if [[ $APPLY -ne 1 ]]; then
   echo "Plan-only mode. Re-run with --apply to publish required packages."
+  if [[ $HAS_FAIL -eq 1 ]]; then
+    echo "Plan failures:"
+    for item in "${FAILED_CHECK_ITEMS[@]}"; do
+      echo "  - $item"
+    done
+    exit 1
+  fi
   exit 0
 fi
 
@@ -552,6 +561,12 @@ if [[ ${#FAILED_ITEMS[@]} -gt 0 ]]; then
 fi
 
 if [[ $PUBLISH_FAIL -eq 1 || $HAS_FAIL -eq 1 ]]; then
+  if [[ ${#FAILED_CHECK_ITEMS[@]} -gt 0 ]]; then
+    echo "  - failed pre-publish checks:"
+    for item in "${FAILED_CHECK_ITEMS[@]}"; do
+      echo "    * $item"
+    done
+  fi
   echo "Final result: $(fail) completed with errors"
   exit 1
 fi

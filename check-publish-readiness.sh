@@ -264,6 +264,8 @@ run_publish_dry_run() {
 
 has_fail=0
 pkg_count=0
+failed_packages=()
+failed_details=()
 
 echo "Primary publisher client: $PRIMARY_CLIENT"
 if [[ -n "$SECONDARY_CLIENT" ]]; then
@@ -291,21 +293,23 @@ for pkg_dir in $(gather_packages); do
 
   pkg_json="$pkg_dir/package.json"
   pkg_fail=0
+  pkg_reasons=()
 
   if node -e "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'))" "$pkg_json" >/dev/null 2>&1; then
     print_check "$(ok)" "package.json is valid JSON"
   else
     print_check "$(fail)" "package.json is invalid JSON"
     pkg_fail=1
+    pkg_reasons+=("invalid package.json")
   fi
 
   name="$(json_get "$pkg_json" 'p.name' || true)"
   version="$(json_get "$pkg_json" 'p.version' || true)"
   license="$(json_get "$pkg_json" 'p.license' || true)"
 
-  [[ -n "$name" ]] && print_check "$(ok)" "name: $name" || { print_check "$(fail)" "missing package name"; pkg_fail=1; }
-  [[ -n "$version" ]] && print_check "$(ok)" "version: $version" || { print_check "$(fail)" "missing version"; pkg_fail=1; }
-  [[ -n "$license" ]] && print_check "$(ok)" "license: $license" || { print_check "$(fail)" "missing license"; pkg_fail=1; }
+  [[ -n "$name" ]] && print_check "$(ok)" "name: $name" || { print_check "$(fail)" "missing package name"; pkg_fail=1; pkg_reasons+=("missing package name"); }
+  [[ -n "$version" ]] && print_check "$(ok)" "version: $version" || { print_check "$(fail)" "missing version"; pkg_fail=1; pkg_reasons+=("missing version"); }
+  [[ -n "$license" ]] && print_check "$(ok)" "license: $license" || { print_check "$(fail)" "missing license"; pkg_fail=1; pkg_reasons+=("missing license"); }
 
   if json_get "$pkg_json" 'Array.isArray(p.keywords) ? p.keywords.includes("pi-package") : false' | grep -q '^true$'; then
     print_check "$(ok)" "keywords include 'pi-package'"
@@ -318,6 +322,7 @@ for pkg_dir in $(gather_packages); do
   else
     print_check "$(fail)" "README.md missing"
     pkg_fail=1
+    pkg_reasons+=("README.md missing")
   fi
 
   if [[ -f "$pkg_dir/LICENSE" ]]; then
@@ -330,6 +335,7 @@ for pkg_dir in $(gather_packages); do
   if [[ -z "$extensions_json" ]]; then
     print_check "$(fail)" "pi.extensions missing or empty"
     pkg_fail=1
+    pkg_reasons+=("pi.extensions missing or empty")
   else
     print_check "$(ok)" "pi.extensions configured: $extensions_json"
 
@@ -346,6 +352,7 @@ for pkg_dir in $(gather_packages); do
         else
           print_check "$(fail)" "extension glob has no matches: $ext_path"
           pkg_fail=1
+          pkg_reasons+=("extension glob has no matches: $ext_path")
         fi
       else
         if [[ -f "$pkg_dir/$ext_clean" ]]; then
@@ -353,6 +360,7 @@ for pkg_dir in $(gather_packages); do
         else
           print_check "$(fail)" "extension entry missing: $ext_path"
           pkg_fail=1
+          pkg_reasons+=("extension entry missing: $ext_path")
         fi
       fi
     done < <(node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));for(const e of (p.pi?.extensions||[])) console.log(e);" "$pkg_json")
@@ -374,6 +382,7 @@ for pkg_dir in $(gather_packages); do
     else
       print_check "$(fail)" "$PRIMARY_CLIENT publish --dry-run failed"
       pkg_fail=1
+      pkg_reasons+=("$PRIMARY_CLIENT publish --dry-run failed")
     fi
   fi
 
@@ -402,6 +411,7 @@ for pkg_dir in $(gather_packages); do
           version_exists)
             print_check "$(fail)" "version $payload is already published"
             pkg_fail=1
+            pkg_reasons+=("version already published on npm: $payload")
             ;;
           version_free)
             print_check "$(ok)" "version $payload is publishable"
@@ -420,6 +430,7 @@ for pkg_dir in $(gather_packages); do
           version_exists)
             print_check "$(fail)" "version $payload is already published"
             pkg_fail=1
+            pkg_reasons+=("version already published on npm: $payload")
             ;;
           version_free)
             print_check "$(ok)" "version $payload is publishable"
@@ -435,6 +446,13 @@ for pkg_dir in $(gather_packages); do
 
   if [[ $pkg_fail -eq 1 ]]; then
     has_fail=1
+    pkg_name="$(basename "$pkg_dir")"
+    failed_packages+=("$pkg_name")
+    if [[ ${#pkg_reasons[@]} -gt 0 ]]; then
+      failed_details+=("$pkg_name|$(printf '%s; ' "${pkg_reasons[@]}" | sed 's/; $//')")
+    else
+      failed_details+=("$pkg_name|unknown reason")
+    fi
     echo "  Result: $(fail)"
   else
     echo "  Result: $(ok)"
@@ -450,6 +468,45 @@ fi
 
 if [[ $has_fail -eq 1 ]]; then
   echo "Summary: $(fail) readiness check failed for one or more packages."
+  echo "Failed packages:"
+  for pkg in "${failed_packages[@]}"; do
+    echo "  - $pkg"
+  done
+  echo
+  echo "Failure reasons:"
+
+  only_version_collisions=1
+  for item in "${failed_details[@]}"; do
+    IFS='|' read -r _pkg reason <<< "$item"
+    if [[ "$reason" != "version already published on npm:"* ]]; then
+      only_version_collisions=0
+      break
+    fi
+  done
+
+  if [[ $only_version_collisions -eq 1 ]]; then
+    echo "  Version already published (per package):"
+    for item in "${failed_details[@]}"; do
+      IFS='|' read -r pkg reason <<< "$item"
+      published_version="${reason##*: }"
+      echo "    - $pkg@$published_version"
+    done
+  else
+    for item in "${failed_details[@]}"; do
+      IFS='|' read -r pkg reason <<< "$item"
+      echo "  - $pkg"
+      IFS=';' read -ra reason_parts <<< "$reason"
+      for part in "${reason_parts[@]}"; do
+        trimmed="$(echo "$part" | sed 's/^ *//; s/ *$//')"
+        [[ -n "$trimmed" ]] && echo "      • $trimmed"
+      done
+    done
+  fi
+
+  echo
+  echo "Hint: if failures are only version collisions, bump versions first:"
+  echo "  ./bump-package-versions.sh --all"
+  echo "  ./bump-package-versions.sh --all --apply"
   exit 1
 fi
 
