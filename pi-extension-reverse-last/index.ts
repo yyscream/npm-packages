@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { getAgentDir, resolvePathFromAgentDir } from "@firstpick/pi-utils";
 import { isToolCallEventType } from "@mariozechner/pi-coding-agent";
 
 type FileSnapshot = {
@@ -30,13 +30,9 @@ function resolveToolPath(cwd: string, inputPath: string): string {
 
 function getStateDir(): string {
   const configured = process.env.PI_REVERSE_LAST_STATE_DIR?.trim();
-  if (configured) {
-    return path.isAbsolute(configured)
-      ? path.normalize(configured)
-      : path.resolve(os.homedir(), configured);
-  }
+  if (configured) return resolvePathFromAgentDir(configured);
 
-  return path.join(os.homedir(), ".pi", "agent", "state", "reverse-last");
+  return path.join(getAgentDir(), "state", "reverse-last");
 }
 
 function getStatePath(sessionId: string): string {

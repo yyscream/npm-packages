@@ -1,9 +1,9 @@
 import { cpSync, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { resolve } from "node:path";
 import process from "node:process";
 import type { Api, Model } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { getAgentDir } from "@firstpick/pi-utils";
 
 type PlanningAnswers = {
 	goal: string;
@@ -84,7 +84,7 @@ function archivePlanCopy(cwd: string, content: string, goal?: string): { archive
 		const source = resolve(cwd, "PLAN.md");
 		if (!existsSync(source)) return { archived: false, error: "PLAN.md not found" };
 		const topic = slugifyTopic(extractPlanTopic(content, goal));
-		const targetDir = resolve(homedir(), ".pi/agent/docs", topic);
+		const targetDir = resolve(getAgentDir(), "docs", topic);
 		mkdirSync(targetDir, { recursive: true });
 		const target = resolve(targetDir, "PLAN.md");
 		cpSync(source, target);
@@ -112,7 +112,7 @@ function persistState(pi: ExtensionAPI, state: PlanModeState): void {
 
 function getUserScopedModels(): Set<string> {
 	try {
-		const settingsPath = resolve(homedir(), ".pi/agent/settings.json");
+		const settingsPath = resolve(getAgentDir(), "settings.json");
 		if (!existsSync(settingsPath)) return new Set();
 		const raw = readFileSync(settingsPath, "utf8");
 		const parsed = JSON.parse(raw) as { enabledModels?: string[] };

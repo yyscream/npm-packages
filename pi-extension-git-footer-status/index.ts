@@ -1,6 +1,6 @@
 import { access } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, resolve, sep } from "node:path";
 import type { AssistantMessage } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
@@ -49,7 +49,7 @@ const FOOTER_FLAGS = {
 function formatCwd(cwd: string): string {
   const home = homedir();
   if (cwd === home) return "~";
-  if (cwd.startsWith(`${home}/`)) return `~/${cwd.slice(home.length + 1)}`;
+  if (cwd.startsWith(`${home}${sep}`)) return `~/${cwd.slice(home.length + 1).split(sep).join("/")}`;
   return cwd;
 }
 

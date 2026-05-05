@@ -1,13 +1,13 @@
 {
-  "name": "@firstpick/pi-extension-bang-command-autocomplete",
-  "version": "0.1.4",
-  "description": "Autocomplete for !<command> in Pi, with optional shell-history indexing.",
+  "name": "@firstpick/pi-utils",
+  "version": "0.1.0",
+  "description": "Shared utilities for Firstpick Pi extension packages.",
   "license": "MIT",
   "keywords": [
     "pi-package",
     "pi",
     "pi-coding-agent",
-    "extension"
+    "utility"
   ],
   "pi": {
     "extensions": [
@@ -21,8 +21,5 @@
     "index.ts",
     "README.md",
     "LICENSE"
-  ],
-  "dependencies": {
-    "@firstpick/pi-utils": "^0.1.0"
-  }
+  ]
 }

@@ -88,14 +88,18 @@ count_renamed=0
 count_skipped=0
 
 shopt -s nullglob
-for pkg_dir in "$ROOT_DIR"/pi-extension-*; do
+for pkg_dir in "$ROOT_DIR"/pi-extension-* "$ROOT_DIR"/pi-utils; do
   [[ -d "$pkg_dir" ]] || continue
   [[ -f "$pkg_dir/package.json" ]] || continue
 
   count_total=$((count_total+1))
 
   pkg_name="$(basename "$pkg_dir")"
-  ext_name="${pkg_name#pi-extension-}"
+  if [[ "$pkg_name" == pi-extension-* ]]; then
+    ext_name="${pkg_name#pi-extension-}"
+  else
+    ext_name="${pkg_name#pi-}"
+  fi
   canonical="$pkg_dir/index.ts"
   dest="$DOTFILES_EXT_DIR/${ext_name}.ts"
 

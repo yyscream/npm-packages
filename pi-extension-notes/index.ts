@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import * as os from "node:os";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { getAgentDir, envFlag } from "@firstpick/pi-utils";
 import type { AutocompleteItem } from "@mariozechner/pi-tui";
 
 type NoteMeta = {
@@ -19,12 +19,6 @@ type NotesIndex = {
 	notes: Record<string, NoteMeta>;
 };
 
-function getAgentDir(): string {
-	const env = process.env.PI_CODING_AGENT_DIR?.trim();
-	if (env) return env;
-	return path.join(os.homedir(), ".pi", "agent");
-}
-
 function getNotesDir(): string {
 	const configured = process.env.PI_NOTES_DIR?.trim();
 	if (configured) return path.resolve(configured);
@@ -36,8 +30,7 @@ function getIndexFile(): string {
 }
 
 function includeRulesInPrompt(): boolean {
-	const raw = process.env.PI_NOTES_INCLUDE_RULES_IN_PROMPT?.trim().toLowerCase();
-	return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+	return envFlag("PI_NOTES_INCLUDE_RULES_IN_PROMPT", false);
 }
 
 function ensureStorage(): void {

@@ -5,7 +5,7 @@ Autocomplete for `!<command>` in Pi.
 ## What it does
 
 - Suggests command names while typing `!<command>`.
-- Uses a built-in common-command index out of the box.
+- Uses a built-in common-command index out of the box (with platform-aware defaults).
 - Learns commands you run via `!`/`!!` and persists them across Pi sessions.
 - Learns full bang command lines (e.g. `!git add .`) and suggests them directly.
 - Learns flags used with those commands (e.g. `!rg -n`) and suggests them when you type `!<command> ` or `!<command> -...`.
@@ -22,7 +22,10 @@ pi install npm:@firstpick/pi-extension-bang-command-autocomplete
 ## Configuration
 
 - `PI_BANG_AUTOCOMPLETE_INCLUDE_HISTORY`
-  - `1|true|yes|on`: include commands from `~/.bash_history` and fish history.
+  - `1|true|yes|on`: include commands from shell history.
+    - Bash: `~/.bash_history`
+    - Zsh: `~/.zsh_history`
+    - Fish: `$XDG_DATA_HOME/fish/fish_history` (fallback: `~/.local/share/fish/fish_history`)
   - unset/other: use built-in command list only (default).
 - `PI_BANG_AUTOCOMPLETE_RUNTIME_STORE_PATH`
   - optional absolute/relative file path for persisted learned commands.

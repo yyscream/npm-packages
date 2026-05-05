@@ -74,6 +74,13 @@ Usage analytics command for Pi session history.
 - Input/output/cache breakdown
 - Top model usage summary
 
+### `@firstpick/pi-utils`
+Shared helpers used by multiple Pi extensions.
+
+- Agent-dir resolution (`PI_CODING_AGENT_DIR` aware)
+- Environment boolean parsing
+- Agent-relative path resolution
+
 ## Utility scripts
 
 - `check-publish-readiness.sh` – validates package metadata, extension entries, dry-run publish, and registry/version status

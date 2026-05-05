@@ -1,19 +1,13 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import os from "node:os";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { getAgentDir } from "@firstpick/pi-utils";
 import { Type } from "typebox";
 
 const DEFAULT_TIMEZONE = "UTC";
 
 function getMemoryTimezone(): string {
   return process.env.PI_MEMORY_HELPER_TIMEZONE?.trim() || DEFAULT_TIMEZONE;
-}
-
-function getAgentDir(): string {
-  const env = process.env.PI_CODING_AGENT_DIR;
-  if (env && env.trim().length > 0) return env;
-  return path.join(os.homedir(), ".pi", "agent");
 }
 
 function dateInTz(timeZone: string): string {

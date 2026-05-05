@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-extension-reverse-last",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Session-aware undo for Pi write/edit tool changes via /reverse-last.",
   "license": "MIT",
   "keywords": [
@@ -21,5 +21,8 @@
     "index.ts",
     "README.md",
     "LICENSE"
-  ]
+  ],
+  "dependencies": {
+    "@firstpick/pi-utils": "^0.1.0"
+  }
 }

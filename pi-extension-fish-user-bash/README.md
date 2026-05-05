@@ -7,7 +7,8 @@ Use fish (or a custom shell) for Pi `!` and `!!` command execution.
 - Overrides Pi `user_bash` operations to use your preferred shell.
 - Prefers explicit shell configuration via env var.
 - Auto-detects fish if not configured.
-- Falls back to `/bin/bash` when fish is unavailable.
+- Falls back to `$SHELL` (if valid), then bash.
+- Uses cross-platform shell resolution (PATH-aware; supports Windows `.exe` lookups).
 
 ## Install
 
@@ -19,8 +20,8 @@ pi install npm:@firstpick/pi-extension-fish-user-bash
 
 - `PI_USER_BASH_SHELL_PATH`
   - absolute path (example: `/usr/bin/fish`), or
-  - executable name resolvable on `PATH` (example: `fish`)
-  - if unset: tries fish automatically, then `/bin/bash`
+  - executable name resolvable on `PATH` (example: `fish` or `bash`)
+  - if unset: tries fish automatically, then `$SHELL` (if valid), then bash
 
 ## Commands
 

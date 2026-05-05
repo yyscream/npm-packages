@@ -1,12 +1,17 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { createLocalBashOperations, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
 function resolveFromPath(binName: string): string | undefined {
   const envPath = process.env.PATH ?? "";
-  for (const dir of envPath.split(":").filter(Boolean)) {
-    const candidate = path.join(dir, binName);
-    if (fs.existsSync(candidate)) return candidate;
+  const candidates = os.platform() === "win32" && !binName.toLowerCase().endsWith(".exe") ? [binName, `${binName}.exe`] : [binName];
+
+  for (const dir of envPath.split(path.delimiter).filter(Boolean)) {
+    for (const name of candidates) {
+      const candidate = path.join(dir, name);
+      if (fs.existsSync(candidate)) return candidate;
+    }
   }
   return undefined;
 }
@@ -14,18 +19,34 @@ function resolveFromPath(binName: string): string | undefined {
 function resolveShellPath(): string {
   const configured = process.env.PI_USER_BASH_SHELL_PATH?.trim();
   if (configured) {
-    if (configured.startsWith("/") && fs.existsSync(configured)) return configured;
+    if (path.isAbsolute(configured) && fs.existsSync(configured)) return configured;
 
     const resolvedConfigured = resolveFromPath(configured);
     if (resolvedConfigured) return resolvedConfigured;
   }
 
-  // Prefer fish when available, but always return an absolute existing binary path.
-  return (
+  const fish =
     resolveFromPath("fish") ??
-    ["/usr/bin/fish", "/bin/fish", "/usr/local/bin/fish"].find((p) => fs.existsSync(p)) ??
-    "/bin/bash"
-  );
+    ["/usr/bin/fish", "/bin/fish", "/usr/local/bin/fish", "/opt/homebrew/bin/fish"].find((p) => fs.existsSync(p));
+  if (fish) return fish;
+
+  const shellFromEnv = process.env.SHELL?.trim();
+  if (shellFromEnv && path.isAbsolute(shellFromEnv) && fs.existsSync(shellFromEnv)) return shellFromEnv;
+
+  const bash =
+    resolveFromPath("bash") ??
+    ["/bin/bash", "/usr/bin/bash", "C:\\Program Files\\Git\\bin\\bash.exe"].find((p) => fs.existsSync(p));
+  if (bash) return bash;
+
+  if (os.platform() === "win32") {
+    const pwsh = resolveFromPath("pwsh") ?? resolveFromPath("powershell");
+    if (pwsh) return pwsh;
+
+    const comspec = process.env.ComSpec?.trim();
+    if (comspec && fs.existsSync(comspec)) return comspec;
+  }
+
+  return process.execPath;
 }
 
 export default function fishUserBash(pi: ExtensionAPI) {

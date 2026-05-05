@@ -2,24 +2,17 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { envFlag, getAgentDir } from "@firstpick/pi-utils";
 
 type CommandSource = "common" | "history" | "runtime";
 
 const DEFAULT_RUNTIME_STORE_PATH = path.join(
-  os.homedir(),
-  ".pi",
-  "agent",
+  getAgentDir(),
   "state",
   "bang-command-autocomplete-runtime.json",
 );
 
-function envFlag(name: string, fallback: boolean): boolean {
-  const raw = process.env[name]?.trim().toLowerCase();
-  if (!raw) return fallback;
-  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
-}
-
-const COMMON_COMMANDS = [
+const COMMON_COMMANDS_BASE = [
   "ls",
   "la",
   "ll",
@@ -51,10 +44,6 @@ const COMMON_COMMANDS = [
   "just",
   "docker",
   "docker-compose",
-  "systemctl",
-  "journalctl",
-  "pacman",
-  "yay",
   "curl",
   "wget",
   "ssh",
@@ -64,6 +53,17 @@ const COMMON_COMMANDS = [
   "htop",
   "btop",
 ] as const;
+
+const COMMON_COMMANDS_UNIX = ["systemctl", "journalctl"] as const;
+const COMMON_COMMANDS_LINUX = ["pacman", "yay"] as const;
+
+function getCommonCommands(): string[] {
+  const platform = os.platform();
+  const commands = [...COMMON_COMMANDS_BASE];
+  if (platform !== "win32") commands.push(...COMMON_COMMANDS_UNIX);
+  if (platform === "linux") commands.push(...COMMON_COMMANDS_LINUX);
+  return commands;
+}
 
 function parseCommandLine(commandLine: string): { executable?: string; flags: string[] } {
   const trimmed = commandLine.trim();
@@ -95,7 +95,8 @@ function extractExecutable(commandLine: string): string | undefined {
 }
 
 function readFishHistoryExecutables(): string[] {
-  const historyPath = path.join(os.homedir(), ".local", "share", "fish", "fish_history");
+  const fishDataHome = process.env.XDG_DATA_HOME?.trim() || path.join(os.homedir(), ".local", "share");
+  const historyPath = path.join(fishDataHome, "fish", "fish_history");
   if (!fs.existsSync(historyPath)) return [];
 
   const content = fs.readFileSync(historyPath, "utf8");
@@ -121,6 +122,20 @@ function readBashHistoryExecutables(): string[] {
   return content
     .split(/\r?\n/)
     .map((line) => extractExecutable(line))
+    .filter((v): v is string => Boolean(v));
+}
+
+function readZshHistoryExecutables(): string[] {
+  const historyPath = path.join(os.homedir(), ".zsh_history");
+  if (!fs.existsSync(historyPath)) return [];
+
+  const content = fs.readFileSync(historyPath, "utf8");
+  return content
+    .split(/\r?\n/)
+    .map((line) => {
+      const cleaned = line.includes(";") ? line.slice(line.indexOf(";") + 1) : line;
+      return extractExecutable(cleaned);
+    })
     .filter((v): v is string => Boolean(v));
 }
 
@@ -218,12 +233,12 @@ function writeRuntimeData(storePath: string, data: RuntimeStoreData): void {
 function buildCommandIndex(includeHistory: boolean): Array<{ command: string; source: CommandSource }> {
   const merged = new Map<string, CommandSource>();
 
-  for (const command of COMMON_COMMANDS) {
+  for (const command of getCommonCommands()) {
     merged.set(command, "common");
   }
 
   if (includeHistory) {
-    const historyExecutables = [...readFishHistoryExecutables(), ...readBashHistoryExecutables()];
+    const historyExecutables = [...readFishHistoryExecutables(), ...readBashHistoryExecutables(), ...readZshHistoryExecutables()];
     for (let i = historyExecutables.length - 1; i >= 0; i--) {
       const command = historyExecutables[i];
       if (!command) continue;
