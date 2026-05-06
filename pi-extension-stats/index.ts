@@ -9,6 +9,7 @@ type DayUsage = {
   cacheWrite: number;
   total: number;
   cost: number;
+  messages: number;
 };
 
 type UsageRecord = {
@@ -20,10 +21,15 @@ type UsageRecord = {
   total: number;
   cost: number;
   model: string;
+  sessionFile: string;
+  sessionId: string;
 };
+
+type Totals = DayUsage;
 
 const DEFAULT_DAYS = 14;
 const MAX_BAR_WIDTH = 24;
+const COST_BAR_WIDTH = 10;
 
 function formatTokens(count: number): string {
   if (count < 1000) return count.toString();
@@ -31,6 +37,17 @@ function formatTokens(count: number): string {
   if (count < 1000000) return `${Math.round(count / 1000)}k`;
   if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
   return `${Math.round(count / 1000000)}M`;
+}
+
+function formatCost(cost: number): string {
+  if (cost <= 0) return "$0.000";
+  if (cost < 0.01) return `$${cost.toFixed(4)}`;
+  if (cost < 10) return `$${cost.toFixed(3)}`;
+  return `$${cost.toFixed(2)}`;
+}
+
+function emptyUsage(): DayUsage {
+  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0, messages: 0 };
 }
 
 function getDayKey(timestamp: string): string | null {
@@ -71,6 +88,8 @@ function collectUsageRecords(sessionFiles: string[]): UsageRecord[] {
       continue;
     }
 
+    const sessionId = path.basename(file, ".jsonl");
+
     for (const line of content.split(/\r?\n/)) {
       if (!line.trim()) continue;
 
@@ -108,6 +127,8 @@ function collectUsageRecords(sessionFiles: string[]): UsageRecord[] {
         total,
         cost,
         model: `${provider}/${model}`,
+        sessionFile: file,
+        sessionId,
       });
     }
   }
@@ -118,13 +139,14 @@ function collectUsageRecords(sessionFiles: string[]): UsageRecord[] {
 function aggregateUsageByDay(records: UsageRecord[]): Map<string, DayUsage> {
   const byDay = new Map<string, DayUsage>();
   for (const r of records) {
-    const prev = byDay.get(r.day) ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0 };
+    const prev = byDay.get(r.day) ?? emptyUsage();
     prev.input += r.input;
     prev.output += r.output;
     prev.cacheRead += r.cacheRead;
     prev.cacheWrite += r.cacheWrite;
     prev.total += r.total;
     prev.cost += r.cost;
+    prev.messages += 1;
     byDay.set(r.day, prev);
   }
   return byDay;
@@ -150,28 +172,80 @@ function getScopeDayKeys(byDay: Map<string, DayUsage>, args: { mode: "range"; da
     : buildDayRange(args.days);
 }
 
-function aggregateModelUsage(records: UsageRecord[], dayKeys: string[]): Array<{ model: string; tokens: number; percent: number; cost: number }> {
-  if (dayKeys.length === 0) return [];
+function sumUsage(byDay: Map<string, DayUsage>, dayKeys: string[]): Totals {
+  return dayKeys.reduce((acc, day) => {
+    const usage = byDay.get(day) ?? emptyUsage();
+    acc.input += usage.input;
+    acc.output += usage.output;
+    acc.cacheRead += usage.cacheRead;
+    acc.cacheWrite += usage.cacheWrite;
+    acc.total += usage.total;
+    acc.cost += usage.cost;
+    acc.messages += usage.messages;
+    return acc;
+  }, emptyUsage());
+}
 
+function scopedRecords(records: UsageRecord[], dayKeys: string[]): UsageRecord[] {
   const daySet = new Set(dayKeys);
-  const modelTotals = new Map<string, { tokens: number; cost: number }>();
-  let totalTokens = 0;
+  return records.filter((r) => daySet.has(r.day));
+}
 
-  for (const r of records) {
-    if (!daySet.has(r.day)) continue;
-    totalTokens += r.total;
-    const prev = modelTotals.get(r.model) ?? { tokens: 0, cost: 0 };
+function aggregateModelUsage(records: UsageRecord[], dayKeys: string[]): Array<{ model: string; tokens: number; percent: number; cost: number; costPercent: number; avgCostPerMillion: number; avgOutputTokens: number; messages: number }> {
+  const scoped = scopedRecords(records, dayKeys);
+  const modelTotals = new Map<string, { tokens: number; output: number; cost: number; messages: number }>();
+  const totalTokens = scoped.reduce((acc, r) => acc + r.total, 0);
+  const totalCost = scoped.reduce((acc, r) => acc + r.cost, 0);
+
+  for (const r of scoped) {
+    const prev = modelTotals.get(r.model) ?? { tokens: 0, output: 0, cost: 0, messages: 0 };
     prev.tokens += r.total;
+    prev.output += r.output;
     prev.cost += r.cost;
+    prev.messages += 1;
     modelTotals.set(r.model, prev);
   }
 
   if (totalTokens <= 0) return [];
 
   return Array.from(modelTotals.entries())
-    .map(([model, v]) => ({ model, tokens: v.tokens, percent: (v.tokens / totalTokens) * 100, cost: v.cost }))
-    .sort((a, b) => b.tokens - a.tokens)
-    .slice(0, 3);
+    .map(([model, v]) => ({
+      model,
+      tokens: v.tokens,
+      percent: (v.tokens / totalTokens) * 100,
+      cost: v.cost,
+      costPercent: totalCost > 0 ? (v.cost / totalCost) * 100 : 0,
+      avgCostPerMillion: v.tokens > 0 ? (v.cost / v.tokens) * 1_000_000 : 0,
+      avgOutputTokens: v.messages > 0 ? v.output / v.messages : 0,
+      messages: v.messages,
+    }))
+    .sort((a, b) => b.cost - a.cost || b.tokens - a.tokens)
+    .slice(0, 5);
+}
+
+function aggregateExpensiveSessions(records: UsageRecord[], dayKeys: string[]): Array<{ day: string; model: string; tokens: number; cost: number; sessionId: string; file: string }> {
+  const sessions = new Map<string, { day: string; modelTokens: Map<string, number>; tokens: number; cost: number; sessionId: string; file: string }>();
+
+  for (const r of scopedRecords(records, dayKeys)) {
+    const prev = sessions.get(r.sessionFile) ?? { day: r.day, modelTokens: new Map(), tokens: 0, cost: 0, sessionId: r.sessionId, file: r.sessionFile };
+    if (r.day < prev.day) prev.day = r.day;
+    prev.tokens += r.total;
+    prev.cost += r.cost;
+    prev.modelTokens.set(r.model, (prev.modelTokens.get(r.model) ?? 0) + r.total);
+    sessions.set(r.sessionFile, prev);
+  }
+
+  return Array.from(sessions.values())
+    .map((s) => ({
+      day: s.day,
+      model: Array.from(s.modelTokens.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "unknown",
+      tokens: s.tokens,
+      cost: s.cost,
+      sessionId: s.sessionId,
+      file: path.basename(s.file),
+    }))
+    .sort((a, b) => b.cost - a.cost || b.tokens - a.tokens)
+    .slice(0, 5);
 }
 
 function buildGraphLines(byDay: Map<string, DayUsage>, dayKeys: string[]): string[] {
@@ -179,43 +253,54 @@ function buildGraphLines(byDay: Map<string, DayUsage>, dayKeys: string[]): strin
     return ["No usage data found yet."];
   }
 
-  const data = dayKeys.map((day) => ({
-    day,
-    usage: byDay.get(day) ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0 },
-  }));
-
+  const data = dayKeys.map((day) => ({ day, usage: byDay.get(day) ?? emptyUsage() }));
   const maxTotal = Math.max(...data.map((d) => d.usage.total), 0);
+  const maxCost = Math.max(...data.map((d) => d.usage.cost), 0);
   const lines: string[] = [];
 
   for (const { day, usage } of data) {
-    const barLen =
-      usage.total <= 0 || maxTotal <= 0 ? 0 : Math.max(1, Math.round((usage.total / maxTotal) * MAX_BAR_WIDTH));
-    const bar = "█".repeat(barLen).padEnd(MAX_BAR_WIDTH, "·");
+    const tokenBarLen = usage.total <= 0 || maxTotal <= 0 ? 0 : Math.max(1, Math.round((usage.total / maxTotal) * MAX_BAR_WIDTH));
+    const costBarLen = usage.cost <= 0 || maxCost <= 0 ? 0 : Math.max(1, Math.round((usage.cost / maxCost) * COST_BAR_WIDTH));
+    const tokenBar = "█".repeat(tokenBarLen).padEnd(MAX_BAR_WIDTH, "·");
+    const costBar = "$".repeat(costBarLen).padEnd(COST_BAR_WIDTH, "·");
 
     lines.push(
-      `${day} ${bar} ${formatTokens(usage.total)} tok (↑${formatTokens(usage.input)} ↓${formatTokens(usage.output)} R${formatTokens(usage.cacheRead)} W${formatTokens(usage.cacheWrite)})`,
+      `${day} ${tokenBar} ${formatTokens(usage.total)} tok ${costBar} ${formatCost(usage.cost)} (↑${formatTokens(usage.input)} ↓${formatTokens(usage.output)} R${formatTokens(usage.cacheRead)} W${formatTokens(usage.cacheWrite)})`,
     );
   }
 
-  const totals = data.reduce(
-    (acc, d) => {
-      acc.input += d.usage.input;
-      acc.output += d.usage.output;
-      acc.cacheRead += d.usage.cacheRead;
-      acc.cacheWrite += d.usage.cacheWrite;
-      acc.total += d.usage.total;
-      acc.cost += d.usage.cost;
-      return acc;
-    },
-    { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0 },
-  );
-
+  const totals = sumUsage(byDay, dayKeys);
   lines.push(
     "",
-    `Σ ${formatTokens(totals.total)} tok (↑${formatTokens(totals.input)} ↓${formatTokens(totals.output)} R${formatTokens(totals.cacheRead)} W${formatTokens(totals.cacheWrite)}) · $${totals.cost.toFixed(3)}`,
+    `Σ ${formatTokens(totals.total)} tok (↑${formatTokens(totals.input)} ↓${formatTokens(totals.output)} R${formatTokens(totals.cacheRead)} W${formatTokens(totals.cacheWrite)}) · ${formatCost(totals.cost)}`,
   );
 
   return lines;
+}
+
+function buildCostTrendLines(byDay: Map<string, DayUsage>, dayKeys: string[]): string[] {
+  const totals = sumUsage(byDay, dayKeys);
+  const activeDays = dayKeys.filter((d) => (byDay.get(d)?.total ?? 0) > 0).length;
+  const divisor = Math.max(activeDays, dayKeys.length, 1);
+  const avgPerDay = totals.cost / divisor;
+  const projectedMonthly = avgPerDay * 30;
+  const highest = dayKeys
+    .map((day) => ({ day, cost: byDay.get(day)?.cost ?? 0 }))
+    .sort((a, b) => b.cost - a.cost)[0];
+
+  return [
+    `Cost trend: avg/day ${formatCost(avgPerDay)} · projected 30d ${formatCost(projectedMonthly)} · highest ${highest && highest.cost > 0 ? `${highest.day} ${formatCost(highest.cost)}` : "n/a"}`,
+  ];
+}
+
+function buildCacheEfficiencyLines(totals: Totals): string[] {
+  const hitRate = totals.total > 0 ? (totals.cacheRead / totals.total) * 100 : 0;
+  const nonCacheTokens = totals.input + totals.output + totals.cacheWrite;
+  const avgCostPerNonCacheToken = nonCacheTokens > 0 && totals.cost > 0 ? totals.cost / nonCacheTokens : 0;
+  const estimatedSavings = totals.cacheRead * avgCostPerNonCacheToken;
+  const savingsPart = estimatedSavings > 0 ? ` · est. cache savings ${formatCost(estimatedSavings)}` : "";
+
+  return [`Cache hit: ${hitRate.toFixed(1)}% · reads ${formatTokens(totals.cacheRead)} · writes ${formatTokens(totals.cacheWrite)}${savingsPart}`];
 }
 
 export default function statsExtension(pi: ExtensionAPI) {
@@ -239,22 +324,34 @@ export default function statsExtension(pi: ExtensionAPI) {
       const byDay = aggregateUsageByDay(records);
       const dayKeys = getScopeDayKeys(byDay, parsedArgs);
       const lines = buildGraphLines(byDay, dayKeys);
+      const totals = sumUsage(byDay, dayKeys);
       const topModels = aggregateModelUsage(records, dayKeys);
+      const topSessions = aggregateExpensiveSessions(records, dayKeys);
       const scopeLabel = parsedArgs.mode === "all" ? "all days" : `last ${parsedArgs.days} days`;
 
-      const hasAnyModelCost = topModels.some((m) => m.cost > 0);
       const modelLines =
         topModels.length === 0
-          ? ["Top models: no model usage in selected range"]
+          ? ["Model comparison: no model usage in selected range"]
           : [
-              "Top models:",
+              "Model comparison:",
               ...topModels.map((m, i) => {
-                const costPart = hasAnyModelCost ? ` · $${m.cost.toFixed(3)}` : "";
-                return `${i + 1}. ${m.model} — ${m.percent.toFixed(1)}% (${formatTokens(m.tokens)} tok)${costPart}`;
+                const costPart = totals.cost > 0 ? ` · ${m.costPercent.toFixed(1)}% spend` : "";
+                return `${i + 1}. ${m.model} — ${m.percent.toFixed(1)}% tokens (${formatTokens(m.tokens)}) · ${formatCost(m.cost)}${costPart} · ${formatCost(m.avgCostPerMillion)}/1M tok · avg ↓${formatTokens(Math.round(m.avgOutputTokens))}/msg`;
               }),
             ];
 
-      ctx.ui.notify(`📊 Token stats (${scopeLabel}, ${files.length} sessions)\n\n${lines.join("\n")}\n\n${modelLines.join("\n")}`, "info");
+      const sessionLines =
+        topSessions.length === 0
+          ? ["Most expensive sessions: none in selected range"]
+          : [
+              "Most expensive sessions:",
+              ...topSessions.map((s, i) => `${i + 1}. ${s.day} ${s.sessionId} — ${formatCost(s.cost)} · ${formatTokens(s.tokens)} tok · ${s.model} · ${s.file}`),
+            ];
+
+      ctx.ui.notify(
+        `📊 Token stats (${scopeLabel}, ${files.length} sessions)\n\n${lines.join("\n")}\n\n${buildCostTrendLines(byDay, dayKeys).join("\n")}\n${buildCacheEfficiencyLines(totals).join("\n")}\n\n${modelLines.join("\n")}\n\n${sessionLines.join("\n")}`,
+        "info",
+      );
     },
   });
 }
