@@ -6,7 +6,7 @@ Enhanced Pi footer with git health and model/token telemetry.
 
 - Shows compact runtime metrics in the footer:
   - input/output/cache tokens
-  - token speed estimate (`tok/s`)
+  - live output token counter + token output speed (`tok/s`) measured from assistant streaming lifecycle events, with a session-history fallback
   - cost + context-window usage
   - current model and reasoning level
 - Shows git status context on the path line:

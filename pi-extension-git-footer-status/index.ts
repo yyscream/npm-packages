@@ -23,6 +23,8 @@ type GitSnapshot = {
   signingMismatch: boolean;
 };
 
+const LIVE_TOKEN_SPEED_ROLLING_WINDOW_MS = 2000;
+
 // Toggle footer items on/off here.
 const FOOTER_FLAGS = {
   branch: false,
@@ -77,6 +79,21 @@ function getEntryTimestampMs(entry: { type: string; timestamp: string; message?:
   }
   const parsed = Date.parse(entry.timestamp);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isReasonableTokenSpeed(tokensPerSecond: number): boolean {
+  return Number.isFinite(tokensPerSecond) && tokensPerSecond > 0 && tokensPerSecond <= 1000;
+}
+
+type LiveTokenSample = {
+  timestampMs: number;
+  tokens: number;
+};
+
+function estimateTokensFromCharCount(charCount: number): number {
+  // Provider tokenizers differ and streaming usage is normally only available at message end.
+  // chars/4 is the common rough estimate for live display; final usage uses provider counts.
+  return Math.max(0, Math.round(charCount / 4));
 }
 
 function formatTokenSpeed(tokensPerSecond: number): string {
@@ -322,6 +339,51 @@ function buildStatusText(ctx: ExtensionContext, snapshot: GitSnapshot): string {
 
 export default function gitFooterStatus(pi: ExtensionAPI) {
   let refreshing = false;
+  let currentAssistantStartMs: number | null = null;
+  let currentAssistantOutputChars = 0;
+  let currentAssistantEstimatedOutputTokens = 0;
+  let currentAssistantLiveTokenSpeed: number | null = null;
+  let currentAssistantTokenSamples: LiveTokenSample[] = [];
+  let latestMeasuredTokenSpeed: number | null = null;
+
+  const recordAssistantSpeed = (message: AssistantMessage, endMs = Date.now()): boolean => {
+    const outputTokens = message.usage?.output ?? 0;
+    if (!outputTokens || currentAssistantStartMs === null || endMs <= currentAssistantStartMs) return false;
+
+    const elapsedSeconds = (endMs - currentAssistantStartMs) / 1000;
+    // Filter out impossible values caused by duplicate/misordered lifecycle events.
+    if (elapsedSeconds < 0.05 || elapsedSeconds > 60 * 60) return false;
+
+    const speed = outputTokens / elapsedSeconds;
+    if (!isReasonableTokenSpeed(speed)) return false;
+
+    latestMeasuredTokenSpeed = speed;
+    return true;
+  };
+
+  const getRollingLiveTokenSpeed = (nowMs = Date.now()): number | null => {
+    const cutoffMs = nowMs - LIVE_TOKEN_SPEED_ROLLING_WINDOW_MS;
+    currentAssistantTokenSamples = currentAssistantTokenSamples.filter((sample) => sample.timestampMs >= cutoffMs);
+
+    if (currentAssistantTokenSamples.length === 0) return null;
+
+    const firstSampleMs = currentAssistantTokenSamples[0]?.timestampMs ?? nowMs;
+    const windowStartMs = Math.max(currentAssistantStartMs ?? firstSampleMs, cutoffMs);
+    const elapsedSeconds = (nowMs - windowStartMs) / 1000;
+    if (elapsedSeconds <= 0) return null;
+
+    const tokens = currentAssistantTokenSamples.reduce((sum, sample) => sum + sample.tokens, 0);
+    const speed = tokens / elapsedSeconds;
+    return isReasonableTokenSpeed(speed) ? speed : null;
+  };
+
+  const resetLiveAssistantState = () => {
+    currentAssistantStartMs = null;
+    currentAssistantOutputChars = 0;
+    currentAssistantEstimatedOutputTokens = 0;
+    currentAssistantLiveTokenSpeed = null;
+    currentAssistantTokenSamples = [];
+  };
 
   const refresh = async (ctx: ExtensionContext) => {
     if (refreshing) return;
@@ -353,7 +415,9 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
           let totalCacheRead = 0;
           let totalCacheWrite = 0;
           let totalCost = 0;
-          let latestTokenSpeed: number | null = null;
+          const liveOutputTokens = currentAssistantStartMs !== null ? currentAssistantEstimatedOutputTokens : 0;
+          let latestTokenSpeed: number | null = currentAssistantStartMs !== null ? currentAssistantLiveTokenSpeed : latestMeasuredTokenSpeed;
+          let historicalTokenSpeed: number | null = null;
 
           const entries = ctx.sessionManager.getEntries();
           for (let i = 0; i < entries.length; i++) {
@@ -366,7 +430,7 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
               totalCacheWrite += message.usage?.cacheWrite ?? 0;
               totalCost += message.usage?.cost?.total ?? 0;
 
-              if ((message.usage?.output ?? 0) > 0) {
+              if (latestMeasuredTokenSpeed === null && (message.usage?.output ?? 0) > 0) {
                 const endMs = getEntryTimestampMs(entry);
                 if (endMs !== null) {
                   let fallbackSpeed: number | null = null;
@@ -385,10 +449,11 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
                     if (elapsedSeconds <= 0) continue;
 
                     const speed = (message.usage?.output ?? 0) / elapsedSeconds;
+                    if (!isReasonableTokenSpeed(speed)) continue;
 
                     // Prefer user-anchored speed (best approximation of full turn latency).
                     if (previous.message.role === "user") {
-                      latestTokenSpeed = speed;
+                      historicalTokenSpeed = speed;
                       break;
                     }
 
@@ -396,12 +461,16 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
                     if (fallbackSpeed === null) fallbackSpeed = speed;
                   }
 
-                  if (latestTokenSpeed === null && fallbackSpeed !== null) {
-                    latestTokenSpeed = fallbackSpeed;
+                  if (fallbackSpeed !== null && historicalTokenSpeed === null) {
+                    historicalTokenSpeed = fallbackSpeed;
                   }
                 }
               }
             }
+          }
+
+          if (latestTokenSpeed === null && historicalTokenSpeed !== null) {
+            latestTokenSpeed = historicalTokenSpeed;
           }
 
           const contextUsage = ctx.getContextUsage();
@@ -440,7 +509,10 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
           const segments: string[] = [];
           if (ioItems.length > 0) segments.push(`${theme.fg("muted", "🪙")} ${ioItems.join(` ${itemSep} `)}`);
           if (cacheItems.length > 0) segments.push(`${theme.fg("muted", "💾")} ${cacheItems.join(` ${itemSep} `)}`);
-          if (latestTokenSpeed !== null) segments.push(`⚡ ${formatTokenSpeed(latestTokenSpeed)} tok/s`);
+          if (latestTokenSpeed !== null) {
+            const livePrefix = liveOutputTokens > 0 ? `${formatTokens(liveOutputTokens)} tok @ ` : "";
+            segments.push(`⚡ ${livePrefix}${formatTokenSpeed(latestTokenSpeed)} tok/s`);
+          }
 
           const usingSubscription = ctx.model ? ctx.modelRegistry.isUsingOAuth(ctx.model) : false;
           if (totalCost || usingSubscription) {
@@ -521,7 +593,56 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
     await refresh(ctx);
   });
 
-  pi.on("turn_end", async (_event, ctx) => {
+  pi.on("message_start", (event) => {
+    if (event.message.role === "assistant") {
+      currentAssistantStartMs = Date.now();
+      currentAssistantOutputChars = 0;
+      currentAssistantEstimatedOutputTokens = 0;
+      currentAssistantLiveTokenSpeed = null;
+      currentAssistantTokenSamples = [];
+    }
+  });
+
+  pi.on("message_update", (event) => {
+    if (event.message.role !== "assistant" || currentAssistantStartMs === null) return;
+
+    const streamEvent = event.assistantMessageEvent;
+    if (
+      streamEvent.type !== "text_delta" &&
+      streamEvent.type !== "thinking_delta" &&
+      streamEvent.type !== "toolcall_delta"
+    ) {
+      return;
+    }
+
+    const nowMs = Date.now();
+    currentAssistantOutputChars += streamEvent.delta.length;
+
+    const estimatedOutputTokens = estimateTokensFromCharCount(currentAssistantOutputChars);
+    const newTokens = Math.max(0, estimatedOutputTokens - currentAssistantEstimatedOutputTokens);
+    currentAssistantEstimatedOutputTokens = estimatedOutputTokens;
+
+    if (newTokens > 0) {
+      currentAssistantTokenSamples.push({ timestampMs: nowMs, tokens: newTokens });
+    }
+
+    currentAssistantLiveTokenSpeed = getRollingLiveTokenSpeed(nowMs);
+  });
+
+  pi.on("message_end", (event) => {
+    if (event.message.role === "assistant") {
+      if (recordAssistantSpeed(event.message as AssistantMessage)) {
+        resetLiveAssistantState();
+      }
+    }
+  });
+
+  pi.on("turn_end", async (event, ctx) => {
+    // Safety net for runtimes where message_end fires before usage is populated.
+    if (event.message.role === "assistant") {
+      recordAssistantSpeed(event.message as AssistantMessage);
+      resetLiveAssistantState();
+    }
     await refresh(ctx);
   });
 
