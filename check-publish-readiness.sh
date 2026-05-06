@@ -3,7 +3,7 @@ set -u
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="all"
-PUBLISHER="auto"        # auto|bun|npm
+PUBLISHER="npm"         # auto|bun|npm
 CHECK_AUTH=1
 STRICT_AUTH=0
 CHECK_REGISTRY=1
@@ -17,7 +17,7 @@ Usage:
   check-publish-readiness.sh [options]
 
 Options:
-  --publisher <auto|bun|npm>   Select publishing client (default: auto)
+  --publisher <auto|bun|npm>   Select publishing client (default: npm; bun is fallback when available)
   --target <name|all>          Check one package folder or all (default: all)
   --all                        Force checking all package folders
   --check-alt-client           Also run dry-run with the other client if installed
@@ -108,10 +108,10 @@ command -v npm >/dev/null 2>&1 && HAS_NPM=1
 command -v bun >/dev/null 2>&1 && HAS_BUN=1
 
 if [[ "$PUBLISHER" == "auto" ]]; then
-  if [[ $HAS_BUN -eq 1 ]]; then
-    PRIMARY_CLIENT="bun"
-  elif [[ $HAS_NPM -eq 1 ]]; then
+  if [[ $HAS_NPM -eq 1 ]]; then
     PRIMARY_CLIENT="npm"
+  elif [[ $HAS_BUN -eq 1 ]]; then
+    PRIMARY_CLIENT="bun"
   else
     echo "ERROR: neither bun nor npm is installed." >&2
     exit 1
@@ -262,6 +262,113 @@ run_publish_dry_run() {
   return 1
 }
 
+package_has_publishable_changes() {
+  local pkg_dir="$1"
+  local pkg_name="$2"
+  local npm_version="$3"
+
+  if [[ $HAS_NPM -ne 1 ]]; then
+    echo "unknown"
+    return 0
+  fi
+
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+
+  local tarball
+  if ! tarball="$(cd "$tmpdir" && npm pack "${pkg_name}@${npm_version}" --silent 2>/dev/null | tail -n 1)"; then
+    rm -rf "$tmpdir"
+    echo "unknown"
+    return 0
+  fi
+
+  local remote_root="$tmpdir/remote/package"
+  mkdir -p "$tmpdir/remote"
+  if ! tar -xzf "$tmpdir/$tarball" -C "$tmpdir/remote" >/dev/null 2>&1; then
+    rm -rf "$tmpdir"
+    echo "unknown"
+    return 0
+  fi
+
+  local local_files=()
+  mapfile -t local_files < <(
+    cd "$pkg_dir" && npm pack --dry-run --json 2>/dev/null | node -e '
+const chunks = [];
+process.stdin.on("data", c => chunks.push(c));
+process.stdin.on("end", () => {
+  try {
+    const data = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    const files = (Array.isArray(data) ? data[0]?.files : data?.files) ?? [];
+    for (const f of files) {
+      if (f?.path) console.log(String(f.path));
+    }
+  } catch {
+    process.exit(1);
+  }
+});
+'
+  )
+
+  if [[ ${#local_files[@]} -eq 0 ]]; then
+    rm -rf "$tmpdir"
+    echo "unknown"
+    return 0
+  fi
+
+  local remote_files=()
+  local local_files_sorted=()
+  mapfile -t remote_files < <(cd "$remote_root" && find . -type f -printf '%P\n' | sort)
+  mapfile -t local_files_sorted < <(printf '%s\n' "${local_files[@]}" | sort)
+
+  local local_list remote_list
+  local_list="$(printf '%s\n' "${local_files_sorted[@]}")"
+  remote_list="$(printf '%s\n' "${remote_files[@]}")"
+
+  if [[ "$local_list" != "$remote_list" ]]; then
+    rm -rf "$tmpdir"
+    echo "yes"
+    return 0
+  fi
+
+  local file
+  for file in "${local_files_sorted[@]}"; do
+    local local_path="$pkg_dir/$file"
+    local remote_path="$remote_root/$file"
+
+    if [[ ! -f "$local_path" || ! -f "$remote_path" ]]; then
+      rm -rf "$tmpdir"
+      echo "yes"
+      return 0
+    fi
+
+    if [[ "$file" == "package.json" ]]; then
+      if ! node -e '
+const fs = require("fs");
+const [a, b] = process.argv.slice(1);
+const ja = JSON.parse(fs.readFileSync(a, "utf8"));
+const jb = JSON.parse(fs.readFileSync(b, "utf8"));
+delete ja.version;
+delete jb.version;
+process.exit(JSON.stringify(ja) === JSON.stringify(jb) ? 0 : 1);
+' "$local_path" "$remote_path" >/dev/null 2>&1; then
+        rm -rf "$tmpdir"
+        echo "yes"
+        return 0
+      fi
+      continue
+    fi
+
+    if ! cmp -s "$local_path" "$remote_path"; then
+      rm -rf "$tmpdir"
+      echo "yes"
+      return 0
+    fi
+  done
+
+  rm -rf "$tmpdir"
+  echo "no"
+}
+
 has_fail=0
 pkg_count=0
 failed_packages=()
@@ -374,16 +481,10 @@ for pkg_dir in $(gather_packages); do
     fi
   fi
 
+  dry_run_ok=0
   if run_publish_dry_run "$PRIMARY_CLIENT" "$pkg_dir"; then
+    dry_run_ok=1
     print_check "$(ok)" "$PRIMARY_CLIENT publish --dry-run succeeds"
-  else
-    if [[ $STRICT_AUTH -eq 0 && $CHECK_AUTH -eq 1 && $PRIMARY_AUTH_OK -eq 0 ]]; then
-      print_check "$(warn)" "$PRIMARY_CLIENT publish --dry-run failed (likely auth-related; non-strict auth mode)"
-    else
-      print_check "$(fail)" "$PRIMARY_CLIENT publish --dry-run failed"
-      pkg_fail=1
-      pkg_reasons+=("$PRIMARY_CLIENT publish --dry-run failed")
-    fi
   fi
 
   if [[ $CHECK_ALT_CLIENT -eq 1 ]]; then
@@ -398,22 +499,31 @@ for pkg_dir in $(gather_packages); do
     fi
   fi
 
+  pkg_exists=0
+  latest=""
+  version_exists=0
+
   if [[ $CHECK_REGISTRY -eq 1 && -n "$name" && -n "$version" ]]; then
     if [[ "$PRIMARY_CLIENT" == "npm" || $HAS_NPM -eq 1 ]]; then
       while IFS='|' read -r status payload; do
         case "$status" in
           exists)
+            pkg_exists=1
+            latest="$payload"
             print_check "$(warn)" "package name already exists on npm (latest: ${payload:-unknown})"
             ;;
           missing)
+            pkg_exists=0
             print_check "$(ok)" "package name appears available on npm"
             ;;
           version_exists)
+            version_exists=1
             print_check "$(fail)" "version $payload is already published"
             pkg_fail=1
             pkg_reasons+=("version already published on npm: $payload")
             ;;
           version_free)
+            version_exists=0
             print_check "$(ok)" "version $payload is publishable"
             ;;
         esac
@@ -422,17 +532,22 @@ for pkg_dir in $(gather_packages); do
       while IFS='|' read -r status payload; do
         case "$status" in
           exists)
+            pkg_exists=1
+            latest="$payload"
             print_check "$(warn)" "package name already exists on npm (latest: ${payload:-unknown})"
             ;;
           missing)
+            pkg_exists=0
             print_check "$(ok)" "package name appears available on npm"
             ;;
           version_exists)
+            version_exists=1
             print_check "$(fail)" "version $payload is already published"
             pkg_fail=1
             pkg_reasons+=("version already published on npm: $payload")
             ;;
           version_free)
+            version_exists=0
             print_check "$(ok)" "version $payload is publishable"
             ;;
         esac
@@ -440,8 +555,43 @@ for pkg_dir in $(gather_packages); do
     else
       print_check "$(warn)" "registry check skipped (no npm/bun registry client available)"
     fi
+
+    if [[ $pkg_exists -eq 1 && -n "$latest" ]]; then
+      changed_against_published="$(package_has_publishable_changes "$pkg_dir" "$name" "$latest")"
+      case "$changed_against_published" in
+        yes)
+          print_check "$(ok)" "local publishable package differs from npm latest $latest"
+          ;;
+        no)
+          if [[ $version_exists -eq 1 ]]; then
+            print_check "$(ok)" "local publishable package matches npm latest $latest"
+          else
+            print_check "$(fail)" "local publishable package matches npm latest $latest (no changes to publish)"
+            pkg_fail=1
+            pkg_reasons+=("no publishable changes vs npm latest: $latest")
+          fi
+          ;;
+        *)
+          print_check "$(fail)" "could not compare local package with npm latest $latest"
+          pkg_fail=1
+          pkg_reasons+=("could not compare local package with npm latest: $latest")
+          ;;
+      esac
+    fi
   elif [[ $CHECK_REGISTRY -eq 0 ]]; then
     print_check "$(warn)" "registry checks skipped (--skip-registry)"
+  fi
+
+  if [[ $dry_run_ok -eq 0 ]]; then
+    if [[ $version_exists -eq 1 ]]; then
+      print_check "$(warn)" "$PRIMARY_CLIENT publish --dry-run failed because version is already published"
+    elif [[ $STRICT_AUTH -eq 0 && $CHECK_AUTH -eq 1 && $PRIMARY_AUTH_OK -eq 0 ]]; then
+      print_check "$(warn)" "$PRIMARY_CLIENT publish --dry-run failed (likely auth-related; non-strict auth mode)"
+    else
+      print_check "$(fail)" "$PRIMARY_CLIENT publish --dry-run failed"
+      pkg_fail=1
+      pkg_reasons+=("$PRIMARY_CLIENT publish --dry-run failed")
+    fi
   fi
 
   if [[ $pkg_fail -eq 1 ]]; then

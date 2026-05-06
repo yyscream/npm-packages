@@ -98,10 +98,10 @@ command -v npm >/dev/null 2>&1 && HAS_NPM=1
 command -v bun >/dev/null 2>&1 && HAS_BUN=1
 
 if [[ "$PUBLISHER" == "auto" ]]; then
-  if [[ $HAS_BUN -eq 1 ]]; then
-    PRIMARY_CLIENT="bun"
-  elif [[ $HAS_NPM -eq 1 ]]; then
+  if [[ $HAS_NPM -eq 1 ]]; then
     PRIMARY_CLIENT="npm"
+  elif [[ $HAS_BUN -eq 1 ]]; then
+    PRIMARY_CLIENT="bun"
   else
     echo "ERROR: neither bun nor npm is installed." >&2
     exit 1

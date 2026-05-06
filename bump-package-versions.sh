@@ -19,8 +19,9 @@ Options:
 
 Rules:
   - Check currently published npm version first.
-  - For already-published packages, enforce local version == npm_latest + 1 patch.
-  - If local is too high, reduce it back to npm_latest + 1 patch.
+  - For already-published packages with publishable changes, enforce local version == next release after npm latest.
+  - Next release increments patch by +1 until patch 9, then rolls to next minor .0.
+  - If local is too high, reduce it back to the enforced next release.
 EOF
 }
 
@@ -127,13 +128,22 @@ console.log(0);
 ' "$a" "$b"
 }
 
-next_patch() {
+next_release_version() {
   local version="$1"
   node -e '
 const v = process.argv[1];
 const m = v.match(/^(\d+)\.(\d+)\.(\d+)$/);
 if (!m) process.exit(2);
-console.log(`${m[1]}.${m[2]}.${Number(m[3]) + 1}`);
+let major = Number(m[1]);
+let minor = Number(m[2]);
+let patch = Number(m[3]);
+if (patch >= 9) {
+  minor += 1;
+  patch = 0;
+} else {
+  patch += 1;
+}
+console.log(`${major}.${minor}.${patch}`);
 ' "$version"
 }
 
@@ -300,7 +310,7 @@ for pkg_dir in "${PACKAGE_DIRS[@]}"; do
 
   echo "  - npm version: $npm_version"
 
-  target_version="$(next_patch "$npm_version")"
+  target_version="$(next_release_version "$npm_version")"
   target_cmp="$(semver_cmp "$local_version" "$target_version" 2>/dev/null || true)"
   if [[ -z "$target_cmp" ]]; then
     echo "  - action: ERROR non-semver comparison for target version"
@@ -326,7 +336,7 @@ for pkg_dir in "${PACKAGE_DIRS[@]}"; do
     continue
   fi
 
-  echo "  - enforced target when changed: $target_version (npm +1 patch)"
+  echo "  - enforced target when changed: $target_version (patch +1, rolls patch 9 to next minor .0)"
 
   if [[ "$target_cmp" == "0" ]]; then
     echo "  - action: unchanged (already at enforced target)"

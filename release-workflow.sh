@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 MODE=""
 TARGET="all"
-PUBLISHER="auto"
+PUBLISHER="npm"
 ACCESS="public"
 CHECK_ALT_CLIENT=0
 STRICT_AUTH=1
@@ -16,14 +16,14 @@ Usage:
   ./release-workflow.sh <--check|--plan|--publish> [options]
 
 Modes (choose exactly one):
-  --check      Run pre-publish readiness checks only
-  --plan       Run publish planning/checks only (no publish)
-  --publish    Run full checks and publish; failures are handled per package
+  --check      Run readiness checks and report required version bumps only
+  --plan       Run version bump planning, then publish planning/checks (no writes/publish)
+  --publish    Apply required version bumps, then publish; failures are handled per package
 
 Options:
   --target <name|all>          Target one package directory or all (default: all)
   --all                        Same as --target all
-  --publisher <auto|bun|npm>   Publisher client (default: auto)
+  --publisher <auto|bun|npm>   Publisher client (default: npm; bun is fallback when available)
   --access <public|restricted> Publish access for --publish/--plan (default: public)
   --check-alt-client           For --check: also dry-run with alternate client
   --no-strict-auth             For --publish/--plan: disable strict auth
@@ -32,7 +32,7 @@ Options:
 Examples:
   ./release-workflow.sh --check --all
   ./release-workflow.sh --plan --target pi-extension-notes
-  ./release-workflow.sh --publish --all --publisher auto
+  ./release-workflow.sh --publish --all
 EOF
 }
 
@@ -113,10 +113,15 @@ if [[ "$ACCESS" != "public" && "$ACCESS" != "restricted" ]]; then
 fi
 
 CHECK_SCRIPT="$ROOT_DIR/check-publish-readiness.sh"
+BUMP_SCRIPT="$ROOT_DIR/bump-package-versions.sh"
 PUBLISH_SCRIPT="$ROOT_DIR/publish-packages.sh"
 
 if [[ ! -x "$CHECK_SCRIPT" ]]; then
   echo "ERROR: missing executable $CHECK_SCRIPT" >&2
+  exit 1
+fi
+if [[ ! -x "$BUMP_SCRIPT" ]]; then
+  echo "ERROR: missing executable $BUMP_SCRIPT" >&2
   exit 1
 fi
 if [[ ! -x "$PUBLISH_SCRIPT" ]]; then
@@ -126,15 +131,30 @@ fi
 
 case "$MODE" in
   check)
-    cmd=("$CHECK_SCRIPT" --target "$TARGET" --publisher "$PUBLISHER")
+    check_cmd=("$CHECK_SCRIPT" --target "$TARGET" --publisher "$PUBLISHER")
     if [[ $CHECK_ALT_CLIENT -eq 1 ]]; then
-      cmd+=(--check-alt-client)
+      check_cmd+=(--check-alt-client)
     fi
-    echo "Running: ${cmd[*]}"
-    exec "${cmd[@]}"
+    echo "Running: ${check_cmd[*]}"
+    set +e
+    "${check_cmd[@]}"
+    check_status=$?
+    set -e
+
+    echo
+    bump_cmd=("$BUMP_SCRIPT" --target "$TARGET")
+    echo "Reporting required version bumps: ${bump_cmd[*]}"
+    "${bump_cmd[@]}"
+
+    exit "$check_status"
     ;;
 
   plan)
+    bump_cmd=("$BUMP_SCRIPT" --target "$TARGET")
+    echo "Planning required version bumps: ${bump_cmd[*]}"
+    "${bump_cmd[@]}"
+    echo
+
     cmd=("$PUBLISH_SCRIPT" --target "$TARGET" --publisher "$PUBLISHER" --access "$ACCESS")
     if [[ $STRICT_AUTH -eq 1 ]]; then
       cmd+=(--strict-auth)
@@ -144,6 +164,11 @@ case "$MODE" in
     ;;
 
   publish)
+    bump_cmd=("$BUMP_SCRIPT" --target "$TARGET" --apply)
+    echo "Applying required version bumps: ${bump_cmd[*]}"
+    "${bump_cmd[@]}"
+    echo
+
     cmd=("$PUBLISH_SCRIPT" --target "$TARGET" --publisher "$PUBLISHER" --access "$ACCESS" --apply)
     if [[ $STRICT_AUTH -eq 1 ]]; then
       cmd+=(--strict-auth)
