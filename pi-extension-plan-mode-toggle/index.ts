@@ -55,7 +55,7 @@ function slugifyTopic(input: string): string {
 
 function extractPlanTopic(content: string, goal?: string): string {
 	const sectionHeadingPattern =
-		/^(?:\d+\.?\s*)?(title\s*&\s*scope|objectives|current state|decision log|proposed architecture|design decisions|tooling\/stack decisions|web research evidence|implementation phases|testing & validation plan|risks, trade-offs, mitigations|open questions|quirks \/ extra relevant notes)$/i;
+		/^(?:\d+\.?\s*)?(title\s*&\s*scope|objectives|current state|decision log|proposed architecture|design decisions|tooling\/stack decisions|web research evidence|implementation checklist|testing & validation plan|risks, trade-offs, mitigations|open questions|quirks \/ extra relevant notes)$/i;
 
 	const lines = content.split(/\r?\n/);
 	for (const line of lines) {
@@ -134,6 +134,7 @@ function buildPlanPrompt(userPrompt: string, answers: PlanningAnswers): string {
 
 Hard requirements:
 - ALWAYS use the brave_search tool for up-to-date official docs for every important stack/tool choice.
+- Track implementation progress strictly with markdown checkboxes (`- [ ]` / `- [x]`) under "Implementation Checklist".
 - Prefer current official documentation over memory.
 - Use local repo research tools (read/grep/find/ls/bash) to ground decisions in the actual codebase.
 - Apply a scientific approach: list assumptions, evidence, alternatives, risks, and validation steps.
@@ -149,7 +150,7 @@ PLAN.md structure (strict):
 6. Design Decisions
 7. Tooling/Stack Decisions (with doc links)
 8. Web Research Evidence
-9. Implementation Phases
+9. Implementation Checklist
 10. Testing & Validation Plan
 11. Risks, Trade-offs, Mitigations
 12. Open Questions

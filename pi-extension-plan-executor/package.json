@@ -1,0 +1,26 @@
+{
+  "name": "@firstpick/pi-extension-plan-executor",
+  "version": "0.1.0",
+  "description": "Autonomous PLAN.md execution loop for Pi that continues until all checklist items are complete.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "extension",
+    "plan"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*"
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ]
+}

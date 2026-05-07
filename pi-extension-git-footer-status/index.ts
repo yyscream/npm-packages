@@ -314,7 +314,7 @@ function buildStatusText(ctx: ExtensionContext, snapshot: GitSnapshot): string {
   if (f.worktrees && snapshot.worktreeCount > 1) extraSection.push(t.fg("muted", `📦${snapshot.worktreeCount}`));
   if (f.tag && snapshot.headTag) extraSection.push(t.fg("accent", `🏷${snapshot.headTag}`));
   if (f.lastCommitAge && snapshot.lastCommitAge) extraSection.push(t.fg("dim", `⏱${snapshot.lastCommitAge}`));
-  if (f.signingMismatch && snapshot.signingMismatch) extraSection.push(t.fg("warning", "🔒!"));
+  if (f.signingMismatch && snapshot.signingMismatch) extraSection.push(t.fg("warning", "⚠️!"));
 
   const isWorkingTreeClean =
     snapshot.ahead === 0 &&
