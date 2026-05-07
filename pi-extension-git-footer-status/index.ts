@@ -23,6 +23,13 @@ type GitSnapshot = {
   signingMismatch: boolean;
 };
 
+type SigningDiagnostics = {
+  commitSignRequired: boolean;
+  signState: string;
+  gpgFormat: string;
+  signingKey: string;
+};
+
 const LIVE_TOKEN_SPEED_ROLLING_WINDOW_MS = 2000;
 
 // Toggle footer items on/off here.
@@ -281,6 +288,22 @@ async function readGitSnapshot(pi: ExtensionAPI, cwd: string): Promise<GitSnapsh
     worktreeCount,
     headTag,
     signingMismatch,
+  };
+}
+
+async function getSigningDiagnostics(pi: ExtensionAPI, cwd: string): Promise<SigningDiagnostics> {
+  const [commitSignRequiredRaw, headSignState, gpgFormatRaw, signingKeyRaw] = await Promise.all([
+    runGit(pi, cwd, ["config", "--bool", "--get", "commit.gpgsign"]),
+    runGit(pi, cwd, ["log", "-1", "--format=%G?"]),
+    runGit(pi, cwd, ["config", "--get", "gpg.format"]),
+    runGit(pi, cwd, ["config", "--get", "user.signingkey"]),
+  ]);
+
+  return {
+    commitSignRequired: commitSignRequiredRaw?.toLowerCase() === "true",
+    signState: headSignState?.trim().toUpperCase() || "N",
+    gpgFormat: gpgFormatRaw?.trim() || "(default:gpg)",
+    signingKey: signingKeyRaw?.trim() || "(not set)",
   };
 }
 
@@ -656,6 +679,27 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       await refresh(ctx);
       ctx.ui.notify("Git footer refreshed", "info");
+    },
+  });
+
+  pi.registerShortcut("ctrl+shift+g", {
+    description: "Show git signing mismatch diagnostics",
+    handler: async (ctx) => {
+      const diagnostics = await getSigningDiagnostics(pi, ctx.cwd);
+      if (!diagnostics.commitSignRequired) {
+        ctx.ui.notify("Signing mismatch: commit.gpgsign is OFF", "info");
+        return;
+      }
+
+      if (!["N", "E"].includes(diagnostics.signState)) {
+        ctx.ui.notify("Signing mismatch: not currently triggered", "info");
+        return;
+      }
+
+      ctx.ui.notify(
+        `Signing mismatch details: commit.gpgsign=ON, last-sign-state=${diagnostics.signState}, gpg.format=${diagnostics.gpgFormat}, user.signingkey=${diagnostics.signingKey}`,
+        "warning",
+      );
     },
   });
 }

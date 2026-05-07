@@ -1,13 +1,14 @@
 {
-  "name": "@firstpick/pi-extension-safety-guard",
-  "version": "0.1.2",
-  "description": "Interactive guardrails for dangerous bash commands and protected file edits in Pi.",
+  "name": "@firstpick/pi-extension-release-npm",
+  "version": "0.1.1",
+  "description": "Pi command to run npm package release workflow with publish confirmation.",
   "license": "MIT",
   "keywords": [
     "pi-package",
     "pi",
-    "pi-coding-agent",
-    "extension"
+    "extension",
+    "npm",
+    "release"
   ],
   "pi": {
     "extensions": [

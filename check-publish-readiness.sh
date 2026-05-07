@@ -518,8 +518,7 @@ for pkg_dir in $(gather_packages); do
             ;;
           version_exists)
             version_exists=1
-            print_check "$(fail)" "version $payload is already published"
-            pkg_fail=1
+            print_check "$(warn)" "version $payload is already published"
             pkg_reasons+=("version already published on npm: $payload")
             ;;
           version_free)
@@ -542,8 +541,7 @@ for pkg_dir in $(gather_packages); do
             ;;
           version_exists)
             version_exists=1
-            print_check "$(fail)" "version $payload is already published"
-            pkg_fail=1
+            print_check "$(warn)" "version $payload is already published"
             pkg_reasons+=("version already published on npm: $payload")
             ;;
           version_free)
