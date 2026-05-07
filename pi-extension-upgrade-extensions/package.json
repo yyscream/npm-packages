@@ -1,0 +1,12 @@
+{
+  "name": "@firstpick/pi-extension-upgrade-extensions",
+  "version": "0.1.0",
+  "description": "Upgrade npm-installed Pi extensions with up-to-date checks.",
+  "license": "MIT",
+  "keywords": ["pi-package", "pi", "extension", "updates"],
+  "pi": { "extensions": ["./index.ts"] },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*"
+  },
+  "files": ["index.ts", "README.md", "LICENSE"]
+}

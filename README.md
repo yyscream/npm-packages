@@ -40,11 +40,11 @@ Adds local notes management inside Pi.
 - Optional rule-note injection into prompt
 
 ### `@firstpick/pi-extension-plan-mode-toggle`
-Adds quick commands to toggle plan mode in Pi.
+Plan mode workflow controls for Pi.
 
-- `/plan-on` to enable plan mode
-- `/plan-off` to disable plan mode
-- `/plan-toggle` to switch current state
+- `/plan-mode on|off|status`
+- `/plan-model [select|provider/model-id]`
+- `Ctrl+Q` shortcut for toggle/arm flow
 
 ### `@firstpick/pi-extension-git-footer-status`
 Enhanced footer/status line for Pi sessions.
@@ -73,6 +73,30 @@ Usage analytics command for Pi session history.
 - Daily token graph (`/stats`, `/stats N`, `/stats all`)
 - Input/output/cache breakdown
 - Top model usage summary
+
+### `@firstpick/pi-extension-plan-executor`
+Autonomous `PLAN.md` checklist execution loop.
+
+- `/execute-plan [path]`
+- `/stop-plan`
+- `/plan-status`
+
+### `@firstpick/pi-extension-release-npm`
+Release orchestration command for this monorepo.
+
+- `/release-npm` runs release checks and optional publish flow
+
+### `@firstpick/pi-extension-todo-progress`
+Auto todo/progress tracking extension.
+
+- auto-creates todos for multi-step prompts
+- persistent progress widget until completion
+
+### `@firstpick/pi-extension-upgrade-extensions`
+Update npm-installed Pi extensions.
+
+- `/extensions-update` with interactive multi-select
+- `/extensions-update all` to directly update all available updates
 
 ### `@firstpick/pi-utils`
 Shared helpers used by multiple Pi extensions.

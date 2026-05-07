@@ -1,17 +1,29 @@
 # @firstpick/pi-extension-plan-executor
 
-Autonomous `PLAN.md` executor for Pi.
+Autonomous `PLAN.md` checklist executor for Pi.
+
+## What it does
+
+- Reads markdown checklist items (`- [ ]` / `- [x]`).
+- Keeps steering execution until unchecked items are completed.
+- Tracks active execution state and progress.
+
+## Install
+
+```bash
+pi install npm:@firstpick/pi-extension-plan-executor
+```
+
+## Configuration
+
+No required configuration.
 
 ## Commands
 
-- `/execute-plan [path]` — starts execution loop (default: `PLAN.md`)
-- `/stop-plan` — stops active loop
-- `/plan-status` — shows current progress
+- `/execute-plan [path]` — start execution loop (default: `PLAN.md`).
+- `/stop-plan` — stop active loop.
+- `/plan-status` — show current progress.
 
-## Behavior
+## Tools
 
-The extension checks markdown checklist items (`- [ ]` / `- [x]`) and keeps steering Pi until all unchecked items are completed.
-
-## Install in Pi
-
-Symlink `index.ts` into `~/.pi/agent/extensions/` and run `/reload`.
+None.

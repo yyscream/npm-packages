@@ -1,6 +1,6 @@
-# pi-extension-plan-mode-toggle
+# @firstpick/pi-extension-plan-mode-toggle
 
-Plan mode extension for Pi.
+Plan mode workflow extension for Pi.
 
 ## What it does
 
@@ -16,6 +16,10 @@ Plan mode extension for Pi.
 pi install npm:@firstpick/pi-extension-plan-mode-toggle
 ```
 
+## Configuration
+
+No required configuration beyond runtime requirements.
+
 ## Requirements
 
 - `brave_search` tool must be available in Pi.
@@ -26,6 +30,10 @@ pi install npm:@firstpick/pi-extension-plan-mode-toggle
 - `/plan-mode on|off|status`
 - `/plan-model [select|provider/model-id]`
 
-## Shortcut
+## Shortcuts
 
 - `Ctrl+Q` — toggle/arm plan mode.
+
+## Tools
+
+None.

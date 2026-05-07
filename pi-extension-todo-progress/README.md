@@ -1,9 +1,33 @@
 # @firstpick/pi-extension-todo-progress
 
-Aggressive auto todo/progress tracking for multi-goal prompts.
+Auto todo/progress tracking for multi-goal prompts.
 
-- Auto-creates todos when prompts look multi-step
-- Keeps progress widget visible until complete
-- Shows up to 5 rows
-- Supports mouse wheel scroll in custom UI
-- Hide completed list with `Ctrl+Alt+X`
+## What it does
+
+- Auto-creates todos when prompts appear multi-step.
+- Keeps a progress widget visible until completion.
+- Shows up to 5 rows.
+- Supports mouse wheel scrolling in custom UI.
+- Supports hiding completed list.
+
+## Install
+
+```bash
+pi install npm:@firstpick/pi-extension-todo-progress
+```
+
+## Configuration
+
+No required configuration.
+
+## Commands
+
+None.
+
+## Shortcuts
+
+- `Ctrl+Alt+X` — hide completed list.
+
+## Tools
+
+None.
