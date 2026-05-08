@@ -6,6 +6,7 @@ Auto todo/progress tracking for multi-goal prompts.
 
 - Auto-creates todos when prompts appear multi-step.
 - Keeps a progress widget visible until completion.
+- Uses explicit status markers: `[ ]` not started, `[-]` partial, `[x]` done.
 - Shows up to 5 rows.
 - Supports mouse wheel scrolling in custom UI.
 - Supports hiding completed list.
@@ -27,6 +28,7 @@ None.
 ## Shortcuts
 
 - `Ctrl+Alt+X` — hide completed list.
+- `Ctrl+Alt+J` / `Ctrl+Alt+K` — scroll todo list down/up.
 
 ## Tools
 
