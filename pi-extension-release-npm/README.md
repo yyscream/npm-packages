@@ -6,6 +6,9 @@ Release orchestration command for this npm-packages workspace.
 
 - Adds `/release-npm` command.
 - Runs release validation and pre-publish workflow.
+- Streams live release output in a widget.
+- Toggles truncated/expanded live output with `Ctrl+O`.
+- Aborts the active release subprocess with `Ctrl+C`.
 - Optionally triggers publish when confirmed.
 
 ## Install

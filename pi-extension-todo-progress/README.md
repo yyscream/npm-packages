@@ -4,12 +4,12 @@ Auto todo/progress tracking for multi-goal prompts.
 
 ## What it does
 
-- Auto-creates todos when prompts appear multi-step.
-- Keeps a progress widget visible until completion.
+- Instructs the agent to create concise, agent-authored todos for multi-step work.
+- Tracks checklist markers from assistant messages instead of copying raw user prompt lines.
 - Uses explicit status markers: `[ ]` not started, `[-]` partial, `[x]` done.
+- Clears the widget automatically when all items are complete.
 - Shows up to 5 rows.
-- Supports mouse wheel scrolling in custom UI.
-- Supports hiding completed list.
+- Supports hiding the current list manually.
 
 ## Install
 
@@ -27,7 +27,7 @@ None.
 
 ## Shortcuts
 
-- `Ctrl+Alt+X` — hide completed list.
+- `Ctrl+Alt+X` — hide current list.
 - `Ctrl+Alt+J` / `Ctrl+Alt+K` — scroll todo list down/up.
 
 ## Tools

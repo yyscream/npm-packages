@@ -1,16 +1,43 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
 const RELEASE_STATUS_KEY = "release-npm";
+const COLLAPSED_LINES = 40;
+
+type RunResult = { ok: boolean; output: string; aborted: boolean };
+type AbortableChild = ChildProcessWithoutNullStreams & { abortReleaseStep?: () => void };
 
 async function runScriptLive(
   cwd: string,
   script: string,
   onChunk: (chunk: string) => void,
-): Promise<{ ok: boolean; output: string }> {
+  onChild?: (child: AbortableChild) => void,
+): Promise<RunResult> {
   return await new Promise((resolve) => {
-    const child = spawn("bash", ["-lc", script], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn("bash", ["-lc", script], { cwd, stdio: ["ignore", "pipe", "pipe"], detached: true }) as AbortableChild;
     let output = "";
+    let aborted = false;
+
+    child.abortReleaseStep = () => {
+      aborted = true;
+      try {
+        if (child.pid) process.kill(-child.pid, "SIGINT");
+      } catch {
+        child.kill("SIGINT");
+      }
+      setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) {
+          try {
+            if (child.pid) process.kill(-child.pid, "SIGTERM");
+          } catch {
+            child.kill("SIGTERM");
+          }
+        }
+      }, 1500).unref();
+    };
+
+    onChild?.(child);
+
     child.stdout.on("data", (d) => {
       const chunk = String(d);
       output += chunk;
@@ -21,7 +48,7 @@ async function runScriptLive(
       output += chunk;
       onChunk(chunk);
     });
-    child.on("close", (code) => resolve({ ok: code === 0, output }));
+    child.on("close", (code) => resolve({ ok: code === 0 && !aborted, output, aborted }));
   });
 }
 
@@ -38,30 +65,76 @@ function isAlreadyPublishedInfo(output: string): boolean {
   return normalized.includes("version already published") && normalized.includes("failure reasons");
 }
 
+function isCtrlO(data: string): boolean {
+  return data === "\x0f" || data.toLowerCase() === "ctrl+o";
+}
+
+function isCtrlC(data: string): boolean {
+  return data === "\x03" || data.toLowerCase() === "ctrl+c";
+}
+
 export default function releaseNpmExtension(pi: ExtensionAPI) {
   pi.registerCommand("release-npm", {
     description: "Run npm release checks/workflow and confirm publish",
     handler: async (_args, ctx) => {
       const steps = ["./check-publish-readiness.sh", "./release-workflow.sh --check --all"];
       let liveBuffer = "";
-      const updated: string[] = [];
-      const skipped: string[] = [];
-      const firstRelease: string[] = [];
-      const failed: Array<{ pkg: string; reason: string }> = [];
+      let expanded = false;
+      let currentChild: AbortableChild | undefined;
+      let unsubscribeKeys: (() => void) | undefined;
+
+      const renderReleaseWidget = () => {
+        if (!ctx.hasUI) return;
+        ctx.ui.setWidget(RELEASE_STATUS_KEY, (_tui, theme) => ({
+          render: (width: number) => {
+            const lines = liveBuffer.split(/\r?\n/).filter(Boolean);
+            const visibleLines = expanded ? lines : lines.slice(-COLLAPSED_LINES);
+            const hint = lines.length > COLLAPSED_LINES
+              ? theme.fg("dim", expanded ? "Release output expanded (Ctrl+O collapse, Ctrl+C abort)" : `Release output truncated (${COLLAPSED_LINES}/${lines.length} lines, Ctrl+O expand, Ctrl+C abort)`)
+              : theme.fg("dim", "Ctrl+C abort");
+            return [...visibleLines, hint].map((line) => line.length > width ? `${line.slice(0, Math.max(0, width - 1))}…` : line);
+          },
+          invalidate: () => {},
+        }));
+      };
+
+      const abortCurrentStep = () => currentChild?.abortReleaseStep?.();
+      const cleanupKeys = () => {
+        unsubscribeKeys?.();
+        unsubscribeKeys = undefined;
+      };
 
       if (ctx.hasUI) {
         ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg("accent", "Release:Running"));
-        ctx.ui.notify("Starting release workflow (verbose + live output)", "info");
+        ctx.ui.notify("Starting release workflow (Ctrl+O expand, Ctrl+C abort)", "info");
+        unsubscribeKeys = ctx.ui.onTerminalInput((data) => {
+          if (isCtrlO(data)) {
+            expanded = !expanded;
+            renderReleaseWidget();
+            return { consume: true };
+          }
+          if (isCtrlC(data)) {
+            ctx.ui.notify("Aborting release workflow...", "warning");
+            abortCurrentStep();
+            return { consume: true };
+          }
+        });
       }
 
       for (const step of steps) {
         ctx.ui.notify(`Running ${step}...`, "info");
         const result = await runScriptLive(ctx.cwd, step, (chunk) => {
           liveBuffer += chunk;
-          if (!ctx.hasUI) return;
-          const lines = liveBuffer.split(/\r?\n/).filter(Boolean);
-          ctx.ui.setWidget(RELEASE_STATUS_KEY, lines.slice(-40));
-        });
+          renderReleaseWidget();
+        }, (child) => { currentChild = child; });
+        currentChild = undefined;
+
+        if (result.aborted) {
+          cleanupKeys();
+          ctx.ui.notify("Release workflow aborted.", "warning");
+          if (ctx.hasUI) ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg("warning", "Release:Aborted"));
+          return;
+        }
 
         if (!result.ok) {
           if (isAlreadyPublishedInfo(result.output)) {
@@ -70,9 +143,8 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
           }
 
           ctx.ui.notify(`${step} failed. Stopping release flow.`, "error");
-          if (ctx.hasUI) {
-            ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg("error", "Release:Failed"));
-          }
+          if (ctx.hasUI) ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg("error", "Release:Failed"));
+          cleanupKeys();
           evaluateFailureWithLLM(pi, step, result.output);
           return;
         }
@@ -80,11 +152,17 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
 
       const choice = await ctx.ui.select("Publish packages now?", ["Yes", "No"]);
       if (choice !== "Yes") {
+        cleanupKeys();
         ctx.ui.notify("Publish cancelled.", "info");
         return;
       }
 
       ctx.ui.notify("Running ./release-workflow.sh --publish --all...", "info");
+      const updated: string[] = [];
+      const skipped: string[] = [];
+      const firstRelease: string[] = [];
+      const failed: Array<{ pkg: string; reason: string }> = [];
+
       const publish = await runScriptLive(ctx.cwd, "./release-workflow.sh --publish --all", (chunk) => {
         liveBuffer += chunk;
 
@@ -115,13 +193,21 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
           }
         }
 
-        if (!ctx.hasUI) return;
-        const lines = linesNow;
-        ctx.ui.setWidget(RELEASE_STATUS_KEY, lines.slice(-40));
-      });
+        renderReleaseWidget();
+      }, (child) => { currentChild = child; });
+      currentChild = undefined;
+
+      if (publish.aborted) {
+        cleanupKeys();
+        ctx.ui.notify("Release workflow aborted.", "warning");
+        if (ctx.hasUI) ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg("warning", "Release:Aborted"));
+        return;
+      }
+
       if (!publish.ok) {
         ctx.ui.notify("release-workflow publish step failed.", "error");
         if (ctx.hasUI) ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg("error", "Release:Failed"));
+        cleanupKeys();
         evaluateFailureWithLLM(pi, "./release-workflow.sh --publish --all", publish.output);
         return;
       }
@@ -137,8 +223,9 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
 
       if (ctx.hasUI) {
         ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg("success", "Release:OK"));
-        ctx.ui.setWidget(RELEASE_STATUS_KEY, []);
+        ctx.ui.setWidget(RELEASE_STATUS_KEY, undefined);
       }
+      cleanupKeys();
       ctx.ui.notify("Release flow completed successfully.", "success");
     },
   });
