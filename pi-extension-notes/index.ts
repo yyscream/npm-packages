@@ -1,8 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, envFlag } from "@firstpick/pi-utils";
-import type { AutocompleteItem } from "@mariozechner/pi-tui";
+import type { AutocompleteItem } from "@earendil-works/pi-tui";
 
 type NoteMeta = {
 	slug: string;
