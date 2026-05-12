@@ -328,7 +328,7 @@ function buildStatusText(ctx: ExtensionContext, snapshot: GitSnapshot): string {
   const changesSection: string[] = [];
   if (f.staged && snapshot.staged > 0) changesSection.push(t.fg("success", `+${snapshot.staged}`));
   if (f.unstaged && snapshot.unstaged > 0) changesSection.push(t.fg("warning", `✎${snapshot.unstaged}`));
-  if (f.untracked && snapshot.untracked > 0) changesSection.push(t.fg("info", `◌${snapshot.untracked}`));
+  if (f.untracked && snapshot.untracked > 0) changesSection.push(t.fg("muted", `◌${snapshot.untracked}`));
   if (f.conflicted && snapshot.conflicted > 0) changesSection.push(t.fg("error", `!${snapshot.conflicted}`));
 
   const extraSection: string[] = [];

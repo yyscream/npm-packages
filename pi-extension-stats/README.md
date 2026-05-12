@@ -2,6 +2,8 @@
 
 Token and cost analytics for Pi session history.
 
+![Token stats dashboard](images/stats_v0.1.2.png)
+
 ## What it does
 
 - Parses local Pi session `.jsonl` files for the current workspace.

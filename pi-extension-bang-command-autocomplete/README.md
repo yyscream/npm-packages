@@ -2,6 +2,14 @@
 
 Autocomplete for `!<command>` in Pi.
 
+![Bang command autocomplete with common commands](images/Common_commands_v0.1.4.png)
+
+Built-in suggestions for common shell commands appear as soon as you type `!`.
+
+![Learned full-line and current-session suggestions](images/Learned_Lines_v0.1.4.png)
+
+Learned full command lines and commands from the current session surface next to each other while you refine a bang.
+
 ## What it does
 
 - Suggests command names while typing `!<command>`.
