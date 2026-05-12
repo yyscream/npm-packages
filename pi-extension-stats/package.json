@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-extension-stats",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Token and cost usage analytics command for Pi session history.",
   "license": "MIT",
   "keywords": [

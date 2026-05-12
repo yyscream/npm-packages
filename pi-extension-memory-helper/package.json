@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-extension-memory-helper",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Memory helper commands and remember_note tool for Pi.",
   "license": "MIT",
   "keywords": [

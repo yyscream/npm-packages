@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-extension-fish-user-bash",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Use fish shell backend for Pi user bash commands (! and !!).",
   "license": "MIT",
   "keywords": [
