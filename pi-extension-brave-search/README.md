@@ -22,13 +22,34 @@ pi install npm:@firstpick/pi-extension-brave-search
 
 - `BRAVE_SEARCH_API_KEY` (required)
 
+If no key is configured when Pi starts, the extension prompts you to enter one and choose where to save it:
+
+- current workspace: `./.env`
+- global Pi config: `$PI_CODING_AGENT_DIR/.env` or `~/.pi/agent/.env`
+
 ## Commands
 
 - `/brave-search-status` — show whether Brave Search is configured and where key resolution succeeded.
-- `/brave-search-test <query>` — run a direct test query.
+- `/brave-search-setup` — run the interactive setup prompt again when no key is configured.
 
 ## Tools
 
 - `brave_search`
   - Inputs: `query`, optional `count`, `country`, `search_lang`, `freshness`, `safesearch`
   - Output: formatted search results + metadata
+
+## Example view
+
+```text
+brave_search "Brave Search API documentation" (2 results)
+ 1. Documentation - Brave Search API
+ https://api-dashboard.search.brave.com/documentation
+ Access billions of web pages with our core search API. Includes local results and rich content enhancements.
+
+ 2. Brave Search API | Brave
+ https://brave.com/search/api/
+ Enterprise-grade Web search API accessing an index of 40+ billion pages.
+ Age: 1 month ago
+```
+
+The query is shown directly in the tool header, so it is easy to see what Pi searched for before reading the results.

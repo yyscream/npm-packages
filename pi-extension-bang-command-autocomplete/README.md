@@ -48,3 +48,23 @@ pi install npm:@firstpick/pi-extension-bang-command-autocomplete
 ## Tools
 
 None.
+
+## Example view
+
+```text
+You type: !gi
+
+Suggestions
+  !git        common command
+  !git status learned full line
+  !git commit learned command + flag
+
+You type: !git -
+
+Suggestions
+  -m          learned for git
+  --amend     learned for git
+  --stat      learned for git
+```
+
+This makes repeat shell commands feel lightweight: type `!`, pick the command or learned full line, and keep moving.
