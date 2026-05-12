@@ -37,3 +37,21 @@ No required configuration beyond runtime requirements.
 ## Tools
 
 None.
+
+## Example view
+
+```text
+/plan-mode on
+Plan mode enabled. Your next request will be turned into a PLAN.md first.
+
+Ctrl+Q
+Plan mode armed for the next prompt.
+
+/plan-model select
+Pick planning model:
+  gpt-5-codex
+  gemini-3-pro
+  claude-sonnet
+```
+
+Plan mode is useful when the next task needs deliberate research, sequencing, or review before code changes begin.

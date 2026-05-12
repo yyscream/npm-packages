@@ -36,3 +36,19 @@ pi install npm:@firstpick/pi-extension-notes
 ## Tools
 
 None.
+
+## Example view
+
+```text
+/note rule-testing :: Always run the smallest useful check before claiming completion.
+Saved note: rule-testing
+
+/note-list
+- rule-testing  [rule]
+
+/note-read testing
+# rule-testing
+Always run the smallest useful check before claiming completion.
+```
+
+Use notes for durable reminders, project conventions, or `rule*` notes you may want injected into future sessions.

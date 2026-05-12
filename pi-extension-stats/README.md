@@ -31,3 +31,19 @@ No required configuration.
 ## Tools
 
 None.
+
+## Example view
+
+```text
+/stats 7
+Token usage — last 7 days
+
+May 06  in 18k  out 4k   $0.11  ████
+May 07  in 42k  out 9k   $0.29  █████████
+May 08  in 12k  out 2k   $0.06  ██
+
+Total: 72k input, 15k output, $0.46
+Cache hit rate: 38%
+```
+
+Use it to understand which days, sessions, and models are driving token volume and cost.

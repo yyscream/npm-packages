@@ -33,3 +33,14 @@ None.
 ## Tools
 
 None.
+
+## Example view
+
+```text
+Todo
+- [x] Inspect package structure
+- [-] Update README examples
+- [ ] Run readiness checks
+```
+
+For multi-step requests, Pi keeps a compact progress widget visible and updates it as work moves from planned to in-progress to done.

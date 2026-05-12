@@ -30,3 +30,16 @@ pi install npm:@firstpick/pi-extension-fish-user-bash
 ## Tools
 
 None.
+
+## Example view
+
+```text
+/user-bash-shell
+Using shell for !/!! commands:
+/usr/bin/fish
+
+!echo $version
+3.7.1
+```
+
+Use this when your normal shell setup lives in Fish and you want Pi bang commands to behave like your own terminal.

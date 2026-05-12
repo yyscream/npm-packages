@@ -27,3 +27,17 @@ No required configuration.
 ## Tools
 
 None.
+
+## Example view
+
+```text
+/execute-plan PLAN.md
+PLAN executor started
+Progress: 0/3 complete
+
+- [x] Inspect current implementation
+- [-] Apply the next planned change
+- [ ] Run verification checks
+```
+
+Use this when you already have a checklist and want Pi to keep steering work until every item is finished or you stop it.

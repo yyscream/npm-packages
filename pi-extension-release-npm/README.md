@@ -32,3 +32,17 @@ No required configuration.
 ## Tools
 
 None.
+
+## Example view
+
+```text
+/release-npm
+Release checks
+  ✓ package metadata valid
+  ✓ README and LICENSE present
+  ✓ npm dry-run completed
+
+Publish packages now?  No / Yes
+```
+
+The command keeps release output visible in Pi, asks before publishing, and lets you abort before any external release happens.

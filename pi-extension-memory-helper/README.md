@@ -33,3 +33,16 @@ pi install npm:@firstpick/pi-extension-memory-helper
   - Input: `note`
   - Action: append to today’s memory file
   - Output: saved file path + timezone info
+
+## Example view
+
+```text
+/remember Prefer one canonical config file over duplicated values
+Saved to ~/.pi/agent/memory/2026-05-12.md
+
+/memory-search canonical config
+1. 2026-05-12.md
+   Prefer one canonical config file over duplicated values
+```
+
+Great for capturing decisions, preferences, and troubleshooting breadcrumbs while staying in the Pi flow.

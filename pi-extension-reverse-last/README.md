@@ -28,3 +28,16 @@ pi install npm:@firstpick/pi-extension-reverse-last
 ## Tools
 
 None.
+
+## Example view
+
+```text
+/reverse-last
+Restored 1 file from the session undo stack:
+- src/config.ts
+
+/reverse-last 2
+Restored 2 recent file changes.
+```
+
+This is a quick escape hatch for recent Pi `write`/`edit` changes in the current session.

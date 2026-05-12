@@ -37,3 +37,16 @@ No required configuration.
 ## Tools
 
 None.
+
+## Example view
+
+```text
+/extensions-update
+Outdated Pi extensions
+  [ ] @firstpick/pi-extension-stats            0.1.2 → 0.1.3
+  [x] @firstpick/pi-extension-brave-search    0.1.5 → 0.1.6
+
+Enter: update selected   Space: toggle   a: all   Esc: cancel
+```
+
+Use `all` for a fast update pass, or the selector when you want to choose exactly which extensions change.
