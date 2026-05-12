@@ -5,11 +5,11 @@ Release orchestration command for this npm-packages workspace.
 ## What it does
 
 - Adds `/release-npm` command.
-- Runs release validation and pre-publish workflow.
+- Asks before starting any publish-capable release workflow.
+- Runs the release workflow once, so each validation/check step executes once per release attempt.
 - Streams live release output in a widget.
 - Toggles truncated/expanded live output with `Ctrl+O`.
 - Aborts the active release subprocess with `Ctrl+C`.
-- Optionally triggers publish when confirmed.
 
 ## Install
 
@@ -23,11 +23,7 @@ No required configuration.
 
 ## Commands
 
-- `/release-npm` — runs:
-  1. `./check-publish-readiness.sh`
-  2. `./release-workflow.sh` (without publish)
-  3. publish confirmation prompt
-  4. publish step if confirmed
+- `/release-npm` — prompts for confirmation, then runs `./release-workflow.sh --publish --all` once if confirmed.
 
 ## Tools
 
@@ -37,12 +33,16 @@ None.
 
 ```text
 /release-npm
-Release checks
-  ✓ package metadata valid
-  ✓ README and LICENSE present
-  ✓ npm dry-run completed
+Run release workflow and publish eligible packages?  No / Yes
 
-Publish packages now?  No / Yes
+Release workflow
+  Applying required version bumps: ./bump-package-versions.sh --target all --apply
+  Running: ./publish-packages.sh --target all --publisher npm --access public --apply --strict-auth
+
+Publish summary:
+  - published total: 3
+  - skipped: 11
+  - failed: 0
 ```
 
-The command keeps release output visible in Pi, asks before publishing, and lets you abort before any external release happens.
+The command asks before starting, keeps release output visible in Pi, and avoids running the same release checks in both a preflight phase and a publish phase.

@@ -76,11 +76,6 @@ function evaluateFailureWithLLM(pi: ExtensionAPI, step: string, output: string):
   );
 }
 
-function isAlreadyPublishedInfo(output: string): boolean {
-  const normalized = output.toLowerCase();
-  return normalized.includes("version already published") && normalized.includes("failure reasons");
-}
-
 function isCtrlO(data: string): boolean {
   return data === "\x0f" || data.toLowerCase() === "ctrl+o";
 }
@@ -97,10 +92,6 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
   pi.registerCommand("release-npm", {
     description: "Run npm release checks/workflow and confirm publish",
     handler: async (_args, ctx) => {
-      const steps = [
-        releaseScriptCommand(ctx.cwd, "check-publish-readiness.sh"),
-        releaseScriptCommand(ctx.cwd, "release-workflow.sh", ["--check", "--all"]),
-      ];
       let liveBuffer = "";
       let expanded = false;
       let currentChild: AbortableChild | undefined;
@@ -127,6 +118,12 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
         unsubscribeKeys = undefined;
       };
 
+      const choice = await ctx.ui.select("Run release workflow and publish eligible packages?", ["Yes", "No"]);
+      if (choice !== "Yes") {
+        ctx.ui.notify("Publish cancelled.", "info");
+        return;
+      }
+
       if (ctx.hasUI) {
         ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg("accent", "Release:Running"));
         ctx.ui.notify("Starting release workflow (Ctrl+O expand, Ctrl+C abort)", "info");
@@ -142,42 +139,6 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
             return { consume: true };
           }
         });
-      }
-
-      for (const step of steps) {
-        ctx.ui.notify(`Running ${step}...`, "info");
-        const result = await runScriptLive(ctx.cwd, step, (chunk) => {
-          liveBuffer += chunk;
-          renderReleaseWidget();
-        }, (child) => { currentChild = child; });
-        currentChild = undefined;
-
-        if (result.aborted) {
-          cleanupKeys();
-          ctx.ui.notify("Release workflow aborted.", "warning");
-          if (ctx.hasUI) ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg("warning", "Release:Aborted"));
-          return;
-        }
-
-        if (!result.ok) {
-          if (isAlreadyPublishedInfo(result.output)) {
-            ctx.ui.notify(`${step}: versions already published (info only), continuing.`, "info");
-            continue;
-          }
-
-          ctx.ui.notify(`${step} failed. Stopping release flow.`, "error");
-          if (ctx.hasUI) ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg("error", "Release:Failed"));
-          cleanupKeys();
-          evaluateFailureWithLLM(pi, step, result.output);
-          return;
-        }
-      }
-
-      const choice = await ctx.ui.select("Publish packages now?", ["Yes", "No"]);
-      if (choice !== "Yes") {
-        cleanupKeys();
-        ctx.ui.notify("Publish cancelled.", "info");
-        return;
       }
 
       const publishCommand = releaseScriptCommand(ctx.cwd, "release-workflow.sh", ["--publish", "--all"]);
