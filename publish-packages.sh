@@ -148,6 +148,18 @@ print_check() {
   printf "  - [%s] %s\n" "$status" "$msg"
 }
 
+release_event() {
+  local status="$1"
+  local name="$2"
+  local version="$3"
+  local action="$4"
+  local detail="${5:-}"
+  node -e '
+    const [, , status, name, version, action, detail] = process.argv;
+    console.log("RELEASE_NPM_EVENT " + JSON.stringify({ status, name, version, action, detail }));
+  ' "$status" "$name" "$version" "$action" "$detail"
+}
+
 json_get() {
   local file="$1"
   local expr="$2"
@@ -492,12 +504,14 @@ for item in "${PLANS[@]}"; do
 
   if [[ "$action" == "skip" ]]; then
     SKIPPED_COUNT=$((SKIPPED_COUNT+1))
+    release_event "skipped" "$name" "$version" "$action" "already published"
     echo "$(info "INFO") Skipping $name@$version (already published)"
     continue
   fi
 
   if [[ "$action" == "error" ]]; then
     SKIPPED_COUNT=$((SKIPPED_COUNT+1))
+    release_event "failed" "$name" "$version" "$action" "failed checks"
     echo "$(fail) Skipping $name@$version (failed checks)"
     PUBLISH_FAIL=1
     continue
@@ -512,6 +526,7 @@ for item in "${PLANS[@]}"; do
     elif [[ "$action" == "publish-update" ]]; then
       PUBLISHED_UPDATE_COUNT=$((PUBLISHED_UPDATE_COUNT+1))
     fi
+    release_event "published" "$name" "$version" "$action" "via $PRIMARY_CLIENT"
     echo "$(ok) Published $name@$version via $PRIMARY_CLIENT"
   else
     if [[ -n "$SECONDARY_CLIENT" ]]; then
@@ -525,17 +540,20 @@ for item in "${PLANS[@]}"; do
         elif [[ "$action" == "publish-update" ]]; then
           PUBLISHED_UPDATE_COUNT=$((PUBLISHED_UPDATE_COUNT+1))
         fi
+        release_event "published" "$name" "$version" "$action" "via fallback $SECONDARY_CLIENT"
         echo "$(ok) Published $name@$version via fallback $SECONDARY_CLIENT"
       else
         PUBLISH_FAIL=1
         FAILED_COUNT=$((FAILED_COUNT+1))
         FAILED_ITEMS+=("$name@$version")
+        release_event "failed" "$name" "$version" "$action" "via both $PRIMARY_CLIENT and $SECONDARY_CLIENT"
         echo "$(fail) Failed to publish $name@$version via both $PRIMARY_CLIENT and $SECONDARY_CLIENT"
       fi
     else
       PUBLISH_FAIL=1
       FAILED_COUNT=$((FAILED_COUNT+1))
       FAILED_ITEMS+=("$name@$version")
+      release_event "failed" "$name" "$version" "$action" "via $PRIMARY_CLIENT"
       echo "$(fail) Failed to publish $name@$version via $PRIMARY_CLIENT"
     fi
   fi

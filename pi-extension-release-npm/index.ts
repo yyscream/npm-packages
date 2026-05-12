@@ -73,6 +73,10 @@ function isCtrlC(data: string): boolean {
   return data === "\x03" || data.toLowerCase() === "ctrl+c";
 }
 
+function stripAnsi(input: string): string {
+  return input.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+}
+
 export default function releaseNpmExtension(pi: ExtensionAPI) {
   pi.registerCommand("release-npm", {
     description: "Run npm release checks/workflow and confirm publish",
@@ -162,37 +166,90 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
       const skipped: string[] = [];
       const firstRelease: string[] = [];
       const failed: Array<{ pkg: string; reason: string }> = [];
+      const publishActions = new Map<string, "publish-first" | "publish-update">();
+
+      const rememberUnique = (items: string[], item: string) => {
+        if (!items.includes(item)) items.push(item);
+      };
+
+      const parsePublishOutput = (output: string) => {
+        const linesNow = stripAnsi(output).split(/\r?\n/).filter(Boolean);
+        for (const line of linesNow) {
+          const mEvent = line.match(/^RELEASE_NPM_EVENT\s+(\{.*\})$/);
+          if (mEvent) {
+            try {
+              const event = JSON.parse(mEvent[1]) as { status?: string; name?: string; version?: string; action?: string; detail?: string };
+              if (event.name && event.version) {
+                const pkg = `${event.name}@${event.version}`;
+                if (event.status === "published" && event.action === "publish-first") {
+                  rememberUnique(firstRelease, pkg);
+                } else if (event.status === "published") {
+                  rememberUnique(updated, pkg);
+                } else if (event.status === "skipped") {
+                  rememberUnique(skipped, pkg);
+                } else if (event.status === "failed") {
+                  const reason = event.detail || event.action || "unknown";
+                  if (!failed.some((f) => f.pkg === pkg && f.reason === reason)) failed.push({ pkg, reason });
+                }
+              }
+            } catch {
+              // Keep regex fallback below for older script output.
+            }
+            continue;
+          }
+
+          const mPublishing = line.match(/Publishing\s+((?:@[^\s/]+\/)?[^\s@]+)@([^\s]+)\s+\((publish-first|publish-update)\)/);
+          if (mPublishing) {
+            publishActions.set(`${mPublishing[1]}@${mPublishing[2]}`, mPublishing[3] as "publish-first" | "publish-update");
+            continue;
+          }
+
+          const mPublished = line.match(/PASS\s+Published\s+((?:@[^\s/]+\/)?[^\s@]+)@([^\s]+)/);
+          if (mPublished) {
+            const name = `${mPublished[1]}@${mPublished[2]}`;
+            const action = publishActions.get(name);
+            if (action === "publish-first") {
+              rememberUnique(firstRelease, name);
+            } else {
+              rememberUnique(updated, name);
+            }
+            continue;
+          }
+
+          const mSkipped = line.match(/INFO\s+Skipping\s+((?:@[^\s/]+\/)?[^\s@]+)@([^\s]+)\s+\(already published\)/);
+          if (mSkipped) {
+            rememberUnique(skipped, `${mSkipped[1]}@${mSkipped[2]}`);
+            continue;
+          }
+
+          const mCheckFailed = line.match(/FAIL\s+Skipping\s+((?:@[^\s/]+\/)?[^\s@]+)@([^\s]+)\s+\(([^)]+)\)/);
+          if (mCheckFailed) {
+            const pkg = `${mCheckFailed[1]}@${mCheckFailed[2]}`;
+            const reason = mCheckFailed[3].trim();
+            if (!failed.some((f) => f.pkg === pkg && f.reason === reason)) failed.push({ pkg, reason });
+            continue;
+          }
+
+          const mFailedPublish = line.match(/FAIL\s+Failed to publish\s+((?:@[^\s/]+\/)?[^\s@]+)@([^\s]+)\s+(.+)/);
+          if (mFailedPublish) {
+            const pkg = `${mFailedPublish[1]}@${mFailedPublish[2]}`;
+            const reason = mFailedPublish[3].trim();
+            if (!failed.some((f) => f.pkg === pkg && f.reason === reason)) failed.push({ pkg, reason });
+          }
+        }
+      };
+
+      const formatReleaseSummary = () => [
+        "Release summary:",
+        `- First publish: ${firstRelease.length ? firstRelease.join(", ") : "none"}`,
+        `- Updated: ${updated.length ? updated.join(", ") : "none"}`,
+        `- Already published: ${skipped.length ? skipped.join(", ") : "none"}`,
+        `- Failed: ${failed.length ? failed.map((f) => `${f.pkg}: ${f.reason}`).join(" | ") : "none"}`,
+      ].join("\n");
 
       const publish = await runScriptLive(ctx.cwd, "./release-workflow.sh --publish --all", (chunk) => {
         liveBuffer += chunk;
-
-        const linesNow = liveBuffer.split(/\r?\n/).filter(Boolean);
-        for (const line of linesNow.slice(-120)) {
-          const mUpdated = line.match(/PASS\s+Published\s+(@[^\s]+)@([^\s]+)/);
-          if (mUpdated) {
-            const name = `${mUpdated[1]}@${mUpdated[2]}`;
-            if (!updated.includes(name)) updated.push(name);
-          }
-
-          const mSkipped = line.match(/INFO\s+Skipping\s+(@[^\s]+)@([^\s]+)\s+\(already published\)/);
-          if (mSkipped) {
-            const name = `${mSkipped[1]}@${mSkipped[2]}`;
-            if (!skipped.includes(name)) skipped.push(name);
-          }
-
-          const mFirst = line.match(/Publishing\s+(@[^\s]+)@([^\s]+)\s+\(publish-new\)/);
-          if (mFirst) {
-            const name = `${mFirst[1]}@${mFirst[2]}`;
-            if (!firstRelease.includes(name)) firstRelease.push(name);
-          }
-
-          const mFailed = line.match(/FAIL\s+([^\n]+)/);
-          if (mFailed) {
-            const reason = mFailed[1].trim();
-            if (!failed.some((f) => f.reason === reason)) failed.push({ pkg: "unknown", reason });
-          }
-        }
-
+        parsePublishOutput(liveBuffer);
         renderReleaseWidget();
       }, (child) => { currentChild = child; });
       currentChild = undefined;
@@ -212,21 +269,14 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
         return;
       }
 
-      const summaryLines: string[] = [
-        "Release summary:",
-        `- Updated: ${updated.length ? updated.join(", ") : "none"}`,
-        `- Skipped: ${skipped.length ? skipped.join(", ") : "none"}`,
-        `- First release: ${firstRelease.length ? firstRelease.join(", ") : "none"}`,
-        `- Failed: ${failed.length ? failed.map((f) => `${f.pkg}: ${f.reason}`).join(" | ") : "none"}`,
-      ];
-      for (const line of summaryLines) ctx.ui.notify(line, "info");
+      parsePublishOutput(publish.output);
 
       if (ctx.hasUI) {
         ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg("success", "Release:OK"));
         ctx.ui.setWidget(RELEASE_STATUS_KEY, undefined);
       }
       cleanupKeys();
-      ctx.ui.notify("Release flow completed successfully.", "success");
+      ctx.ui.notify(`${formatReleaseSummary()}\nRelease flow completed successfully.`, "success");
     },
   });
 }

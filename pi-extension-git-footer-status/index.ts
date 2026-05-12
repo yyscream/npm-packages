@@ -103,6 +103,10 @@ function estimateTokensFromCharCount(charCount: number): number {
   return Math.max(0, Math.round(charCount / 4));
 }
 
+function estimatePromptInjectionTokens(systemPrompt: string): number {
+  return estimateTokensFromCharCount(systemPrompt.length);
+}
+
 function formatTokenSpeed(tokensPerSecond: number): string {
   if (tokensPerSecond < 100) {
     if (tokensPerSecond >= 10) return tokensPerSecond.toFixed(1);
@@ -496,6 +500,8 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
             latestTokenSpeed = historicalTokenSpeed;
           }
 
+          const promptInjectionTokens = estimatePromptInjectionTokens(ctx.getSystemPrompt());
+
           const contextUsage = ctx.getContextUsage();
           const contextWindow = contextUsage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
           const contextPercentValue = contextUsage?.percent ?? 0;
@@ -532,6 +538,7 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
           const segments: string[] = [];
           if (ioItems.length > 0) segments.push(`${theme.fg("muted", "🪙")} ${ioItems.join(` ${itemSep} `)}`);
           if (cacheItems.length > 0) segments.push(`${theme.fg("muted", "💾")} ${cacheItems.join(` ${itemSep} `)}`);
+          segments.push(`PI: ${formatTokens(promptInjectionTokens)} tok`);
           if (latestTokenSpeed !== null) {
             const livePrefix = liveOutputTokens > 0 ? `${formatTokens(liveOutputTokens)} tok @ ` : "";
             segments.push(`⚡ ${livePrefix}${formatTokenSpeed(latestTokenSpeed)} tok/s`);
