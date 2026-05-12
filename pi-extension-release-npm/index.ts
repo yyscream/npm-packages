@@ -1,3 +1,6 @@
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -6,6 +9,19 @@ const COLLAPSED_LINES = 40;
 
 type RunResult = { ok: boolean; output: string; aborted: boolean };
 type AbortableChild = ChildProcessWithoutNullStreams & { abortReleaseStep?: () => void };
+
+const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function releaseScriptCommand(cwd: string, scriptName: string, args: string[] = []): string {
+  const localScript = join(cwd, scriptName);
+  const scriptPath = existsSync(localScript) ? localScript : join(EXTENSION_DIR, scriptName);
+  const quotedArgs = args.map(shellQuote).join(" ");
+  return `PI_NPM_PACKAGES_ROOT=${shellQuote(cwd)} ${shellQuote(scriptPath)}${quotedArgs ? ` ${quotedArgs}` : ""}`;
+}
 
 async function runScriptLive(
   cwd: string,
@@ -81,7 +97,10 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
   pi.registerCommand("release-npm", {
     description: "Run npm release checks/workflow and confirm publish",
     handler: async (_args, ctx) => {
-      const steps = ["./check-publish-readiness.sh", "./release-workflow.sh --check --all"];
+      const steps = [
+        releaseScriptCommand(ctx.cwd, "check-publish-readiness.sh"),
+        releaseScriptCommand(ctx.cwd, "release-workflow.sh", ["--check", "--all"]),
+      ];
       let liveBuffer = "";
       let expanded = false;
       let currentChild: AbortableChild | undefined;
@@ -161,7 +180,8 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
         return;
       }
 
-      ctx.ui.notify("Running ./release-workflow.sh --publish --all...", "info");
+      const publishCommand = releaseScriptCommand(ctx.cwd, "release-workflow.sh", ["--publish", "--all"]);
+      ctx.ui.notify("Running release-workflow.sh --publish --all...", "info");
       const updated: string[] = [];
       const skipped: string[] = [];
       const firstRelease: string[] = [];
@@ -247,7 +267,7 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
         `- Failed: ${failed.length ? failed.map((f) => `${f.pkg}: ${f.reason}`).join(" | ") : "none"}`,
       ].join("\n");
 
-      const publish = await runScriptLive(ctx.cwd, "./release-workflow.sh --publish --all", (chunk) => {
+      const publish = await runScriptLive(ctx.cwd, publishCommand, (chunk) => {
         liveBuffer += chunk;
         parsePublishOutput(liveBuffer);
         renderReleaseWidget();
@@ -265,7 +285,7 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
         ctx.ui.notify("release-workflow publish step failed.", "error");
         if (ctx.hasUI) ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg("error", "Release:Failed"));
         cleanupKeys();
-        evaluateFailureWithLLM(pi, "./release-workflow.sh --publish --all", publish.output);
+        evaluateFailureWithLLM(pi, "release-workflow.sh --publish --all", publish.output);
         return;
       }
 
