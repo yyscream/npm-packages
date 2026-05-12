@@ -2,6 +2,8 @@
 
 Enhanced Pi footer with git health and model/token telemetry.
 
+![Status bar with metrics and git context](images/Statusbar_v0.1.5.png)
+
 ## What it does
 
 - Shows compact runtime metrics in the footer:

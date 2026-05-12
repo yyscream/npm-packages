@@ -1,9 +1,9 @@
 import { access } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, resolve, sep } from "node:path";
-import type { AssistantMessage } from "@mariozechner/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 type GitSnapshot = {
   branch: string;
@@ -332,7 +332,7 @@ function buildStatusText(ctx: ExtensionContext, snapshot: GitSnapshot): string {
   const changesSection: string[] = [];
   if (f.staged && snapshot.staged > 0) changesSection.push(t.fg("success", `+${snapshot.staged}`));
   if (f.unstaged && snapshot.unstaged > 0) changesSection.push(t.fg("warning", `✎${snapshot.unstaged}`));
-  if (f.untracked && snapshot.untracked > 0) changesSection.push(t.fg("info", `◌${snapshot.untracked}`));
+  if (f.untracked && snapshot.untracked > 0) changesSection.push(t.fg("muted", `◌${snapshot.untracked}`));
   if (f.conflicted && snapshot.conflicted > 0) changesSection.push(t.fg("error", `!${snapshot.conflicted}`));
 
   const extraSection: string[] = [];
