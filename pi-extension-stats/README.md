@@ -9,7 +9,7 @@ Token and cost analytics for Pi session history.
 - Parses local Pi session `.jsonl` files for the current workspace.
 - Aggregates usage by UTC day.
 - Displays compact daily token bars and cost bars with totals.
-- Shows input/output/cache breakdown, cache hit rate, estimated cache savings, cost burn rate, and top model usage.
+- Shows input/output/cache breakdown, prompt-injection estimate (`PI: X tok`) with source split-up, cache hit rate, estimated cache savings, cost burn rate, and top model usage.
 - Highlights highest-cost day, projected 30-day cost, most expensive sessions, and model cost efficiency.
 
 ## Install
