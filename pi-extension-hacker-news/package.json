@@ -1,0 +1,27 @@
+{
+  "name": "@firstpick/pi-extension-hacker-news",
+  "version": "0.1.0",
+  "description": "Hacker News tools and commands for Pi using the official Firebase API.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "extension",
+    "hacker-news"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ]
+}
