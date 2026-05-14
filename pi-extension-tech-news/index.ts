@@ -16,6 +16,8 @@ const OSV_API_URL = "https://api.osv.dev/v1/vulns";
 const CVE_RECORD_API_URL = "https://cveawg.mitre.org/api/cve";
 const DAILY_DEV_BASE_URL = "https://api.daily.dev/public/v1";
 const DAILY_DEV_TOKEN_ENV = "DAILY_DEV_TOKEN";
+const DAILY_DEV_COOKIE_ENV = "DAILY_DEV_COOKIE";
+const DAILY_DEV_AUTHORIZATION_ENV = "DAILY_DEV_AUTHORIZATION";
 const X_BEARER_TOKEN_ENV = "X_BEARER_TOKEN";
 const NITTER_BASE_URL_ENV = "NITTER_BASE_URL";
 const NITTER_ACCOUNTS_ENV = "NITTER_ACCOUNTS";
@@ -71,6 +73,8 @@ const DEFAULT_REDDIT_SUBREDDITS = [
 const NEWS_MESSAGE_TYPE = "news-feed-result";
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 50;
+const DEFAULT_DAILY_DEV_RANK: DailyDevRank = "upvoted";
+const DAILY_DEV_SUPPORTED_TYPES = ["article", "share", "freeform", "tweet", "video:youtube", "collection", "poll"] as const;
 const MAX_COMMENT_DEPTH = 3;
 const MAX_COMMENT_COUNT = 100;
 const NEWS_GENERAL_DIR = join(homedir(), ".pi", "NEWS", "GENERAL");
@@ -159,26 +163,45 @@ type SocketJsonFeed = {
 
 type DailyDevPost = {
   id?: string;
-  title?: string;
+  title?: string | null;
+  titleHtml?: string | null;
   url?: string | null;
   summary?: string | null;
+  content?: string | null;
+  contentHtml?: string | null;
   publishedAt?: string | null;
   createdAt?: string;
   commentsPermalink?: string;
-  source?: { name?: string; handle?: string };
+  permalink?: string;
+  source?: { id?: string; name?: string; handle?: string; image?: string | null };
   tags?: string[];
   numUpvotes?: number;
   numComments?: number;
-  author?: { name?: string | null } | null;
+  author?: { name?: string | null; username?: string | null } | null;
+  type?: string | null;
+  readTime?: number | null;
+  bookmarked?: boolean;
+  read?: boolean;
+  upvoted?: boolean;
+  userState?: { vote?: number } | null;
+  sharedPost?: DailyDevPost | null;
 };
 
 type DailyDevFeedResponse = {
   data?: DailyDevPost[];
 };
 
+type DailyDevGraphqlPostConnection = {
+  edges?: Array<{
+    node?: DailyDevPost;
+  }>;
+};
+
 type DailyDevGraphqlResponse = {
   data?: {
     latest?: DailyDevPost[];
+    feed?: DailyDevGraphqlPostConnection;
+    mostUpvotedFeed?: DailyDevGraphqlPostConnection;
   };
   errors?: Array<{ message?: string }>;
 };
@@ -208,6 +231,7 @@ type RedditListingResponse = {
 
 type RedditSort = "hot" | "new" | "top" | "rising";
 type TwitterRank = "engagement" | "recent";
+type DailyDevRank = "recent" | "upvoted";
 
 type XRecentSearchResponse = {
   data?: Array<{
@@ -284,6 +308,7 @@ type ParsedNewsArgs = {
   twitterQuery?: string;
   twitterAccounts?: string[];
   twitterRank: TwitterRank;
+  dailyDevRank: DailyDevRank;
 };
 
 type ParsedSecurityNewsArgs = {
@@ -303,6 +328,7 @@ const hnFeedSchema = Type.Union([
 
 const redditSortSchema = Type.Union([Type.Literal("hot"), Type.Literal("new"), Type.Literal("top"), Type.Literal("rising")]);
 const twitterRankSchema = Type.Union([Type.Literal("engagement"), Type.Literal("recent")]);
+const dailyDevRankSchema = Type.Union([Type.Literal("recent"), Type.Literal("upvoted")]);
 
 const NEWS_FEED_PARAMS = Type.Object({
   source: Type.Optional(sourceSchema, { description: "News source: hackernews, socket, dailydev, reddit, twitter, or all." }),
@@ -313,6 +339,7 @@ const NEWS_FEED_PARAMS = Type.Object({
   twitterQuery: Type.Optional(Type.String({ description: "X/Twitter recent-search query. Defaults to configured NITTER_ACCOUNTS as from:user OR terms, then tech-news terms." })),
   twitterAccounts: Type.Optional(Type.Array(Type.String(), { description: "X/Twitter accounts to fetch via query/from:account and Nitter fallback." })),
   twitterRank: Type.Optional(twitterRankSchema, { description: "Twitter/X ranking mode for official API results: engagement or recent. Defaults to engagement." }),
+  dailyDevRank: Type.Optional(dailyDevRankSchema, { description: "daily.dev ranking mode when source is dailydev/all: upvoted or recent. Defaults to upvoted." }),
 });
 
 const NEWS_SEC_PARAMS = Type.Object({
@@ -406,19 +433,68 @@ async function fetchSocketFeed(limit: number, signal?: AbortSignal): Promise<New
   }));
 }
 
-function mapDailyDevPosts(posts: DailyDevPost[], limit: number): NewsEntry[] {
-  return posts.slice(0, limit).map((post) => ({
-    source: "dailydev" as const,
-    id: post.id,
-    title: post.title ?? post.id ?? "Untitled daily.dev post",
-    url: post.url ?? post.commentsPermalink ?? (post.id ? `https://app.daily.dev/posts/${post.id}` : "https://app.daily.dev/"),
-    sourceUrl: post.commentsPermalink,
-    author: post.author?.name ?? post.source?.name ?? post.source?.handle,
-    score: post.numUpvotes,
-    comments: post.numComments,
-    publishedAt: post.publishedAt ?? post.createdAt,
-    summary: post.summary ?? post.tags?.slice(0, 5).map((tag) => `#${tag}`).join(" "),
-  }));
+function textFromDailyDevPost(value: string | null | undefined, html?: string | null): string | undefined {
+  return value?.trim() || htmlToText(html ?? undefined);
+}
+
+function mapDailyDevPosts(posts: DailyDevPost[], limit: number, feedLabel?: string): NewsEntry[] {
+  return posts.slice(0, limit).map((post) => {
+    const linkedPost = post.sharedPost ?? post;
+    const tagSummary = post.tags?.slice(0, 5).map((tag) => `#${tag}`).join(" ");
+    const stateSummary = [
+      post.readTime ? `${post.readTime} min read` : "",
+      post.bookmarked ? "bookmarked" : "",
+      post.read ? "read" : "",
+      post.upvoted || (post.userState?.vote ?? 0) > 0 ? "upvoted" : "",
+      tagSummary,
+    ].filter(Boolean).join(" · ");
+    const title = textFromDailyDevPost(post.title, post.titleHtml)
+      ?? textFromDailyDevPost(linkedPost.title, linkedPost.titleHtml)
+      ?? textFromDailyDevPost(post.content, post.contentHtml)
+      ?? textFromDailyDevPost(linkedPost.content, linkedPost.contentHtml)
+      ?? post.id
+      ?? linkedPost.id
+      ?? "Untitled daily.dev post";
+    const summary = post.summary
+      ?? linkedPost.summary
+      ?? textFromDailyDevPost(post.content, post.contentHtml)
+      ?? textFromDailyDevPost(linkedPost.content, linkedPost.contentHtml)
+      ?? (stateSummary || undefined);
+
+    return {
+      source: "dailydev" as const,
+      id: post.id,
+      title,
+      url: linkedPost.url ?? post.url ?? post.commentsPermalink ?? post.permalink ?? (post.id ? `https://app.daily.dev/posts/${post.id}` : "https://app.daily.dev/"),
+      sourceUrl: post.commentsPermalink ?? post.permalink,
+      author: post.author?.name ?? post.author?.username ?? post.source?.name ?? post.source?.handle,
+      score: post.numUpvotes,
+      comments: post.numComments,
+      publishedAt: post.publishedAt ?? post.createdAt,
+      summary,
+      feed: feedLabel ?? (post.bookmarked || post.read || post.upvoted || post.userState ? "daily.dev/session" : undefined),
+    };
+  });
+}
+
+function normalizeAuthorizationHeader(value?: string): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  return /^Bearer\s+/i.test(trimmed) ? trimmed : `Bearer ${trimmed}`;
+}
+
+function buildDailyDevSessionHeaders(): Record<string, string> {
+  const cookie = resolveEnvValue(DAILY_DEV_COOKIE_ENV).value?.trim();
+  const authorization = normalizeAuthorizationHeader(resolveEnvValue(DAILY_DEV_AUTHORIZATION_ENV).value);
+  return {
+    ...(cookie ? { cookie } : {}),
+    ...(authorization ? { authorization } : {}),
+  };
+}
+
+function hasDailyDevSessionAuth(): boolean {
+  const headers = buildDailyDevSessionHeaders();
+  return Boolean(headers.cookie || headers.authorization);
 }
 
 async function fetchDailyDevRestFeed(limit: number, token: string, signal?: AbortSignal): Promise<NewsEntry[]> {
@@ -473,7 +549,99 @@ async function fetchDailyDevGraphqlFeed(limit: number, signal?: AbortSignal): Pr
   return mapDailyDevPosts(payload.data?.latest ?? [], limit);
 }
 
-async function fetchDailyDevFeed(limit: number, signal?: AbortSignal): Promise<NewsEntry[]> {
+function dailyDevPostSelection(): string {
+  return `
+    edges {
+      node {
+        id
+        title
+        titleHtml
+        url
+        publishedAt
+        createdAt
+        image
+        summary
+        content
+        contentHtml
+        type
+        readTime
+        commentsPermalink
+        permalink
+        source { id name handle image }
+        tags
+        numUpvotes
+        numComments
+        author { name username }
+        bookmarked
+        read
+        upvoted
+        userState { vote }
+        sharedPost {
+          id
+          title
+          titleHtml
+          url
+          summary
+          content
+          contentHtml
+          commentsPermalink
+          permalink
+          source { id name handle image }
+        }
+      }
+    }
+  `;
+}
+
+async function fetchDailyDevGraphqlSessionFeed(limit: number, rank: DailyDevRank = DEFAULT_DAILY_DEV_RANK, signal?: AbortSignal): Promise<NewsEntry[]> {
+  // Advanced opt-in path for mimicking the authenticated web app feed. This uses
+  // daily.dev's internal GraphQL API and can break if private operations change.
+  // recent uses TIME ranking; upvoted uses daily.dev's "most upvoted in the past
+  // 7 days" feed instead of POPULARITY, which can surface stale onboarding posts.
+  const query = rank === "upvoted"
+    ? `
+      query NewsFeedDailyDevMostUpvoted($first: Int!, $supportedTypes: [String!]) {
+        mostUpvotedFeed(first: $first, period: 7, supportedTypes: $supportedTypes) {
+          ${dailyDevPostSelection()}
+        }
+      }
+    `
+    : `
+      query NewsFeedDailyDevSession($first: Int!, $now: DateTime!) {
+        feed(first: $first, now: $now, ranking: TIME) {
+          ${dailyDevPostSelection()}
+        }
+      }
+    `;
+  const response = await fetch("https://api.daily.dev/graphql", {
+    method: "POST",
+    signal,
+    headers: {
+      "content-type": "application/json",
+      "user-agent": "pi-news-feed/0.1 (+https://daily.dev)",
+      ...buildDailyDevSessionHeaders(),
+    },
+    body: JSON.stringify({
+      query,
+      variables: rank === "upvoted" ? { first: limit, supportedTypes: [...DAILY_DEV_SUPPORTED_TYPES] } : { first: limit, now: new Date().toISOString() },
+    }),
+  });
+  if (!response.ok) throw new Error(`daily.dev authenticated GraphQL ${response.status} for ${rank} feed`);
+
+  const payload = (await response.json()) as DailyDevGraphqlResponse;
+  if (payload.errors?.length) {
+    throw new Error(`daily.dev authenticated GraphQL error: ${payload.errors.map((error) => error.message ?? "unknown").join("; ")}`);
+  }
+  const connection = rank === "upvoted" ? payload.data?.mostUpvotedFeed : payload.data?.feed;
+  const entries = mapDailyDevPosts(connection?.edges?.map((edge) => edge.node).filter((post): post is DailyDevPost => Boolean(post)) ?? [], limit, `daily.dev/session/${rank}`);
+  return rank === "upvoted"
+    ? entries.sort((a, b) => (b.score ?? 0) - (a.score ?? 0) || Date.parse(b.publishedAt ?? "0") - Date.parse(a.publishedAt ?? "0"))
+    : entries.sort((a, b) => Date.parse(b.publishedAt ?? "0") - Date.parse(a.publishedAt ?? "0"));
+}
+
+async function fetchDailyDevFeed(limit: number, rank: DailyDevRank = DEFAULT_DAILY_DEV_RANK, signal?: AbortSignal): Promise<NewsEntry[]> {
+  if (hasDailyDevSessionAuth()) return fetchDailyDevGraphqlSessionFeed(limit, rank, signal);
+  if (rank === "upvoted") return fetchDailyDevGraphqlSessionFeed(limit, rank, signal);
   const token = resolveEnvValue(DAILY_DEV_TOKEN_ENV).value;
   if (token) return fetchDailyDevRestFeed(limit, token, signal);
   return fetchDailyDevGraphqlFeed(limit, signal);
@@ -781,25 +949,34 @@ function truncateText(value: string | undefined, maxLength: number): string | un
   return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 }
 
-function truncateAtSentence(value: string | undefined, minLength: number, maxLength: number): string | undefined {
+function truncateAtSentence(value: string | undefined, minLength: number, softMaxLength: number, overflowLength = 0): string | undefined {
   if (!value) return undefined;
   const normalized = value.replace(/\s+/g, " ").trim();
-  if (normalized.length <= maxLength) return normalized;
+  if (normalized.length <= softMaxLength) return normalized;
 
   const searchFrom = Math.min(minLength, normalized.length);
-  const sentenceEnd = normalized.slice(searchFrom, maxLength + 1).search(/[.!?](?:\s|$)/);
-  if (sentenceEnd >= 0) {
-    return normalized.slice(0, searchFrom + sentenceEnd + 1).trim();
+  const hardMaxLength = Math.min(normalized.length, softMaxLength + Math.max(0, overflowLength));
+  const sentenceBoundary = /[.!?](?:["')\]]+)?(?:\s|$)/g;
+  sentenceBoundary.lastIndex = searchFrom;
+  let match: RegExpExecArray | null;
+  while ((match = sentenceBoundary.exec(normalized)) !== null) {
+    const end = match.index + match[0].trimEnd().length;
+    if (end <= hardMaxLength) return normalized.slice(0, end).trim();
+    break;
   }
 
-  const lastSentenceEnd = Math.max(
-    normalized.lastIndexOf(".", maxLength),
-    normalized.lastIndexOf("!", maxLength),
-    normalized.lastIndexOf("?", maxLength),
+  const lastClearBreak = Math.max(
+    normalized.lastIndexOf(";", hardMaxLength),
+    normalized.lastIndexOf(":", hardMaxLength),
+    normalized.lastIndexOf(" — ", hardMaxLength),
+    normalized.lastIndexOf(" – ", hardMaxLength),
   );
-  if (lastSentenceEnd >= minLength) return normalized.slice(0, lastSentenceEnd + 1).trim();
+  if (lastClearBreak >= minLength) return `${normalized.slice(0, lastClearBreak).trimEnd()}…`;
 
-  return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+  const lastWordBreak = normalized.lastIndexOf(" ", hardMaxLength);
+  if (lastWordBreak >= minLength) return `${normalized.slice(0, lastWordBreak).trimEnd()}…`;
+
+  return `${normalized.slice(0, Math.max(0, softMaxLength - 1)).trimEnd()}…`;
 }
 
 function formatEntry(entry: NewsEntry, index: number): string {
@@ -811,7 +988,7 @@ function formatEntry(entry: NewsEntry, index: number): string {
     formatDate(entry.publishedAt) ? `🕒 ${formatDate(entry.publishedAt)}` : undefined,
   ].filter(Boolean).join("  ");
   const title = truncateAtSentence(entry.title, 120, 180);
-  const summary = truncateAtSentence(entry.summary, 180, 300);
+  const summary = truncateAtSentence(entry.summary, 180, 300, 180);
   return [
     ` ${String(index + 1).padStart(2, " ")}. ${title}`,
     badges ? `     ${badges}` : undefined,
@@ -908,8 +1085,10 @@ function parseNewsArgs(args: string): ParsedNewsArgs {
   const twitterQuery = twitterQueryToken ? twitterQueryToken.slice(twitterQueryToken.indexOf("=") + 1) : undefined;
   const twitterRankToken = tokens.find((token) => token === "engagement" || token === "recent");
   const twitterRank = (twitterRankToken ?? "engagement") as TwitterRank;
+  const dailyDevRankToken = tokens.find((token) => token === "upvoted" || token === "popular" || token === "recent");
+  const dailyDevRank = (dailyDevRankToken === "recent" ? "recent" : DEFAULT_DAILY_DEV_RANK) as DailyDevRank;
   const limit = clampInteger(limitInput, DEFAULT_LIMIT, 1, MAX_LIMIT);
-  return { source, feed, limit, redditSort, subreddits, twitterQuery, twitterAccounts, twitterRank };
+  return { source, feed, limit, redditSort, subreddits, twitterQuery, twitterAccounts, twitterRank, dailyDevRank };
 }
 
 function parseSecurityNewsArgs(args: string): ParsedSecurityNewsArgs {
@@ -947,11 +1126,11 @@ async function withWorkingMessage<T>(ctx: any, message: string, run: (update: (m
   });
 }
 
-async function fetchConcreteNewsFeed(source: ConcreteNewsSource, hnFeed: HnFeed, limit: number, redditSubreddits?: unknown, redditSort: RedditSort = "hot", signal?: AbortSignal, twitterQuery?: string, twitterAccounts?: unknown, twitterRank: TwitterRank = "engagement", onProgress?: (message: string) => void): Promise<NewsEntry[]> {
+async function fetchConcreteNewsFeed(source: ConcreteNewsSource, hnFeed: HnFeed, limit: number, redditSubreddits?: unknown, redditSort: RedditSort = "hot", signal?: AbortSignal, twitterQuery?: string, twitterAccounts?: unknown, twitterRank: TwitterRank = "engagement", dailyDevRank: DailyDevRank = DEFAULT_DAILY_DEV_RANK, onProgress?: (message: string) => void): Promise<NewsEntry[]> {
   onProgress?.(newsSourceProgressLabel(source));
   if (source === "hackernews") return fetchHnFeed(hnFeed, limit, signal);
   if (source === "socket") return fetchSocketFeed(limit, signal);
-  if (source === "dailydev") return fetchDailyDevFeed(limit, signal);
+  if (source === "dailydev") return fetchDailyDevFeed(limit, dailyDevRank, signal);
   if (source === "reddit") return fetchRedditFeed(limit, redditSubreddits, redditSort, signal);
   return fetchTwitterFeed(limit, twitterQuery, twitterAccounts, signal, twitterRank);
 }
@@ -960,14 +1139,14 @@ function perSourceLimit(totalLimit: number, sourceCount: number): number {
   return Math.max(1, Math.floor(totalLimit / Math.max(1, sourceCount)));
 }
 
-async function fetchNewsFeed(source: NewsSource, hnFeed: HnFeed, limit: number, redditSubreddits?: unknown, redditSort: RedditSort = "hot", signal?: AbortSignal, twitterQuery?: string, twitterAccounts?: unknown, twitterRank: TwitterRank = "engagement", onProgress?: (message: string) => void): Promise<NewsEntry[]> {
-  if (source !== "all") return fetchConcreteNewsFeed(source, hnFeed, limit, redditSubreddits, redditSort, signal, twitterQuery, twitterAccounts, twitterRank, onProgress);
+async function fetchNewsFeed(source: NewsSource, hnFeed: HnFeed, limit: number, redditSubreddits?: unknown, redditSort: RedditSort = "hot", signal?: AbortSignal, twitterQuery?: string, twitterAccounts?: unknown, twitterRank: TwitterRank = "engagement", dailyDevRank: DailyDevRank = DEFAULT_DAILY_DEV_RANK, onProgress?: (message: string) => void): Promise<NewsEntry[]> {
+  if (source !== "all") return fetchConcreteNewsFeed(source, hnFeed, limit, redditSubreddits, redditSort, signal, twitterQuery, twitterAccounts, twitterRank, dailyDevRank, onProgress);
 
   const enabledSources = getEnabledNewsSources();
   const limitPerSource = perSourceLimit(limit, enabledSources.length);
   onProgress?.(`Fetching ${enabledSources.length} news sources…`);
   const results = await Promise.allSettled(
-    enabledSources.map((sourceName) => fetchConcreteNewsFeed(sourceName, hnFeed, limitPerSource, redditSubreddits, redditSort, signal, twitterQuery, twitterAccounts, twitterRank, onProgress)),
+    enabledSources.map((sourceName) => fetchConcreteNewsFeed(sourceName, hnFeed, limitPerSource, redditSubreddits, redditSort, signal, twitterQuery, twitterAccounts, twitterRank, dailyDevRank, onProgress)),
   );
   const entries = results.flatMap((result) => result.status === "fulfilled" ? result.value : []);
   return entries
@@ -1194,7 +1373,7 @@ function renderStyledNews(details: NewsMessageDetails, theme: any): Box {
         formatDate(entry.publishedAt) ? theme.fg("dim", `🕒 ${formatDate(entry.publishedAt)}`) : undefined,
       ].filter(Boolean).join("  ");
       const title = truncateAtSentence(entry.title, 120, 180);
-      const summary = truncateAtSentence(entry.summary, 180, 300);
+      const summary = truncateAtSentence(entry.summary, 180, 300, 180);
 
       lines.push(`${theme.fg("dim", String(index + 1).padStart(2, " ") + ".")} ${theme.bold(title ?? entry.title)}`);
       if (badges) lines.push(`    ${badges}`);
@@ -1217,6 +1396,16 @@ const REDDIT_COOKIE_INSTRUCTIONS = `How to get Reddit cookies:
 4. Optional: copy the value of the 'token_v2' cookie.
 5. Treat these like passwords; they authenticate your Reddit session.`;
 
+const DAILY_DEV_SESSION_INSTRUCTIONS = `daily.dev session GraphQL setup (advanced/fragile):
+1. Open https://app.daily.dev in a browser and log in.
+2. Open DevTools (F12) → Network, then refresh the daily.dev feed.
+3. In the DevTools Network request list, filter for Fetch/XHR or search for graphql.
+4. Select a POST request whose URL is https://api.daily.dev/graphql inside DevTools. Do not open that URL in the browser tab; opened directly it only returns {"errors":[{"message":"Unknown query"}]}.
+5. With that Network request selected, open Headers → Request Headers.
+6. Copy the full Cookie request header and save it as ${DAILY_DEV_COOKIE_ENV}.
+7. If Request Headers includes Authorization, copy it too and save it as ${DAILY_DEV_AUTHORIZATION_ENV}.
+8. Prefer ${DAILY_DEV_TOKEN_ENV} when available; session headers can expire and are private app internals.`;
+
 const TWITTER_SETUP_INSTRUCTIONS = `Twitter/X setup:
 1. Create an X developer app with API v2 Recent Search access.
 2. Copy the app Bearer Token.
@@ -1225,30 +1414,60 @@ const TWITTER_SETUP_INSTRUCTIONS = `Twitter/X setup:
 5. The official X API is the primary source; Nitter is used only when the API fails or no token is configured.`;
 
 async function setupDailyDev(ctx: SetupUiContext): Promise<void> {
-  const existing = resolveEnvValue(DAILY_DEV_TOKEN_ENV);
-  const action = existing.value
-    ? await ctx.ui.select(`daily.dev API token is already configured via ${existing.source}.`, ["Replace token", "Show setup URL", "Cancel"])
-    : "Replace token";
+  const existingToken = resolveEnvValue(DAILY_DEV_TOKEN_ENV);
+  const existingCookie = resolveEnvValue(DAILY_DEV_COOKIE_ENV);
+  const existingAuthorization = resolveEnvValue(DAILY_DEV_AUTHORIZATION_ENV);
+  const action = await ctx.ui.select("daily.dev setup", [
+    existingToken.value ? "Replace API token" : "Enter API token",
+    existingCookie.value || existingAuthorization.value ? "Replace session headers" : "Enter session headers",
+    "Show API token URL",
+    "Show session instructions",
+    "Cancel",
+  ]);
 
-  if (action === "Show setup URL") {
+  if (action === "Show API token URL") {
     ctx.ui.notify("Create/manage token here: https://app.daily.dev/settings/api", "info");
     return;
   }
-  if (action !== "Replace token") {
-    ctx.ui.notify("News setup cancelled.", "warning");
+  if (action === "Show session instructions") {
+    ctx.ui.notify(DAILY_DEV_SESSION_INSTRUCTIONS, "info");
     return;
   }
+  if (action === "Enter API token" || action === "Replace API token") {
+    const token = (await ctx.ui.input("daily.dev API token", existingToken.value ? "Paste replacement Personal Access Token" : "Paste your daily.dev Personal Access Token"))?.trim();
+    if (!token) {
+      ctx.ui.notify("News setup cancelled: no token entered.", "warning");
+      return;
+    }
 
-  const token = (await ctx.ui.input("daily.dev API token", "Paste your daily.dev Personal Access Token"))?.trim();
-  if (!token) {
-    ctx.ui.notify("News setup cancelled: no token entered.", "warning");
+    const filePath = getAgentEnvPath();
+    upsertEnvValue(filePath, DAILY_DEV_TOKEN_ENV, token);
+    process.env[DAILY_DEV_TOKEN_ENV] = token;
+    ctx.ui.notify(`daily.dev API token saved to ${filePath}`, "success");
     return;
   }
+  if (action === "Enter session headers" || action === "Replace session headers") {
+    ctx.ui.notify(DAILY_DEV_SESSION_INSTRUCTIONS, "info");
+    const cookie = (await ctx.ui.input("daily.dev Cookie header", existingCookie.value ? "Paste replacement full Cookie header" : "Paste full Cookie request header from api.daily.dev/graphql"))?.trim();
+    const authorization = (await ctx.ui.input("daily.dev Authorization header (optional)", existingAuthorization.value ? "Paste replacement Authorization header or leave blank to keep unset" : "Paste Authorization header if present, or leave blank"))?.trim();
+    if (!cookie && !authorization) {
+      ctx.ui.notify("News setup cancelled: no session headers entered.", "warning");
+      return;
+    }
 
-  const filePath = getAgentEnvPath();
-  upsertEnvValue(filePath, DAILY_DEV_TOKEN_ENV, token);
-  process.env[DAILY_DEV_TOKEN_ENV] = token;
-  ctx.ui.notify(`daily.dev API token saved to ${filePath}`, "success");
+    const filePath = getAgentEnvPath();
+    if (cookie) {
+      upsertEnvValue(filePath, DAILY_DEV_COOKIE_ENV, cookie);
+      process.env[DAILY_DEV_COOKIE_ENV] = cookie;
+    }
+    if (authorization) {
+      upsertEnvValue(filePath, DAILY_DEV_AUTHORIZATION_ENV, authorization);
+      process.env[DAILY_DEV_AUTHORIZATION_ENV] = authorization;
+    }
+    ctx.ui.notify(`daily.dev session headers saved to ${filePath}. ${DAILY_DEV_COOKIE_ENV} ${cookie ? "saved" : "left unchanged"}; ${DAILY_DEV_AUTHORIZATION_ENV} ${authorization ? "saved" : "left unchanged"}.`, "success");
+    return;
+  }
+  ctx.ui.notify("News setup cancelled.", "warning");
 }
 
 async function setupReddit(ctx: SetupUiContext): Promise<void> {
@@ -1330,8 +1549,8 @@ async function setupTwitter(ctx: SetupUiContext): Promise<void> {
 }
 
 async function runNewsSetup(ctx: SetupUiContext): Promise<void> {
-  const choice = await ctx.ui.select("News setup", ["daily.dev API token", "Reddit cookies", "Twitter/X + Nitter", "Show Reddit cookie instructions"]);
-  if (choice === "daily.dev API token") return setupDailyDev(ctx);
+  const choice = await ctx.ui.select("News setup", ["daily.dev", "Reddit cookies", "Twitter/X + Nitter", "Show Reddit cookie instructions"]);
+  if (choice === "daily.dev") return setupDailyDev(ctx);
   if (choice === "Reddit cookies") return setupReddit(ctx);
   if (choice === "Twitter/X + Nitter") return setupTwitter(ctx);
   if (choice === "Show Reddit cookie instructions") {
@@ -1366,8 +1585,9 @@ export default function newsFeedExtension(pi: ExtensionAPI) {
       const limit = clampInteger(params.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
       const redditSort = (params.redditSort ?? "hot") as RedditSort;
       const twitterRank = (params.twitterRank ?? "engagement") as TwitterRank;
+      const dailyDevRank = (params.dailyDevRank ?? DEFAULT_DAILY_DEV_RANK) as DailyDevRank;
       return withWorkingMessage(ctx, "Fetching news…", async (update) => {
-        const entries = await fetchNewsFeed(source, feed, limit, params.subreddits, redditSort, signal, params.twitterQuery, params.twitterAccounts, twitterRank, (message) => {
+        const entries = await fetchNewsFeed(source, feed, limit, params.subreddits, redditSort, signal, params.twitterQuery, params.twitterAccounts, twitterRank, dailyDevRank, (message) => {
           update(message);
           onUpdate?.({ content: [{ type: "text", text: `Working… ${message}` }], isPartial: true });
         });
@@ -1376,7 +1596,7 @@ export default function newsFeedExtension(pi: ExtensionAPI) {
         const savedPath = saveNewsOutput("general", content, `${source}-${feed}-${limit}`);
         return {
           content: [{ type: "text", text: `${content}\n\nSaved: ${savedPath}` }],
-          details: { source, feed, redditSort, subreddits: normalizeSubreddits(params.subreddits), twitterQuery: params.twitterQuery, twitterAccounts: normalizeTwitterAccounts(params.twitterAccounts), twitterRank, limit, savedPath, entries },
+          details: { source, feed, redditSort, subreddits: normalizeSubreddits(params.subreddits), twitterQuery: params.twitterQuery, twitterAccounts: normalizeTwitterAccounts(params.twitterAccounts), twitterRank, dailyDevRank, limit, savedPath, entries },
         };
       });
     },
@@ -1416,12 +1636,12 @@ export default function newsFeedExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("news", {
-    description: "Fetch news: /news [hackernews|socket|dailydev|reddit|twitter|all] [limit] [top|new|best|ask|show|job|hot|rising|engagement|recent] [subreddits=programming,rust] [accounts=OpenAI,github] [query=from:OpenAI]",
+    description: "Fetch news: /news [hackernews|socket|dailydev|reddit|twitter|all] [limit] [top|new|best|ask|show|job|hot|rising|engagement|recent|upvoted|popular] [subreddits=programming,rust] [accounts=OpenAI,github] [query=from:OpenAI]",
     handler: async (args: string, ctx: any) => {
       const parsed = parseNewsArgs(args);
       try {
         await withWorkingMessage(ctx, "Fetching news…", async (update) => {
-          const entries = await fetchNewsFeed(parsed.source, parsed.feed, parsed.limit, parsed.subreddits, parsed.redditSort, undefined, parsed.twitterQuery, parsed.twitterAccounts, parsed.twitterRank, update);
+          const entries = await fetchNewsFeed(parsed.source, parsed.feed, parsed.limit, parsed.subreddits, parsed.redditSort, undefined, parsed.twitterQuery, parsed.twitterAccounts, parsed.twitterRank, parsed.dailyDevRank, update);
           update("Formatting news…");
           const content = formatNews(parsed.source, entries);
           sendNewsMessage(pi, content, entries, parsed.source);
@@ -1439,7 +1659,7 @@ export default function newsFeedExtension(pi: ExtensionAPI) {
       const parsed = parseNewsArgs(args);
       try {
         await withWorkingMessage(ctx, "Fetching news…", async (update) => {
-          const entries = await fetchNewsFeed(parsed.source, parsed.feed, parsed.limit, parsed.subreddits, parsed.redditSort, undefined, parsed.twitterQuery, parsed.twitterAccounts, parsed.twitterRank, update);
+          const entries = await fetchNewsFeed(parsed.source, parsed.feed, parsed.limit, parsed.subreddits, parsed.redditSort, undefined, parsed.twitterQuery, parsed.twitterAccounts, parsed.twitterRank, parsed.dailyDevRank, update);
           update("Formatting and saving news…");
           const content = formatNews(parsed.source, entries);
           const savedPath = saveNewsOutput("general", content, `${parsed.source}-${parsed.feed}-${parsed.limit}`);
