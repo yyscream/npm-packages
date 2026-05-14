@@ -15,12 +15,16 @@ Pi extension that adds a generic `news_feed` tool backed by Hacker News, Socket.
   - Twitter parameters: `twitterQuery?: string`, `twitterAccounts?: string[]`, `twitterRank?: "engagement" | "recent"` (official X API only; default `engagement`).
 - `news_sec` — agent-callable security/CVE-focused feed, equivalent to `/news-sec [limit] [redditSort]`.
   - Parameters: `limit?: number`, `redditSort?: "hot" | "new" | "top" | "rising"`.
+  - Prioritizes confirmed `HIGH`/`CRITICAL` CVEs from NVD, deduped by CVE ID and enriched with CISA KEV, CVE.org, FIRST EPSS, OSV, and GitHub Advisory signals.
+  - CVEs appearing in more sources are ranked higher; rejected/denied/reserved CVE states are filtered out when available.
 
 ## Commands
 
 ```text
 /news [hackernews|socket|dailydev|reddit|twitter|all] [limit] [top|new|best|ask|show|job|hot|new|top|rising|engagement|recent] [subreddits=programming,rust] [accounts=OpenAI,github] [query=from:OpenAI]
+/news-save [same args as /news]              # show once per session and save to ~/.pi/NEWS/GENERAL/
 /news-sec [limit] [hot|new|top|rising]
+/news-sec-save [limit] [hot|new|top|rising] # show once per session and save to ~/.pi/NEWS/SECURITY/
 /news-setup
 ```
 
@@ -37,8 +41,10 @@ Examples:
 /news twitter 20 query=(from:CISAgov OR from:TheHackersNews) -is:retweet
 /news all 20 new
 /news hackernews 20 new
-/news-sec 25 hot                       # security/CVE-relevant Reddit + Socket.dev supply-chain news
-/news-sec 25 new                       # more recent security/CVE-relevant news
+/news-sec 25 hot                       # confirmed high/critical CVEs, enriched and deduped by CVE ID
+/news-sec 25 new                       # same CVE feed; falls back to Reddit/Socket if CVE APIs return no entries
+/news-save all 20 new                  # show once and save general news to ~/.pi/NEWS/GENERAL/
+/news-sec-save 25 hot                  # show once and save security news to ~/.pi/NEWS/SECURITY/
 /news-setup                            # configure daily.dev token or Reddit cookies
 ```
 

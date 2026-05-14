@@ -3,10 +3,17 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
+import { withExtensionWorkingIndicator, type ExtensionWorkingIndicator } from "@firstpick/pi-utils";
 import { Type } from "typebox";
 
 const HN_BASE_URL = "https://hacker-news.firebaseio.com/v0";
 const SOCKET_FEED_URL = "https://socket.dev/api/blog/feed.json";
+const NVD_CVE_API_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0";
+const CISA_KEV_JSON_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json";
+const FIRST_EPSS_API_URL = "https://api.first.org/data/v1/epss";
+const GITHUB_ADVISORIES_API_URL = "https://api.github.com/advisories";
+const OSV_API_URL = "https://api.osv.dev/v1/vulns";
+const CVE_RECORD_API_URL = "https://cveawg.mitre.org/api/cve";
 const DAILY_DEV_BASE_URL = "https://api.daily.dev/public/v1";
 const DAILY_DEV_TOKEN_ENV = "DAILY_DEV_TOKEN";
 const X_BEARER_TOKEN_ENV = "X_BEARER_TOKEN";
@@ -66,6 +73,9 @@ const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 50;
 const MAX_COMMENT_DEPTH = 3;
 const MAX_COMMENT_COUNT = 100;
+const NEWS_GENERAL_DIR = join(homedir(), ".pi", "NEWS", "GENERAL");
+const NEWS_SECURITY_DIR = join(homedir(), ".pi", "NEWS", "SECURITY");
+const shownNewsOutputs = new Set<string>();
 
 const NEWS_SOURCES = ["hackernews", "socket", "dailydev", "reddit", "twitter", "all"] as const;
 const CONCRETE_NEWS_SOURCES = ["hackernews", "socket", "dailydev", "reddit", "twitter"] as const;
@@ -102,7 +112,7 @@ type CommentNode = {
 };
 
 type NewsEntry = {
-  source: "hackernews" | "socket" | "dailydev" | "reddit" | "twitter";
+  source: "hackernews" | "socket" | "dailydev" | "reddit" | "twitter" | "vuln";
   id?: string | number;
   title: string;
   url: string;
@@ -113,6 +123,19 @@ type NewsEntry = {
   publishedAt?: string;
   summary?: string;
   feed?: string;
+};
+
+type VulnerabilityEntry = NewsEntry & {
+  source: "vuln";
+  cve: string;
+  severity?: "CRITICAL" | "HIGH";
+  cvss?: number;
+  epss?: number;
+  sourceCount: number;
+  sources: string[];
+  affected?: string[];
+  status?: string;
+  fixed?: boolean;
 };
 
 type SocketJsonFeed = {
@@ -213,6 +236,31 @@ type RssItem = {
   description?: string;
 };
 
+type NvdResponse = {
+  vulnerabilities?: Array<{
+    cve?: {
+      id?: string;
+      published?: string;
+      lastModified?: string;
+      vulnStatus?: string;
+      descriptions?: Array<{ lang?: string; value?: string }>;
+      metrics?: {
+        cvssMetricV31?: Array<{ cvssData?: { baseScore?: number; baseSeverity?: string } }>;
+        cvssMetricV30?: Array<{ cvssData?: { baseScore?: number; baseSeverity?: string } }>;
+        cvssMetricV2?: Array<{ baseSeverity?: string; cvssData?: { baseScore?: number } }>;
+      };
+      references?: { referenceData?: Array<{ url?: string }> };
+      configurations?: Array<{ nodes?: Array<{ cpeMatch?: Array<{ criteria?: string; matchCriteriaId?: string; vulnerable?: boolean }> }> }>;
+    };
+  }>;
+};
+
+type CisaKevResponse = { vulnerabilities?: Array<{ cveID?: string; vulnerabilityName?: string; dateAdded?: string; shortDescription?: string; requiredAction?: string; vendorProject?: string; product?: string }> };
+type EpssResponse = { data?: Array<{ cve?: string; epss?: string; percentile?: string }> };
+type GitHubAdvisory = { ghsa_id?: string; cve_id?: string | null; summary?: string; description?: string; severity?: string; published_at?: string; updated_at?: string; html_url?: string; state?: string; vulnerabilities?: Array<{ vulnerable_version_range?: string; patched_versions?: string | null; package?: { ecosystem?: string; name?: string } }> };
+type CveRecordResponse = { cveMetadata?: { cveId?: string; state?: string; datePublished?: string; dateUpdated?: string }; containers?: { cna?: { descriptions?: Array<{ lang?: string; value?: string }> } } };
+type OsvVulnerability = { id?: string; aliases?: string[]; summary?: string; details?: string; modified?: string; published?: string; affected?: Array<{ ranges?: Array<{ events?: Array<{ fixed?: string }> }> }> };
+
 type SetupUiContext = {
   ui: {
     input(title: string, placeholder?: string): Promise<string | undefined>;
@@ -231,6 +279,22 @@ type NewsMessageDetails = {
   source: NewsSource;
   entries: NewsEntry[];
   generatedAt: number;
+};
+
+type ParsedNewsArgs = {
+  source: NewsSource;
+  feed: HnFeed;
+  limit: number;
+  redditSort: RedditSort;
+  subreddits?: string[];
+  twitterQuery?: string;
+  twitterAccounts?: string[];
+  twitterRank: TwitterRank;
+};
+
+type ParsedSecurityNewsArgs = {
+  limit: number;
+  redditSort: RedditSort;
 };
 
 const sourceSchema = Type.Union([Type.Literal("hackernews"), Type.Literal("socket"), Type.Literal("dailydev"), Type.Literal("reddit"), Type.Literal("twitter"), Type.Literal("all")]);
@@ -743,6 +807,7 @@ function sourceLabel(source: NewsEntry["source"]): string {
   if (source === "dailydev") return "🟦 daily.dev";
   if (source === "reddit") return "🟥 Reddit";
   if (source === "twitter") return "𝕏 Twitter/X";
+  if (source === "vuln") return "🚨 CVE Intelligence";
   return source;
 }
 
@@ -767,6 +832,27 @@ function truncateText(value: string | undefined, maxLength: number): string | un
   return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 }
 
+function truncateAtSentence(value: string | undefined, minLength: number, maxLength: number): string | undefined {
+  if (!value) return undefined;
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) return normalized;
+
+  const searchFrom = Math.min(minLength, normalized.length);
+  const sentenceEnd = normalized.slice(searchFrom, maxLength + 1).search(/[.!?](?:\s|$)/);
+  if (sentenceEnd >= 0) {
+    return normalized.slice(0, searchFrom + sentenceEnd + 1).trim();
+  }
+
+  const lastSentenceEnd = Math.max(
+    normalized.lastIndexOf(".", maxLength),
+    normalized.lastIndexOf("!", maxLength),
+    normalized.lastIndexOf("?", maxLength),
+  );
+  if (lastSentenceEnd >= minLength) return normalized.slice(0, lastSentenceEnd + 1).trim();
+
+  return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
 function formatEntry(entry: NewsEntry, index: number): string {
   const badges = [
     entry.feed ? `[${entry.feed}]` : undefined,
@@ -775,9 +861,10 @@ function formatEntry(entry: NewsEntry, index: number): string {
     entry.author ? `👤 ${entry.author}` : undefined,
     formatDate(entry.publishedAt) ? `🕒 ${formatDate(entry.publishedAt)}` : undefined,
   ].filter(Boolean).join("  ");
-  const summary = truncateText(entry.summary, 220);
+  const title = truncateAtSentence(entry.title, 120, 180);
+  const summary = truncateAtSentence(entry.summary, 180, 300);
   return [
-    ` ${String(index + 1).padStart(2, " ")}. ${entry.title}`,
+    ` ${String(index + 1).padStart(2, " ")}. ${title}`,
     badges ? `     ${badges}` : undefined,
     `     🔗 ${entry.url}`,
     entry.sourceUrl && entry.sourceUrl !== entry.url ? `     🧭 ${entry.sourceUrl}` : undefined,
@@ -825,11 +912,94 @@ function formatNews(source: NewsSource, entries: NewsEntry[]): string {
   return `${title}\n\n${sections.join("\n\n")}`;
 }
 
+function safeFilenamePart(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "news";
+}
+
+function saveNewsOutput(kind: "general" | "security", content: string, label: string): string {
+  const dir = kind === "security" ? NEWS_SECURITY_DIR : NEWS_GENERAL_DIR;
+  mkdirSync(dir, { recursive: true });
+  const now = new Date();
+  const timestamp = now.toISOString().replace(/[:.]/g, "-");
+  const path = join(dir, `${timestamp}-${safeFilenamePart(label)}.md`);
+  writeFileSync(path, `${content.trimEnd()}\n`, "utf8");
+  return path;
+}
+
+function sendNewsMessage(pi: ExtensionAPI, content: string, entries: NewsEntry[], source: NewsSource = "all"): void {
+  pi.sendMessage({
+    customType: NEWS_MESSAGE_TYPE,
+    content,
+    display: true,
+    details: { source, entries, generatedAt: Date.now() } satisfies NewsMessageDetails,
+  });
+}
+
+function sendNewsMessageOnce(pi: ExtensionAPI, key: string, content: string, entries: NewsEntry[], source: NewsSource = "all"): boolean {
+  if (shownNewsOutputs.has(key)) return false;
+  shownNewsOutputs.add(key);
+  sendNewsMessage(pi, content, entries, source);
+  return true;
+}
+
+function parseNewsArgs(args: string): ParsedNewsArgs {
+  const tokens = args.trim().split(/\s+/).filter(Boolean);
+  const source = NEWS_SOURCES.includes(tokens[0] as NewsSource) ? (tokens.shift() as NewsSource) : "all";
+  const limitTokenIndex = tokens.findIndex((token) => /^\d+$/.test(token));
+  const limitInput = limitTokenIndex >= 0 ? Number(tokens.splice(limitTokenIndex, 1)[0]) : undefined;
+  const feed = HN_FEEDS.includes(tokens[0] as HnFeed) ? (tokens.shift() as HnFeed) : "top";
+  const redditSortToken = tokens.find((token) => ["hot", "new", "top", "rising"].includes(token));
+  const redditSort = (redditSortToken ?? "hot") as RedditSort;
+  const subredditsToken = tokens.find((token) => token.startsWith("subreddits="));
+  const subreddits = subredditsToken ? subredditsToken.slice("subreddits=".length).split(",").map((s) => s.trim()).filter(Boolean) : undefined;
+  const twitterAccountsToken = tokens.find((token) => token.startsWith("twitterAccounts=") || token.startsWith("accounts="));
+  const twitterAccounts = twitterAccountsToken ? twitterAccountsToken.slice(twitterAccountsToken.indexOf("=") + 1).split(",").map((s) => s.trim()).filter(Boolean) : undefined;
+  const twitterQueryIndex = tokens.findIndex((token) => token.startsWith("twitterQuery=") || token.startsWith("query="));
+  const twitterQueryToken = twitterQueryIndex >= 0 ? tokens.slice(twitterQueryIndex).join(" ") : undefined;
+  const twitterQuery = twitterQueryToken ? twitterQueryToken.slice(twitterQueryToken.indexOf("=") + 1) : undefined;
+  const twitterRankToken = tokens.find((token) => token === "engagement" || token === "recent");
+  const twitterRank = (twitterRankToken ?? "engagement") as TwitterRank;
+  const limit = clampInteger(limitInput, DEFAULT_LIMIT, 1, MAX_LIMIT);
+  return { source, feed, limit, redditSort, subreddits, twitterQuery, twitterAccounts, twitterRank };
+}
+
+function parseSecurityNewsArgs(args: string): ParsedSecurityNewsArgs {
+  const tokens = args.trim().split(/\s+/).filter(Boolean);
+  const limitToken = tokens.find((token) => /^\d+$/.test(token));
+  const sortToken = tokens.find((token) => ["hot", "new", "top", "rising"].includes(token));
+  return { limit: clampInteger(limitToken ? Number(limitToken) : 20, 20, 1, MAX_LIMIT), redditSort: (sortToken ?? "hot") as RedditSort };
+}
+
+function newsSessionKey(parsed: ParsedNewsArgs): string {
+  return `news:${JSON.stringify(parsed)}`;
+}
+
+function securityNewsSessionKey(parsed: ParsedSecurityNewsArgs): string {
+  return `security:${parsed.limit}:${parsed.redditSort}`;
+}
+
 function getEnabledNewsSources(): ConcreteNewsSource[] {
   return [...CONCRETE_NEWS_SOURCES];
 }
 
-async function fetchConcreteNewsFeed(source: ConcreteNewsSource, hnFeed: HnFeed, limit: number, redditSubreddits?: unknown, redditSort: RedditSort = "hot", signal?: AbortSignal, twitterQuery?: string, twitterAccounts?: unknown, twitterRank: TwitterRank = "engagement"): Promise<NewsEntry[]> {
+function newsSourceProgressLabel(source: ConcreteNewsSource): string {
+  if (source === "hackernews") return "Fetching Hacker News…";
+  if (source === "socket") return "Fetching Socket.dev supply-chain news…";
+  if (source === "dailydev") return "Fetching daily.dev…";
+  if (source === "reddit") return "Fetching Reddit feeds…";
+  return "Fetching X/Twitter feeds…";
+}
+
+async function withWorkingMessage<T>(ctx: any, message: string, run: (update: (message: string) => void) => Promise<T>): Promise<T> {
+  return withExtensionWorkingIndicator(ctx, message, async (indicator: ExtensionWorkingIndicator) => run((nextMessage) => indicator.update(nextMessage)), {
+    id: "tech-news-working",
+    title: "Working",
+    placement: "aboveEditor",
+  });
+}
+
+async function fetchConcreteNewsFeed(source: ConcreteNewsSource, hnFeed: HnFeed, limit: number, redditSubreddits?: unknown, redditSort: RedditSort = "hot", signal?: AbortSignal, twitterQuery?: string, twitterAccounts?: unknown, twitterRank: TwitterRank = "engagement", onProgress?: (message: string) => void): Promise<NewsEntry[]> {
+  onProgress?.(newsSourceProgressLabel(source));
   if (source === "hackernews") return fetchHnFeed(hnFeed, limit, signal);
   if (source === "socket") return fetchSocketFeed(limit, signal);
   if (source === "dailydev") return fetchDailyDevFeed(limit, signal);
@@ -841,13 +1011,14 @@ function perSourceLimit(totalLimit: number, sourceCount: number): number {
   return Math.max(1, Math.floor(totalLimit / Math.max(1, sourceCount)));
 }
 
-async function fetchNewsFeed(source: NewsSource, hnFeed: HnFeed, limit: number, redditSubreddits?: unknown, redditSort: RedditSort = "hot", signal?: AbortSignal, twitterQuery?: string, twitterAccounts?: unknown, twitterRank: TwitterRank = "engagement"): Promise<NewsEntry[]> {
-  if (source !== "all") return fetchConcreteNewsFeed(source, hnFeed, limit, redditSubreddits, redditSort, signal, twitterQuery, twitterAccounts, twitterRank);
+async function fetchNewsFeed(source: NewsSource, hnFeed: HnFeed, limit: number, redditSubreddits?: unknown, redditSort: RedditSort = "hot", signal?: AbortSignal, twitterQuery?: string, twitterAccounts?: unknown, twitterRank: TwitterRank = "engagement", onProgress?: (message: string) => void): Promise<NewsEntry[]> {
+  if (source !== "all") return fetchConcreteNewsFeed(source, hnFeed, limit, redditSubreddits, redditSort, signal, twitterQuery, twitterAccounts, twitterRank, onProgress);
 
   const enabledSources = getEnabledNewsSources();
   const limitPerSource = perSourceLimit(limit, enabledSources.length);
+  onProgress?.(`Fetching ${enabledSources.length} news sources…`);
   const results = await Promise.allSettled(
-    enabledSources.map((sourceName) => fetchConcreteNewsFeed(sourceName, hnFeed, limitPerSource, redditSubreddits, redditSort, signal, twitterQuery, twitterAccounts, twitterRank)),
+    enabledSources.map((sourceName) => fetchConcreteNewsFeed(sourceName, hnFeed, limitPerSource, redditSubreddits, redditSort, signal, twitterQuery, twitterAccounts, twitterRank, onProgress)),
   );
   const entries = results.flatMap((result) => result.status === "fulfilled" ? result.value : []);
   return entries
@@ -855,9 +1026,183 @@ async function fetchNewsFeed(source: NewsSource, hnFeed: HnFeed, limit: number, 
     .slice(0, limit);
 }
 
-async function fetchSecurityNews(limit: number, redditSort: RedditSort = "hot", signal?: AbortSignal): Promise<NewsEntry[]> {
+function cveIdFromText(value: string | undefined): string | undefined {
+  return value?.match(/CVE-\d{4}-\d{4,}/i)?.[0]?.toUpperCase();
+}
+
+function nvdSeverityAndScore(cve: NonNullable<NonNullable<NvdResponse["vulnerabilities"]>[number]["cve"]>): { severity?: "CRITICAL" | "HIGH"; score?: number } {
+  const metric = cve.metrics?.cvssMetricV31?.[0] ?? cve.metrics?.cvssMetricV30?.[0] ?? cve.metrics?.cvssMetricV2?.[0];
+  const metricAny = metric as { baseSeverity?: string; cvssData?: { baseSeverity?: string; baseScore?: number } } | undefined;
+  const severity = (metricAny?.cvssData?.baseSeverity ?? metricAny?.baseSeverity)?.toUpperCase();
+  return { severity: severity === "CRITICAL" || severity === "HIGH" ? severity : undefined, score: metricAny?.cvssData?.baseScore };
+}
+
+function isConfirmedCveStatus(status: string | undefined): boolean {
+  return !status || !["REJECTED", "DENIED", "RESERVED"].includes(status.toUpperCase());
+}
+
+function parseCpeAffected(criteria: string | undefined): string | undefined {
+  if (!criteria) return undefined;
+  const parts = criteria.split(":");
+  const vendor = parts[3]?.replace(/_/g, " ");
+  const product = parts[4]?.replace(/_/g, " ");
+  const version = parts[5] && !["*", "-"].includes(parts[5]) ? ` ${parts[5]}` : "";
+  if (!vendor || !product) return undefined;
+  return `${vendor} ${product}${version}`;
+}
+
+function uniqueLimited(values: Array<string | undefined>, limit = 4): string[] {
+  return [...new Set(values.map((value) => value?.trim()).filter((value): value is string => !!value))].slice(0, limit);
+}
+
+function mergeVulnerability(map: Map<string, VulnerabilityEntry>, patch: Partial<VulnerabilityEntry> & { cve: string; sourceName: string }) {
+  const current = map.get(patch.cve);
+  const sources = new Set([...(current?.sources ?? []), patch.sourceName]);
+  const affected = uniqueLimited([...(current?.affected ?? []), ...(patch.affected ?? [])], 6);
+  map.set(patch.cve, {
+    source: "vuln",
+    id: patch.cve,
+    cve: patch.cve,
+    title: patch.title ?? current?.title ?? patch.cve,
+    url: patch.url ?? current?.url ?? `https://nvd.nist.gov/vuln/detail/${patch.cve}`,
+    publishedAt: patch.publishedAt ?? current?.publishedAt,
+    summary: patch.summary ?? current?.summary,
+    feed: [...sources].join(", "),
+    severity: patch.severity ?? current?.severity,
+    cvss: Math.max(patch.cvss ?? 0, current?.cvss ?? 0) || undefined,
+    epss: patch.epss ?? current?.epss,
+    sourceCount: sources.size,
+    sources: [...sources].sort(),
+    affected,
+    status: patch.status ?? current?.status,
+    fixed: patch.fixed ?? current?.fixed,
+  });
+}
+
+async function fetchNvdCriticalHigh(limit: number, signal?: AbortSignal): Promise<VulnerabilityEntry[]> {
+  const end = new Date();
+  const start = new Date(end.getTime() - 14 * 24 * 60 * 60 * 1000);
+  const url = `${NVD_CVE_API_URL}?pubStartDate=${encodeURIComponent(start.toISOString())}&pubEndDate=${encodeURIComponent(end.toISOString())}&resultsPerPage=${Math.min(200, Math.max(50, limit * 4))}`;
+  const data = await fetchUrlJson<NvdResponse>(url, signal);
+  const map = new Map<string, VulnerabilityEntry>();
+  for (const item of data.vulnerabilities ?? []) {
+    const cve = item.cve;
+    if (!cve?.id || !isConfirmedCveStatus(cve.vulnStatus)) continue;
+    const { severity, score } = nvdSeverityAndScore(cve);
+    if (!severity) continue;
+    const affected = uniqueLimited(cve.configurations?.flatMap((configuration) => configuration.nodes?.flatMap((node) => node.cpeMatch?.filter((match) => match.vulnerable !== false).map((match) => parseCpeAffected(match.criteria)) ?? []) ?? []) ?? []);
+    mergeVulnerability(map, {
+      sourceName: "nvd",
+      cve: cve.id,
+      title: `${cve.id} — ${severity}${score ? ` ${score}` : ""}`,
+      url: `https://nvd.nist.gov/vuln/detail/${cve.id}`,
+      publishedAt: cve.published,
+      summary: cve.descriptions?.find((d) => d.lang === "en")?.value,
+      severity,
+      cvss: score,
+      affected,
+      status: cve.vulnStatus,
+    });
+  }
+  return [...map.values()];
+}
+
+async function enrichSecurityVulns(entries: VulnerabilityEntry[], signal?: AbortSignal): Promise<VulnerabilityEntry[]> {
+  const map = new Map(entries.map((entry) => [entry.cve, entry]));
+  const [kev, githubCritical, githubHigh, epssRecords, osvRecords, cveStatuses] = await Promise.allSettled([
+    fetchUrlJson<CisaKevResponse>(CISA_KEV_JSON_URL, signal),
+    fetchUrlJson<GitHubAdvisory[]>(`${GITHUB_ADVISORIES_API_URL}?severity=critical&per_page=100&sort=published&direction=desc`, signal),
+    fetchUrlJson<GitHubAdvisory[]>(`${GITHUB_ADVISORIES_API_URL}?severity=high&per_page=100&sort=published&direction=desc`, signal),
+    fetchUrlJson<EpssResponse>(`${FIRST_EPSS_API_URL}?cve=${encodeURIComponent(entries.map((entry) => entry.cve).join(","))}`, signal),
+    Promise.all(entries.slice(0, 50).map((entry) => fetchUrlJson<OsvVulnerability>(`${OSV_API_URL}/${entry.cve}`, signal).catch(() => undefined))),
+    Promise.all(entries.slice(0, 50).map((entry) => fetchUrlJson<CveRecordResponse>(`${CVE_RECORD_API_URL}/${entry.cve}`, signal).catch(() => undefined))),
+  ]);
+
+  if (kev.status === "fulfilled") {
+    for (const item of kev.value.vulnerabilities ?? []) {
+      const cve = item.cveID?.toUpperCase();
+      const existing = cve ? map.get(cve) : undefined;
+      if (!cve || !existing) continue;
+      mergeVulnerability(map, { sourceName: "cisa-kev", cve, title: item.vulnerabilityName, publishedAt: item.dateAdded, summary: `${item.shortDescription ?? existing.summary ?? ""}${item.requiredAction ? ` Required action: ${item.requiredAction}` : ""}`, affected: uniqueLimited([`${item.vendorProject ?? ""} ${item.product ?? ""}`]), fixed: /update|upgrade|patch|fixed|apply/i.test(item.requiredAction ?? "") });
+    }
+  }
+
+  const github = [githubCritical, githubHigh].flatMap((result) => result.status === "fulfilled" ? result.value : []);
+  if (github.length > 0) {
+    for (const item of github) {
+      const cve = item.cve_id?.toUpperCase() ?? cveIdFromText(`${item.summary} ${item.description}`);
+      const severity = item.severity?.toUpperCase();
+      if (!cve || !map.has(cve) || (severity !== "CRITICAL" && severity !== "HIGH")) continue;
+      const affected = uniqueLimited(item.vulnerabilities?.map((v) => `${v.package?.ecosystem ?? "package"}/${v.package?.name ?? "unknown"} ${v.vulnerable_version_range ?? ""}`) ?? []);
+      mergeVulnerability(map, { sourceName: "github-advisory", cve, title: item.summary, url: item.html_url, publishedAt: item.published_at, severity: severity as "CRITICAL" | "HIGH", affected, fixed: item.vulnerabilities?.some((v) => !!v.patched_versions) });
+    }
+  }
+
+  if (osvRecords.status === "fulfilled") {
+    for (const item of osvRecords.value) {
+      const cve = item?.aliases?.find((alias) => /^CVE-\d{4}-\d{4,}$/i.test(alias))?.toUpperCase() ?? cveIdFromText(item?.id);
+      if (!cve || !map.has(cve)) continue;
+      mergeVulnerability(map, { sourceName: "osv", cve, title: item?.summary, url: `https://osv.dev/vulnerability/${encodeURIComponent(item?.id ?? cve)}`, publishedAt: item?.published, summary: item?.details, affected: item?.affected?.length ? [item.id ?? cve] : undefined, fixed: item?.affected?.some((affected) => affected.ranges?.some((range) => range.events?.some((event) => !!event.fixed))) });
+    }
+  }
+
+  if (epssRecords.status === "fulfilled") {
+    for (const item of epssRecords.value.data ?? []) {
+      const cve = item.cve?.toUpperCase();
+      const epss = item.epss ? Number(item.epss) : undefined;
+      if (cve && map.has(cve)) mergeVulnerability(map, { sourceName: "epss", cve, epss });
+    }
+  }
+
+  if (cveStatuses.status === "fulfilled") {
+    for (const item of cveStatuses.value) {
+      const cve = item?.cveMetadata?.cveId?.toUpperCase();
+      const state = item?.cveMetadata?.state;
+      if (!cve || !map.has(cve)) continue;
+      if (!isConfirmedCveStatus(state)) map.delete(cve);
+      else mergeVulnerability(map, { sourceName: "cve-org", cve, status: state });
+    }
+  }
+
+  return [...map.values()].sort((a, b) => {
+    const sourceDelta = b.sourceCount - a.sourceCount;
+    if (sourceDelta !== 0) return sourceDelta;
+    const severityDelta = (b.severity === "CRITICAL" ? 1 : 0) - (a.severity === "CRITICAL" ? 1 : 0);
+    if (severityDelta !== 0) return severityDelta;
+    return (b.epss ?? 0) - (a.epss ?? 0) || (b.cvss ?? 0) - (a.cvss ?? 0) || Date.parse(b.publishedAt ?? "0") - Date.parse(a.publishedAt ?? "0");
+  });
+}
+
+function formatSecurityNews(entries: NewsEntry[]): string {
+  if (entries.length === 0) return "No confirmed high/critical CVEs found.";
+  const separator = "─".repeat(88);
+  return [`🚨 Security CVE Feed`, `${entries.length} confirmed HIGH/CRITICAL CVEs · ranked by source coverage, severity, EPSS, CVSS`, "", ...entries.map((entry, index) => {
+    const vuln = entry as VulnerabilityEntry;
+    const severity = [vuln.severity, vuln.cvss ? `CVSS ${vuln.cvss}` : undefined, vuln.epss !== undefined ? `EPSS ${(vuln.epss * 100).toFixed(1)}%` : undefined].filter(Boolean).join(" · ");
+    const state = [vuln.status ? `status: ${vuln.status}` : undefined, vuln.fixed === undefined ? undefined : vuln.fixed ? "fix/mitigation signal: yes" : "fix/mitigation signal: none found"].filter(Boolean).join(" · ");
+    return [
+      separator,
+      `${String(index + 1).padStart(2, " ")}. ${vuln.cve}  ${severity}`,
+      `    Title:    ${vuln.title.replace(/^CVE-\d{4}-\d{4,}\s+—\s+/, "")}`,
+      `    Affects:  ${(vuln.affected?.length ? vuln.affected.join("; ") : "unknown / not provided by sources")}`,
+      `    Sources:  ${vuln.sourceCount} (${vuln.sources.join(", ")})`,
+      state ? `    State:    ${state}` : undefined,
+      `    Link:     ${vuln.url}`,
+      vuln.summary ? `    Summary:  ${truncateAtSentence(vuln.summary, 220, 420)}` : undefined,
+    ].filter(Boolean).join("\n");
+  }), separator].join("\n");
+}
+
+async function fetchSecurityNews(limit: number, redditSort: RedditSort = "hot", signal?: AbortSignal, onProgress?: (message: string) => void): Promise<NewsEntry[]> {
+  onProgress?.("Fetching NVD high/critical CVEs…");
+  const nvdEntries = await fetchNvdCriticalHigh(limit, signal);
+  onProgress?.("Enriching CVEs with CISA KEV, CVE.org, EPSS, OSV, and GitHub Advisories…");
+  const enriched = await enrichSecurityVulns(nvdEntries, signal);
+  if (enriched.length > 0) return enriched.slice(0, limit);
+
   const redditLimit = Math.max(1, Math.ceil(limit * 0.75));
   const socketLimit = Math.max(1, limit - redditLimit);
+  onProgress?.("CVE APIs returned no entries; fetching Reddit and Socket.dev fallback…");
   const [redditEntries, socketEntries] = await Promise.all([
     fetchRedditFeed(redditLimit, [...SECURITY_REDDIT_SUBREDDITS], redditSort, signal),
     fetchSocketFeed(socketLimit, signal),
@@ -872,6 +1217,12 @@ async function fetchSecurityNews(limit: number, redditSort: RedditSort = "hot", 
 }
 
 function renderStyledNews(details: NewsMessageDetails, theme: any): Box {
+  if (details.entries.some((entry) => entry.source === "vuln")) {
+    const box = new Box(1, 1, (text: string) => theme.bg("customMessageBg", text));
+    box.addChild(new Text(formatSecurityNews(details.entries), 0, 0));
+    return box;
+  }
+
   const sourceOrder = details.source === "all" ? CONCRETE_NEWS_SOURCES : CONCRETE_NEWS_SOURCES.filter((sourceName) => sourceName === details.source);
   const lines: string[] = [];
   const activeSections = sourceOrder.filter((sourceName) => details.entries.some((entry) => entry.source === sourceName));
@@ -893,9 +1244,10 @@ function renderStyledNews(details: NewsMessageDetails, theme: any): Box {
         entry.author ? theme.fg("dim", `👤 ${entry.author}`) : undefined,
         formatDate(entry.publishedAt) ? theme.fg("dim", `🕒 ${formatDate(entry.publishedAt)}`) : undefined,
       ].filter(Boolean).join("  ");
-      const summary = truncateText(entry.summary, 220);
+      const title = truncateAtSentence(entry.title, 120, 180);
+      const summary = truncateAtSentence(entry.summary, 180, 300);
 
-      lines.push(`${theme.fg("dim", String(index + 1).padStart(2, " ") + ".")} ${theme.bold(entry.title)}`);
+      lines.push(`${theme.fg("dim", String(index + 1).padStart(2, " ") + ".")} ${theme.bold(title ?? entry.title)}`);
       if (badges) lines.push(`    ${badges}`);
       lines.push(`    ${theme.fg("accent", "🔗")} ${entry.url}`);
       if (entry.sourceUrl && entry.sourceUrl !== entry.url) lines.push(`    ${theme.fg("dim", "🧭")} ${theme.fg("dim", entry.sourceUrl)}`);
@@ -1041,7 +1393,7 @@ async function runNewsSetup(ctx: SetupUiContext): Promise<void> {
 }
 
 export default function newsFeedExtension(pi: ExtensionAPI) {
-  pi.registerMessageRenderer(NEWS_MESSAGE_TYPE, (message, _options, theme) => {
+  pi.registerMessageRenderer(NEWS_MESSAGE_TYPE, (message: any, _options: any, theme: any) => {
     const details = message.details as NewsMessageDetails | undefined;
     if (!details) {
       const box = new Box(1, 1, (text: string) => theme.bg("customMessageBg", text));
@@ -1059,17 +1411,25 @@ export default function newsFeedExtension(pi: ExtensionAPI) {
     promptSnippet: "Fetch news from Hacker News feeds, Socket.dev blog JSON feed, Reddit tech subreddits, X/Twitter, and configured authenticated sources like daily.dev.",
     promptGuidelines: ["Use news_feed when the user asks for current Hacker News, Reddit, Socket.dev, security, supply-chain, or general news feed entries."],
     parameters: NEWS_FEED_PARAMS,
-    async execute(_toolCallId, params, signal) {
+    async execute(_toolCallId: unknown, params: any, signal?: AbortSignal, onUpdate?: any, ctx?: any) {
       const source = (params.source ?? "all") as NewsSource;
       const feed = (params.feed ?? "top") as HnFeed;
       const limit = clampInteger(params.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
       const redditSort = (params.redditSort ?? "hot") as RedditSort;
       const twitterRank = (params.twitterRank ?? "engagement") as TwitterRank;
-      const entries = await fetchNewsFeed(source, feed, limit, params.subreddits, redditSort, signal, params.twitterQuery, params.twitterAccounts, twitterRank);
-      return {
-        content: [{ type: "text", text: formatNews(source, entries) }],
-        details: { source, feed, redditSort, subreddits: normalizeSubreddits(params.subreddits), twitterQuery: params.twitterQuery, twitterAccounts: normalizeTwitterAccounts(params.twitterAccounts), twitterRank, limit, entries },
-      };
+      return withWorkingMessage(ctx, "Fetching news…", async (update) => {
+        const entries = await fetchNewsFeed(source, feed, limit, params.subreddits, redditSort, signal, params.twitterQuery, params.twitterAccounts, twitterRank, (message) => {
+          update(message);
+          onUpdate?.({ content: [{ type: "text", text: `Working… ${message}` }], isPartial: true });
+        });
+        update("Formatting and saving news…");
+        const content = formatNews(source, entries);
+        const savedPath = saveNewsOutput("general", content, `${source}-${feed}-${limit}`);
+        return {
+          content: [{ type: "text", text: `${content}\n\nSaved: ${savedPath}` }],
+          details: { source, feed, redditSort, subreddits: normalizeSubreddits(params.subreddits), twitterQuery: params.twitterQuery, twitterAccounts: normalizeTwitterAccounts(params.twitterAccounts), twitterRank, limit, savedPath, entries },
+        };
+      });
     },
   });
 
@@ -1080,52 +1440,42 @@ export default function newsFeedExtension(pi: ExtensionAPI) {
     promptSnippet: "Fetch security and CVE-relevant news from Reddit security communities and Socket.dev.",
     promptGuidelines: ["Use news_sec when the user asks for current security, CVE, vulnerability, exploit, malware, supply-chain, or incident news. Summarize the most important items and call out likely actionability for the user."],
     parameters: NEWS_SEC_PARAMS,
-    async execute(_toolCallId, params, signal) {
+    async execute(_toolCallId: unknown, params: any, signal?: AbortSignal, onUpdate?: any, ctx?: any) {
       const limit = clampInteger(params.limit, 20, 1, MAX_LIMIT);
       const redditSort = (params.redditSort ?? "hot") as RedditSort;
-      const entries = await fetchSecurityNews(limit, redditSort, signal);
-      return {
-        content: [{ type: "text", text: formatNews("all", entries) }],
-        details: { source: "security", redditSort, subreddits: [...SECURITY_REDDIT_SUBREDDITS], limit, entries },
-      };
+      return withWorkingMessage(ctx, "Fetching security CVE news…", async (update) => {
+        const entries = await fetchSecurityNews(limit, redditSort, signal, (message) => {
+          update(message);
+          onUpdate?.({ content: [{ type: "text", text: `Working… ${message}` }], isPartial: true });
+        });
+        update("Formatting and saving security news…");
+        const content = formatSecurityNews(entries);
+        const savedPath = saveNewsOutput("security", content, `security-${redditSort}-${limit}`);
+        return {
+          content: [{ type: "text", text: `${content}\n\nSaved: ${savedPath}` }],
+          details: { source: "security", redditSort, subreddits: [...SECURITY_REDDIT_SUBREDDITS], limit, savedPath, entries },
+        };
+      });
     },
   });
 
   pi.registerCommand("news-setup", {
     description: "Configure optional news sources such as daily.dev tokens and Reddit cookies.",
-    handler: async (_args, ctx) => {
+    handler: async (_args: string, ctx: any) => {
       await runNewsSetup(ctx);
     },
   });
 
   pi.registerCommand("news", {
     description: "Fetch news: /news [hackernews|socket|dailydev|reddit|twitter|all] [limit] [top|new|best|ask|show|job|hot|rising|engagement|recent] [subreddits=programming,rust] [accounts=OpenAI,github] [query=from:OpenAI]",
-    handler: async (args, ctx) => {
-      const tokens = args.trim().split(/\s+/).filter(Boolean);
-      const source = NEWS_SOURCES.includes(tokens[0] as NewsSource) ? (tokens.shift() as NewsSource) : "all";
-      const limitTokenIndex = tokens.findIndex((token) => /^\d+$/.test(token));
-      const limitInput = limitTokenIndex >= 0 ? Number(tokens.splice(limitTokenIndex, 1)[0]) : undefined;
-      const feed = HN_FEEDS.includes(tokens[0] as HnFeed) ? (tokens.shift() as HnFeed) : "top";
-      const redditSortToken = tokens.find((token) => ["hot", "new", "top", "rising"].includes(token));
-      const redditSort = (redditSortToken ?? "hot") as RedditSort;
-      const subredditsToken = tokens.find((token) => token.startsWith("subreddits="));
-      const subreddits = subredditsToken ? subredditsToken.slice("subreddits=".length).split(",").map((s) => s.trim()).filter(Boolean) : undefined;
-      const twitterAccountsToken = tokens.find((token) => token.startsWith("twitterAccounts=") || token.startsWith("accounts="));
-      const twitterAccounts = twitterAccountsToken ? twitterAccountsToken.slice(twitterAccountsToken.indexOf("=") + 1).split(",").map((s) => s.trim()).filter(Boolean) : undefined;
-      const twitterQueryIndex = tokens.findIndex((token) => token.startsWith("twitterQuery=") || token.startsWith("query="));
-      const twitterQueryToken = twitterQueryIndex >= 0 ? tokens.slice(twitterQueryIndex).join(" ") : undefined;
-      const twitterQuery = twitterQueryToken ? twitterQueryToken.slice(twitterQueryToken.indexOf("=") + 1) : undefined;
-      const twitterRankToken = tokens.find((token) => token === "engagement" || token === "recent");
-      const twitterRank = (twitterRankToken ?? "engagement") as TwitterRank;
-      const limit = clampInteger(limitInput, DEFAULT_LIMIT, 1, MAX_LIMIT);
-
+    handler: async (args: string, ctx: any) => {
+      const parsed = parseNewsArgs(args);
       try {
-        const entries = await fetchNewsFeed(source, feed, limit, subreddits, redditSort, undefined, twitterQuery, twitterAccounts, twitterRank);
-        pi.sendMessage({
-          customType: NEWS_MESSAGE_TYPE,
-          content: formatNews(source, entries),
-          display: true,
-          details: { source, entries, generatedAt: Date.now() } satisfies NewsMessageDetails,
+        await withWorkingMessage(ctx, "Fetching news…", async (update) => {
+          const entries = await fetchNewsFeed(parsed.source, parsed.feed, parsed.limit, parsed.subreddits, parsed.redditSort, undefined, parsed.twitterQuery, parsed.twitterAccounts, parsed.twitterRank, update);
+          update("Formatting news…");
+          const content = formatNews(parsed.source, entries);
+          sendNewsMessage(pi, content, entries, parsed.source);
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -1134,27 +1484,60 @@ export default function newsFeedExtension(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("news-save", {
+    description: "Fetch, show once per session, and save news to ~/.pi/NEWS/GENERAL/: /news-save [same args as /news]",
+    handler: async (args: string, ctx: any) => {
+      const parsed = parseNewsArgs(args);
+      try {
+        await withWorkingMessage(ctx, "Fetching news…", async (update) => {
+          const entries = await fetchNewsFeed(parsed.source, parsed.feed, parsed.limit, parsed.subreddits, parsed.redditSort, undefined, parsed.twitterQuery, parsed.twitterAccounts, parsed.twitterRank, update);
+          update("Formatting and saving news…");
+          const content = formatNews(parsed.source, entries);
+          const savedPath = saveNewsOutput("general", content, `${parsed.source}-${parsed.feed}-${parsed.limit}`);
+          sendNewsMessageOnce(pi, newsSessionKey(parsed), content, entries, parsed.source);
+          ctx.ui.notify(`News saved to ${savedPath}`, "success");
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        ctx.ui.notify(`Failed to save news: ${message}`, "error");
+      }
+    },
+  });
+
   pi.registerCommand("news-sec", {
     description: "Fetch recent/popular security and CVE-relevant news: /news-sec [limit] [hot|new|top|rising]",
-    handler: async (args, ctx) => {
-      const tokens = args.trim().split(/\s+/).filter(Boolean);
-      const limitToken = tokens.find((token) => /^\d+$/.test(token));
-      const sortToken = tokens.find((token) => ["hot", "new", "top", "rising"].includes(token));
-      const limit = clampInteger(limitToken ? Number(limitToken) : 20, 20, 1, MAX_LIMIT);
-      const redditSort = (sortToken ?? "hot") as RedditSort;
-
+    handler: async (args: string, ctx: any) => {
+      const parsed = parseSecurityNewsArgs(args);
       try {
-        const entries = await fetchSecurityNews(limit, redditSort);
-
-        pi.sendMessage({
-          customType: NEWS_MESSAGE_TYPE,
-          content: formatNews("all", entries),
-          display: true,
-          details: { source: "all", entries, generatedAt: Date.now() } satisfies NewsMessageDetails,
+        await withWorkingMessage(ctx, "Fetching security CVE news…", async (update) => {
+          const entries = await fetchSecurityNews(parsed.limit, parsed.redditSort, undefined, update);
+          update("Formatting security news…");
+          const content = formatSecurityNews(entries);
+          sendNewsMessage(pi, content, entries);
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         ctx.ui.notify(`Failed to fetch security news: ${message}`, "error");
+      }
+    },
+  });
+
+  pi.registerCommand("news-sec-save", {
+    description: "Fetch, show once per session, and save security CVE news to ~/.pi/NEWS/SECURITY/: /news-sec-save [limit] [hot|new|top|rising]",
+    handler: async (args: string, ctx: any) => {
+      const parsed = parseSecurityNewsArgs(args);
+      try {
+        await withWorkingMessage(ctx, "Fetching security CVE news…", async (update) => {
+          const entries = await fetchSecurityNews(parsed.limit, parsed.redditSort, undefined, update);
+          update("Formatting and saving security news…");
+          const content = formatSecurityNews(entries);
+          const savedPath = saveNewsOutput("security", content, `security-${parsed.redditSort}-${parsed.limit}`);
+          sendNewsMessageOnce(pi, securityNewsSessionKey(parsed), content, entries);
+          ctx.ui.notify(`Security news saved to ${savedPath}`, "success");
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        ctx.ui.notify(`Failed to save security news: ${message}`, "error");
       }
     },
   });

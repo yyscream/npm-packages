@@ -38,6 +38,7 @@ type SetupUiContext = {
 
 const ENV_KEY = "BRAVE_SEARCH_API_KEY";
 const SETUP_PROMPTED_KEY = "__piExtensionBraveSearchSetupPrompted";
+const POST_SEARCH_DELAY_MS = 500;
 
 const BraveSearchParams = Type.Object({
 	query: Type.String({ description: "Search query" }),
@@ -94,6 +95,11 @@ function resolveApiKey(): ApiKeyResolution {
 
 function quoteEnvValue(value: string): string {
 	return JSON.stringify(value);
+}
+
+function delay(ms: number): Promise<void> {
+	if (ms <= 0) return Promise.resolve();
+	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function upsertEnvValue(filePath: string, key: string, value: string): void {
@@ -201,71 +207,75 @@ export default function braveSearchExtension(pi: ExtensionAPI): void {
 			const { apiKey } = resolveApiKey();
 			if (!apiKey) throw new Error(`${ENV_KEY} is not set. Run /brave-search-setup to configure it.`);
 
-			const url = new URL("https://api.search.brave.com/res/v1/web/search");
-			url.searchParams.set("q", params.query);
-			url.searchParams.set("count", String(params.count ?? 5));
-			if (params.country) url.searchParams.set("country", params.country);
-			if (params.search_lang) url.searchParams.set("search_lang", params.search_lang);
-			if (params.freshness) url.searchParams.set("freshness", params.freshness);
-			if (params.safesearch) url.searchParams.set("safesearch", params.safesearch);
+			try {
+				const url = new URL("https://api.search.brave.com/res/v1/web/search");
+				url.searchParams.set("q", params.query);
+				url.searchParams.set("count", String(params.count ?? 5));
+				if (params.country) url.searchParams.set("country", params.country);
+				if (params.search_lang) url.searchParams.set("search_lang", params.search_lang);
+				if (params.freshness) url.searchParams.set("freshness", params.freshness);
+				if (params.safesearch) url.searchParams.set("safesearch", params.safesearch);
 
-			const response = await fetch(url, {
-				method: "GET",
-				headers: {
-					Accept: "application/json",
-					"Accept-Encoding": "gzip",
-					"X-Subscription-Token": apiKey,
-				},
-				signal,
-			});
+				const response = await fetch(url, {
+					method: "GET",
+					headers: {
+						Accept: "application/json",
+						"Accept-Encoding": "gzip",
+						"X-Subscription-Token": apiKey,
+					},
+					signal,
+				});
 
-			if (!response.ok) {
-				throw new Error(`Brave Search API failed: ${response.status} ${response.statusText}`);
-			}
+				if (!response.ok) {
+					throw new Error(`Brave Search API failed: ${response.status} ${response.statusText}`);
+				}
 
-			const data = (await response.json()) as BraveSearchResponse;
-			const results = data.web?.results ?? [];
+				const data = (await response.json()) as BraveSearchResponse;
+				const results = data.web?.results ?? [];
 
-			if (results.length === 0) {
+				if (results.length === 0) {
+					return {
+						content: [{ type: "text", text: "No results found." }],
+						details: { query: params.query, resultCount: 0, results: [] },
+					};
+				}
+
+				const rawOutput = results
+					.map((result, index) => {
+						const lines = [`${index + 1}. ${result.title ?? "Untitled"}`, result.url ?? ""];
+						if (result.description) lines.push(result.description);
+						if (result.age) lines.push(`Age: ${result.age}`);
+						return lines.join("\n");
+					})
+					.join("\n\n");
+
+				const truncation = truncateHead(rawOutput, {
+					maxLines: DEFAULT_MAX_LINES,
+					maxBytes: DEFAULT_MAX_BYTES,
+				});
+
+				let text = truncation.content;
+				if (truncation.truncated) {
+					text += `\n\n[Output truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)})]`;
+				}
+
 				return {
-					content: [{ type: "text", text: "No results found." }],
-					details: { query: params.query, resultCount: 0, results: [] },
+					content: [{ type: "text", text }],
+					details: {
+						query: params.query,
+						resultCount: results.length,
+						results: results.map((result) => ({
+							title: result.title,
+							url: result.url,
+							description: result.description,
+							age: result.age,
+						})),
+						truncation: truncation.truncated ? truncation : undefined,
+					},
 				};
+			} finally {
+				await delay(POST_SEARCH_DELAY_MS);
 			}
-
-			const rawOutput = results
-				.map((result, index) => {
-					const lines = [`${index + 1}. ${result.title ?? "Untitled"}`, result.url ?? ""];
-					if (result.description) lines.push(result.description);
-					if (result.age) lines.push(`Age: ${result.age}`);
-					return lines.join("\n");
-				})
-				.join("\n\n");
-
-			const truncation = truncateHead(rawOutput, {
-				maxLines: DEFAULT_MAX_LINES,
-				maxBytes: DEFAULT_MAX_BYTES,
-			});
-
-			let text = truncation.content;
-			if (truncation.truncated) {
-				text += `\n\n[Output truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)})]`;
-			}
-
-			return {
-				content: [{ type: "text", text }],
-				details: {
-					query: params.query,
-					resultCount: results.length,
-					results: results.map((result) => ({
-						title: result.title,
-						url: result.url,
-						description: result.description,
-						age: result.age,
-					})),
-					truncation: truncation.truncated ? truncation : undefined,
-				},
-			};
 		},
 	});
 }
