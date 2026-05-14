@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-extension-notes",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Local notes CRUD extension for Pi with optional rule-note prompt injection.",
   "license": "MIT",
   "keywords": [
