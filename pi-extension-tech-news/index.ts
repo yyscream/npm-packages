@@ -9,6 +9,29 @@ const HN_BASE_URL = "https://hacker-news.firebaseio.com/v0";
 const SOCKET_FEED_URL = "https://socket.dev/api/blog/feed.json";
 const DAILY_DEV_BASE_URL = "https://api.daily.dev/public/v1";
 const DAILY_DEV_TOKEN_ENV = "DAILY_DEV_TOKEN";
+const X_BEARER_TOKEN_ENV = "X_BEARER_TOKEN";
+const NITTER_BASE_URL_ENV = "NITTER_BASE_URL";
+const NITTER_ACCOUNTS_ENV = "NITTER_ACCOUNTS";
+const DEFAULT_NITTER_BASE_URL = "https://nitter.net";
+const NITTER_RSS_USER_AGENT = "FreshRSS/1.24";
+const DEFAULT_TWITTER_ACCOUNTS = [
+  // Cybersecurity / vulnerability intelligence
+  "CISAgov",
+  "TheHackersNews",
+  "BleepinComputer",
+  "vxunderground",
+  "SwiftOnSecurity",
+  "SocketSecurity",
+  "GitHubSecurity",
+  // Developer ecosystem / trendsetters
+  "t3dotgg",
+  "rauchg",
+  "swyx",
+  "addyosmani",
+  "dan_abramov",
+  "github",
+  "HackerNewsYC",
+] as const;
 const REDDIT_SESSION_ENV = "REDDIT_SESSION";
 const REDDIT_TOKEN_V2_ENV = "TOKEN_V2";
 const REDDIT_USER_AGENT = "pi-news-feed/0.1 (+https://reddit.com)";
@@ -44,8 +67,8 @@ const MAX_LIMIT = 50;
 const MAX_COMMENT_DEPTH = 3;
 const MAX_COMMENT_COUNT = 100;
 
-const NEWS_SOURCES = ["hackernews", "socket", "dailydev", "reddit", "all"] as const;
-const CONCRETE_NEWS_SOURCES = ["hackernews", "socket", "dailydev", "reddit"] as const;
+const NEWS_SOURCES = ["hackernews", "socket", "dailydev", "reddit", "twitter", "all"] as const;
+const CONCRETE_NEWS_SOURCES = ["hackernews", "socket", "dailydev", "reddit", "twitter"] as const;
 type ConcreteNewsSource = (typeof CONCRETE_NEWS_SOURCES)[number];
 type NewsSource = (typeof NEWS_SOURCES)[number];
 
@@ -79,7 +102,7 @@ type CommentNode = {
 };
 
 type NewsEntry = {
-  source: "hackernews" | "socket" | "dailydev" | "reddit";
+  source: "hackernews" | "socket" | "dailydev" | "reddit" | "twitter";
   id?: string | number;
   title: string;
   url: string;
@@ -161,6 +184,34 @@ type RedditListingResponse = {
 };
 
 type RedditSort = "hot" | "new" | "top" | "rising";
+type TwitterRank = "engagement" | "recent";
+
+type XRecentSearchResponse = {
+  data?: Array<{
+    id: string;
+    text?: string;
+    author_id?: string;
+    created_at?: string;
+    public_metrics?: {
+      retweet_count?: number;
+      reply_count?: number;
+      like_count?: number;
+      quote_count?: number;
+    };
+  }>;
+  includes?: {
+    users?: Array<{ id: string; username?: string; name?: string }>;
+  };
+  errors?: Array<{ title?: string; detail?: string }>;
+};
+
+type RssItem = {
+  title?: string;
+  link?: string;
+  pubDate?: string;
+  creator?: string;
+  description?: string;
+};
 
 type SetupUiContext = {
   ui: {
@@ -182,7 +233,7 @@ type NewsMessageDetails = {
   generatedAt: number;
 };
 
-const sourceSchema = Type.Union([Type.Literal("hackernews"), Type.Literal("socket"), Type.Literal("dailydev"), Type.Literal("reddit"), Type.Literal("all")]);
+const sourceSchema = Type.Union([Type.Literal("hackernews"), Type.Literal("socket"), Type.Literal("dailydev"), Type.Literal("reddit"), Type.Literal("twitter"), Type.Literal("all")]);
 const hnFeedSchema = Type.Union([
   Type.Literal("top"),
   Type.Literal("new"),
@@ -193,13 +244,17 @@ const hnFeedSchema = Type.Union([
 ]);
 
 const redditSortSchema = Type.Union([Type.Literal("hot"), Type.Literal("new"), Type.Literal("top"), Type.Literal("rising")]);
+const twitterRankSchema = Type.Union([Type.Literal("engagement"), Type.Literal("recent")]);
 
 const NEWS_FEED_PARAMS = Type.Object({
-  source: Type.Optional(sourceSchema, { description: "News source: hackernews, socket, dailydev, reddit, or all." }),
+  source: Type.Optional(sourceSchema, { description: "News source: hackernews, socket, dailydev, reddit, twitter, or all." }),
   feed: Type.Optional(hnFeedSchema, { description: "Hacker News feed when source is hackernews/all: top, new, best, ask, show, or job." }),
   limit: Type.Optional(Type.Number({ minimum: 1, maximum: MAX_LIMIT, description: "Number of entries to return, max 50." })),
   subreddits: Type.Optional(Type.Array(Type.String(), { description: "Reddit subreddits to fetch when source is reddit/all. Defaults to tech subreddits." })),
   redditSort: Type.Optional(redditSortSchema, { description: "Reddit sort: hot, new, top, or rising." }),
+  twitterQuery: Type.Optional(Type.String({ description: "X/Twitter recent-search query. Defaults to configured NITTER_ACCOUNTS as from:user OR terms, then tech-news terms." })),
+  twitterAccounts: Type.Optional(Type.Array(Type.String(), { description: "X/Twitter accounts to fetch via query/from:account and Nitter fallback." })),
+  twitterRank: Type.Optional(twitterRankSchema, { description: "Twitter/X ranking mode for official API results: engagement or recent. Defaults to engagement." }),
 });
 
 const NEWS_SEC_PARAMS = Type.Object({
@@ -491,11 +546,203 @@ async function fetchRedditFeed(limit: number, subredditsInput?: unknown, sort: R
   return entries.sort((a, b) => Date.parse(b.publishedAt ?? "0") - Date.parse(a.publishedAt ?? "0")).slice(0, limit);
 }
 
+function normalizeTwitterHandle(handle: string): string | undefined {
+  const normalized = handle.trim().replace(/^@/, "");
+  return /^[A-Za-z0-9_]{1,15}$/.test(normalized) ? normalized : undefined;
+}
+
+function normalizeTwitterAccounts(input?: unknown): string[] {
+  const fromInput = Array.isArray(input) ? input : [];
+  const fromEnv = resolveEnvValue(NITTER_ACCOUNTS_ENV).value?.split(",") ?? [];
+  const raw = fromInput.length > 0 ? fromInput : fromEnv.length > 0 ? fromEnv : [...DEFAULT_TWITTER_ACCOUNTS];
+  const seen = new Set<string>();
+  const accounts: string[] = [];
+  for (const item of raw) {
+    if (typeof item !== "string") continue;
+    const account = normalizeTwitterHandle(item);
+    if (!account) continue;
+    const key = account.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    accounts.push(account);
+  }
+  return accounts.slice(0, 25);
+}
+
+function buildTwitterQuery(query?: string, accountsInput?: unknown): string {
+  const explicit = query?.trim();
+  if (explicit) return explicit;
+  const accounts = normalizeTwitterAccounts(accountsInput);
+  if (accounts.length > 0) return `(${accounts.map((account) => `from:${account}`).join(" OR ")}) -is:retweet`;
+  return `(AI OR LLM OR cybersecurity OR programming OR opensource OR "open source") -is:retweet lang:en`;
+}
+
+function sortTwitterEntries(entries: NewsEntry[], rankMode: TwitterRank): NewsEntry[] {
+  if (rankMode === "recent") return [...entries].sort((a, b) => Date.parse(b.publishedAt ?? "0") - Date.parse(a.publishedAt ?? "0"));
+  return [...entries].sort((a, b) => {
+    const popDelta = popularityRank(b) - popularityRank(a);
+    if (popDelta !== 0) return popDelta;
+    return Date.parse(b.publishedAt ?? "0") - Date.parse(a.publishedAt ?? "0");
+  });
+}
+
+async function fetchXRecentSearch(limit: number, query: string, rankMode: TwitterRank, signal?: AbortSignal): Promise<NewsEntry[]> {
+  const token = resolveEnvValue(X_BEARER_TOKEN_ENV).value;
+  if (!token) throw new Error(`${X_BEARER_TOKEN_ENV} is not configured`);
+
+  const sampleSize = Math.max(10, Math.min(100, rankMode === "engagement" ? Math.max(limit * 5, limit) : limit));
+  const params = new URLSearchParams({
+    query,
+    max_results: String(sampleSize),
+    "tweet.fields": "created_at,public_metrics,author_id",
+    expansions: "author_id",
+    "user.fields": "username,name",
+  });
+  const response = await fetch(`https://api.x.com/2/tweets/search/recent?${params.toString()}`, {
+    signal,
+    headers: {
+      authorization: `Bearer ${token}`,
+      "user-agent": "pi-news-feed/0.1 (+https://x.com)",
+    },
+  });
+  if (!response.ok) throw new Error(`X API HTTP ${response.status} for recent search`);
+
+  const payload = (await response.json()) as XRecentSearchResponse;
+  if (payload.errors?.length && !payload.data?.length) {
+    throw new Error(`X API error: ${payload.errors.map((error) => error.detail ?? error.title ?? "unknown").join("; ")}`);
+  }
+  const users = new Map((payload.includes?.users ?? []).map((user) => [user.id, user]));
+  const mapped = (payload.data ?? []).map((tweet) => {
+    const user = tweet.author_id ? users.get(tweet.author_id) : undefined;
+    const username = user?.username;
+    const text = tweet.text?.replace(/\s+/g, " ").trim() || `Tweet ${tweet.id}`;
+    const metrics = tweet.public_metrics;
+    return {
+      source: "twitter" as const,
+      feed: query,
+      id: tweet.id,
+      title: truncateText(text, 140) ?? text,
+      url: username ? `https://x.com/${username}/status/${tweet.id}` : `https://x.com/i/web/status/${tweet.id}`,
+      author: username ? `@${username}` : user?.name,
+      score: (metrics?.like_count ?? 0) + (metrics?.retweet_count ?? 0) + (metrics?.quote_count ?? 0),
+      comments: metrics?.reply_count,
+      publishedAt: tweet.created_at,
+      summary: text,
+    };
+  });
+  return sortTwitterEntries(mapped, rankMode).slice(0, limit);
+}
+
+function decodeXmlEntities(value: string): string {
+  return value
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&gt;/g, ">")
+    .replace(/&lt;/g, "<")
+    .replace(/&amp;/g, "&");
+}
+
+function getXmlTag(block: string, tag: string): string | undefined {
+  const match = block.match(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tag}>`, "i"));
+  return match ? decodeXmlEntities(match[1] ?? "").trim() : undefined;
+}
+
+function parseRssItems(xml: string): RssItem[] {
+  const channelTitle = getXmlTag(xml, "title") ?? "";
+  if (/not yet whitelist|not yet whitelisted|forbidden|blocked/i.test(channelTitle)) return [];
+
+  return [...xml.matchAll(/<item[\s\S]*?<\/item>/gi)].flatMap((match) => {
+    const block = match[0];
+    const title = getXmlTag(block, "title");
+    const description = htmlToText(getXmlTag(block, "description"));
+    const summary = `${title ?? ""} ${description ?? ""}`;
+    if (/not yet whitelist|not yet whitelisted|plain request with just the id|forbidden|blocked/i.test(summary)) return [];
+    return [{
+      title,
+      link: getXmlTag(block, "link"),
+      pubDate: getXmlTag(block, "pubDate"),
+      creator: getXmlTag(block, "dc:creator") ?? getXmlTag(block, "author"),
+      description,
+    }];
+  });
+}
+
+function getNitterBaseUrl(): string | undefined {
+  const baseUrl = (resolveEnvValue(NITTER_BASE_URL_ENV).value?.trim() || DEFAULT_NITTER_BASE_URL).replace(/\/+$/, "");
+  if (!baseUrl) return undefined;
+  try {
+    const parsed = new URL(baseUrl);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return undefined;
+    return parsed.toString().replace(/\/+$/, "");
+  } catch {
+    return undefined;
+  }
+}
+
+async function fetchNitterAccountFeed(account: string, limit: number, baseUrl: string, signal?: AbortSignal): Promise<NewsEntry[]> {
+  const url = `${baseUrl}/${encodeURIComponent(account)}/rss`;
+  const response = await fetch(url, {
+    signal,
+    headers: {
+      accept: "application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8",
+      "user-agent": NITTER_RSS_USER_AGENT,
+    },
+  });
+  if (!response.ok) throw new Error(`Nitter HTTP ${response.status} for @${account}`);
+  const items = parseRssItems(await response.text());
+  return items.slice(0, limit).map((item) => {
+    const link = item.link || `${baseUrl}/${account}`;
+    const xLink = link.replace(/^https?:\/\/[^/]+\//, `https://x.com/`);
+    const summary = item.description || item.title || `@${account} post`;
+    return {
+      source: "twitter" as const,
+      feed: `nitter:@${account}`,
+      title: truncateText(summary, 140) ?? summary,
+      url: xLink,
+      sourceUrl: link,
+      author: item.creator || `@${account}`,
+      publishedAt: item.pubDate ? new Date(item.pubDate).toISOString() : undefined,
+      summary,
+    };
+  });
+}
+
+async function fetchNitterFeed(limit: number, accountsInput?: unknown, signal?: AbortSignal): Promise<NewsEntry[]> {
+  const baseUrl = getNitterBaseUrl();
+  if (!baseUrl) throw new Error(`${NITTER_BASE_URL_ENV} is not configured`);
+  const accounts = normalizeTwitterAccounts(accountsInput);
+  if (accounts.length === 0) throw new Error(`${NITTER_ACCOUNTS_ENV}, twitterAccounts, or built-in default accounts are required for Nitter fallback`);
+  const limitPerAccount = Math.max(1, Math.ceil(limit / accounts.length));
+  const results = await Promise.allSettled(accounts.map((account) => fetchNitterAccountFeed(account, limitPerAccount, baseUrl, signal)));
+  const entries = results.flatMap((result) => result.status === "fulfilled" ? result.value : []);
+  if (entries.length === 0) {
+    const failures = results.map((result, index) => result.status === "rejected" ? `@${accounts[index]}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}` : undefined).filter(Boolean);
+    throw new Error(`Nitter fallback failed: ${failures.join("; ")}`);
+  }
+  return entries.sort((a, b) => Date.parse(b.publishedAt ?? "0") - Date.parse(a.publishedAt ?? "0")).slice(0, limit);
+}
+
+async function fetchTwitterFeed(limit: number, query?: string, accountsInput?: unknown, signal?: AbortSignal, rankMode: TwitterRank = "engagement"): Promise<NewsEntry[]> {
+  const searchQuery = buildTwitterQuery(query, accountsInput);
+  try {
+    return await fetchXRecentSearch(limit, searchQuery, rankMode, signal);
+  } catch (error) {
+    const fallbackEntries = await fetchNitterFeed(limit, accountsInput, signal);
+    return fallbackEntries.map((entry) => ({
+      ...entry,
+      summary: `${entry.summary ?? ""}${entry.summary ? " " : ""}(X API fallback: ${error instanceof Error ? error.message : String(error)})`,
+    }));
+  }
+}
+
 function sourceLabel(source: NewsEntry["source"]): string {
   if (source === "hackernews") return "🟧 Hacker News";
   if (source === "socket") return "🛡️ Socket.dev Blog";
   if (source === "dailydev") return "🟦 daily.dev";
   if (source === "reddit") return "🟥 Reddit";
+  if (source === "twitter") return "𝕏 Twitter/X";
   return source;
 }
 
@@ -582,24 +829,25 @@ function getEnabledNewsSources(): ConcreteNewsSource[] {
   return [...CONCRETE_NEWS_SOURCES];
 }
 
-async function fetchConcreteNewsFeed(source: ConcreteNewsSource, hnFeed: HnFeed, limit: number, redditSubreddits?: unknown, redditSort: RedditSort = "hot", signal?: AbortSignal): Promise<NewsEntry[]> {
+async function fetchConcreteNewsFeed(source: ConcreteNewsSource, hnFeed: HnFeed, limit: number, redditSubreddits?: unknown, redditSort: RedditSort = "hot", signal?: AbortSignal, twitterQuery?: string, twitterAccounts?: unknown, twitterRank: TwitterRank = "engagement"): Promise<NewsEntry[]> {
   if (source === "hackernews") return fetchHnFeed(hnFeed, limit, signal);
   if (source === "socket") return fetchSocketFeed(limit, signal);
   if (source === "dailydev") return fetchDailyDevFeed(limit, signal);
-  return fetchRedditFeed(limit, redditSubreddits, redditSort, signal);
+  if (source === "reddit") return fetchRedditFeed(limit, redditSubreddits, redditSort, signal);
+  return fetchTwitterFeed(limit, twitterQuery, twitterAccounts, signal, twitterRank);
 }
 
 function perSourceLimit(totalLimit: number, sourceCount: number): number {
   return Math.max(1, Math.floor(totalLimit / Math.max(1, sourceCount)));
 }
 
-async function fetchNewsFeed(source: NewsSource, hnFeed: HnFeed, limit: number, redditSubreddits?: unknown, redditSort: RedditSort = "hot", signal?: AbortSignal): Promise<NewsEntry[]> {
-  if (source !== "all") return fetchConcreteNewsFeed(source, hnFeed, limit, redditSubreddits, redditSort, signal);
+async function fetchNewsFeed(source: NewsSource, hnFeed: HnFeed, limit: number, redditSubreddits?: unknown, redditSort: RedditSort = "hot", signal?: AbortSignal, twitterQuery?: string, twitterAccounts?: unknown, twitterRank: TwitterRank = "engagement"): Promise<NewsEntry[]> {
+  if (source !== "all") return fetchConcreteNewsFeed(source, hnFeed, limit, redditSubreddits, redditSort, signal, twitterQuery, twitterAccounts, twitterRank);
 
   const enabledSources = getEnabledNewsSources();
   const limitPerSource = perSourceLimit(limit, enabledSources.length);
   const results = await Promise.allSettled(
-    enabledSources.map((sourceName) => fetchConcreteNewsFeed(sourceName, hnFeed, limitPerSource, redditSubreddits, redditSort, signal)),
+    enabledSources.map((sourceName) => fetchConcreteNewsFeed(sourceName, hnFeed, limitPerSource, redditSubreddits, redditSort, signal, twitterQuery, twitterAccounts, twitterRank)),
   );
   const entries = results.flatMap((result) => result.status === "fulfilled" ? result.value : []);
   return entries
@@ -668,6 +916,13 @@ const REDDIT_COOKIE_INSTRUCTIONS = `How to get Reddit cookies:
 4. Optional: copy the value of the 'token_v2' cookie.
 5. Treat these like passwords; they authenticate your Reddit session.`;
 
+const TWITTER_SETUP_INSTRUCTIONS = `Twitter/X setup:
+1. Create an X developer app with API v2 Recent Search access.
+2. Copy the app Bearer Token.
+3. Official X API results include engagement metrics and support ranking via twitterRank=engagement|recent.
+4. Optional fallback: configure a Nitter-compatible base URL and comma-separated account handles.
+5. The official X API is the primary source; Nitter is used only when the API fails or no token is configured.`;
+
 async function setupDailyDev(ctx: SetupUiContext): Promise<void> {
   const existing = resolveEnvValue(DAILY_DEV_TOKEN_ENV);
   const action = existing.value
@@ -729,10 +984,55 @@ async function setupReddit(ctx: SetupUiContext): Promise<void> {
   ctx.ui.notify(`Reddit cookies saved to ${filePath}. ${REDDIT_TOKEN_V2_ENV} ${tokenV2 ? "saved" : "left unset"}.`, "success");
 }
 
+async function setupTwitter(ctx: SetupUiContext): Promise<void> {
+  const existingToken = resolveEnvValue(X_BEARER_TOKEN_ENV);
+  const existingNitter = resolveEnvValue(NITTER_BASE_URL_ENV);
+  const action = await ctx.ui.select("Twitter/X setup", ["Enter X Bearer Token", "Configure Nitter fallback", "Show setup instructions", "Cancel"]);
+
+  if (action === "Show setup instructions") {
+    ctx.ui.notify(TWITTER_SETUP_INSTRUCTIONS, "info");
+    return;
+  }
+  if (action === "Enter X Bearer Token") {
+    ctx.ui.notify(TWITTER_SETUP_INSTRUCTIONS, "info");
+    const token = (await ctx.ui.input("X API Bearer Token", existingToken.value ? "Paste replacement bearer token" : "Paste bearer token"))?.trim();
+    if (!token) {
+      ctx.ui.notify("Twitter setup cancelled: no bearer token entered.", "warning");
+      return;
+    }
+    const filePath = getGlobalEnvPath();
+    upsertEnvValue(filePath, X_BEARER_TOKEN_ENV, token);
+    process.env[X_BEARER_TOKEN_ENV] = token;
+    ctx.ui.notify(`X Bearer Token saved to ${filePath}`, "success");
+    return;
+  }
+  if (action === "Configure Nitter fallback") {
+    const baseUrl = (await ctx.ui.input("Nitter base URL", existingNitter.value ?? DEFAULT_NITTER_BASE_URL))?.trim();
+    if (!baseUrl) {
+      ctx.ui.notify("Twitter setup cancelled: Nitter base URL is required.", "warning");
+      return;
+    }
+    const accounts = (await ctx.ui.input("Twitter/X accounts for Nitter fallback", resolveEnvValue(NITTER_ACCOUNTS_ENV).value ?? DEFAULT_TWITTER_ACCOUNTS.join(",")))?.trim();
+    if (!accounts) {
+      ctx.ui.notify("Twitter setup cancelled: at least one account is required for Nitter fallback.", "warning");
+      return;
+    }
+    const filePath = getGlobalEnvPath();
+    upsertEnvValue(filePath, NITTER_BASE_URL_ENV, baseUrl.replace(/\/+$/, ""));
+    upsertEnvValue(filePath, NITTER_ACCOUNTS_ENV, accounts);
+    process.env[NITTER_BASE_URL_ENV] = baseUrl.replace(/\/+$/, "");
+    process.env[NITTER_ACCOUNTS_ENV] = accounts;
+    ctx.ui.notify(`Nitter fallback saved to ${filePath}`, "success");
+    return;
+  }
+  ctx.ui.notify("Twitter setup cancelled.", "warning");
+}
+
 async function runNewsSetup(ctx: SetupUiContext): Promise<void> {
-  const choice = await ctx.ui.select("News setup", ["daily.dev API token", "Reddit cookies", "Show Reddit cookie instructions"]);
+  const choice = await ctx.ui.select("News setup", ["daily.dev API token", "Reddit cookies", "Twitter/X + Nitter", "Show Reddit cookie instructions"]);
   if (choice === "daily.dev API token") return setupDailyDev(ctx);
   if (choice === "Reddit cookies") return setupReddit(ctx);
+  if (choice === "Twitter/X + Nitter") return setupTwitter(ctx);
   if (choice === "Show Reddit cookie instructions") {
     ctx.ui.notify(REDDIT_COOKIE_INSTRUCTIONS, "info");
     return;
@@ -755,8 +1055,8 @@ export default function newsFeedExtension(pi: ExtensionAPI) {
 
     name: "news_feed",
     label: "News Feed",
-    description: "Fetch news entries from Hacker News, Socket.dev Blog, Reddit tech subreddits, and configured authenticated sources like daily.dev.",
-    promptSnippet: "Fetch news from Hacker News feeds, Socket.dev blog JSON feed, Reddit tech subreddits, and configured authenticated sources like daily.dev.",
+    description: "Fetch news entries from Hacker News, Socket.dev Blog, Reddit tech subreddits, X/Twitter, and configured authenticated sources like daily.dev.",
+    promptSnippet: "Fetch news from Hacker News feeds, Socket.dev blog JSON feed, Reddit tech subreddits, X/Twitter, and configured authenticated sources like daily.dev.",
     promptGuidelines: ["Use news_feed when the user asks for current Hacker News, Reddit, Socket.dev, security, supply-chain, or general news feed entries."],
     parameters: NEWS_FEED_PARAMS,
     async execute(_toolCallId, params, signal) {
@@ -764,10 +1064,11 @@ export default function newsFeedExtension(pi: ExtensionAPI) {
       const feed = (params.feed ?? "top") as HnFeed;
       const limit = clampInteger(params.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
       const redditSort = (params.redditSort ?? "hot") as RedditSort;
-      const entries = await fetchNewsFeed(source, feed, limit, params.subreddits, redditSort, signal);
+      const twitterRank = (params.twitterRank ?? "engagement") as TwitterRank;
+      const entries = await fetchNewsFeed(source, feed, limit, params.subreddits, redditSort, signal, params.twitterQuery, params.twitterAccounts, twitterRank);
       return {
         content: [{ type: "text", text: formatNews(source, entries) }],
-        details: { source, feed, redditSort, subreddits: normalizeSubreddits(params.subreddits), limit, entries },
+        details: { source, feed, redditSort, subreddits: normalizeSubreddits(params.subreddits), twitterQuery: params.twitterQuery, twitterAccounts: normalizeTwitterAccounts(params.twitterAccounts), twitterRank, limit, entries },
       };
     },
   });
@@ -798,7 +1099,7 @@ export default function newsFeedExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("news", {
-    description: "Fetch news: /news [hackernews|socket|dailydev|reddit|all] [limit] [top|new|best|ask|show|job|hot|rising] [subreddits=programming,rust]",
+    description: "Fetch news: /news [hackernews|socket|dailydev|reddit|twitter|all] [limit] [top|new|best|ask|show|job|hot|rising|engagement|recent] [subreddits=programming,rust] [accounts=OpenAI,github] [query=from:OpenAI]",
     handler: async (args, ctx) => {
       const tokens = args.trim().split(/\s+/).filter(Boolean);
       const source = NEWS_SOURCES.includes(tokens[0] as NewsSource) ? (tokens.shift() as NewsSource) : "all";
@@ -809,10 +1110,17 @@ export default function newsFeedExtension(pi: ExtensionAPI) {
       const redditSort = (redditSortToken ?? "hot") as RedditSort;
       const subredditsToken = tokens.find((token) => token.startsWith("subreddits="));
       const subreddits = subredditsToken ? subredditsToken.slice("subreddits=".length).split(",").map((s) => s.trim()).filter(Boolean) : undefined;
+      const twitterAccountsToken = tokens.find((token) => token.startsWith("twitterAccounts=") || token.startsWith("accounts="));
+      const twitterAccounts = twitterAccountsToken ? twitterAccountsToken.slice(twitterAccountsToken.indexOf("=") + 1).split(",").map((s) => s.trim()).filter(Boolean) : undefined;
+      const twitterQueryIndex = tokens.findIndex((token) => token.startsWith("twitterQuery=") || token.startsWith("query="));
+      const twitterQueryToken = twitterQueryIndex >= 0 ? tokens.slice(twitterQueryIndex).join(" ") : undefined;
+      const twitterQuery = twitterQueryToken ? twitterQueryToken.slice(twitterQueryToken.indexOf("=") + 1) : undefined;
+      const twitterRankToken = tokens.find((token) => token === "engagement" || token === "recent");
+      const twitterRank = (twitterRankToken ?? "engagement") as TwitterRank;
       const limit = clampInteger(limitInput, DEFAULT_LIMIT, 1, MAX_LIMIT);
 
       try {
-        const entries = await fetchNewsFeed(source, feed, limit, subreddits, redditSort);
+        const entries = await fetchNewsFeed(source, feed, limit, subreddits, redditSort, undefined, twitterQuery, twitterAccounts, twitterRank);
         pi.sendMessage({
           customType: NEWS_MESSAGE_TYPE,
           content: formatNews(source, entries),
