@@ -156,12 +156,24 @@ case "$MODE" in
     "${bump_cmd[@]}"
     echo
 
+    tmp_root="$(mktemp -d)"
+    cleanup_plan_tmp() {
+      rm -rf "$tmp_root"
+    }
+    trap cleanup_plan_tmp EXIT
+
+    echo "Preparing temporary version-bumped workspace: $tmp_root"
+    cp -a "$ROOT_DIR/." "$tmp_root/"
+    echo "Applying planned version bumps in temporary workspace: $BUMP_SCRIPT --target $TARGET --apply"
+    PI_NPM_PACKAGES_ROOT="$tmp_root" "$BUMP_SCRIPT" --target "$TARGET" --apply
+    echo
+
     cmd=("$PUBLISH_SCRIPT" --target "$TARGET" --publisher "$PUBLISHER" --access "$ACCESS")
     if [[ $STRICT_AUTH -eq 1 ]]; then
       cmd+=(--strict-auth)
     fi
-    echo "Running: ${cmd[*]}"
-    exec "${cmd[@]}"
+    echo "Running publish plan against version-bumped temp workspace: ${cmd[*]}"
+    PI_NPM_PACKAGES_ROOT="$tmp_root" exec "${cmd[@]}"
     ;;
 
   publish)
