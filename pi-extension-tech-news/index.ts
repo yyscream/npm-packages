@@ -9,14 +9,43 @@ const HN_BASE_URL = "https://hacker-news.firebaseio.com/v0";
 const SOCKET_FEED_URL = "https://socket.dev/api/blog/feed.json";
 const DAILY_DEV_BASE_URL = "https://api.daily.dev/public/v1";
 const DAILY_DEV_TOKEN_ENV = "DAILY_DEV_TOKEN";
+const REDDIT_SESSION_ENV = "REDDIT_SESSION";
+const REDDIT_TOKEN_V2_ENV = "TOKEN_V2";
+const REDDIT_USER_AGENT = "pi-news-feed/0.1 (+https://reddit.com)";
+const SECURITY_REDDIT_SUBREDDITS = [
+  "cybersecurity",
+  "netsec",
+  "InfoSecNews",
+  "blueteamsec",
+  "AskNetsec",
+  "ReverseEngineering",
+  "malware",
+  "exploitdev",
+  "pwned",
+  "sysadmin",
+  "devops",
+] as const;
+
+const DEFAULT_REDDIT_SUBREDDITS = [
+  "programming",
+  "technology",
+  "MachineLearning",
+  "LocalLLaMA",
+  "selfhosted",
+  "rust",
+  "typescript",
+  "javascript",
+  "python",
+  ...SECURITY_REDDIT_SUBREDDITS,
+] as const;
 const NEWS_MESSAGE_TYPE = "news-feed-result";
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 50;
 const MAX_COMMENT_DEPTH = 3;
 const MAX_COMMENT_COUNT = 100;
 
-const NEWS_SOURCES = ["hackernews", "socket", "dailydev", "all"] as const;
-const CONCRETE_NEWS_SOURCES = ["hackernews", "socket", "dailydev"] as const;
+const NEWS_SOURCES = ["hackernews", "socket", "dailydev", "reddit", "all"] as const;
+const CONCRETE_NEWS_SOURCES = ["hackernews", "socket", "dailydev", "reddit"] as const;
 type ConcreteNewsSource = (typeof CONCRETE_NEWS_SOURCES)[number];
 type NewsSource = (typeof NEWS_SOURCES)[number];
 
@@ -50,7 +79,7 @@ type CommentNode = {
 };
 
 type NewsEntry = {
-  source: "hackernews" | "socket" | "dailydev";
+  source: "hackernews" | "socket" | "dailydev" | "reddit";
   id?: string | number;
   title: string;
   url: string;
@@ -108,6 +137,31 @@ type DailyDevGraphqlResponse = {
   errors?: Array<{ message?: string }>;
 };
 
+type RedditListingResponse = {
+  error?: number | string;
+  message?: string;
+  data?: {
+    children?: Array<{
+      data?: {
+        id?: string;
+        title?: string;
+        author?: string;
+        subreddit?: string;
+        score?: number;
+        num_comments?: number;
+        url?: string;
+        permalink?: string;
+        created_utc?: number;
+        selftext?: string;
+        over_18?: boolean;
+        stickied?: boolean;
+      };
+    }>;
+  };
+};
+
+type RedditSort = "hot" | "new" | "top" | "rising";
+
 type SetupUiContext = {
   ui: {
     input(title: string, placeholder?: string): Promise<string | undefined>;
@@ -128,7 +182,7 @@ type NewsMessageDetails = {
   generatedAt: number;
 };
 
-const sourceSchema = Type.Union([Type.Literal("hackernews"), Type.Literal("socket"), Type.Literal("dailydev"), Type.Literal("all")]);
+const sourceSchema = Type.Union([Type.Literal("hackernews"), Type.Literal("socket"), Type.Literal("dailydev"), Type.Literal("reddit"), Type.Literal("all")]);
 const hnFeedSchema = Type.Union([
   Type.Literal("top"),
   Type.Literal("new"),
@@ -138,10 +192,19 @@ const hnFeedSchema = Type.Union([
   Type.Literal("job"),
 ]);
 
+const redditSortSchema = Type.Union([Type.Literal("hot"), Type.Literal("new"), Type.Literal("top"), Type.Literal("rising")]);
+
 const NEWS_FEED_PARAMS = Type.Object({
-  source: Type.Optional(sourceSchema, { description: "News source: hackernews, socket, or all." }),
+  source: Type.Optional(sourceSchema, { description: "News source: hackernews, socket, dailydev, reddit, or all." }),
   feed: Type.Optional(hnFeedSchema, { description: "Hacker News feed when source is hackernews/all: top, new, best, ask, show, or job." }),
   limit: Type.Optional(Type.Number({ minimum: 1, maximum: MAX_LIMIT, description: "Number of entries to return, max 50." })),
+  subreddits: Type.Optional(Type.Array(Type.String(), { description: "Reddit subreddits to fetch when source is reddit/all. Defaults to tech subreddits." })),
+  redditSort: Type.Optional(redditSortSchema, { description: "Reddit sort: hot, new, top, or rising." }),
+});
+
+const NEWS_SEC_PARAMS = Type.Object({
+  limit: Type.Optional(Type.Number({ minimum: 1, maximum: MAX_LIMIT, description: "Number of security/CVE-relevant entries to return, max 50. Defaults to 20." })),
+  redditSort: Type.Optional(redditSortSchema, { description: "Reddit sort for security subreddits: hot, new, top, or rising. Defaults to hot." }),
 });
 
 const ITEM_PARAMS = Type.Object({
@@ -348,10 +411,91 @@ async function fetchDailyDevFeed(limit: number, signal?: AbortSignal): Promise<N
   return fetchDailyDevGraphqlFeed(limit, signal);
 }
 
+function buildRedditCookieHeader(): string {
+  return [
+    resolveEnvValue(REDDIT_SESSION_ENV).value ? `reddit_session=${resolveEnvValue(REDDIT_SESSION_ENV).value}` : "",
+    resolveEnvValue(REDDIT_TOKEN_V2_ENV).value ? `token_v2=${resolveEnvValue(REDDIT_TOKEN_V2_ENV).value}` : "",
+  ].filter(Boolean).join("; ");
+}
+
+function normalizeSubreddits(input: unknown): string[] {
+  const raw = Array.isArray(input) && input.length > 0 ? input : [...DEFAULT_REDDIT_SUBREDDITS];
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const item of raw) {
+    if (typeof item !== "string") continue;
+    const sub = item.trim().replace(/^r\//i, "");
+    if (!/^[A-Za-z0-9_]{2,21}$/.test(sub)) continue;
+    const key = sub.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push(sub);
+  }
+  return normalized.slice(0, 20);
+}
+
+async function fetchRedditJson<T>(url: string, signal?: AbortSignal): Promise<T> {
+  const cookies = buildRedditCookieHeader();
+  const response = await fetch(url, {
+    signal,
+    headers: {
+      accept: "application/json",
+      "user-agent": REDDIT_USER_AGENT,
+      ...(cookies ? { cookie: cookies } : {}),
+    },
+  });
+  if (!response.ok) throw new Error(`Reddit HTTP ${response.status} for ${url}`);
+  return (await response.json()) as T;
+}
+
+async function fetchRedditSubredditFeed(subreddit: string, limit: number, sort: RedditSort, signal?: AbortSignal): Promise<NewsEntry[]> {
+  const url = `https://www.reddit.com/r/${encodeURIComponent(subreddit)}/${sort}.json?limit=${encodeURIComponent(String(limit))}`;
+  const data = await fetchRedditJson<RedditListingResponse>(url, signal);
+  if (data.error) throw new Error(`Reddit error for r/${subreddit}: ${data.error}${data.message ? ` - ${data.message}` : ""}`);
+
+  return (data.data?.children ?? [])
+    .map((child): NewsEntry | undefined => {
+      const post = child.data;
+      if (!post?.title || post.stickied) return undefined;
+      const permalink = post.permalink ? `https://reddit.com${post.permalink}` : `https://www.reddit.com/r/${subreddit}`;
+      return {
+        source: "reddit",
+        feed: `r/${post.subreddit ?? subreddit}/${sort}`,
+        id: post.id,
+        title: post.title,
+        url: post.url || permalink,
+        sourceUrl: permalink,
+        author: post.author ? `u/${post.author}` : undefined,
+        score: post.score,
+        comments: post.num_comments,
+        publishedAt: post.created_utc ? new Date(post.created_utc * 1000).toISOString() : undefined,
+        summary: post.selftext ? post.selftext.replace(/\s+/g, " ").trim().slice(0, 280) : undefined,
+      };
+    })
+    .filter((entry): entry is NewsEntry => Boolean(entry));
+}
+
+async function fetchRedditFeed(limit: number, subredditsInput?: unknown, sort: RedditSort = "hot", signal?: AbortSignal): Promise<NewsEntry[]> {
+  const subreddits = normalizeSubreddits(subredditsInput);
+  if (subreddits.length === 0) return [];
+  const limitPerSubreddit = Math.max(1, Math.ceil(limit / subreddits.length));
+  const results = await Promise.allSettled(subreddits.map((subreddit) => fetchRedditSubredditFeed(subreddit, limitPerSubreddit, sort, signal)));
+  const entries: NewsEntry[] = [];
+  const failures: string[] = [];
+  for (let i = 0; i < results.length; i++) {
+    const result = results[i];
+    if (result.status === "fulfilled") entries.push(...result.value);
+    else failures.push(`r/${subreddits[i]}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
+  }
+  if (entries.length === 0 && failures.length > 0) throw new Error(`Reddit fetch failed: ${failures.join("; ")}`);
+  return entries.sort((a, b) => Date.parse(b.publishedAt ?? "0") - Date.parse(a.publishedAt ?? "0")).slice(0, limit);
+}
+
 function sourceLabel(source: NewsEntry["source"]): string {
   if (source === "hackernews") return "🟧 Hacker News";
   if (source === "socket") return "🛡️ Socket.dev Blog";
   if (source === "dailydev") return "🟦 daily.dev";
+  if (source === "reddit") return "🟥 Reddit";
   return source;
 }
 
@@ -438,26 +582,44 @@ function getEnabledNewsSources(): ConcreteNewsSource[] {
   return [...CONCRETE_NEWS_SOURCES];
 }
 
-async function fetchConcreteNewsFeed(source: ConcreteNewsSource, hnFeed: HnFeed, limit: number, signal?: AbortSignal): Promise<NewsEntry[]> {
+async function fetchConcreteNewsFeed(source: ConcreteNewsSource, hnFeed: HnFeed, limit: number, redditSubreddits?: unknown, redditSort: RedditSort = "hot", signal?: AbortSignal): Promise<NewsEntry[]> {
   if (source === "hackernews") return fetchHnFeed(hnFeed, limit, signal);
   if (source === "socket") return fetchSocketFeed(limit, signal);
-  return fetchDailyDevFeed(limit, signal);
+  if (source === "dailydev") return fetchDailyDevFeed(limit, signal);
+  return fetchRedditFeed(limit, redditSubreddits, redditSort, signal);
 }
 
 function perSourceLimit(totalLimit: number, sourceCount: number): number {
   return Math.max(1, Math.floor(totalLimit / Math.max(1, sourceCount)));
 }
 
-async function fetchNewsFeed(source: NewsSource, hnFeed: HnFeed, limit: number, signal?: AbortSignal): Promise<NewsEntry[]> {
-  if (source !== "all") return fetchConcreteNewsFeed(source, hnFeed, limit, signal);
+async function fetchNewsFeed(source: NewsSource, hnFeed: HnFeed, limit: number, redditSubreddits?: unknown, redditSort: RedditSort = "hot", signal?: AbortSignal): Promise<NewsEntry[]> {
+  if (source !== "all") return fetchConcreteNewsFeed(source, hnFeed, limit, redditSubreddits, redditSort, signal);
 
   const enabledSources = getEnabledNewsSources();
   const limitPerSource = perSourceLimit(limit, enabledSources.length);
-  const results = await Promise.all(
-    enabledSources.map((sourceName) => fetchConcreteNewsFeed(sourceName, hnFeed, limitPerSource, signal)),
+  const results = await Promise.allSettled(
+    enabledSources.map((sourceName) => fetchConcreteNewsFeed(sourceName, hnFeed, limitPerSource, redditSubreddits, redditSort, signal)),
   );
-  return results.flat()
+  const entries = results.flatMap((result) => result.status === "fulfilled" ? result.value : []);
+  return entries
     .sort((a, b) => Date.parse(b.publishedAt ?? "0") - Date.parse(a.publishedAt ?? "0"))
+    .slice(0, limit);
+}
+
+async function fetchSecurityNews(limit: number, redditSort: RedditSort = "hot", signal?: AbortSignal): Promise<NewsEntry[]> {
+  const redditLimit = Math.max(1, Math.ceil(limit * 0.75));
+  const socketLimit = Math.max(1, limit - redditLimit);
+  const [redditEntries, socketEntries] = await Promise.all([
+    fetchRedditFeed(redditLimit, [...SECURITY_REDDIT_SUBREDDITS], redditSort, signal),
+    fetchSocketFeed(socketLimit, signal),
+  ]);
+  return [...redditEntries, ...socketEntries]
+    .sort((a, b) => {
+      const popularityDelta = popularityRank(b) - popularityRank(a);
+      if (popularityDelta !== 0 && Number.isFinite(popularityDelta)) return popularityDelta;
+      return Date.parse(b.publishedAt ?? "0") - Date.parse(a.publishedAt ?? "0");
+    })
     .slice(0, limit);
 }
 
@@ -499,30 +661,21 @@ function renderStyledNews(details: NewsMessageDetails, theme: any): Box {
   return box;
 }
 
-const SETUP_PROVIDERS = [
-  {
-    label: "daily.dev API token",
-    envKey: DAILY_DEV_TOKEN_ENV,
-    url: "https://app.daily.dev/settings/api",
-    placeholder: "Paste your daily.dev Personal Access Token",
-  },
-] as const;
+const REDDIT_COOKIE_INSTRUCTIONS = `How to get Reddit cookies:
+1. Open https://www.reddit.com in a browser and log in.
+2. Open DevTools (F12) → Application/Storage → Cookies → https://www.reddit.com.
+3. Copy the value of the 'reddit_session' cookie.
+4. Optional: copy the value of the 'token_v2' cookie.
+5. Treat these like passwords; they authenticate your Reddit session.`;
 
-async function runNewsSetup(ctx: SetupUiContext): Promise<void> {
-  const choice = await ctx.ui.select("News setup", SETUP_PROVIDERS.map((provider) => provider.label));
-  const provider = SETUP_PROVIDERS.find((candidate) => candidate.label === choice);
-  if (!provider) {
-    ctx.ui.notify("News setup cancelled.", "warning");
-    return;
-  }
-
-  const existing = resolveEnvValue(provider.envKey);
+async function setupDailyDev(ctx: SetupUiContext): Promise<void> {
+  const existing = resolveEnvValue(DAILY_DEV_TOKEN_ENV);
   const action = existing.value
-    ? await ctx.ui.select(`${provider.label} is already configured via ${existing.source}.`, ["Replace token", "Show setup URL", "Cancel"])
+    ? await ctx.ui.select(`daily.dev API token is already configured via ${existing.source}.`, ["Replace token", "Show setup URL", "Cancel"])
     : "Replace token";
 
   if (action === "Show setup URL") {
-    ctx.ui.notify(`Create/manage token here: ${provider.url}`, "info");
+    ctx.ui.notify("Create/manage token here: https://app.daily.dev/settings/api", "info");
     return;
   }
   if (action !== "Replace token") {
@@ -530,16 +683,61 @@ async function runNewsSetup(ctx: SetupUiContext): Promise<void> {
     return;
   }
 
-  const token = (await ctx.ui.input(provider.label, provider.placeholder))?.trim();
+  const token = (await ctx.ui.input("daily.dev API token", "Paste your daily.dev Personal Access Token"))?.trim();
   if (!token) {
     ctx.ui.notify("News setup cancelled: no token entered.", "warning");
     return;
   }
 
   const filePath = getGlobalEnvPath();
-  upsertEnvValue(filePath, provider.envKey, token);
-  process.env[provider.envKey] = token;
-  ctx.ui.notify(`${provider.label} saved to ${filePath}`, "success");
+  upsertEnvValue(filePath, DAILY_DEV_TOKEN_ENV, token);
+  process.env[DAILY_DEV_TOKEN_ENV] = token;
+  ctx.ui.notify(`daily.dev API token saved to ${filePath}`, "success");
+}
+
+async function setupReddit(ctx: SetupUiContext): Promise<void> {
+  const existingSession = resolveEnvValue(REDDIT_SESSION_ENV);
+  const existingTokenV2 = resolveEnvValue(REDDIT_TOKEN_V2_ENV);
+  const action = existingSession.value
+    ? await ctx.ui.select(`Reddit cookies are already configured via ${existingSession.source}.`, ["Replace cookies", "Show cookie instructions", "Cancel"])
+    : await ctx.ui.select("Reddit setup", ["Enter cookies", "Show cookie instructions", "Cancel"]);
+
+  if (action === "Show cookie instructions") {
+    ctx.ui.notify(REDDIT_COOKIE_INSTRUCTIONS, "info");
+    return;
+  }
+  if (action !== "Replace cookies" && action !== "Enter cookies") {
+    ctx.ui.notify("Reddit setup cancelled.", "warning");
+    return;
+  }
+
+  ctx.ui.notify(REDDIT_COOKIE_INSTRUCTIONS, "info");
+  const redditSession = (await ctx.ui.input("Reddit reddit_session cookie", existingSession.value ? "Paste replacement reddit_session cookie" : "Paste reddit_session cookie value"))?.trim();
+  if (!redditSession) {
+    ctx.ui.notify("Reddit setup cancelled: reddit_session is required.", "warning");
+    return;
+  }
+
+  const tokenV2 = (await ctx.ui.input("Reddit token_v2 cookie (optional)", existingTokenV2.value ? "Paste replacement token_v2 or leave blank to keep unset" : "Paste token_v2 cookie value, or leave blank"))?.trim();
+  const filePath = getGlobalEnvPath();
+  upsertEnvValue(filePath, REDDIT_SESSION_ENV, redditSession);
+  process.env[REDDIT_SESSION_ENV] = redditSession;
+  if (tokenV2) {
+    upsertEnvValue(filePath, REDDIT_TOKEN_V2_ENV, tokenV2);
+    process.env[REDDIT_TOKEN_V2_ENV] = tokenV2;
+  }
+  ctx.ui.notify(`Reddit cookies saved to ${filePath}. ${REDDIT_TOKEN_V2_ENV} ${tokenV2 ? "saved" : "left unset"}.`, "success");
+}
+
+async function runNewsSetup(ctx: SetupUiContext): Promise<void> {
+  const choice = await ctx.ui.select("News setup", ["daily.dev API token", "Reddit cookies", "Show Reddit cookie instructions"]);
+  if (choice === "daily.dev API token") return setupDailyDev(ctx);
+  if (choice === "Reddit cookies") return setupReddit(ctx);
+  if (choice === "Show Reddit cookie instructions") {
+    ctx.ui.notify(REDDIT_COOKIE_INSTRUCTIONS, "info");
+    return;
+  }
+  ctx.ui.notify("News setup cancelled.", "warning");
 }
 
 export default function newsFeedExtension(pi: ExtensionAPI) {
@@ -557,41 +755,64 @@ export default function newsFeedExtension(pi: ExtensionAPI) {
 
     name: "news_feed",
     label: "News Feed",
-    description: "Fetch news entries from Hacker News, Socket.dev Blog, and configured authenticated sources like daily.dev.",
-    promptSnippet: "Fetch news from Hacker News feeds, Socket.dev blog JSON feed, and configured authenticated sources like daily.dev.",
-    promptGuidelines: ["Use news_feed when the user asks for current Hacker News, Socket.dev, security, supply-chain, or general news feed entries."],
+    description: "Fetch news entries from Hacker News, Socket.dev Blog, Reddit tech subreddits, and configured authenticated sources like daily.dev.",
+    promptSnippet: "Fetch news from Hacker News feeds, Socket.dev blog JSON feed, Reddit tech subreddits, and configured authenticated sources like daily.dev.",
+    promptGuidelines: ["Use news_feed when the user asks for current Hacker News, Reddit, Socket.dev, security, supply-chain, or general news feed entries."],
     parameters: NEWS_FEED_PARAMS,
     async execute(_toolCallId, params, signal) {
       const source = (params.source ?? "all") as NewsSource;
       const feed = (params.feed ?? "top") as HnFeed;
       const limit = clampInteger(params.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
-      const entries = await fetchNewsFeed(source, feed, limit, signal);
+      const redditSort = (params.redditSort ?? "hot") as RedditSort;
+      const entries = await fetchNewsFeed(source, feed, limit, params.subreddits, redditSort, signal);
       return {
         content: [{ type: "text", text: formatNews(source, entries) }],
-        details: { source, feed, limit, entries },
+        details: { source, feed, redditSort, subreddits: normalizeSubreddits(params.subreddits), limit, entries },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "news_sec",
+    label: "Security News",
+    description: "Fetch recent and popular security/CVE-relevant news from security Reddit subreddits and Socket.dev supply-chain posts.",
+    promptSnippet: "Fetch security and CVE-relevant news from Reddit security communities and Socket.dev.",
+    promptGuidelines: ["Use news_sec when the user asks for current security, CVE, vulnerability, exploit, malware, supply-chain, or incident news. Summarize the most important items and call out likely actionability for the user."],
+    parameters: NEWS_SEC_PARAMS,
+    async execute(_toolCallId, params, signal) {
+      const limit = clampInteger(params.limit, 20, 1, MAX_LIMIT);
+      const redditSort = (params.redditSort ?? "hot") as RedditSort;
+      const entries = await fetchSecurityNews(limit, redditSort, signal);
+      return {
+        content: [{ type: "text", text: formatNews("all", entries) }],
+        details: { source: "security", redditSort, subreddits: [...SECURITY_REDDIT_SUBREDDITS], limit, entries },
       };
     },
   });
 
   pi.registerCommand("news-setup", {
-    description: "Configure optional news sources such as daily.dev tokens.",
+    description: "Configure optional news sources such as daily.dev tokens and Reddit cookies.",
     handler: async (_args, ctx) => {
       await runNewsSetup(ctx);
     },
   });
 
   pi.registerCommand("news", {
-    description: "Fetch news: /news [hackernews|socket|dailydev|all] [limit] [top|new|best|ask|show|job]",
+    description: "Fetch news: /news [hackernews|socket|dailydev|reddit|all] [limit] [top|new|best|ask|show|job|hot|rising] [subreddits=programming,rust]",
     handler: async (args, ctx) => {
       const tokens = args.trim().split(/\s+/).filter(Boolean);
       const source = NEWS_SOURCES.includes(tokens[0] as NewsSource) ? (tokens.shift() as NewsSource) : "all";
       const limitTokenIndex = tokens.findIndex((token) => /^\d+$/.test(token));
       const limitInput = limitTokenIndex >= 0 ? Number(tokens.splice(limitTokenIndex, 1)[0]) : undefined;
-      const feed = HN_FEEDS.includes(tokens[0] as HnFeed) ? (tokens[0] as HnFeed) : "top";
+      const feed = HN_FEEDS.includes(tokens[0] as HnFeed) ? (tokens.shift() as HnFeed) : "top";
+      const redditSortToken = tokens.find((token) => ["hot", "new", "top", "rising"].includes(token));
+      const redditSort = (redditSortToken ?? "hot") as RedditSort;
+      const subredditsToken = tokens.find((token) => token.startsWith("subreddits="));
+      const subreddits = subredditsToken ? subredditsToken.slice("subreddits=".length).split(",").map((s) => s.trim()).filter(Boolean) : undefined;
       const limit = clampInteger(limitInput, DEFAULT_LIMIT, 1, MAX_LIMIT);
 
       try {
-        const entries = await fetchNewsFeed(source, feed, limit);
+        const entries = await fetchNewsFeed(source, feed, limit, subreddits, redditSort);
         pi.sendMessage({
           customType: NEWS_MESSAGE_TYPE,
           content: formatNews(source, entries),
@@ -601,6 +822,31 @@ export default function newsFeedExtension(pi: ExtensionAPI) {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         ctx.ui.notify(`Failed to fetch news: ${message}`, "error");
+      }
+    },
+  });
+
+  pi.registerCommand("news-sec", {
+    description: "Fetch recent/popular security and CVE-relevant news: /news-sec [limit] [hot|new|top|rising]",
+    handler: async (args, ctx) => {
+      const tokens = args.trim().split(/\s+/).filter(Boolean);
+      const limitToken = tokens.find((token) => /^\d+$/.test(token));
+      const sortToken = tokens.find((token) => ["hot", "new", "top", "rising"].includes(token));
+      const limit = clampInteger(limitToken ? Number(limitToken) : 20, 20, 1, MAX_LIMIT);
+      const redditSort = (sortToken ?? "hot") as RedditSort;
+
+      try {
+        const entries = await fetchSecurityNews(limit, redditSort);
+
+        pi.sendMessage({
+          customType: NEWS_MESSAGE_TYPE,
+          content: formatNews("all", entries),
+          display: true,
+          details: { source: "all", entries, generatedAt: Date.now() } satisfies NewsMessageDetails,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        ctx.ui.notify(`Failed to fetch security news: ${message}`, "error");
       }
     },
   });

@@ -43,7 +43,7 @@ async function appendMemoryNote(note: string): Promise<string> {
   return file;
 }
 
-async function searchMemory(query: string): Promise<Array<{ file: string; score: number; line: string }>> {
+async function searchMemory(query: string, limit = 10): Promise<Array<{ file: string; score: number; line: string }>> {
   const memoryDir = path.join(getAgentDir(), "memory");
   const entries = await fs.readdir(memoryDir, { withFileTypes: true }).catch(() => []);
   const files = entries
@@ -66,7 +66,8 @@ async function searchMemory(query: string): Promise<Array<{ file: string; score:
     }
   }
 
-  return hits.sort((a, b) => b.score - a.score).slice(0, 10);
+  const safeLimit = Math.min(50, Math.max(1, Math.trunc(limit)));
+  return hits.sort((a, b) => b.score - a.score).slice(0, safeLimit);
 }
 
 export default function memoryHelper(pi: ExtensionAPI) {
@@ -123,6 +124,38 @@ export default function memoryHelper(pi: ExtensionAPI) {
       return {
         content: [{ type: "text", text: `Saved note to ${file}` }],
         details: { file, timezone: getMemoryTimezone() },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "memory_search",
+    label: "Memory Search",
+    description: "Search persisted memory markdown files for relevant notes",
+    parameters: Type.Object({
+      query: Type.String({ description: "Search query" }),
+      limit: Type.Optional(Type.Number({ minimum: 1, maximum: 50, description: "Max results to return (1-50)" })),
+    }),
+    async execute(_toolCallId, params) {
+      const query = params.query.trim();
+      if (!query) {
+        throw new Error("query must be a non-empty string");
+      }
+
+      const limit = typeof params.limit === "number" ? params.limit : 10;
+      const results = await searchMemory(query, limit);
+
+      if (results.length === 0) {
+        return {
+          content: [{ type: "text", text: `No memory matches found for '${query}'.` }],
+          details: { query, count: 0, results: [] },
+        };
+      }
+
+      const lines = results.map((r, i) => `${i + 1}. ${path.basename(r.file)} — ${r.line}`);
+      return {
+        content: [{ type: "text", text: `Memory matches for '${query}':\n\n${lines.join("\n")}` }],
+        details: { query, count: results.length, results },
       };
     },
   });

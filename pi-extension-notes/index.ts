@@ -3,6 +3,7 @@ import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, envFlag } from "@firstpick/pi-utils";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
 
 type NoteMeta = {
 	slug: string;
@@ -401,6 +402,150 @@ export default function notesExtension(pi: ExtensionAPI) {
 			}
 
 			ctx.ui.notify(`Deleted note '${note.title}' (${note.slug})`, "info");
+		},
+	});
+
+	pi.registerTool({
+		name: "note_list",
+		label: "Note List",
+		description: "List notes with optional rule filtering",
+		parameters: Type.Object({
+			limit: Type.Optional(Type.Number({ minimum: 1, maximum: 100, description: "Maximum notes to return (1-100)" })),
+			includeRulesOnly: Type.Optional(Type.Boolean({ description: "If true, return only rule notes" })),
+		}),
+		async execute(_toolCallId, params) {
+			refreshIndex();
+			const raw = listNotes();
+			const filtered = params.includeRulesOnly ? raw.filter((n) => n.isRule) : raw;
+			const limit = typeof params.limit === "number" ? Math.min(100, Math.max(1, Math.trunc(params.limit))) : 20;
+			const notes = filtered.slice(0, limit);
+			const text = notes.length
+				? notes.map((n, i) => `${i + 1}. ${n.slug} :: ${n.title}${n.isRule ? " [rule]" : ""}`).join("\n")
+				: "No notes found.";
+
+			return {
+				content: [{ type: "text", text }],
+				details: {
+					count: notes.length,
+					total: filtered.length,
+					notes: notes.map((n) => ({
+						slug: n.slug,
+						title: n.title,
+						updatedAt: n.updatedAt,
+						isRule: n.isRule,
+						preview: n.preview,
+					})),
+				},
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "note_read",
+		label: "Note Read",
+		description: "Read one note by slug/title using fuzzy matching",
+		parameters: Type.Object({
+			query: Type.String({ description: "Note slug or title query" }),
+		}),
+		async execute(_toolCallId, params) {
+			refreshIndex();
+			const query = params.query.trim();
+			if (!query) throw new Error("query must be a non-empty string");
+
+			const note = resolveNote(index.notes, query);
+			if (!note) throw new Error(`Note not found: ${query}`);
+
+			const content = readNoteContent(note);
+			if (content == null) throw new Error(`Failed to read note '${note.slug}'`);
+
+			return {
+				content: [{ type: "text", text: `${note.title} (${note.slug})\n${content}` }],
+				details: {
+					note: {
+						slug: note.slug,
+						title: note.title,
+						updatedAt: note.updatedAt,
+						isRule: note.isRule,
+						content,
+					},
+				},
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "note_update",
+		label: "Note Update",
+		description: "Update an existing note's content by slug/title",
+		parameters: Type.Object({
+			query: Type.String({ description: "Note slug or title query" }),
+			content: Type.String({ description: "New note content" }),
+		}),
+		async execute(_toolCallId, params) {
+			refreshIndex();
+			const query = params.query.trim();
+			if (!query) throw new Error("query must be a non-empty string");
+
+			const note = resolveNote(index.notes, query);
+			if (!note) throw new Error(`Note not found: ${query}`);
+
+			const nextContent = params.content.trim();
+			if (!nextContent) throw new Error("content must be non-empty");
+
+			note.updatedAt = new Date().toISOString();
+			note.isRule = isRuleNote(note.title, nextContent);
+			note.preview = nextContent.replace(/\s+/g, " ").trim().slice(0, 120);
+
+			fs.writeFileSync(path.join(getNotesDir(), note.file), nextContent, "utf8");
+			saveIndex(index);
+			contentCache.set(note.slug, nextContent);
+
+			return {
+				content: [{ type: "text", text: `Updated note '${note.title}' (${note.slug})` }],
+				details: { slug: note.slug, title: note.title, updatedAt: note.updatedAt, isRule: note.isRule },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "note_delete",
+		label: "Note Delete",
+		description: "Delete a note by slug/title. Requires explicit confirm=true.",
+		parameters: Type.Object({
+			query: Type.String({ description: "Note slug or title query" }),
+			confirm: Type.Boolean({ description: "Must be true only when user explicitly requested deletion" }),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			if (!params.confirm) {
+				throw new Error("Deletion blocked: confirm must be true and user intent must be explicit.");
+			}
+
+			refreshIndex();
+			const query = params.query.trim();
+			if (!query) throw new Error("query must be a non-empty string");
+
+			const note = resolveNote(index.notes, query);
+			if (!note) throw new Error(`Note not found: ${query}`);
+
+			if (ctx.hasUI) {
+				const ok = await ctx.ui.confirm("Delete note?", `${note.slug} :: ${note.title}`);
+				if (!ok) throw new Error("Deletion cancelled by user.");
+			}
+
+			delete index.notes[note.slug];
+			saveIndex(index);
+			contentCache.delete(note.slug);
+
+			try {
+				fs.unlinkSync(path.join(getNotesDir(), note.file));
+			} catch {
+				// ignore missing file; index is canonical
+			}
+
+			return {
+				content: [{ type: "text", text: `Deleted note '${note.title}' (${note.slug})` }],
+				details: { slug: note.slug, title: note.title },
+			};
 		},
 	});
 

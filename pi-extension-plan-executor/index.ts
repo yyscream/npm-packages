@@ -4,6 +4,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { readFile } from "node:fs/promises";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { matchesKey } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
 
 type PlanRuntimeState = {
   active: boolean;
@@ -271,45 +272,121 @@ export default function planExecutorExtension(pi: ExtensionAPI) {
     });
   };
 
+  const statusLine = () =>
+    `active=${state.active} plan=${state.planPath} resolved=${state.resolvedPlanPath} idleTurns=${state.idleTurns}/${state.maxIdleTurns}`;
+
+  const startExecutor = (
+    ctx: { cwd: string; hasUI: boolean; ui: { notify: (message: string, level?: "info" | "warning" | "error" | "success") => void; setStatus: (key: string, value: string) => void; theme: { fg: (color: string, text: string) => string }; onTerminalInput?: (handler: (data: string) => { consume?: boolean } | void) => () => void } },
+    resolution: PlanResolution,
+    maxIdleTurns?: number,
+  ) => {
+    state.active = true;
+    state.planPath = resolution.displayPath;
+    state.resolvedPlanPath = resolution.readPath;
+    state.idleTurns = 0;
+    if (typeof maxIdleTurns === "number") {
+      state.maxIdleTurns = Math.max(1, Math.min(10, Math.trunc(maxIdleTurns)));
+    }
+
+    pi.sendUserMessage(
+      `Start autonomous plan execution for ${state.planPath}. Keep working until every markdown checklist item is checked. After each implementation step, update ${state.planPath}, run relevant verification, and continue to the next unchecked item until complete.`,
+    );
+
+    updateExecutorStatus(ctx, true);
+    armAbortKeys(ctx);
+    ctx.ui.notify(`Plan executor started: ${state.planPath} (Esc/Ctrl+C to abort)`, "success");
+  };
+
+  const stopExecutorExplicit = (ctx: { hasUI: boolean; ui: { notify: (message: string, level?: "info" | "warning" | "error" | "success") => void; setStatus: (key: string, value: string) => void; theme: { fg: (color: string, text: string) => string } } }) => {
+    state.active = false;
+    clearAbortKeys();
+    updateExecutorStatus(ctx, false);
+    ctx.ui.notify("Plan executor stopped", "info");
+  };
+
   pi.registerCommand("execute-plan", {
     description: "Execute PLAN.md until all checklist items are completed",
     handler: async (args, ctx) => {
       const requested = args.trim();
       const resolution = requested ? resolvePlanPath(ctx.cwd, requested) : await pickPlan(ctx);
       if (!resolution) return;
-
-      state.active = true;
-      state.planPath = resolution.displayPath;
-      state.resolvedPlanPath = resolution.readPath;
-      state.idleTurns = 0;
-
-      pi.sendUserMessage(
-        `Start autonomous plan execution for ${state.planPath}. Keep working until every markdown checklist item is checked. After each implementation step, update ${state.planPath}, run relevant verification, and continue to the next unchecked item until complete.`,
-      );
-
-      updateExecutorStatus(ctx, true);
-      armAbortKeys(ctx);
-      ctx.ui.notify(`Plan executor started: ${state.planPath} (Esc/Ctrl+C to abort)`, "success");
+      startExecutor(ctx, resolution);
     },
   });
 
   pi.registerCommand("stop-plan", {
     description: "Stop active PLAN executor loop",
     handler: async (_args, ctx) => {
-      state.active = false;
-      clearAbortKeys();
-      updateExecutorStatus(ctx, false);
-      ctx.ui.notify("Plan executor stopped", "info");
+      stopExecutorExplicit(ctx);
     },
   });
 
   pi.registerCommand("plan-status", {
     description: "Show current PLAN executor status",
     handler: async (_args, ctx) => {
-      ctx.ui.notify(
-        `active=${state.active} plan=${state.planPath} resolved=${state.resolvedPlanPath} idleTurns=${state.idleTurns}/${state.maxIdleTurns}`,
-        "info",
-      );
+      ctx.ui.notify(statusLine(), "info");
+    },
+  });
+
+  pi.registerTool({
+    name: "start_plan_executor",
+    label: "Start Plan Executor",
+    description: "Start autonomous execution for a PLAN.md checklist",
+    parameters: Type.Object({
+      planPath: Type.Optional(Type.String({ description: "Plan path or topic. Defaults to PLAN.md resolution rules." })),
+      maxIdleTurns: Type.Optional(Type.Number({ minimum: 1, maximum: 10, description: "Stop after this many follow-up turns without progress" })),
+      confirmAutonomousExecution: Type.Boolean({ description: "Must be true only when user explicitly asked for autonomous plan execution" }),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      if (!params.confirmAutonomousExecution) {
+        throw new Error("Blocked: confirmAutonomousExecution must be true with explicit user intent.");
+      }
+
+      const requested = params.planPath?.trim() ?? "";
+      const resolution = resolvePlanPath(ctx.cwd, requested || DEFAULT_PATH);
+      if (!existsSync(resolution.readPath)) {
+        throw new Error(`Plan file not found: ${resolution.displayPath}`);
+      }
+
+      startExecutor(ctx, resolution, params.maxIdleTurns);
+      return {
+        content: [{ type: "text", text: `Started plan executor for ${resolution.displayPath}.` }],
+        details: { ...state },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "stop_plan_executor",
+    label: "Stop Plan Executor",
+    description: "Stop active autonomous plan execution",
+    parameters: Type.Object({}),
+    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+      if (!state.active) {
+        return {
+          content: [{ type: "text", text: "Plan executor is already stopped." }],
+          details: { ...state },
+        };
+      }
+
+      stopExecutorExplicit(ctx);
+      return {
+        content: [{ type: "text", text: "Plan executor stopped." }],
+        details: { ...state },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "plan_executor_status",
+    label: "Plan Executor Status",
+    description: "Inspect current autonomous plan executor state",
+    parameters: Type.Object({}),
+    async execute() {
+      return {
+        content: [{ type: "text", text: statusLine() }],
+        details: { ...state },
+      };
     },
   });
 

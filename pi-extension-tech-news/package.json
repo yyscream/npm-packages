@@ -1,14 +1,16 @@
 {
-  "name": "@firstpick/pi-extension-hacker-news",
+  "name": "@firstpick/pi-extension-tech-news",
   "version": "0.1.0",
-  "description": "Hacker News tools and commands for Pi using the official Firebase API.",
+  "description": "Tech news tools and commands for Pi using Hacker News, Reddit, Socket.dev, and daily.dev sources.",
   "license": "MIT",
   "keywords": [
     "pi-package",
     "pi",
     "pi-coding-agent",
     "extension",
-    "hacker-news"
+    "tech-news",
+    "hacker-news",
+    "reddit"
   ],
   "pi": {
     "extensions": [
