@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
 import { spawn } from "node:child_process";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { getAgentSettingsPath } from "@firstpick/pi-utils";
 
 type SettingsShape = { packages?: string[] };
 type UpdateCandidate = { spec: string; name: string; latest: string };
@@ -91,7 +91,7 @@ export default function upgradeExtensions(pi: ExtensionAPI) {
     description: "Check and update npm-installed Pi extensions (use 'all' to update all without selection)",
     handler: async (args, ctx) => {
       const updateAll = args?.trim().toLowerCase() === "all";
-      const settingsPath = resolve(process.env.HOME || "", ".pi/agent/settings.json");
+      const settingsPath = getAgentSettingsPath();
       let settings: SettingsShape = {};
       try {
         settings = JSON.parse(await readFile(settingsPath, "utf8")) as SettingsShape;

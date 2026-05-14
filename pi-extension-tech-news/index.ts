@@ -1,9 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
-import { withExtensionWorkingIndicator, type ExtensionWorkingIndicator } from "@firstpick/pi-utils";
+import { getAgentEnvPath, resolveEnvValue, upsertEnvValue, withExtensionWorkingIndicator, type ExtensionWorkingIndicator } from "@firstpick/pi-utils";
 import { Type } from "typebox";
 
 const HN_BASE_URL = "https://hacker-news.firebaseio.com/v0";
@@ -269,12 +269,6 @@ type SetupUiContext = {
   };
 };
 
-type EnvResolution = {
-  value?: string;
-  source?: string;
-  path?: string;
-};
-
 type NewsMessageDetails = {
   source: NewsSource;
   entries: NewsEntry[];
@@ -336,51 +330,6 @@ const ITEM_PARAMS = Type.Object({
 function clampInteger(value: unknown, fallback: number, min: number, max: number): number {
   const parsed = typeof value === "number" && Number.isFinite(value) ? Math.trunc(value) : fallback;
   return Math.min(max, Math.max(min, parsed));
-}
-
-function getGlobalEnvPath(): string {
-  return join(homedir(), ".pi", "agent", ".env");
-}
-
-function parseEnvFile(filePath: string): Record<string, string> {
-  if (!existsSync(filePath)) return {};
-  const values: Record<string, string> = {};
-  for (const rawLine of readFileSync(filePath, "utf8").split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) continue;
-    const match = line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
-    if (!match) continue;
-    let value = match[2] ?? "";
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-      value = value.slice(1, -1);
-    }
-    values[match[1] ?? ""] = value.replace(/\\n/g, "\n");
-  }
-  return values;
-}
-
-function quoteEnvValue(value: string): string {
-  return JSON.stringify(value);
-}
-
-function upsertEnvValue(filePath: string, key: string, value: string): void {
-  let content = existsSync(filePath) ? readFileSync(filePath, "utf8") : "";
-  const line = `${key}=${quoteEnvValue(value)}`;
-  const pattern = new RegExp(`^\\s*(?:export\\s+)?${key}\\s*=.*$`, "m");
-  content = pattern.test(content) ? content.replace(pattern, line) : `${content}${content && !content.endsWith("\n") ? "\n" : ""}${line}\n`;
-  mkdirSync(dirname(filePath), { recursive: true });
-  writeFileSync(filePath, content, { mode: 0o600 });
-}
-
-function resolveEnvValue(key: string): EnvResolution {
-  const envValue = process.env[key]?.trim();
-  if (envValue) return { value: envValue, source: "environment" };
-
-  const globalEnvPath = getGlobalEnvPath();
-  const globalValue = parseEnvFile(globalEnvPath)[key]?.trim();
-  if (globalValue) return { value: globalValue, source: "Pi global .env", path: globalEnvPath };
-
-  return {};
 }
 
 function hnFeedToEndpoint(feed: HnFeed): string {
@@ -1296,7 +1245,7 @@ async function setupDailyDev(ctx: SetupUiContext): Promise<void> {
     return;
   }
 
-  const filePath = getGlobalEnvPath();
+  const filePath = getAgentEnvPath();
   upsertEnvValue(filePath, DAILY_DEV_TOKEN_ENV, token);
   process.env[DAILY_DEV_TOKEN_ENV] = token;
   ctx.ui.notify(`daily.dev API token saved to ${filePath}`, "success");
@@ -1326,7 +1275,7 @@ async function setupReddit(ctx: SetupUiContext): Promise<void> {
   }
 
   const tokenV2 = (await ctx.ui.input("Reddit token_v2 cookie (optional)", existingTokenV2.value ? "Paste replacement token_v2 or leave blank to keep unset" : "Paste token_v2 cookie value, or leave blank"))?.trim();
-  const filePath = getGlobalEnvPath();
+  const filePath = getAgentEnvPath();
   upsertEnvValue(filePath, REDDIT_SESSION_ENV, redditSession);
   process.env[REDDIT_SESSION_ENV] = redditSession;
   if (tokenV2) {
@@ -1352,7 +1301,7 @@ async function setupTwitter(ctx: SetupUiContext): Promise<void> {
       ctx.ui.notify("Twitter setup cancelled: no bearer token entered.", "warning");
       return;
     }
-    const filePath = getGlobalEnvPath();
+    const filePath = getAgentEnvPath();
     upsertEnvValue(filePath, X_BEARER_TOKEN_ENV, token);
     process.env[X_BEARER_TOKEN_ENV] = token;
     ctx.ui.notify(`X Bearer Token saved to ${filePath}`, "success");
@@ -1369,7 +1318,7 @@ async function setupTwitter(ctx: SetupUiContext): Promise<void> {
       ctx.ui.notify("Twitter setup cancelled: at least one account is required for Nitter fallback.", "warning");
       return;
     }
-    const filePath = getGlobalEnvPath();
+    const filePath = getAgentEnvPath();
     upsertEnvValue(filePath, NITTER_BASE_URL_ENV, baseUrl.replace(/\/+$/, ""));
     upsertEnvValue(filePath, NITTER_ACCOUNTS_ENV, accounts);
     process.env[NITTER_BASE_URL_ENV] = baseUrl.replace(/\/+$/, "");

@@ -1,7 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { delay, getAgentEnvPath, getWorkspaceEnvPath, readEnvValue, upsertEnvValue } from "@firstpick/pi-utils";
 import { Text } from "@earendil-works/pi-tui";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -49,36 +47,6 @@ const BraveSearchParams = Type.Object({
 	safesearch: Type.Optional(Type.String({ description: "Optional safesearch mode such as off, moderate, or strict" })),
 });
 
-function getPiAgentDir(): string {
-	return process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
-}
-
-function getWorkspaceEnvPath(): string {
-	return join(process.cwd(), ".env");
-}
-
-function getGlobalEnvPath(): string {
-	return join(getPiAgentDir(), ".env");
-}
-
-function readEnvValue(filePath: string, key: string): string | undefined {
-	if (!existsSync(filePath)) return undefined;
-	const content = readFileSync(filePath, "utf8");
-	for (const line of content.split(/\r?\n/)) {
-		const match = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
-		if (!match || match[1] !== key) continue;
-		let value = match[2] ?? "";
-		const commentStart = value.search(/\s#/);
-		if (commentStart >= 0) value = value.slice(0, commentStart);
-		value = value.trim();
-		if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-			value = value.slice(1, -1);
-		}
-		return value;
-	}
-	return undefined;
-}
-
 function resolveApiKey(): ApiKeyResolution {
 	if (process.env[ENV_KEY]) return { apiKey: process.env[ENV_KEY], source: "environment" };
 
@@ -86,34 +54,11 @@ function resolveApiKey(): ApiKeyResolution {
 	const workspaceKey = readEnvValue(workspaceEnvPath, ENV_KEY);
 	if (workspaceKey) return { apiKey: workspaceKey, source: "workspace .env", path: workspaceEnvPath };
 
-	const globalEnvPath = getGlobalEnvPath();
+	const globalEnvPath = getAgentEnvPath();
 	const globalKey = readEnvValue(globalEnvPath, ENV_KEY);
 	if (globalKey) return { apiKey: globalKey, source: "Pi global .env", path: globalEnvPath };
 
 	return {};
-}
-
-function quoteEnvValue(value: string): string {
-	return JSON.stringify(value);
-}
-
-function delay(ms: number): Promise<void> {
-	if (ms <= 0) return Promise.resolve();
-	return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function upsertEnvValue(filePath: string, key: string, value: string): void {
-	let content = existsSync(filePath) ? readFileSync(filePath, "utf8") : "";
-	const line = `${key}=${quoteEnvValue(value)}`;
-	const pattern = new RegExp(`^\\s*(?:export\\s+)?${key}\\s*=.*$`, "m");
-	if (pattern.test(content)) {
-		content = content.replace(pattern, line);
-	} else {
-		if (content.length > 0 && !content.endsWith("\n")) content += "\n";
-		content += `${line}\n`;
-	}
-	mkdirSync(dirname(filePath), { recursive: true });
-	writeFileSync(filePath, content, { mode: 0o600 });
 }
 
 async function promptForSetup(ctx: SetupUiContext): Promise<void> {
@@ -146,7 +91,7 @@ async function promptForSetup(ctx: SetupUiContext): Promise<void> {
 		return;
 	}
 
-	const filePath = target === "Pi global .env" ? getGlobalEnvPath() : getWorkspaceEnvPath();
+	const filePath = target === "Pi global .env" ? getAgentEnvPath() : getWorkspaceEnvPath();
 	upsertEnvValue(filePath, ENV_KEY, trimmedApiKey);
 	process.env[ENV_KEY] = trimmedApiKey;
 	ctx.ui.notify(`Brave Search API key saved to ${filePath}`, "info");

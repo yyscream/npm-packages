@@ -1,8 +1,8 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { readFile } from "node:fs/promises";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, slugify } from "@firstpick/pi-utils";
 import { matchesKey } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
@@ -28,21 +28,8 @@ const DEFAULT_PATH = "PLAN.md";
 const EXECUTOR_STATUS_KEY = "plan-executor";
 const COMPLETION_MARKER = ".plan-executor-complete";
 
-function getAgentDir(): string {
-  return process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
-}
-
 function getArchivedPlansRoot(): string {
   return join(getAgentDir(), "docs");
-}
-
-function slugifyTopic(input: string): string {
-  return input
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 80) || "plan";
 }
 
 function completionMarkerPath(planPath: string): string {
@@ -108,7 +95,7 @@ function resolvePlanPath(cwd: string, requestedPath: string): PlanResolution {
   }
 
   const docsRoot = getArchivedPlansRoot();
-  const topic = slugifyTopic(requested.replace(/(?:^|\/)PLAN\.md$/i, ""));
+  const topic = slugify(requested.replace(/(?:^|\/)PLAN\.md$/i, ""), { fallback: "plan" });
   const topicPlan = join(docsRoot, topic, "PLAN.md");
   if (requested !== DEFAULT_PATH && existsSync(topicPlan) && !isPlanMarkedComplete(topicPlan)) {
     return { displayPath: displayArchivedPlanPath(topic), readPath: topicPlan };

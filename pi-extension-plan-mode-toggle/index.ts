@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import process from "node:process";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { getAgentDir } from "@firstpick/pi-utils";
+import { getAgentDir, slugify } from "@firstpick/pi-utils";
 
 type PlanningAnswers = {
 	goal: string;
@@ -44,15 +44,6 @@ function modelKey(model: Model<Api>): string {
 	return `${model.provider}/${model.id}`;
 }
 
-function slugifyTopic(input: string): string {
-	return input
-		.toLowerCase()
-		.trim()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "")
-		.slice(0, 80) || "plan";
-}
-
 function extractPlanTopic(content: string, goal?: string): string {
 	const sectionHeadingPattern =
 		/^(?:\d+\.?\s*)?(title\s*&\s*scope|objectives|current state|decision log|proposed architecture|design decisions|tooling\/stack decisions|web research evidence|implementation checklist|testing & validation plan|risks, trade-offs, mitigations|open questions|quirks \/ extra relevant notes)$/i;
@@ -83,7 +74,7 @@ function archivePlanCopy(cwd: string, content: string, goal?: string): { archive
 	try {
 		const source = resolve(cwd, "PLAN.md");
 		if (!existsSync(source)) return { archived: false, error: "PLAN.md not found" };
-		const topic = slugifyTopic(extractPlanTopic(content, goal));
+		const topic = slugify(extractPlanTopic(content, goal), { fallback: "plan" });
 		const targetDir = resolve(getAgentDir(), "docs", topic);
 		mkdirSync(targetDir, { recursive: true });
 		const target = resolve(targetDir, "PLAN.md");

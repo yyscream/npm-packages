@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { isAbsolute, resolve, sep } from "node:path";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { formatTokens, estimatePromptInjectionTokens, estimateTokensFromCharCount } from "@firstpick/pi-utils";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 type GitSnapshot = {
@@ -62,14 +63,6 @@ function formatCwd(cwd: string): string {
   return cwd;
 }
 
-function formatTokens(count: number): string {
-  if (count < 1000) return count.toString();
-  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
-  if (count < 1000000) return `${Math.round(count / 1000)}k`;
-  if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
-  return `${Math.round(count / 1000000)}M`;
-}
-
 function normalizeTimestampMs(timestamp: number): number {
   // Handle mixed timestamp units from different session formats.
   // seconds   -> ms  (e.g. 1715000000)
@@ -96,16 +89,6 @@ type LiveTokenSample = {
   timestampMs: number;
   tokens: number;
 };
-
-function estimateTokensFromCharCount(charCount: number): number {
-  // Provider tokenizers differ and streaming usage is normally only available at message end.
-  // chars/4 is the common rough estimate for live display; final usage uses provider counts.
-  return Math.max(0, Math.round(charCount / 4));
-}
-
-function estimatePromptInjectionTokens(systemPrompt: string): number {
-  return estimateTokensFromCharCount(systemPrompt.length);
-}
 
 function formatTokenSpeed(tokensPerSecond: number): string {
   if (tokensPerSecond < 100) {

@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { getAgentDir, envFlag } from "@firstpick/pi-utils";
+import { getAgentDir, envFlag, slugify } from "@firstpick/pi-utils";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
@@ -61,15 +61,6 @@ function loadIndex(): NotesIndex {
 function saveIndex(index: NotesIndex): void {
 	ensureStorage();
 	fs.writeFileSync(getIndexFile(), JSON.stringify(index, null, 2), "utf8");
-}
-
-function slugify(input: string): string {
-	return input
-		.toLowerCase()
-		.trim()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "")
-		.slice(0, 80);
 }
 
 function firstTwoWordsForAutoTitle(text: string): string {

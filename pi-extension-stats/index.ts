@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { buildSessionContext, formatSkillsForPrompt } from "@earendil-works/pi-coding-agent";
 import type { BuildSystemPromptOptions, ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { estimatePromptInjectionTokens, estimateTokensFromCharCount, formatTokens } from "@firstpick/pi-utils";
 
 type DayUsage = {
   input: number;
@@ -43,24 +44,6 @@ type TokenBreakdownSource = {
 const DEFAULT_DAYS = 14;
 const MAX_BAR_WIDTH = 24;
 const COST_BAR_WIDTH = 10;
-
-function formatTokens(count: number): string {
-  if (count < 1000) return count.toString();
-  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
-  if (count < 1000000) return `${Math.round(count / 1000)}k`;
-  if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
-  return `${Math.round(count / 1000000)}M`;
-}
-
-function estimateTokensFromCharCount(charCount: number): number {
-  // Keep this estimate intentionally identical to pi-extension-git-footer-status.
-  // Provider tokenizers differ, so chars/4 is the shared rough display estimate.
-  return Math.max(0, Math.round(charCount / 4));
-}
-
-function estimatePromptInjectionTokens(systemPrompt: string): number {
-  return estimateTokensFromCharCount(systemPrompt.length);
-}
 
 function addPromptSource(sources: PromptInjectionSource[], label: string, content: string | undefined): number {
   if (!content) return 0;
