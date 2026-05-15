@@ -6,6 +6,8 @@ type TodoState = { visible: boolean; items: TodoItem[]; offset: number };
 
 const KEY = "todo-progress";
 const MAX_ROWS = 5;
+const MAX_ITEMS = 12;
+const TODO_LINE_REGEX = /^\s*(?:(?:[-*]|\d+[.)])\s*)?\[( |x|X|-)\]\s+(.+)$/;
 
 function statusLabel(status: TodoStatus): string {
   if (status === "done") return "[x]";
@@ -41,6 +43,56 @@ function render(ctx: ExtensionContext, s: TodoState) {
   ctx.ui.setWidget(KEY, lines);
 }
 
+function parseTodoLine(line: string): TodoItem | undefined {
+  const match = TODO_LINE_REGEX.exec(line);
+  if (!match) return undefined;
+
+  const mark = (match[1] || " ").toLowerCase();
+  const label = (match[2] || "").trim().replace(/\s+/g, " ");
+  if (!label) return undefined;
+
+  return {
+    status: mark === "x" ? "done" : mark === "-" ? "partial" : "todo",
+    text: label,
+  };
+}
+
+function extractChecklist(text: string): TodoItem[] {
+  const checklist: TodoItem[] = [];
+  let inFence = false;
+
+  for (const line of text.split(/\r?\n/)) {
+    if (/^\s*```/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+
+    const item = parseTodoLine(line);
+    if (item) checklist.push(item);
+  }
+
+  return checklist;
+}
+
+function stripChecklistLines(text: string): string {
+  let inFence = false;
+  const kept: string[] = [];
+
+  for (const line of text.split(/\r?\n/)) {
+    if (/^\s*```/.test(line)) {
+      inFence = !inFence;
+      kept.push(line);
+      continue;
+    }
+
+    if (!inFence && parseTodoLine(line)) continue;
+    kept.push(line);
+  }
+
+  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 export default function todoProgress(pi: ExtensionAPI) {
   const state: TodoState = { visible: false, items: [], offset: 0 };
 
@@ -48,7 +100,7 @@ export default function todoProgress(pi: ExtensionAPI) {
     return {
       systemPrompt:
         event.systemPrompt +
-        "\n\n[TODO PROGRESS POLICY] For multi-step work, create a concise agent-authored checklist with 2-6 short items. Do not copy raw user-prompt lines as todos; rewrite them into clear action items. Use explicit markers: [ ] not started, [-] partial/in progress, [x] complete. Update checklist markers as work changes. Before your final answer, close the todo list by marking every remaining item [x] or by explicitly stating no todo list is needed for the completed single-step task.",
+        "\n\n[TODO PROGRESS POLICY] For multi-step work, create a concise agent-authored checklist with 2-6 short items. Do not copy raw user-prompt lines as todos; rewrite them into clear action items. Emit todo updates as markdown checklist lines exactly like `- [ ] item`, `- [-] item`, or `- [x] item`; do not use raw user prompt lines as todos. Update checklist markers as work changes. Before your final answer, close the todo list by marking every remaining item `[x]` or by explicitly stating no todo list is needed for the completed single-step task.",
     };
   });
 
@@ -60,23 +112,22 @@ export default function todoProgress(pi: ExtensionAPI) {
   pi.on("message_end", async (event, ctx) => {
     if (event.message.role !== "assistant") return;
 
-    const text = event.message.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n");
-
-    const checklistRegex = /^\s*(?:[-*]|\d+[.)])\s*\[( |x|X|-)\]\s+(.+)$/gm;
-    const checklist: Array<TodoItem> = [];
-    for (const match of text.matchAll(checklistRegex)) {
-      const mark = (match[1] || " ").toLowerCase();
-      const label = (match[2] || "").trim().replace(/\s+/g, " ");
-      const status: TodoStatus = mark === "x" ? "done" : mark === "-" ? "partial" : "todo";
-      if (label) checklist.push({ status, text: label });
-    }
+    const textParts = event.message.content.filter((c: any) => c.type === "text");
+    const checklist = textParts.flatMap((c: any) => extractChecklist(c.text));
 
     if (checklist.length === 0) return;
 
-    state.items = checklist.slice(0, 12);
+    state.items = checklist.slice(0, MAX_ITEMS);
     state.offset = Math.min(state.offset, Math.max(0, state.items.length - MAX_ROWS));
     state.visible = true;
     render(ctx, state);
+
+    return {
+      message: {
+        ...event.message,
+        content: event.message.content.map((c: any) => (c.type === "text" ? { ...c, text: stripChecklistLines(c.text) } : c)),
+      },
+    };
   });
 
   pi.registerShortcut("ctrl+alt+x", {

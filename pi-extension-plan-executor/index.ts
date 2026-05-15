@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { readFile } from "node:fs/promises";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, slugify } from "@firstpick/pi-utils";
@@ -50,6 +51,16 @@ function displayArchivedPlanPath(topic: string): string {
   return `~/.pi/agent/docs/${topic}/PLAN.md`;
 }
 
+function expandUserPath(path: string): string {
+  if (path === "~") return homedir();
+  if (path.startsWith("~/")) return join(homedir(), path.slice(2));
+  return path;
+}
+
+function isReadableIncompletePlan(path: string): boolean {
+  return existsSync(path) && statSync(path).isFile() && !isPlanMarkedComplete(path);
+}
+
 function createPlanChoice(displayPath: string, readPath: string, prefix: string): PlanChoice {
   const progress = parsePlanProgress(readFileSync(readPath, "utf8"));
   const stat = statSync(readPath);
@@ -89,15 +100,19 @@ function findLatestArchivedPlan(cwd: string): string | undefined {
 
 function resolvePlanPath(cwd: string, requestedPath: string): PlanResolution {
   const requested = (requestedPath || DEFAULT_PATH).trim() || DEFAULT_PATH;
-  const directPath = isAbsolute(requested) ? requested : resolve(cwd, requested);
-  if (existsSync(directPath) && !isPlanMarkedComplete(directPath)) {
+  const expandedRequested = expandUserPath(requested);
+  const directPath = isAbsolute(expandedRequested) ? expandedRequested : resolve(cwd, expandedRequested);
+  if (isReadableIncompletePlan(directPath)) {
     return { displayPath: requested, readPath: directPath };
   }
 
   const docsRoot = getArchivedPlansRoot();
-  const topic = slugify(requested.replace(/(?:^|\/)PLAN\.md$/i, ""), { fallback: "plan" });
+  const topicInput = requested.startsWith("~/.pi/agent/docs/")
+    ? requested.slice("~/.pi/agent/docs/".length)
+    : requested;
+  const topic = slugify(topicInput.replace(/(?:^|\/)PLAN\.md$/i, ""), { fallback: "plan" });
   const topicPlan = join(docsRoot, topic, "PLAN.md");
-  if (requested !== DEFAULT_PATH && existsSync(topicPlan) && !isPlanMarkedComplete(topicPlan)) {
+  if (requested !== DEFAULT_PATH && isReadableIncompletePlan(topicPlan)) {
     return { displayPath: displayArchivedPlanPath(topic), readPath: topicPlan };
   }
 

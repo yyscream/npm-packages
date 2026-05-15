@@ -125,7 +125,7 @@ function buildPlanPrompt(userPrompt: string, answers: PlanningAnswers): string {
 
 Hard requirements:
 - ALWAYS use the brave_search tool for up-to-date official docs for every important stack/tool choice.
-- Track implementation progress strictly with markdown checkboxes (`- [ ]` / `- [x]`) under "Implementation Checklist".
+- Track implementation progress strictly with markdown checkboxes (\`- [ ]\` / \`- [x]\`) under "Implementation Checklist".
 - Prefer current official documentation over memory.
 - Use local repo research tools (read/grep/find/ls/bash) to ground decisions in the actual codebase.
 - Apply a scientific approach: list assumptions, evidence, alternatives, risks, and validation steps.
