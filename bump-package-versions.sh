@@ -185,7 +185,7 @@ package_has_publishable_changes() {
   fi
 
   mapfile -t local_files < <(
-    cd "$pkg_dir" && npm pack --dry-run --json 2>/dev/null | node -e '
+    cd "$pkg_dir" && npm pack --dry-run --json --ignore-scripts 2>/dev/null | node -e '
 const chunks = [];
 process.stdin.on("data", c => chunks.push(c));
 process.stdin.on("end", () => {
