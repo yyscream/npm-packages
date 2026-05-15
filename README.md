@@ -6,6 +6,13 @@ Right now it contains **Pi extension packages**.
 
 ## Packages
 
+### `@firstpick/pi-extension-archwiki-local`
+Adds local ArchWiki retrieval tools to Pi using the installed `arch-wiki-docs` package.
+
+- `/archwiki-status` cache/docs status command
+- `archwiki_search`, `archwiki_read`, `archwiki_sections`, `archwiki_extract`, `archwiki_related` tools
+- Prefers local ArchWiki evidence for Arch/Linux troubleshooting
+
 ### `@firstpick/pi-extension-bang-command-autocomplete`
 Adds autocomplete for `!<command>` in Pi.
 
@@ -111,7 +118,7 @@ Shared helpers used by multiple Pi extensions.
 - `publish-packages.sh` – plans/applies publish actions dynamically for all package folders
 - `bump-package-versions.sh` – checks npm published versions first and enforces the next release version for changed packages (`+0.0.1`, rolling `*.9` to next minor `.0`; bumps up or reduces down only when needed)
 - `release-workflow.sh` – orchestrates release checks: `--check` reports required bumps, `--plan` includes bump planning, and `--publish` applies required bumps before publishing
-- `sync-dotfiles-extension-symlinks.sh` – ensures `~/.dotfiles/.pi/agent/extensions/*.ts` are symlinks to canonical `pi-extension-*/index.ts` files; renames non-symlink files to `.hardcoded.<timestamp>.bak`
+- `sync-pi-package-symlinks.sh` – ensures local development symlinks for Pi extensions (`~/.pi/agent/extensions/*.ts`) and packaged skills (`~/.pi/agent/skills/<skill-name>`) point to canonical resources in `npm-packages`; renames non-symlink conflicts to `.hardcoded.<timestamp>.bak`
 
 ## Publish model
 

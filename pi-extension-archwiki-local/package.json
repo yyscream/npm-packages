@@ -1,0 +1,36 @@
+{
+  "name": "@firstpick/pi-extension-archwiki-local",
+  "version": "0.1.0",
+  "description": "Local ArchWiki search and retrieval tools for Pi using the installed arch-wiki-docs package.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "extension",
+    "archwiki",
+    "arch-linux"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "scripts": {
+    "docs:generate": "node scripts/generate-query-expansions-doc.mjs",
+    "prepack": "npm run docs:generate"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "files": [
+    "index.ts",
+    "skills",
+    "README.md",
+    "LICENSE"
+  ]
+}
