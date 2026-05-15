@@ -8,11 +8,15 @@ Release orchestration command for this npm-packages workspace.
 - Runs release preflight checks before asking to publish.
 - Shows a summary of planned version changes and publish actions in the confirmation prompt.
 - Publishes only after explicit confirmation.
+- After confirmation, publishes only package targets detected in the pre-confirmation publish plan instead of scanning all packages again.
+- After a successful publish, updates installed Pi extensions only for packages detected in that same pre-confirmation publish plan.
 - Streams live release output in an above-editor panel, separate from the conversation transcript.
 - Keeps the normal Pi input row usable while the release is running.
 - Shows phase/status/help in a below-editor footer instead of at the top of the output.
 - Toggles compact/expanded output with `/release-toggle` while `/release-npm` runs in the background.
 - Aborts the active release subprocess with `/release-abort` while `/release-npm` runs in the background.
+- Saves each release run log under `~/.pi/agent/release-npm-logs/`.
+- Shows saved logs with `/release-npm-logs` in a custom above-editor display.
 
 ## Install
 
@@ -26,9 +30,10 @@ No required configuration.
 
 ## Commands
 
-- `/release-npm` — runs `./release-workflow.sh --plan --all`, shows the planned version/publish summary, prompts for confirmation, then runs `./release-workflow.sh --publish --all` if confirmed.
+- `/release-npm` — runs `./release-workflow.sh --plan --all`, shows the planned version/publish summary plus exact package targets, prompts for confirmation, then runs `./release-workflow.sh --publish --target <dir>` only for those detected targets. Successful planned publishes are installed via `pi install npm:<name>@latest`; skipped packages are not installed.
 - `/release-toggle` — toggles active release output between compact and expanded mode.
 - `/release-abort` — aborts the active release subprocess.
+- `/release-npm-logs` — select a saved release run and display it above the editor; press `Esc`/`q` or run `/release-npm-logs close` to close it.
 
 ## Tools
 

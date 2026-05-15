@@ -1,16 +1,31 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const RELEASE_STATUS_KEY = "release-npm";
+const RELEASE_LOG_WIDGET_KEY = "release-npm:logs";
 const COLLAPSED_LINES = 40;
 
 type RunResult = { ok: boolean; output: string; aborted: boolean };
+type CommandResult = { ok: boolean; output: string };
 type AbortableChild = ChildProcessWithoutNullStreams & { abortReleaseStep?: () => void };
+type PlannedPublish = { name: string; version: string; action: "publish-first" | "publish-update"; label: string };
+type PlannedPublishTarget = PlannedPublish & { target: string };
+type ReleaseLogEntry = { file: string; title: string; mtimeMs: number };
+
+type ReleaseRunLog = {
+  id: string;
+  startedAt: string;
+  cwd: string;
+  chunks: string[];
+  saved: boolean;
+};
 
 const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
+const RELEASE_LOG_DIR = join(homedir(), ".pi", "agent", "release-npm-logs");
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
@@ -21,6 +36,65 @@ function releaseScriptCommand(cwd: string, scriptName: string, args: string[] = 
   const scriptPath = existsSync(localScript) ? localScript : join(EXTENSION_DIR, scriptName);
   const quotedArgs = args.map(shellQuote).join(" ");
   return `PI_NPM_PACKAGES_ROOT=${shellQuote(cwd)} ${shellQuote(scriptPath)}${quotedArgs ? ` ${quotedArgs}` : ""}`;
+}
+
+function sanitizeLogId(value: string): string {
+  return value.replace(/[^0-9A-Za-z._-]/g, "-");
+}
+
+function createReleaseRunLog(cwd: string): ReleaseRunLog {
+  const startedAt = new Date().toISOString();
+  return { id: sanitizeLogId(startedAt), startedAt, cwd, chunks: [], saved: false };
+}
+
+function appendReleaseLog(runLog: ReleaseRunLog, chunk: string): void {
+  runLog.chunks.push(chunk);
+}
+
+function saveReleaseRunLog(runLog: ReleaseRunLog, status: string, summary?: string): string | undefined {
+  if (runLog.saved) return undefined;
+  runLog.saved = true;
+  try {
+    mkdirSync(RELEASE_LOG_DIR, { recursive: true });
+    const path = join(RELEASE_LOG_DIR, `${runLog.id}-${sanitizeLogId(status)}.log`);
+    const content = [
+      `release-npm log`,
+      `started_at=${runLog.startedAt}`,
+      `finished_at=${new Date().toISOString()}`,
+      `status=${status}`,
+      `cwd=${runLog.cwd}`,
+      summary ? `summary=${summary.replace(/\r?\n/g, " | ")}` : undefined,
+      "",
+      "--- output ---",
+      runLog.chunks.join(""),
+    ].filter((line): line is string => line !== undefined).join("\n");
+    writeFileSync(path, content, "utf8");
+    return path;
+  } catch {
+    return undefined;
+  }
+}
+
+function listReleaseLogs(): ReleaseLogEntry[] {
+  if (!existsSync(RELEASE_LOG_DIR)) return [];
+  return readdirSync(RELEASE_LOG_DIR)
+    .filter((file) => file.endsWith(".log"))
+    .map((file) => {
+      const path = join(RELEASE_LOG_DIR, file);
+      const stat = statSync(path);
+      return { file: path, title: file.replace(/\.log$/, ""), mtimeMs: stat.mtimeMs };
+    })
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+}
+
+async function runCommand(cwd: string, command: string): Promise<CommandResult> {
+  return await new Promise((resolve) => {
+    const child = spawn("bash", ["-lc", command], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    let output = "";
+    child.stdout.on("data", (d) => { output += String(d); });
+    child.stderr.on("data", (d) => { output += String(d); });
+    child.on("close", (code) => resolve({ ok: code === 0, output }));
+  });
 }
 
 async function runScriptLive(
@@ -166,6 +240,44 @@ function splitPublishPlan(output: string): { publish: string[]; skip: string[]; 
   return { publish, skip, blocked, other };
 }
 
+function extractPlannedPublishes(output: string): PlannedPublish[] {
+  return splitPublishPlan(output).publish.flatMap((line) => {
+    const match = line.match(/^((?:@[^\s/]+\/)?[^\s@]+)@([^\s]+)\s+->\s+(publish-first|publish-update)$/);
+    if (!match) return [];
+    return [{ name: match[1], version: match[2], action: match[3] as PlannedPublish["action"], label: `${match[1]}@${match[2]}` }];
+  });
+}
+
+function resolvePlannedPublishTargets(cwd: string, planned: PlannedPublish[]): { targets: PlannedPublishTarget[]; missing: PlannedPublish[] } {
+  const packageNameToDir = new Map<string, string>();
+  for (const entry of readdirSync(cwd, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const packageJsonPath = join(cwd, entry.name, "package.json");
+    if (!existsSync(packageJsonPath)) continue;
+    try {
+      const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as { name?: string };
+      if (packageJson.name) packageNameToDir.set(packageJson.name, entry.name);
+    } catch {
+      // Ignore invalid package metadata here; readiness checks report it separately.
+    }
+  }
+
+  const targets: PlannedPublishTarget[] = [];
+  const missing: PlannedPublish[] = [];
+  const seenTargets = new Set<string>();
+  for (const item of planned) {
+    const target = packageNameToDir.get(item.name);
+    if (!target) {
+      missing.push(item);
+      continue;
+    }
+    if (seenTargets.has(target)) continue;
+    seenTargets.add(target);
+    targets.push({ ...item, target });
+  }
+  return { targets, missing };
+}
+
 function formatPreflightSummary(output: string): string {
   const versionChanges = extractVersionChanges(output);
   const bumpSummaries = stripAnsi(output)
@@ -195,12 +307,79 @@ const RELEASE_FOOTER_KEY = `${RELEASE_STATUS_KEY}:footer`;
 const EXPANDED_LINES = 160;
 
 let activeReleaseRun: { abort: () => void; toggleOutput: () => void } | undefined;
+let activeLogViewerCleanup: (() => void) | undefined;
 
 function truncateLine(line: string, width: number): string {
   return line.length > width ? `${line.slice(0, Math.max(0, width - 1))}…` : line;
 }
 
 export default function releaseNpmExtension(pi: ExtensionAPI) {
+  pi.registerCommand("release-npm-logs", {
+    description: "Select and display saved /release-npm run logs",
+    handler: async (args, ctx) => {
+      if (args?.trim().toLowerCase() === "close") {
+        activeLogViewerCleanup?.();
+        activeLogViewerCleanup = undefined;
+        ctx.ui.notify("Release log viewer closed.", "info");
+        return;
+      }
+
+      const logs = listReleaseLogs();
+      if (logs.length === 0) {
+        ctx.ui.notify(`No release logs found in ${RELEASE_LOG_DIR}.`, "info");
+        return;
+      }
+
+      const choices = logs.map((log, index) => `${index + 1}. ${log.title}`);
+      const choice = await ctx.ui.select("Select release log to display", [...choices, "Cancel"]);
+      if (!choice || choice === "Cancel") return;
+
+      const selectedIndex = choices.indexOf(choice);
+      const selected = logs[selectedIndex];
+      if (!selected) return;
+
+      let content = "";
+      try {
+        content = readFileSync(selected.file, "utf8");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        ctx.ui.notify(`Could not read release log: ${message}`, "error");
+        return;
+      }
+
+      activeLogViewerCleanup?.();
+      const lines = content.split(/\r?\n/);
+      const renderLimit = 240;
+      const unsubscribe = ctx.hasUI
+        ? ctx.ui.onTerminalInput((data) => {
+          if (data === "\u001b" || data === "q" || data === "Q") {
+            activeLogViewerCleanup?.();
+            activeLogViewerCleanup = undefined;
+            return { consume: true };
+          }
+          return undefined;
+        })
+        : undefined;
+      activeLogViewerCleanup = () => {
+        unsubscribe?.();
+        if (ctx.hasUI) ctx.ui.setWidget(RELEASE_LOG_WIDGET_KEY, undefined);
+      };
+
+      if (ctx.hasUI) {
+        ctx.ui.setWidget(RELEASE_LOG_WIDGET_KEY, (_tui, theme) => ({
+          render: (width: number) => [
+            truncateLine(theme.fg("accent", `Release log: ${selected.title}`), width),
+            truncateLine(theme.fg("dim", `Path: ${selected.file} · showing last ${Math.min(renderLimit, lines.length)}/${lines.length} lines · Esc/q closes`), width),
+            "",
+            ...lines.slice(-renderLimit).map((line) => truncateLine(line, width)),
+          ],
+          invalidate: () => {},
+        }), { placement: "aboveEditor" });
+      }
+      ctx.ui.notify(`Showing release log ${selected.title}.`, "info");
+    },
+  });
+
   pi.registerCommand("release-toggle", {
     description: "Toggle active /release-npm output between compact and expanded modes",
     handler: async (_args, ctx) => {
@@ -232,6 +411,7 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
         return;
       }
 
+      const runLog = createReleaseRunLog(ctx.cwd);
       void (async () => {
       let liveBuffer = "";
       let expanded = false;
@@ -285,8 +465,10 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
         expanded = !expanded;
         renderReleaseUi();
       };
+      const finishLog = (status: string, summary?: string) => saveReleaseRunLog(runLog, status, summary);
       const appendOutput = (chunk: string) => {
         liveBuffer += chunk;
+        appendReleaseLog(runLog, chunk);
         renderReleaseUi();
       };
       activeReleaseRun = { abort: abortCurrentStep, toggleOutput };
@@ -314,14 +496,16 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
       currentChild = undefined;
 
       if (plan.aborted) {
+        const logPath = finishLog("aborted-preflight");
         closeReleaseUi();
-        ctx.ui.notify("Release workflow aborted.", "warning");
+        ctx.ui.notify(`Release workflow aborted.${logPath ? ` Log: ${logPath}` : ""}`, "warning");
         if (ctx.hasUI) ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg("warning", "Release:Aborted"));
         return;
       }
 
       if (!plan.ok) {
-        ctx.ui.notify("release-workflow preflight failed; publish was not offered.", "error");
+        const logPath = finishLog("failed-preflight");
+        ctx.ui.notify(`release-workflow preflight failed; publish was not offered.${logPath ? ` Log: ${logPath}` : ""}`, "error");
         if (ctx.hasUI) ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg("error", "Release:Failed"));
         closeReleaseUi();
         evaluateFailureWithLLM(pi, "release-workflow.sh --plan --all", plan.output);
@@ -329,15 +513,29 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
       }
 
       closeReleaseUi();
+      const plannedPublishes = extractPlannedPublishes(plan.output);
+      const plannedTargetResolution = resolvePlannedPublishTargets(ctx.cwd, plannedPublishes);
       const preflightSummary = formatPreflightSummary(plan.output);
-      const choice = await ctx.ui.select(`${preflightSummary}\n\nPublish eligible packages now?`, ["Yes", "No"]);
+      const targetSummary = [
+        "Publish targets after confirmation:",
+        ...(plannedTargetResolution.targets.length
+          ? plannedTargetResolution.targets.map((item) => `  ${item.target} (${item.label} -> ${item.action})`)
+          : ["  none"]),
+        ...(plannedTargetResolution.missing.length
+          ? ["Missing local package dirs:", ...plannedTargetResolution.missing.map((item) => `  ${item.label}`)]
+          : []),
+      ].join("\n");
+      appendReleaseLog(runLog, `\n--- preflight summary ---\n${preflightSummary}\n\n${targetSummary}\n`);
+      const choice = await ctx.ui.select(`${preflightSummary}\n\n${targetSummary}\n\nPublish eligible packages now?`, ["Yes", "No"]);
+      appendReleaseLog(runLog, `\n--- user confirmation ---\nchoice=${choice ?? "<none>"}\n`);
       if (choice !== "Yes") {
         closeReleaseUi();
         if (ctx.hasUI) {
           ctx.ui.setWidget(RELEASE_STATUS_KEY, undefined);
           ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg("warning", "Release:Cancelled"));
         }
-        ctx.ui.notify("Publish cancelled after successful preflight checks.", "info");
+        const logPath = finishLog("cancelled", preflightSummary);
+        ctx.ui.notify(`Publish cancelled after successful preflight checks.${logPath ? ` Log: ${logPath}` : ""}`, "info");
         return;
       }
 
@@ -350,8 +548,14 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
         setPhase("Release publishing");
       }
 
-      const publishCommand = releaseScriptCommand(ctx.cwd, "release-workflow.sh", ["--publish", "--all"]);
-      ctx.ui.notify("Running release-workflow.sh --publish --all...", "info");
+      if (plannedTargetResolution.targets.length === 0) {
+        const logPath = finishLog("no-targets", preflightSummary);
+        closeReleaseUi();
+        ctx.ui.notify(`No publish targets were detected in the pre-confirmation plan; nothing to publish.${logPath ? ` Log: ${logPath}` : ""}`, "info");
+        return;
+      }
+
+      ctx.ui.notify(`Running publish workflow for ${plannedTargetResolution.targets.length} preflight-detected target(s)...`, "info");
       const updated: string[] = [];
       const skipped: string[] = [];
       const firstRelease: string[] = [];
@@ -440,35 +644,69 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
         `  - ${failed.length ? failed.map((f) => `${f.pkg}: ${f.reason}`).join(" | ") : "none"}`,
       ].join("\n");
 
-      const publish = await runScriptLive(ctx.cwd, publishCommand, (chunk) => {
-        appendOutput(chunk);
-        parsePublishOutput(liveBuffer);
-      }, (child) => { currentChild = child; });
-      currentChild = undefined;
+      let combinedPublishOutput = "";
+      for (const target of plannedTargetResolution.targets) {
+        const publishCommand = releaseScriptCommand(ctx.cwd, "release-workflow.sh", ["--publish", "--target", target.target]);
+        ctx.ui.notify(`Running release-workflow.sh --publish --target ${target.target}...`, "info");
+        appendOutput(`\n==> Publishing target ${target.target} (${target.label})\n`);
+        const publish = await runScriptLive(ctx.cwd, publishCommand, (chunk) => {
+          appendOutput(chunk);
+          parsePublishOutput(liveBuffer);
+        }, (child) => { currentChild = child; });
+        currentChild = undefined;
+        combinedPublishOutput += publish.output;
 
-      if (publish.aborted) {
-        closeReleaseUi();
-        ctx.ui.notify("Release workflow aborted.", "warning");
-        if (ctx.hasUI) ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg("warning", "Release:Aborted"));
-        return;
+        if (publish.aborted) {
+          const logPath = finishLog("aborted-publish", `target=${target.target}`);
+          closeReleaseUi();
+          ctx.ui.notify(`Release workflow aborted.${logPath ? ` Log: ${logPath}` : ""}`, "warning");
+          if (ctx.hasUI) ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg("warning", "Release:Aborted"));
+          return;
+        }
+
+        if (!publish.ok) {
+          const logPath = finishLog("failed-publish", `target=${target.target}`);
+          ctx.ui.notify(`release-workflow publish step failed for ${target.target}.${logPath ? ` Log: ${logPath}` : ""}`, "error");
+          if (ctx.hasUI) ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg("error", "Release:Failed"));
+          closeReleaseUi();
+          evaluateFailureWithLLM(pi, `release-workflow.sh --publish --target ${target.target}`, publish.output);
+          return;
+        }
+
+        parsePublishOutput(publish.output);
       }
 
-      if (!publish.ok) {
-        ctx.ui.notify("release-workflow publish step failed.", "error");
-        if (ctx.hasUI) ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg("error", "Release:Failed"));
-        closeReleaseUi();
-        evaluateFailureWithLLM(pi, "release-workflow.sh --publish --all", publish.output);
-        return;
-      }
+      parsePublishOutput(combinedPublishOutput);
 
-      parsePublishOutput(publish.output);
+      const successfulPublishes = new Set([...firstRelease, ...updated]);
+      const updateCandidates = plannedPublishes.filter((item) => successfulPublishes.has(item.label));
+      const extensionUpdates: string[] = [];
+      const extensionUpdateFailures: Array<{ pkg: string; reason: string }> = [];
+      for (const item of updateCandidates) {
+        ctx.ui.notify(`Updating installed Pi extension ${item.name} after publish...`, "info");
+        const install = await runCommand(ctx.cwd, `pi install npm:${shellQuote(`${item.name}@latest`)}`);
+        if (install.ok) {
+          extensionUpdates.push(item.name);
+          ctx.ui.notify(`Updated installed Pi extension ${item.name}@latest`, "success");
+        } else {
+          extensionUpdateFailures.push({ pkg: item.name, reason: install.output.trim().split(/\r?\n/).slice(-1)[0] || "pi install failed" });
+          ctx.ui.notify(`Failed to update installed Pi extension ${item.name}`, "error");
+        }
+      }
 
       if (ctx.hasUI) {
-        ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg("success", "Release:OK"));
+        ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg(extensionUpdateFailures.length ? "warning" : "success", extensionUpdateFailures.length ? "Release:OK/UpdateWarn" : "Release:OK"));
         ctx.ui.setWidget(RELEASE_STATUS_KEY, undefined);
       }
       closeReleaseUi();
-      ctx.ui.notify(`${formatReleaseSummary()}\nRelease flow completed successfully.`, "success");
+      const extensionUpdateSummary = [
+        "Installed extension updates:",
+        `  - Updated: ${extensionUpdates.length ? extensionUpdates.join(", ") : "none"}`,
+        `  - Failed: ${extensionUpdateFailures.length ? extensionUpdateFailures.map((f) => `${f.pkg}: ${f.reason}`).join(" | ") : "none"}`,
+      ].join("\n");
+      const finalSummary = `${formatReleaseSummary()}\n${extensionUpdateSummary}`;
+      const logPath = finishLog(extensionUpdateFailures.length ? "completed-update-warnings" : "completed", finalSummary);
+      ctx.ui.notify(`${finalSummary}\nRelease flow completed successfully.${logPath ? `\nLog: ${logPath}` : ""}`, extensionUpdateFailures.length ? "warning" : "success");
       })().catch((error: unknown) => {
         activeReleaseRun = undefined;
         if (ctx.hasUI) {
@@ -477,7 +715,8 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
           ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg("error", "Release:Failed"));
         }
         const message = error instanceof Error ? error.message : String(error);
-        ctx.ui.notify(`Release workflow crashed: ${message}`, "error");
+        const logPath = saveReleaseRunLog(runLog, "crashed", message);
+        ctx.ui.notify(`Release workflow crashed: ${message}${logPath ? ` Log: ${logPath}` : ""}`, "error");
       });
     },
   });
