@@ -100,7 +100,7 @@ export default function todoProgress(pi: ExtensionAPI) {
     return {
       systemPrompt:
         event.systemPrompt +
-        "\n\n[TODO PROGRESS POLICY] For multi-step work, create a concise agent-authored checklist with 2-6 short items. Do not copy raw user-prompt lines as todos; rewrite them into clear action items. Emit todo updates as markdown checklist lines exactly like `- [ ] item`, `- [-] item`, or `- [x] item`; do not use raw user prompt lines as todos. Update checklist markers as work changes. Before your final answer, close the todo list by marking every remaining item `[x]` or by explicitly stating no todo list is needed for the completed single-step task.",
+        "\n\n[TODO PROGRESS POLICY] For multi-step work, create a concise agent-authored checklist with 2-6 short items. Do not copy raw user-prompt lines as todos; rewrite them into clear action items. Emit todo updates as markdown checklist lines exactly like `- [ ] item`, `- [-] item`, or `- [x] item`; do not use raw user prompt lines as todos. Update checklist markers as work changes. Todo checklists are live-turn progress only: still emit `[x]` updates when possible, but the extension will close the widget deterministically when the agent turn ends.",
     };
   });
 
@@ -128,6 +128,12 @@ export default function todoProgress(pi: ExtensionAPI) {
         content: event.message.content.map((c: any) => (c.type === "text" ? { ...c, text: stripChecklistLines(c.text) } : c)),
       },
     };
+  });
+
+  pi.on("agent_end", async (_event, ctx) => {
+    // The widget represents live progress for the active turn, not persistent task state.
+    // Do not leave stale partial/todo items visible if the model forgets a final update.
+    clear(ctx, state);
   });
 
   pi.registerShortcut("ctrl+alt+x", {
