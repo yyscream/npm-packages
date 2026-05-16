@@ -1,0 +1,33 @@
+{
+  "name": "@firstpick/pi-extension-hyprland-wiki-local",
+  "version": "0.1.0",
+  "description": "Local Hyprland Wiki search and retrieval tools for Pi backed by a cloned official hyprland-wiki repository.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "extension",
+    "hyprland",
+    "wiki",
+    "wayland"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "files": [
+    "index.ts",
+    "skills",
+    "README.md",
+    "LICENSE"
+  ]
+}
