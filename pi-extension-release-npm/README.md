@@ -30,7 +30,7 @@ No required configuration.
 
 ## Commands
 
-- `/release-npm` — runs `./release-workflow.sh --plan --all`, shows the planned version/publish summary plus exact package targets, prompts for confirmation, then runs `./release-workflow.sh --publish --target <dir>` only for those detected targets. Successful planned publishes are installed via `pi install npm:<name>@latest`; skipped packages are not installed.
+- `/release-npm` — runs `./release-workflow.sh --plan --all`, shows the planned version/publish summary plus exact package targets, prompts for confirmation, then runs `./release-workflow.sh --publish --target <dir>` only for those detected targets. It does not install packages after publishing.
 - `/release-toggle` — toggles active release output between compact and expanded mode.
 - `/release-abort` — aborts the active release subprocess.
 - `/release-npm-logs` — select a saved release run and display it above the editor; press `Esc`/`q` or run `/release-npm-logs close` to close it.

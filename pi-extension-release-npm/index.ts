@@ -678,35 +678,14 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
 
       parsePublishOutput(combinedPublishOutput);
 
-      const successfulPublishes = new Set([...firstRelease, ...updated]);
-      const updateCandidates = plannedPublishes.filter((item) => successfulPublishes.has(item.label));
-      const extensionUpdates: string[] = [];
-      const extensionUpdateFailures: Array<{ pkg: string; reason: string }> = [];
-      for (const item of updateCandidates) {
-        ctx.ui.notify(`Updating installed Pi extension ${item.name} after publish...`, "info");
-        const install = await runCommand(ctx.cwd, `pi install npm:${shellQuote(`${item.name}@latest`)}`);
-        if (install.ok) {
-          extensionUpdates.push(item.name);
-          ctx.ui.notify(`Updated installed Pi extension ${item.name}@latest`, "success");
-        } else {
-          extensionUpdateFailures.push({ pkg: item.name, reason: install.output.trim().split(/\r?\n/).slice(-1)[0] || "pi install failed" });
-          ctx.ui.notify(`Failed to update installed Pi extension ${item.name}`, "error");
-        }
-      }
-
       if (ctx.hasUI) {
-        ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg(extensionUpdateFailures.length ? "warning" : "success", extensionUpdateFailures.length ? "Release:OK/UpdateWarn" : "Release:OK"));
+        ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg("success", "Release:OK"));
         ctx.ui.setWidget(RELEASE_STATUS_KEY, undefined);
       }
       closeReleaseUi();
-      const extensionUpdateSummary = [
-        "Installed extension updates:",
-        `  - Updated: ${extensionUpdates.length ? extensionUpdates.join(", ") : "none"}`,
-        `  - Failed: ${extensionUpdateFailures.length ? extensionUpdateFailures.map((f) => `${f.pkg}: ${f.reason}`).join(" | ") : "none"}`,
-      ].join("\n");
-      const finalSummary = `${formatReleaseSummary()}\n${extensionUpdateSummary}`;
-      const logPath = finishLog(extensionUpdateFailures.length ? "completed-update-warnings" : "completed", finalSummary);
-      ctx.ui.notify(`${finalSummary}\nRelease flow completed successfully.${logPath ? `\nLog: ${logPath}` : ""}`, extensionUpdateFailures.length ? "warning" : "success");
+      const finalSummary = formatReleaseSummary();
+      const logPath = finishLog("completed", finalSummary);
+      ctx.ui.notify(`${finalSummary}\nRelease flow completed successfully.${logPath ? `\nLog: ${logPath}` : ""}`, "success");
       })().catch((error: unknown) => {
         activeReleaseRun = undefined;
         if (ctx.hasUI) {
