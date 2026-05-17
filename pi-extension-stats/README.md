@@ -24,9 +24,14 @@ No required configuration.
 
 ## Commands
 
-- `/stats` — show last 14 days.
-- `/stats <days>` — show last N days.
-- `/stats all` — show all available days.
+- `/stats [days|all]` — show token usage dashboard (default: last 14 days).
+- `/stats tokens` — show current context token breakdown by source/type.
+- `/stats-pi` — show prompt-injection token breakdown.
+- `/stats-last [days|all]` — show non-zero daily usage graph.
+- `/stats-most-expense [days|all]` — show most expensive sessions.
+- `/stats-model-compare [days|all]` — show model token/cost comparison.
+- `/stats-cost-trend [days|all]` — show cost trend and projections.
+- `/stats-cache [days|all]` — show cache efficiency and token mix.
 
 ## Tools
 

@@ -23,16 +23,19 @@ pi install npm:@firstpick/pi-extension-memory-helper
 
 ## Commands
 
-- `/remember <note>` — append a timestamped note to today’s memory file.
-- `/memory-search <query>` — search memory markdown files and return top matches.
-- `/memory-helper-status` — show active timezone and memory directory.
+- `/remember <note>` - append a timestamped note to today's memory file.
+- `/memory-search <query>` - search memory markdown files and return top matches.
+- `/memory-helper-status` - show active timezone and memory directory.
 
 ## Tools
 
 - `remember_note`
   - Input: `note`
-  - Action: append to today’s memory file
+  - Action: append to today's memory file
   - Output: saved file path + timezone info
+- `memory_search`
+  - Input: `query`, optional `limit` (1–50)
+  - Action: search persisted memory markdown files for relevant notes
 
 ## Example view
 

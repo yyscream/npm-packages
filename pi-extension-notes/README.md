@@ -35,7 +35,13 @@ pi install npm:@firstpick/pi-extension-notes
 
 ## Tools
 
-None.
+- `note_list` — list notes with optional rule filtering.
+  - Inputs: `limit` (1–100), optional `includeRulesOnly`
+- `note_read` — read one note by slug/title using fuzzy matching.
+  - Input: `query`
+- `note_update` — update an existing note's content by slug/title.
+  - Inputs: `query`, `content`
+- `note_delete` — delete a note by slug/title. Requires explicit `confirm=true`.
 
 ## Example view
 

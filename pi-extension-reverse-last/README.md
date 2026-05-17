@@ -27,7 +27,7 @@ pi install npm:@firstpick/pi-extension-reverse-last
 
 ## Tools
 
-None.
+- `reverse_last` — undo the most recent write/edit file changes captured in this session.
 
 ## Example view
 

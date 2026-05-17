@@ -5,6 +5,7 @@ Pi extension that adds a generic `news_feed` tool backed by Hacker News, Socket.
 ## Tools
 
 - `news_feed` — fetch entries from `hackernews`, `socket`, `dailydev`, `reddit`, `twitter`, or `all`.
+- `news_sec` — agent-callable security/CVE-focused feed, equivalent to `/news-sec [limit] [redditSort]`. Prioritizes confirmed HIGH/CRITICAL CVEs from NVD, deduped by CVE ID and enriched with CISA KEV, CVE.org, FIRST EPSS, OSV, and GitHub Advisory signals.
   - Hacker News feeds: `top`, `new`, `best`, `ask`, `show`, `job`.
   - Socket source uses `https://socket.dev/api/blog/feed.json`.
   - daily.dev source uses `https://api.daily.dev/public/v1/feeds/popular` with `DAILY_DEV_TOKEN` when configured. Without an API token, it can use opt-in browser session headers (`DAILY_DEV_COOKIE` / optional `DAILY_DEV_AUTHORIZATION`) for authenticated internal GraphQL feeds (`recent` or `upvoted`), otherwise it falls back to the unauthenticated internal GraphQL endpoint.

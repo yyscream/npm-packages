@@ -35,7 +35,9 @@ No required configuration.
 
 ## Tools
 
-None.
+- `start_plan_executor` — start autonomous plan execution for a PLAN.md checklist.
+- `stop_plan_executor` — stop active autonomous plan execution.
+- `plan_executor_status` — inspect current autonomous plan executor state.
 
 ## Example view
 
