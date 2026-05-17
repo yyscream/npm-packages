@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-extension-hyprland-wiki-local",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local Hyprland Wiki search and retrieval tools for Pi backed by a cloned official hyprland-wiki repository.",
   "license": "MIT",
   "keywords": [
