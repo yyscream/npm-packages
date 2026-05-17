@@ -112,6 +112,16 @@ Shared helpers used by multiple Pi extensions.
 - Environment boolean parsing
 - Agent-relative path resolution
 
+## Templates
+
+### `templates/local-wiki-extension`
+Reusable scaffold for local documentation/wiki extensions analogous to the ArchWiki and Hyprland Wiki packages.
+
+- local search/read/sections/extract/related tools
+- setup/status commands
+- packaged skill template for local-docs-first routing
+- cache-backed Markdown/HTML corpus indexing
+
 ## Utility scripts
 
 - `check-publish-readiness.sh` – validates package metadata, extension entries, dry-run publish, registry/version status, and local-vs-npm packed contents

@@ -23,6 +23,9 @@
     "docs:generate": "node scripts/generate-query-expansions-doc.mjs",
     "prepack": "npm run docs:generate"
   },
+  "dependencies": {
+    "@firstpick/pi-utils": "^0.1.3"
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"

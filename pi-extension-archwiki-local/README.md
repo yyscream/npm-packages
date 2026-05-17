@@ -13,7 +13,6 @@ Cache path:
 ```txt
 ~/.cache/pi/archwiki-local/
 ├── pages.json
-├── index.json
 └── metadata.json
 ```
 
@@ -42,7 +41,7 @@ The skill is for Arch Linux and Arch-based distributions, not only vanilla Arch.
 
 ## Notes
 
-The first tool call builds the cache. Cache invalidation uses schema version, page count, docs path, and newest source mtime.
+The first tool call builds the cache through the shared `pi-utils` local-wiki engine. Cache invalidation uses schema version, page count, docs path, and newest source mtime.
 
 If `/usr/share/doc/arch-wiki/html/en/` is missing or empty, ArchWiki-local prompts/tools warn that `arch-wiki-docs` is required and stop instead of falling back silently.
 
