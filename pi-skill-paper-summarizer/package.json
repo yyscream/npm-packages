@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-skill-paper-summarizer",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Agents should invoke this skill for academic or technical papers, arXiv/PubMed/IEEE/ACM links, PDFs, methodology review, limitations, practical implications, or extracting findings for engineering decisions.",
   "license": "MIT",
   "keywords": [
