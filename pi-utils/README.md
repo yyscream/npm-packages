@@ -19,7 +19,12 @@ Shared helper utilities used by `@firstpick/pi-extension-*` packages.
 - `slugify(input, options?)`
 - `formatTokens(count)`
 - `estimateTokensFromCharCount(charCount)`
+- `estimateTokensFromText(text)`
 - `estimatePromptInjectionTokens(systemPrompt)`
+- `estimateInitialPromptInput(options)`
+- `collectInitialPromptCalibration(sessionDir, maxSamples?)`
+- `buildInitialPromptCalibrationRecord(args)`
+- `appendInitialPromptCalibrationRecord(appendEntry, record)`
 - `delay(ms)`
 - `createExtensionWorkingIndicator(ctx, initialMessage, options?)`
 - `withExtensionWorkingIndicator(ctx, initialMessage, run, options?)`

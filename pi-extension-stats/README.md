@@ -26,7 +26,7 @@ No required configuration.
 
 - `/stats [days|all]` — show token usage dashboard (default: last 14 days).
 - `/stats tokens` — show current context token breakdown by source/type.
-- `/stats-pi` — show estimated initial prompt input token breakdown. It counts prompt text with a `chars / 4` heuristic, then applies a `1.5×` multiplier to approximate structured tools/request overhead.
+- `/stats-pi` — show estimated initial prompt input token breakdown. It counts Pi's system prompt text, active provider-level tool schemas, framing overhead, and optional historical calibration.
 - `/stats-last [days|all]` — show non-zero daily usage graph.
 - `/stats-most-expense [days|all]` — show most expensive sessions.
 - `/stats-model-compare [days|all]` — show model token/cost comparison.
@@ -35,17 +35,19 @@ No required configuration.
 
 ## Prompt input estimate
 
-`/stats-pi` and the `PI: X tok` value in `/stats` estimate the full initial model input, not just raw prompt text.
+`/stats-pi` and the `PI: ~X tok` value in `/stats` estimate the full initial model input, not just raw prompt text. `/stats-pi` can be run before any LLM prompt in a fresh session.
 
 The calculation is intentionally provider-agnostic:
 
 ```text
-promptTextTokens = systemPrompt.length / 4
-estimatedInitialInput = promptTextTokens × 1.5
-structuredOverhead = estimatedInitialInput - promptTextTokens
+promptTextTokens = weighted text estimate of ctx.getSystemPrompt()
+toolSchemaTokens = weighted text estimate of active tool definitions JSON
+framingTokens = conservative message/request framing allowance
+baseEstimate = promptTextTokens + toolSchemaTokens + framingTokens
+estimatedInitialInput = baseEstimate × historicalCalibrationMultiplier
 ```
 
-The extra `structuredOverhead` row approximates tokens added by structured tool definitions, request framing, and provider message overhead. It is a calibrated estimate for dashboard use; provider-reported `usage.input` in Pi session JSONL remains the authoritative post-call value.
+The historical multiplier is learned opportunistically from future sessions by comparing the pre-call estimate with the provider-reported first assistant `usage.input + usage.cacheRead + usage.cacheWrite` after subtracting the first user prompt estimate. Without samples, `/stats-pi` reports an uncalibrated estimate and a conservative range. Provider-reported usage in Pi session JSONL remains the authoritative post-call value.
 
 ## Tools
 

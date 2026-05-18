@@ -2,7 +2,18 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { buildSessionContext, formatSkillsForPrompt } from "@earendil-works/pi-coding-agent";
 import type { BuildSystemPromptOptions, ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { estimatePromptInjectionTokens, estimateTokensFromCharCount, formatTokens } from "@firstpick/pi-utils";
+import {
+  appendInitialPromptCalibrationRecord,
+  buildInitialPromptCalibrationRecord,
+  collectInitialPromptCalibration,
+  estimateInitialPromptInput,
+  estimatePromptInjectionTokens,
+  estimateTokensFromCharCount,
+  formatTokens,
+  type InitialPromptCalibration,
+  type InitialPromptInputEstimate,
+  type InitialPromptToolInfo,
+} from "@firstpick/pi-utils";
 
 type DayUsage = {
   input: number;
@@ -31,6 +42,12 @@ type UsageRecord = {
 
 type Totals = DayUsage;
 
+type PendingInitialPromptMeasurement = {
+  estimate: InitialPromptInputEstimate;
+  firstUserTokens: number;
+  skipReason?: string;
+};
+
 type PromptInjectionSource = {
   label: string;
   chars: number;
@@ -44,7 +61,7 @@ type TokenBreakdownSource = {
 const DEFAULT_DAYS = 14;
 const MAX_BAR_WIDTH = 24;
 const COST_BAR_WIDTH = 10;
-const INITIAL_INPUT_OVERHEAD_MULTIPLIER = 1.5;
+const FIRST_USER_MESSAGE_FRAMING_TOKENS = 16;
 
 function addPromptSource(sources: PromptInjectionSource[], label: string, content: string | undefined): number {
   if (!content) return 0;
@@ -173,28 +190,65 @@ function buildPromptInjectionSources(systemPrompt: string, options: BuildSystemP
   return sources;
 }
 
-function formatPromptInjectionLines(systemPrompt: string, options: BuildSystemPromptOptions | null): string[] {
+function formatTokenCell(tokens: number): string {
+  return tokens < 0 ? `-${formatTokens(Math.abs(tokens))}` : formatTokens(tokens);
+}
+
+function formatCalibrationSummary(estimate: InitialPromptInputEstimate): string {
+  if (estimate.calibrationSamples <= 0) return "uncalibrated";
+  const sampleLabel = estimate.calibrationSamples === 1 ? "sample" : "samples";
+  return `learned scale ×${estimate.calibrationMultiplier.toFixed(2)} from ${estimate.calibrationSamples} ${sampleLabel}`;
+}
+
+function distributeCalibratedTokens<T extends { tokens: number }>(sources: T[], calibratedTotal: number): T[] {
+  const uncalibratedTotal = sources.reduce((sum, source) => sum + source.tokens, 0);
+  if (uncalibratedTotal <= 0 || calibratedTotal <= 0) return sources.map((source) => ({ ...source, tokens: 0 }));
+
+  const exact = sources.map((source, index) => {
+    const scaled = (source.tokens / uncalibratedTotal) * calibratedTotal;
+    const tokens = Math.floor(scaled);
+    return { index, tokens, remainder: scaled - tokens };
+  });
+  let remaining = calibratedTotal - exact.reduce((sum, source) => sum + source.tokens, 0);
+  for (const source of [...exact].sort((a, b) => b.remainder - a.remainder || a.index - b.index)) {
+    if (remaining <= 0) break;
+    source.tokens += 1;
+    remaining -= 1;
+  }
+
+  return sources.map((source, index) => ({ ...source, tokens: exact[index]?.tokens ?? 0 }));
+}
+
+function formatPromptInjectionLines(systemPrompt: string, options: BuildSystemPromptOptions | null, estimate: InitialPromptInputEstimate): string[] {
   const promptSources = buildPromptInjectionSources(systemPrompt, options)
-    .map((source) => ({ ...source, tokens: estimateTokensFromCharCount(source.chars) }))
+    .map((source) => ({
+      ...source,
+      tokens: systemPrompt.length > 0 ? Math.round((source.chars / systemPrompt.length) * estimate.promptText) : estimateTokensFromCharCount(source.chars),
+    }))
     .sort((a, b) => b.tokens - a.tokens || b.chars - a.chars);
-  const promptTextTokens = estimatePromptInjectionTokens(systemPrompt);
-  const estimatedInitialInputTokens = Math.round(promptTextTokens * INITIAL_INPUT_OVERHEAD_MULTIPLIER);
-  const estimatedStructuredOverheadTokens = Math.max(0, estimatedInitialInputTokens - promptTextTokens);
-  const sources = [
-    { label: "Estimated structured tools / request overhead", chars: 0, tokens: estimatedStructuredOverheadTokens },
+  const uncalibratedSources = [
+    estimate.toolSchemas > 0
+      ? { label: `Active tool schemas (${estimate.toolCount})`, chars: 0, tokens: estimate.toolSchemas }
+      : null,
+    estimate.framing > 0 ? { label: "Provider/request framing", chars: 0, tokens: estimate.framing } : null,
     ...promptSources,
-  ].filter((source) => source.tokens > 0);
+  ].filter((source): source is { label: string; chars: number; tokens: number } => !!source && source.tokens !== 0);
+  const sources = distributeCalibratedTokens(uncalibratedSources, estimate.total)
+    .filter((source) => source.tokens !== 0)
+    .sort((a, b) => Math.abs(b.tokens) - Math.abs(a.tokens) || b.chars - a.chars);
   const labelWidth = Math.max("Source".length, ...sources.map((source) => source.label.length));
-  const tokenWidth = Math.max("Tokens".length, ...sources.map((source) => formatTokens(source.tokens).length));
+  const tokenWidth = Math.max("Tokens".length, ...sources.map((source) => formatTokenCell(source.tokens).length));
   const percentWidth = "%".length;
   const separator = `├${"─".repeat(labelWidth + 2)}┼${"─".repeat(tokenWidth + 2)}┼${"─".repeat(percentWidth + 6)}┤`;
   const rows = sources.map((source) => {
-    const percent = estimatedInitialInputTokens > 0 ? `${((source.tokens / estimatedInitialInputTokens) * 100).toFixed(1)}%` : "0.0%";
-    return `│ ${source.label.padEnd(labelWidth)} │ ${formatTokens(source.tokens).padStart(tokenWidth)} │ ${percent.padStart(percentWidth + 4)} │`;
+    const percent = estimate.total > 0 ? `${((source.tokens / estimate.total) * 100).toFixed(1)}%` : "0.0%";
+    return `│ ${source.label.padEnd(labelWidth)} │ ${formatTokenCell(source.tokens).padStart(tokenWidth)} │ ${percent.padStart(percentWidth + 4)} │`;
   });
+  const range = estimate.low !== estimate.high ? ` · range ${formatTokens(estimate.low)}–${formatTokens(estimate.high)}` : "";
 
   return [
-    `Prompt injection: PI: ${formatTokens(estimatedInitialInputTokens)} tok estimated initial input (prompt text ${formatTokens(promptTextTokens)} × ${INITIAL_INPUT_OVERHEAD_MULTIPLIER})`,
+    `Prompt injection: PI: ~${formatTokens(estimate.total)} tok initial input (${estimate.confidence}${range})`,
+    `Unscaled basis: prompt text ${formatTokens(estimate.promptText)} + tool schemas ${formatTokens(estimate.toolSchemas)} + framing ${formatTokens(estimate.framing)} · displayed rows are proportionally scaled (${formatCalibrationSummary(estimate)})`,
     `┌${"─".repeat(labelWidth + 2)}┬${"─".repeat(tokenWidth + 2)}┬${"─".repeat(percentWidth + 6)}┐`,
     `│ ${"Source".padEnd(labelWidth)} │ ${"Tokens".padStart(tokenWidth)} │ ${"%".padStart(percentWidth + 4)} │`,
     separator,
@@ -613,9 +667,91 @@ function buildCacheEfficiencyLines(totals: Totals): string[] {
 
 export default function statsExtension(pi: ExtensionAPI) {
   let latestSystemPromptOptions: BuildSystemPromptOptions | null = null;
+  let pendingInitialPromptMeasurement: PendingInitialPromptMeasurement | null = null;
 
-  pi.on("before_agent_start", async (event) => {
+  const getToolEstimateInputs = (): { activeTools: string[]; allTools: InitialPromptToolInfo[] } => {
+    let activeTools: string[] = [];
+    let allTools: InitialPromptToolInfo[] = [];
+
+    try {
+      activeTools = pi.getActiveTools();
+    } catch {
+      activeTools = [];
+    }
+
+    try {
+      allTools = pi.getAllTools().map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+      }));
+    } catch {
+      allTools = [];
+    }
+
+    return { activeTools, allTools };
+  };
+
+  const getPromptCalibration = (ctx: ExtensionCommandContext): InitialPromptCalibration | null => {
+    return collectInitialPromptCalibration(ctx.sessionManager.getSessionDir());
+  };
+
+  const estimateInitialPromptForContext = (systemPrompt: string, calibration?: InitialPromptCalibration | null): InitialPromptInputEstimate => {
+    const { activeTools, allTools } = getToolEstimateInputs();
+    return estimateInitialPromptInput({ systemPrompt, activeTools, allTools, calibration });
+  };
+
+  const branchHasAssistantUsage = (ctx: { sessionManager: { getBranch(): unknown[] } }): boolean => {
+    try {
+      return ctx.sessionManager.getBranch().some((entry) => {
+        const record = (entry && typeof entry === "object" ? entry : {}) as Record<string, any>;
+        return record.type === "message" && record.message?.role === "assistant" && !!record.message?.usage;
+      });
+    } catch {
+      return true;
+    }
+  };
+
+  pi.on("session_start", async () => {
+    pendingInitialPromptMeasurement = null;
+  });
+
+  pi.on("before_agent_start", async (event, ctx) => {
     latestSystemPromptOptions = event.systemPromptOptions;
+
+    if (!branchHasAssistantUsage(ctx)) {
+      pendingInitialPromptMeasurement = {
+        estimate: estimateInitialPromptForContext(event.systemPrompt, null),
+        firstUserTokens: estimatePromptInjectionTokens(event.prompt) + FIRST_USER_MESSAGE_FRAMING_TOKENS,
+        skipReason: event.images && event.images.length > 0 ? "image prompt" : undefined,
+      };
+    }
+  });
+
+  pi.on("agent_start", async (_event, ctx) => {
+    if (!pendingInitialPromptMeasurement || pendingInitialPromptMeasurement.skipReason) return;
+    pendingInitialPromptMeasurement.estimate = estimateInitialPromptForContext(ctx.getSystemPrompt(), null);
+  });
+
+  pi.on("message_end", async (event) => {
+    if (!pendingInitialPromptMeasurement) return;
+    const pending = pendingInitialPromptMeasurement;
+    const message = (event.message && typeof event.message === "object" ? event.message : {}) as Record<string, any>;
+    if (message.role !== "assistant" || !message.usage) return;
+    pendingInitialPromptMeasurement = null;
+    if (pending.skipReason) return;
+
+    const usage = message.usage as Record<string, unknown>;
+    const actualInitialInputTokens =
+      (Number(usage.input ?? 0) || 0) + (Number(usage.cacheRead ?? 0) || 0) + (Number(usage.cacheWrite ?? 0) || 0);
+    const record = buildInitialPromptCalibrationRecord({
+      estimate: pending.estimate,
+      actualInitialInputTokens,
+      firstUserTokens: pending.firstUserTokens,
+      provider: String(message.provider ?? "unknown"),
+      model: String(message.responseModel ?? message.model ?? "unknown"),
+    });
+    if (record) appendInitialPromptCalibrationRecord(pi.appendEntry, record);
   });
 
   const showCurrentContextTokens = (ctx: ExtensionCommandContext) => {
@@ -640,8 +776,9 @@ export default function statsExtension(pi: ExtensionAPI) {
     const byDay = aggregateUsageByDay(records);
     const dayKeys = getScopeDayKeys(byDay, parsedArgs);
     const totals = sumUsage(byDay, dayKeys);
+    const calibration = collectInitialPromptCalibration(sessionDir);
     const scopeLabel = parsedArgs.mode === "all" ? "all days" : `last ${parsedArgs.days} days`;
-    return { files, records, byDay, dayKeys, totals, scopeLabel };
+    return { files, records, byDay, dayKeys, totals, calibration, scopeLabel };
   };
 
   const parseStatsCommandArgs = (args: string, ctx: ExtensionCommandContext) => {
@@ -709,14 +846,16 @@ export default function statsExtension(pi: ExtensionAPI) {
   );
 
   registerScopedStatsCommand("stats-last", "Show non-zero daily usage graph. Usage: /stats-last [days|all]", (data, ctx) => {
-    const promptInjectionTokens = estimatePromptInjectionTokens(ctx.getSystemPrompt());
-    return [`📊 Token stats (${data.scopeLabel}, ${data.files.length} sessions) · PI: ${formatTokens(promptInjectionTokens)} tok`, "", ...buildGraphLines(data.byDay, data.dayKeys, true)];
+    const promptEstimate = estimateInitialPromptForContext(ctx.getSystemPrompt(), data.calibration);
+    return [`📊 Token stats (${data.scopeLabel}, ${data.files.length} sessions) · PI: ~${formatTokens(promptEstimate.total)} tok`, "", ...buildGraphLines(data.byDay, data.dayKeys, true)];
   });
 
   pi.registerCommand("stats-pi", {
-    description: "Show prompt-injection token breakdown.",
+    description: "Show estimated initial prompt input token breakdown.",
     handler: async (_args, ctx) => {
-      ctx.ui.notify(formatPromptInjectionLines(ctx.getSystemPrompt(), latestSystemPromptOptions).join("\n"), "info");
+      const systemPrompt = ctx.getSystemPrompt();
+      const promptEstimate = estimateInitialPromptForContext(systemPrompt, getPromptCalibration(ctx));
+      ctx.ui.notify(formatPromptInjectionLines(systemPrompt, latestSystemPromptOptions, promptEstimate).join("\n"), "info");
     },
   });
 
@@ -733,9 +872,9 @@ export default function statsExtension(pi: ExtensionAPI) {
       if (!data) return;
 
       const systemPrompt = ctx.getSystemPrompt();
-      const promptInjectionTokens = estimatePromptInjectionTokens(systemPrompt);
+      const promptEstimate = estimateInitialPromptForContext(systemPrompt, data.calibration);
       const graphLines = buildGraphLines(data.byDay, data.dayKeys, true);
-      const promptInjectionLines = formatPromptInjectionLines(systemPrompt, latestSystemPromptOptions);
+      const promptInjectionLines = formatPromptInjectionLines(systemPrompt, latestSystemPromptOptions, promptEstimate);
       const modelLines = formatModelComparisonLines(data.records, data.dayKeys, data.totals).slice(0, 7);
       const sessionLines = formatExpensiveSessionLines(data.records, data.dayKeys).slice(0, 7);
       const commandLines = [
@@ -744,7 +883,7 @@ export default function statsExtension(pi: ExtensionAPI) {
       ];
 
       ctx.ui.notify(
-        `📊 Token stats (${data.scopeLabel}, ${data.files.length} sessions) · PI: ${formatTokens(promptInjectionTokens)} tok\n\n${graphLines.join("\n")}\n\n${promptInjectionLines.join("\n")}\n\n${buildCostTrendLines(data.byDay, data.dayKeys).join("\n")}\n${buildCacheEfficiencyLines(data.totals).join("\n")}\n\n${modelLines.join("\n")}\n\n${sessionLines.join("\n")}\n\n${commandLines.join("\n")}`,
+        `📊 Token stats (${data.scopeLabel}, ${data.files.length} sessions) · PI: ~${formatTokens(promptEstimate.total)} tok\n\n${graphLines.join("\n")}\n\n${promptInjectionLines.join("\n")}\n\n${buildCostTrendLines(data.byDay, data.dayKeys).join("\n")}\n${buildCacheEfficiencyLines(data.totals).join("\n")}\n\n${modelLines.join("\n")}\n\n${sessionLines.join("\n")}\n\n${commandLines.join("\n")}`,
         "info",
       );
     },

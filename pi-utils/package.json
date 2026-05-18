@@ -9,6 +9,7 @@
     "./env": "./src/env.ts",
     "./text": "./src/text.ts",
     "./tokens": "./src/tokens.ts",
+    "./prompt-calibration": "./src/prompt-calibration.ts",
     "./async": "./src/async.ts",
     "./ui": "./src/ui/working-indicator.ts",
     "./local-wiki": "./src/local-wiki.ts"

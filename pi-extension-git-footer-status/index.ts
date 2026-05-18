@@ -3,7 +3,13 @@ import { homedir } from "node:os";
 import { isAbsolute, resolve, sep } from "node:path";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { formatTokens, estimatePromptInjectionTokens, estimateTokensFromCharCount } from "@firstpick/pi-utils";
+import {
+  collectInitialPromptCalibration,
+  estimateInitialPromptInput,
+  estimateTokensFromCharCount,
+  formatTokens,
+  type InitialPromptToolInfo,
+} from "@firstpick/pi-utils";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 type GitSnapshot = {
@@ -483,7 +489,28 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
             latestTokenSpeed = historicalTokenSpeed;
           }
 
-          const promptInjectionTokens = estimatePromptInjectionTokens(ctx.getSystemPrompt());
+          let activeTools: string[] = [];
+          let allTools: InitialPromptToolInfo[] = [];
+          try {
+            activeTools = pi.getActiveTools();
+          } catch {
+            activeTools = [];
+          }
+          try {
+            allTools = pi.getAllTools().map((tool) => ({
+              name: tool.name,
+              description: tool.description,
+              parameters: tool.parameters,
+            }));
+          } catch {
+            allTools = [];
+          }
+          const promptInjectionTokens = estimateInitialPromptInput({
+            systemPrompt: ctx.getSystemPrompt(),
+            activeTools,
+            allTools,
+            calibration: collectInitialPromptCalibration(ctx.sessionManager.getSessionDir()),
+          }).total;
 
           const contextUsage = ctx.getContextUsage();
           const contextWindow = contextUsage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
