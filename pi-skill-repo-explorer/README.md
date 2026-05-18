@@ -18,6 +18,33 @@ pi install npm:@firstpick/pi-skill-repo-explorer
 
 No required configuration.
 
+## Expected usage structure
+
+The skill is a workflow plus bundled helper scripts. It expects the agent to resolve paths relative to the installed skill directory before running helpers.
+
+Bundled layout:
+
+```text
+skills/repo-explorer/
+  SKILL.md
+  scripts/
+    build_repo_index.py
+    extract_explorer_handoff.py
+    refresh_repo_index.py
+    validate_handoff.py
+```
+
+When following the skill manually, run helper scripts from `skills/repo-explorer/` or pass absolute paths, for example:
+
+```bash
+cd /path/to/installed/package/skills/repo-explorer
+python3 ./scripts/refresh_repo_index.py --repo /path/to/repo --data-dir data/
+python3 ./scripts/build_repo_index.py --repo /path/to/repo --output data/repo-index.json
+python3 ./scripts/validate_handoff.py --input /dev/stdin
+```
+
+The target repository can be any readable local directory. The generated `data/` index directory is local scratch state and does not need to exist before first use.
+
 ## Commands
 
 None.

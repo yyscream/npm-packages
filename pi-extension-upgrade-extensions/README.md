@@ -17,7 +17,37 @@ pi install npm:@firstpick/pi-extension-upgrade-extensions
 
 ## Configuration
 
-No required configuration.
+No required configuration inside the extension, but it only updates packages that Pi already knows about.
+
+Expected Pi setup:
+
+```json
+{
+  "packages": [
+    "npm:@firstpick/pi-extension-stats",
+    "npm:@firstpick/pi-extension-brave-search"
+  ]
+}
+```
+
+The extension reads `packages` from Pi's agent settings file, normally:
+
+```text
+~/.pi/agent/settings.json
+```
+
+Only entries starting with `npm:` are considered. Local file paths, symlinked development packages, and non-npm package entries are ignored. Each npm entry is queried with `npm view <package> version --json`, then updated by running:
+
+```bash
+pi install npm:<package>@latest
+```
+
+So the user needs:
+
+- `npm` available on `PATH`
+- network access to the npm registry
+- package entries present in Pi settings
+- permission for `pi install` to update the selected packages
 
 ## Commands
 

@@ -1,0 +1,56 @@
+{
+  "policy_version": "research-orchestration-scout-1.0.0",
+  "query_plan": {
+    "max_queries": {
+      "quick": 4,
+      "standard": 8,
+      "deep": 12
+    },
+    "forbidden_substrings": [],
+    "templates": [
+      {
+        "template": "{topic} official documentation",
+        "rationale": "Prefer primary/official sources first"
+      },
+      {
+        "template": "{topic} technical overview",
+        "rationale": "Establish baseline terminology and scope"
+      },
+      {
+        "template": "{topic} limitations risks tradeoffs",
+        "rationale": "Find caveats and contradictory evidence"
+      },
+      {
+        "template": "{topic} {facet}",
+        "rationale": "Investigate a specific facet",
+        "requires_facet": true
+      }
+    ]
+  },
+  "sources": {
+    "tracking_query_params": [
+      "utm_source",
+      "utm_medium",
+      "utm_campaign",
+      "utm_term",
+      "utm_content",
+      "fbclid",
+      "gclid"
+    ],
+    "strip_all_query": false,
+    "official_host_suffixes": [
+      ".gov",
+      ".edu"
+    ]
+  },
+  "evidence_bundle": {
+    "schema_version": "1.0.0",
+    "json_sort_keys": true
+  },
+  "citation_audit": {
+    "exempt_statuses": [
+      "unsupported",
+      "inferential"
+    ]
+  }
+}

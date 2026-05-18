@@ -28,16 +28,16 @@ Prefer **tech-deep-dive**, **competitor-analysis**, or **paper-summarizer** when
 
 ## Scout scripts → pipeline step
 
-Run from repo root (or adjust paths). Policy defaults: `workspace-researcher/scripts/policy.json`.
+Run from the installed skill directory, or adjust paths to absolute locations. Policy defaults to `./scripts/policy.json` next to the bundled scripts.
 
 | Step | Script | When |
 |------|--------|------|
-| After depth + topic fixed | `../../scripts/scout_query_plan.py` | Emit ordered queries (`Q001`…) and `plan_hash` for the research trace |
-| After URL collection | `../../scripts/scout_normalize_sources.py` | Dedupe and sort sources before the final table |
-| Long / multi-session runs | `../../scripts/scout_evidence_bundle.py` | Freeze fetch records (JSONL → `evidence_bundle.json` + `content_sha256`) |
-| Before high-stakes delivery | `../../scripts/scout_citation_audit.py` | Gate: every `key_findings[]` row has `source_ids` or `unsupported` / `inferential` |
+| After depth + topic fixed | `./scripts/scout_query_plan.py` | Emit ordered queries (`Q001`…) and `plan_hash` for the research trace |
+| After URL collection | `./scripts/scout_normalize_sources.py` | Dedupe and sort sources before the final table |
+| Long / multi-session runs | `./scripts/scout_evidence_bundle.py` | Freeze fetch records (JSONL → `evidence_bundle.json` + `content_sha256`) |
+| Before high-stakes delivery | `./scripts/scout_citation_audit.py` | Gate: every `key_findings[]` row has `source_ids` or `unsupported` / `inferential` |
 
-Details and exit codes: `workspace-researcher/scripts/README.md`.
+Details and exit codes: `./scripts/README.md`.
 
 ## Handoff schema (optional, for subagents)
 

@@ -28,6 +28,64 @@ pi install npm:@firstpick/pi-extension-release-npm
 
 No required configuration.
 
+## Expected workspace structure
+
+This extension is intended for a package workspace, not a single arbitrary npm package. Run `/release-npm` from the workspace root.
+
+The workspace root must contain the release helper scripts used by the command:
+
+```text
+npm-packages/
+  release-workflow.sh
+  bump-package-versions.sh
+  check-publish-readiness.sh
+  publish-packages.sh
+
+  pi-extension-example/
+    package.json
+    README.md
+    LICENSE
+    index.ts
+
+  pi-skill-example/
+    package.json
+    README.md
+    LICENSE
+    ...
+```
+
+Package discovery is shallow: only direct child directories of the current working directory that contain a `package.json` are considered. Nested packages and npm/yarn/pnpm workspace metadata are not scanned.
+
+Each package should include:
+
+```json
+{
+  "name": "@scope/package-name",
+  "version": "0.1.0",
+  "license": "MIT",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ]
+}
+```
+
+Readiness checks require or verify:
+
+- valid `package.json`
+- `name`, `version`, and `license`
+- `README.md`
+- `pi.extensions` with entries pointing to existing files or matching globs
+- `keywords` containing `pi-package` is recommended for discoverability
+- `LICENSE` is recommended
+
+`/release-npm` runs `./release-workflow.sh --plan --all` first, then after confirmation publishes only the package directories detected in that plan with `./release-workflow.sh --publish --target <dir>`.
+
 ## Commands
 
 - `/release-npm` — runs `./release-workflow.sh --plan --all`, shows the planned version/publish summary plus exact package targets, prompts for confirmation, then runs `./release-workflow.sh --publish --target <dir>` only for those detected targets. It does not install packages after publishing.
