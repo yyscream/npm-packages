@@ -18,6 +18,8 @@ Ensures local npm-packages Pi resources are live-linked for development:
 - every pi-extension-* package gets a matching
   ~/.pi/agent/extensions/<name>.ts symlink to its canonical
   npm-packages/pi-extension-<name>/index.ts file
+- pi-utils is linked only as a node_modules dependency, not as a loadable
+  extension, because it is a shared utility package
 - every packaged skill under pi-extension-*/skills/<skill-name>/SKILL.md gets a
   ~/.pi/agent/skills/<skill-name> symlink to that package skill directory
 
@@ -228,7 +230,7 @@ sync_extension_symlinks() {
   local count_total=0 count_ok=0 count_linked=0 count_relinked=0 count_renamed=0 count_skipped=0
 
   shopt -s nullglob
-  for pkg_dir in "$ROOT_DIR"/pi-extension-* "$ROOT_DIR"/pi-utils; do
+  for pkg_dir in "$ROOT_DIR"/pi-extension-*; do
     [[ -d "$pkg_dir" ]] || continue
     [[ -f "$pkg_dir/package.json" ]] || continue
 
