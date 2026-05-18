@@ -1,0 +1,12 @@
+[
+  {
+    "claim_text": "Caffeine (100-300mg) improves sustained attention and reaction time",
+    "evidence_required": "RCTs or meta-analyses on caffeine and cognitive performance",
+    "confidence_target": 0.7
+  },
+  {
+    "claim_text": "Caffeine has no effect on long-term memory formation",
+    "evidence_required": "Studies comparing memory recall in caffeine vs placebo groups",
+    "confidence_target": 0.7
+  }
+]

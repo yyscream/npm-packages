@@ -263,6 +263,32 @@ run_publish_dry_run() {
   return 1
 }
 
+find_user_specific_values() {
+  local pkg_dir="$1"
+  local patterns=()
+
+  [[ -n "${HOME:-}" ]] && patterns+=("$HOME")
+  [[ -n "${USER:-}" ]] && patterns+=("/home/$USER")
+
+  local tz="${TZ:-}"
+  if [[ -z "$tz" ]] && command -v timedatectl >/dev/null 2>&1; then
+    tz="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
+  fi
+  [[ -n "$tz" ]] && patterns+=("$tz")
+
+  local tmpfile
+  tmpfile="$(mktemp)"
+  trap 'rm -f "$tmpfile"' RETURN
+
+  local pattern
+  for pattern in "${patterns[@]}"; do
+    [[ -z "$pattern" ]] && continue
+    grep -RIlF --exclude-dir='.git' --exclude-dir='node_modules' --exclude-dir='dist' --exclude-dir='build' --exclude='package-lock.json' -- "$pattern" "$pkg_dir" >>"$tmpfile" 2>/dev/null || true
+  done
+
+  sort -u "$tmpfile" | sed "s#^$pkg_dir/##"
+}
+
 package_has_publishable_changes() {
   local pkg_dir="$1"
   local pkg_name="$2"
@@ -439,44 +465,48 @@ for pkg_dir in $(gather_packages); do
     print_check "$(warn)" "LICENSE missing"
   fi
 
-  extensions_json="$(json_get "$pkg_json" 'p.pi && Array.isArray(p.pi.extensions) ? p.pi.extensions : null' || true)"
-  if [[ -z "$extensions_json" ]]; then
-    print_check "$(fail)" "pi.extensions missing or empty"
+  resource_count="$(node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));let n=0;for(const k of ["extensions","skills","prompts","themes"]){if(Array.isArray(p.pi?.[k])) n+=p.pi[k].length}console.log(n)' "$pkg_json" 2>/dev/null || echo 0)"
+  if [[ "$resource_count" -eq 0 ]]; then
+    print_check "$(fail)" "pi manifest has no extensions, skills, prompts, or themes"
     pkg_fail=1
-    pkg_reasons+=("pi.extensions missing or empty")
+    pkg_reasons+=("pi manifest has no extensions, skills, prompts, or themes")
   else
-    print_check "$(ok)" "pi.extensions configured: $extensions_json"
+    print_check "$(ok)" "pi manifest resource entries: $resource_count"
 
-    while IFS= read -r ext_path; do
-      [[ -z "$ext_path" ]] && continue
-      ext_clean="${ext_path#./}"
+    while IFS='|' read -r resource_type resource_path; do
+      [[ -z "$resource_path" ]] && continue
+      resource_clean="${resource_path#./}"
 
-      if [[ "$ext_clean" == *"*"* || "$ext_clean" == *"?"* || "$ext_clean" == *"["* ]]; then
+      if [[ "$resource_clean" == *"*"* || "$resource_clean" == *"?"* || "$resource_clean" == *"["* ]]; then
         shopt -s nullglob
-        matches=("$pkg_dir"/$ext_clean)
+        matches=("$pkg_dir"/$resource_clean)
         shopt -u nullglob
         if [[ ${#matches[@]} -gt 0 ]]; then
-          print_check "$(ok)" "extension glob matches ${#matches[@]} file(s): $ext_path"
+          print_check "$(ok)" "$resource_type glob matches ${#matches[@]} path(s): $resource_path"
         else
-          print_check "$(fail)" "extension glob has no matches: $ext_path"
+          print_check "$(fail)" "$resource_type glob has no matches: $resource_path"
           pkg_fail=1
-          pkg_reasons+=("extension glob has no matches: $ext_path")
+          pkg_reasons+=("$resource_type glob has no matches: $resource_path")
         fi
       else
-        if [[ -f "$pkg_dir/$ext_clean" ]]; then
-          print_check "$(ok)" "extension entry exists: $ext_path"
+        if [[ -e "$pkg_dir/$resource_clean" ]]; then
+          print_check "$(ok)" "$resource_type entry exists: $resource_path"
         else
-          print_check "$(fail)" "extension entry missing: $ext_path"
+          print_check "$(fail)" "$resource_type entry missing: $resource_path"
           pkg_fail=1
-          pkg_reasons+=("extension entry missing: $ext_path")
+          pkg_reasons+=("$resource_type entry missing: $resource_path")
         fi
       fi
-    done < <(node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));for(const e of (p.pi?.extensions||[])) console.log(e);" "$pkg_json")
+    done < <(node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));for(const k of ["extensions","skills","prompts","themes"]){for(const e of (p.pi?.[k]||[])) console.log(`${k}|${e}`)}' "$pkg_json")
   fi
 
-  if [[ $CHECK_HARDCODE -eq 1 && -f "$pkg_dir/index.ts" ]]; then
-    if grep -qE '(^|[^A-Za-z0-9_])(/home/firstpick|Europe/Zurich|/usr/sbin/fish)($|[^A-Za-z0-9_])' "$pkg_dir/index.ts"; then
-      print_check "$(warn)" "index.ts contains potentially user-specific hardcoded values"
+  if [[ $CHECK_HARDCODE -eq 1 ]]; then
+    hardcode_hits="$(find_user_specific_values "$pkg_dir" || true)"
+    if [[ -n "$hardcode_hits" ]]; then
+      print_check "$(warn)" "package contains potentially user-specific hardcoded values"
+      while IFS= read -r hit; do
+        [[ -n "$hit" ]] && print_check "$(warn)" "  check file: $hit"
+      done <<<"$hardcode_hits"
     else
       print_check "$(ok)" "no obvious user-specific hardcoded paths/timezone"
     fi

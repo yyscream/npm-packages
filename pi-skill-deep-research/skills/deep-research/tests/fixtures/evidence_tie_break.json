@@ -1,0 +1,40 @@
+[
+  {
+    "claim_id": "C001",
+    "sources": [
+      {
+        "title": "Study Alpha on caffeine",
+        "authors": "Alpha A",
+        "year": 2020,
+        "tier": "peer_reviewed",
+        "url": "https://pubmed.ncbi.nlm.nih.gov/20000002",
+        "citation": "Alpha A, \"Study Alpha on caffeine\", Journal A, 2020. https://pubmed.ncbi.nlm.nih.gov/20000002",
+        "supports_claim": true,
+        "relevance_note": "Same tier and year as Beta — URL sort decides order",
+        "retrieved_at": "2026-02-26T10:00:00+00:00"
+      },
+      {
+        "title": "Study Beta on caffeine",
+        "authors": "Beta B",
+        "year": 2020,
+        "tier": "peer_reviewed",
+        "url": "https://pubmed.ncbi.nlm.nih.gov/20000001",
+        "citation": "Beta B, \"Study Beta on caffeine\", Journal B, 2020. https://pubmed.ncbi.nlm.nih.gov/20000001",
+        "supports_claim": true,
+        "relevance_note": "Same tier and year as Alpha — URL sort decides order",
+        "retrieved_at": "2026-02-26T10:01:00+00:00"
+      },
+      {
+        "title": "Community post on caffeine",
+        "authors": "user123",
+        "year": 2020,
+        "tier": "community",
+        "url": "https://reddit.com/r/science/comments/xyz",
+        "citation": "user123, \"Community post on caffeine\", Reddit, 2020. https://reddit.com/r/science/comments/xyz",
+        "supports_claim": true,
+        "relevance_note": "Lower tier, should sort after peer_reviewed",
+        "retrieved_at": "2026-02-26T10:02:00+00:00"
+      }
+    ]
+  }
+]

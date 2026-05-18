@@ -165,7 +165,7 @@ Treat these cookie values like passwords. They authenticate your Reddit browser 
 Symlink `index.ts` into Pi's extension directory:
 
 ```bash
-ln -s /home/firstpick/npm-packages/pi-extension-tech-news/index.ts ~/.pi/agent/extensions/tech-news.ts
+ln -s "$HOME/npm-packages/pi-extension-tech-news/index.ts" "$HOME/.pi/agent/extensions/tech-news.ts"
 ```
 
 Then run `/reload` in Pi.

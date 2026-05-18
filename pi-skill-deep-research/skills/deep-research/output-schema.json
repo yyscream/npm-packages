@@ -1,0 +1,228 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DeepResearchOutput",
+  "description": "Deterministic output schema for the deep-research skill. All outputs must validate against this schema.",
+  "type": "object",
+  "required": ["topic", "run_id", "policy_version", "claims", "verdict_summary", "decision_trace", "failures"],
+  "additionalProperties": false,
+  "properties": {
+    "topic": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Original research topic as provided by the user"
+    },
+    "topic_normalized": {
+      "type": "string",
+      "description": "Lowercased, whitespace-collapsed, punctuation-stripped topic for dedup"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^dr-[0-9]{8}T[0-9]{6}Z-[a-f0-9]{8}$",
+      "description": "Deterministic run ID: dr-YYYYMMDDTHHMMSSZ-<8-char hash of normalized topic>"
+    },
+    "policy_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "schema_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "topic_summary": {
+      "type": "string",
+      "description": "Phase 1 general research summary (what people are saying)"
+    },
+    "claims": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 5,
+      "items": {
+        "$ref": "#/definitions/Claim"
+      },
+      "description": "Claims extracted and evaluated, ordered by claim_id ascending"
+    },
+    "verdict_summary": {
+      "type": "object",
+      "required": ["total_claims", "supported", "partially_supported", "insufficient_evidence", "contradicted"],
+      "additionalProperties": false,
+      "properties": {
+        "total_claims": { "type": "integer", "minimum": 0 },
+        "supported": { "type": "integer", "minimum": 0 },
+        "partially_supported": { "type": "integer", "minimum": 0 },
+        "insufficient_evidence": { "type": "integer", "minimum": 0 },
+        "contradicted": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "decision_trace": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/DecisionTraceEntry"
+      },
+      "description": "Ordered trace of every deterministic decision made during the run"
+    },
+    "failures": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/FailureEntry"
+      },
+      "description": "Explicit record of all failure modes encountered"
+    }
+  },
+  "definitions": {
+    "Claim": {
+      "type": "object",
+      "required": ["claim_id", "claim_text", "confidence_target", "verdict", "evidence"],
+      "additionalProperties": false,
+      "properties": {
+        "claim_id": {
+          "type": "string",
+          "pattern": "^C[0-9]{3}$",
+          "description": "Sequential claim ID (C001, C002, ...)"
+        },
+        "claim_text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_required": {
+          "type": "string",
+          "description": "What kind of evidence would support or refute this claim"
+        },
+        "confidence_target": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "verdict": {
+          "type": "string",
+          "enum": ["supported", "partially_supported", "insufficient_evidence", "contradicted"]
+        },
+        "verdict_reason": {
+          "type": "string",
+          "description": "One-line deterministic explanation referencing rule_id and evidence counts"
+        },
+        "evidence": {
+          "type": "array",
+          "maxItems": 5,
+          "items": {
+            "$ref": "#/definitions/Source"
+          },
+          "description": "Evidence items, ordered by tier (highest first), then recency, then URL lexical"
+        },
+        "agreement_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Fraction of evidence items that support the claim"
+        },
+        "peer_reviewed_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "Source": {
+      "type": "object",
+      "required": ["source_id", "tier", "citation", "canonical_url", "retrieved_at", "supports_claim"],
+      "additionalProperties": false,
+      "properties": {
+        "source_id": {
+          "type": "string",
+          "pattern": "^S[0-9]{3}$",
+          "description": "Sequential source ID (S001, S002, ...)"
+        },
+        "tier": {
+          "type": "string",
+          "enum": ["peer_reviewed", "preprint", "community", "social"]
+        },
+        "citation": {
+          "type": "string",
+          "description": "Normalized citation following policy.output.citation_format"
+        },
+        "title": {
+          "type": "string"
+        },
+        "authors": {
+          "type": "string"
+        },
+        "year": {
+          "type": "integer"
+        },
+        "canonical_url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "retrieved_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "supports_claim": {
+          "type": "boolean",
+          "description": "true if this source supports the claim, false if it contradicts"
+        },
+        "relevance_note": {
+          "type": "string",
+          "description": "Brief explanation of how this source relates to the claim"
+        },
+        "dedupe_key": {
+          "type": "string",
+          "description": "Computed from title_normalized + canonical_url_host + publication_year"
+        }
+      }
+    },
+    "DecisionTraceEntry": {
+      "type": "object",
+      "required": ["rule_id", "inputs", "result"],
+      "additionalProperties": false,
+      "properties": {
+        "rule_id": {
+          "type": "string",
+          "description": "Identifier of the policy rule applied (e.g. verdict.supported, fallback.no_peer_reviewed)"
+        },
+        "claim_id": {
+          "type": "string",
+          "description": "Which claim this decision applies to, if any"
+        },
+        "inputs": {
+          "type": "object",
+          "description": "Snapshot of inputs that fed the decision"
+        },
+        "result": {
+          "type": "string",
+          "description": "Outcome of applying the rule"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "FailureEntry": {
+      "type": "object",
+      "required": ["failure_type", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "failure_type": {
+          "type": "string",
+          "enum": ["no_peer_reviewed", "no_sources_at_all", "retrieval_failure", "claim_extraction_failure", "schema_validation_failure"]
+        },
+        "claim_id": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "fallback_action": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    }
+  }
+}

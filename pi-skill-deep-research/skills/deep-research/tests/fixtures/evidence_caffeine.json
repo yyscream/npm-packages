@@ -1,0 +1,67 @@
+[
+  {
+    "claim_id": "C001",
+    "sources": [
+      {
+        "title": "Effects of caffeine on cognitive performance: a meta-analysis",
+        "authors": "Smith J, Brown A",
+        "year": 2021,
+        "tier": "peer_reviewed",
+        "url": "https://pubmed.ncbi.nlm.nih.gov/33000001",
+        "citation": "Smith J, Brown A, \"Effects of caffeine on cognitive performance: a meta-analysis\", J Neuroscience, 2021. https://pubmed.ncbi.nlm.nih.gov/33000001",
+        "supports_claim": true,
+        "relevance_note": "Meta-analysis of 40 RCTs showing improved reaction time at 100-300mg doses",
+        "retrieved_at": "2026-02-26T10:00:00+00:00"
+      },
+      {
+        "title": "Caffeine and alertness: dose-response in healthy adults",
+        "authors": "Wang L, Garcia M",
+        "year": 2020,
+        "tier": "peer_reviewed",
+        "url": "https://pubmed.ncbi.nlm.nih.gov/32000002",
+        "citation": "Wang L, Garcia M, \"Caffeine and alertness: dose-response in healthy adults\", Psychopharmacology, 2020. https://pubmed.ncbi.nlm.nih.gov/32000002",
+        "supports_claim": true,
+        "relevance_note": "RCT with 200 participants confirming attention improvement",
+        "retrieved_at": "2026-02-26T10:01:00+00:00"
+      },
+      {
+        "title": "Stimulant effects of caffeine: a systematic review",
+        "authors": "Chen R",
+        "year": 2019,
+        "tier": "preprint",
+        "url": "https://arxiv.org/abs/1901.00001",
+        "citation": "Chen R, \"Stimulant effects of caffeine: a systematic review\", arXiv preprint, 2019. https://arxiv.org/abs/1901.00001",
+        "supports_claim": true,
+        "relevance_note": "Preprint reviewing stimulant mechanisms of caffeine",
+        "retrieved_at": "2026-02-26T10:02:00+00:00"
+      }
+    ]
+  },
+  {
+    "claim_id": "C002",
+    "sources": [
+      {
+        "title": "Caffeine and memory consolidation: mixed results",
+        "authors": "Davis T, Lee S",
+        "year": 2022,
+        "tier": "peer_reviewed",
+        "url": "https://pubmed.ncbi.nlm.nih.gov/35000003",
+        "citation": "Davis T, Lee S, \"Caffeine and memory consolidation: mixed results\", Memory & Cognition, 2022. https://pubmed.ncbi.nlm.nih.gov/35000003",
+        "supports_claim": false,
+        "relevance_note": "Found caffeine may actually enhance memory consolidation at moderate doses",
+        "retrieved_at": "2026-02-26T10:03:00+00:00"
+      },
+      {
+        "title": "Post-study caffeine boosts memory in humans",
+        "authors": "Borota D et al.",
+        "year": 2014,
+        "tier": "peer_reviewed",
+        "url": "https://pubmed.ncbi.nlm.nih.gov/24413697",
+        "citation": "Borota D et al., \"Post-study caffeine boosts memory in humans\", Nature Neuroscience, 2014. https://pubmed.ncbi.nlm.nih.gov/24413697",
+        "supports_claim": false,
+        "relevance_note": "Landmark study showing 200mg caffeine improved 24h memory recall",
+        "retrieved_at": "2026-02-26T10:04:00+00:00"
+      }
+    ]
+  }
+]

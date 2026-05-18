@@ -1,0 +1,29 @@
+[
+  {
+    "claim_id": "C001",
+    "sources": [
+      {
+        "title": "Reddit user claims crystals helped them",
+        "authors": "u/crystal_believer",
+        "year": 2024,
+        "tier": "community",
+        "url": "https://reddit.com/r/health/comments/abc123",
+        "citation": "u/crystal_believer, \"Reddit user claims crystals helped them\", Reddit, 2024. https://reddit.com/r/health/comments/abc123",
+        "supports_claim": true,
+        "relevance_note": "Anecdotal report on reddit",
+        "retrieved_at": "2026-02-26T10:00:00+00:00"
+      },
+      {
+        "title": "Discussion: alternative medicine and cancer",
+        "authors": "forum_user42",
+        "year": 2023,
+        "tier": "community",
+        "url": "https://healthforums.com/thread/99999",
+        "citation": "forum_user42, \"Discussion: alternative medicine and cancer\", Health Forums, 2023. https://healthforums.com/thread/99999",
+        "supports_claim": true,
+        "relevance_note": "Forum discussion with no scientific backing",
+        "retrieved_at": "2026-02-26T10:01:00+00:00"
+      }
+    ]
+  }
+]

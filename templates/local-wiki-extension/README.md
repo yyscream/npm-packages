@@ -38,7 +38,7 @@ local-wiki-extension/
    | `{{displayName}}` | `Example Wiki` |
    | `{{topicName}}` | `Example` |
    | `{{skillName}}` | `example-local` |
-   | `{{docsPath}}` | `/home/firstpick/.examplewiki` |
+   | `{{docsPath}}` | `$HOME/.examplewiki` |
    | `{{repoUrl}}` | `https://github.com/example/example-wiki.git` or empty |
    | `{{fileExtensionsRegex}}` | `\.mdx?$` or `\.html?$` |
    | `{{promptDetectionRegex}}` | `\b(example|examplectl)\b` |

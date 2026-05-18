@@ -263,6 +263,32 @@ run_publish_dry_run() {
   return 1
 }
 
+find_user_specific_values() {
+  local pkg_dir="$1"
+  local patterns=()
+
+  [[ -n "${HOME:-}" ]] && patterns+=("$HOME")
+  [[ -n "${USER:-}" ]] && patterns+=("/home/$USER")
+
+  local tz="${TZ:-}"
+  if [[ -z "$tz" ]] && command -v timedatectl >/dev/null 2>&1; then
+    tz="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
+  fi
+  [[ -n "$tz" ]] && patterns+=("$tz")
+
+  local tmpfile
+  tmpfile="$(mktemp)"
+  trap 'rm -f "$tmpfile"' RETURN
+
+  local pattern
+  for pattern in "${patterns[@]}"; do
+    [[ -z "$pattern" ]] && continue
+    grep -RIlF --exclude-dir='.git' --exclude-dir='node_modules' --exclude-dir='dist' --exclude-dir='build' --exclude='package-lock.json' -- "$pattern" "$pkg_dir" >>"$tmpfile" 2>/dev/null || true
+  done
+
+  sort -u "$tmpfile" | sed "s#^$pkg_dir/##"
+}
+
 package_has_publishable_changes() {
   local pkg_dir="$1"
   local pkg_name="$2"
@@ -474,9 +500,13 @@ for pkg_dir in $(gather_packages); do
     done < <(node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));for(const e of (p.pi?.extensions||[])) console.log(e);" "$pkg_json")
   fi
 
-  if [[ $CHECK_HARDCODE -eq 1 && -f "$pkg_dir/index.ts" ]]; then
-    if grep -qE '(^|[^A-Za-z0-9_])(/home/firstpick|Europe/Zurich|/usr/sbin/fish)($|[^A-Za-z0-9_])' "$pkg_dir/index.ts"; then
-      print_check "$(warn)" "index.ts contains potentially user-specific hardcoded values"
+  if [[ $CHECK_HARDCODE -eq 1 ]]; then
+    hardcode_hits="$(find_user_specific_values "$pkg_dir" || true)"
+    if [[ -n "$hardcode_hits" ]]; then
+      print_check "$(warn)" "package contains potentially user-specific hardcoded values"
+      while IFS= read -r hit; do
+        [[ -n "$hit" ]] && print_check "$(warn)" "  check file: $hit"
+      done <<<"$hardcode_hits"
     else
       print_check "$(ok)" "no obvious user-specific hardcoded paths/timezone"
     fi

@@ -1,0 +1,206 @@
+---
+name: deep-research
+description: Agents should invoke this skill for high-stakes or complex research needing multi-source evidence, scientific/technical fact-checking, decision traces, or rigorous verification. Runs deterministic two-phase research with schema/policy validation.
+---
+
+# Deep Research
+
+Deterministic research pipeline that produces reproducible, schema-validated
+output. Same input + same state = same output.
+
+## Triggers
+
+Activate when the user asks for rigorous multi-source research or uses any of these commands:
+- `/deep-research [topic]`
+- `/deepresearch [topic]`
+- `/dpr [topic]`
+- `/dp [topic]`
+- `/dr [topic]`
+
+## Quick Start
+
+```bash
+S="{baseDir}/scripts"
+B="{baseDir}"
+
+# Full deterministic run (after claims + evidence are collected):
+python3 $S/run_deep_research.py \
+  --topic "Does caffeine improve focus?" \
+  --topic-summary "Common belief that caffeine enhances concentration." \
+  --claims-file /tmp/dr-claims.json \
+  --evidence-file /tmp/dr-evidence.json \
+  --policy $B/policy.json \
+  --schema $B/output-schema.json \
+  --state $B/state.json \
+  --output-json /tmp/dr-output.json \
+  --output-md /tmp/dr-output.md
+```
+
+Exit codes: `0` success, `1` validation/policy error, `2` partial retrieval, `3` no-evidence fallback.
+
+## Workflow
+
+### Phase 1: General Research (Agent-Driven)
+
+Search the web to understand the topic. Identify up to **5** key claims to fact-check.
+
+Write claims to a JSON file using this exact schema:
+
+```json
+[
+  {
+    "claim_text": "Caffeine (100-300mg) improves sustained attention",
+    "evidence_required": "RCTs or meta-analyses on caffeine and attention",
+    "confidence_target": 0.7
+  }
+]
+```
+
+Required fields per claim: `claim_text`, `evidence_required`, `confidence_target`.
+
+### Phase 2: Scientific Fact-Check (Agent-Driven)
+
+For each claim, search source databases **in tier order**:
+
+| Tier | Sources | Flag |
+|---|---|---|
+| `peer_reviewed` | PubMed, Google Scholar | ✅ |
+| `preprint` | arXiv, bioRxiv, medRxiv | 📝 |
+| `community` | Reddit, StackExchange, forums | 🗨️ |
+| `social` | X/Twitter | 🐦 |
+
+**Evidence budget per claim:** 2 peer-reviewed + 1 fallback (max 5 total).
+
+Write evidence to a JSON file:
+
+```json
+[
+  {
+    "claim_id": "C001",
+    "sources": [
+      {
+        "title": "Effects of caffeine on cognitive performance",
+        "authors": "Smith et al.",
+        "year": 2020,
+        "tier": "peer_reviewed",
+        "url": "https://pubmed.ncbi.nlm.nih.gov/12345678",
+        "citation": "Smith et al., \"Effects of caffeine on cognitive performance\", J. Neuroscience, 2020. https://pubmed.ncbi.nlm.nih.gov/12345678",
+        "supports_claim": true,
+        "relevance_note": "RCT showing improved reaction time at 200mg dose",
+        "retrieved_at": "2026-02-26T10:00:00+00:00"
+      }
+    ]
+  }
+]
+```
+
+**Important:** Always trace secondary-source citations back to original papers.
+
+### Phase 3: Deterministic Classification (Runner)
+
+Run the deterministic runner. It applies these verdict rules from `policy.json`:
+
+| Verdict | Rule |
+|---|---|
+| **Supported** | >= 2 peer-reviewed sources, agreement ratio >= 0.8 |
+| **Partially Supported** | >= 1 peer-reviewed source, agreement ratio >= 0.5 |
+| **Insufficient Evidence** | 0 peer-reviewed sources or no evidence at all |
+| **Contradicted** | >= 1 contradicting source, agreement ratio < 0.3 |
+
+Every verdict includes a `decision_trace` entry with `rule_id`, `inputs`, and `result`.
+
+## Fallback Behaviors
+
+All fallbacks are explicit and policy-defined. There is no implicit "best effort" path.
+
+| Condition | Action | Verdict Cap |
+|---|---|---|
+| No peer-reviewed sources found | Descend to next tier in fallback order | `partially_supported` max |
+| No sources found at all | Emit `insufficient_evidence` | `insufficient_evidence` |
+| Source database unreachable | Mark partial, continue with available | Exit code 2 |
+| Cannot extract claims from topic | Reject run, require explicit claims | Exit code 1 |
+
+### Fallback Text Blocks (Verbatim)
+
+**No peer-reviewed sources:**
+```
+No peer-reviewed papers found on this specific claim. Checking alternative sources.
+```
+
+**No sources at all:**
+```
+No evidence found across any source tier for this claim.
+```
+
+**Retrieval failure:**
+```
+One or more source databases were unreachable. Results may be incomplete.
+```
+
+**Claim extraction failure:**
+```
+Could not extract structured claims from the topic. Provide explicit claims.
+```
+
+## Output Contract
+
+All outputs validate against `output-schema.json`. Required top-level fields:
+`topic`, `run_id`, `policy_version`, `claims[]`, `verdict_summary`, `decision_trace[]`, `failures[]`.
+
+Run IDs follow the pattern: `dr-YYYYMMDDTHHMMSSZ-<8-char topic hash>`.
+
+### Deterministic Ordering
+
+- Claims ordered by `claim_id` ascending (C001, C002, ...).
+- Evidence per claim ordered by: tier (highest first) -> recency (newest first) -> URL lexical.
+- Sections in fixed order: topic_summary, claims, evidence_matrix, verdict_summary, decision_trace, failures.
+
+## Source Priority
+
+1. **Highest:** Peer-reviewed journals (open access)
+2. **Medium:** Preprints (arXiv, bioRxiv) — flag as "not peer-reviewed"
+3. **Low:** Community discussions — flag as anecdotal
+4. **Lowest:** Social media — flag as unverified
+
+## Deduplication
+
+Sources are deduped by composite key: `title_normalized + canonical_url_host + publication_year`.
+URLs are normalized by stripping query parameters and fragments.
+
+## File Inventory
+
+```
+skills/deep-research/
+  SKILL.md              # This file
+  policy.json           # Deterministic decision rules
+  output-schema.json    # JSON Schema for output validation
+  state.json            # Run history, dedupe fingerprints, claim canonicalization
+  scripts/
+    ./scripts/run_deep_research.py  # Deterministic runner (collect/normalize/classify/render/validate)
+  tests/
+    fixtures/             # Test input fixtures
+    ./tests/test_determinism.py   # Reproducibility and schema tests
+```
+
+## Scripts Reference
+
+### ./scripts/run_deep_research.py
+
+| Arg | Required | Description |
+|---|---|---|
+| `--topic` | Yes | Research topic |
+| `--topic-summary` | No | Phase 1 summary text |
+| `--claims-file` | Yes | JSON file with structured claims |
+| `--evidence-file` | No | JSON file with pre-collected evidence |
+| `--policy` | Yes | Path to policy.json |
+| `--schema` | No | Path to output-schema.json |
+| `--state` | Yes | Path to state.json |
+| `--output-json` | No | Write JSON output to file |
+| `--output-md` | No | Write Markdown output to file |
+
+| Exit Code | Meaning |
+|---|---|
+| 0 | Success |
+| 1 | Validation or policy error |
+| 2 | Upstream retrieval partial |
+| 3 | No-evidence fallback produced |

@@ -1,0 +1,116 @@
+{
+  "policy_version": "1.0.0",
+  "description": "Deterministic decision rules for deep-research skill",
+
+  "source_tiers": {
+    "order": ["peer_reviewed", "preprint", "community", "social"],
+    "labels": {
+      "peer_reviewed": "Peer-reviewed scientific paper",
+      "preprint": "Preprint (not peer-reviewed)",
+      "community": "Community discussion (Reddit, forums)",
+      "social": "Social media (unverified)"
+    },
+    "flags": {
+      "peer_reviewed": "\u2705",
+      "preprint": "\ud83d\udcdd",
+      "community": "\ud83d\udde8\ufe0f",
+      "social": "\ud83d\udc26"
+    },
+    "databases": {
+      "peer_reviewed": ["pubmed", "google_scholar"],
+      "preprint": ["arxiv", "biorxiv", "medrxiv"],
+      "community": ["reddit", "stackexchange", "forums"],
+      "social": ["x_twitter"]
+    }
+  },
+
+  "evidence_budget": {
+    "per_claim_target": 3,
+    "per_claim_minimum": 1,
+    "tier_allocation": {
+      "peer_reviewed": 2,
+      "fallback": 1
+    },
+    "fallback_order": ["preprint", "community", "social"],
+    "max_sources_per_claim": 5
+  },
+
+  "claims": {
+    "max_per_run": 5,
+    "extraction_required_fields": ["claim_text", "evidence_required", "confidence_target"],
+    "confidence_targets": [0.5, 0.7, 0.9],
+    "default_confidence_target": 0.7
+  },
+
+  "verdicts": {
+    "scale": ["supported", "partially_supported", "insufficient_evidence", "contradicted"],
+    "thresholds": {
+      "supported": {
+        "min_peer_reviewed": 2,
+        "min_agreement_ratio": 0.8,
+        "description": "At least 2 peer-reviewed sources agree with no contradictions"
+      },
+      "partially_supported": {
+        "min_peer_reviewed": 1,
+        "min_agreement_ratio": 0.5,
+        "description": "At least 1 peer-reviewed source agrees; some evidence mixed"
+      },
+      "insufficient_evidence": {
+        "min_peer_reviewed": 0,
+        "max_total_sources": 0,
+        "description": "No peer-reviewed sources found; only lower-tier or no evidence"
+      },
+      "contradicted": {
+        "min_contradicting": 1,
+        "min_agreement_ratio_below": 0.3,
+        "description": "Peer-reviewed sources predominantly contradict the claim"
+      }
+    },
+    "tie_breaker": ["tier", "recency", "url_lexical"],
+    "default_verdict": "insufficient_evidence"
+  },
+
+  "output": {
+    "max_sections": 6,
+    "section_order": [
+      "topic_summary",
+      "claims",
+      "evidence_matrix",
+      "verdict_summary",
+      "decision_trace",
+      "failures"
+    ],
+    "citation_format": "Author(s), \"Title\", Source/Journal, Year. URL",
+    "normalize_urls": true,
+    "strip_tracking_params": true
+  },
+
+  "fallbacks": {
+    "no_peer_reviewed": {
+      "action": "descend_to_next_tier",
+      "message": "No peer-reviewed papers found on this specific claim. Checking alternative sources.",
+      "verdict_cap": "partially_supported"
+    },
+    "no_sources_at_all": {
+      "action": "emit_insufficient",
+      "message": "No evidence found across any source tier for this claim.",
+      "verdict": "insufficient_evidence"
+    },
+    "retrieval_failure": {
+      "action": "mark_partial_and_continue",
+      "message": "One or more source databases were unreachable. Results may be incomplete.",
+      "exit_code": 2
+    },
+    "claim_extraction_failure": {
+      "action": "reject_run",
+      "message": "Could not extract structured claims from the topic. Provide explicit claims.",
+      "exit_code": 1
+    }
+  },
+
+  "deduplication": {
+    "key_fields": ["title_normalized", "canonical_url_host", "publication_year"],
+    "title_normalization": "lowercase_strip_punctuation_whitespace",
+    "url_normalization": "strip_query_params_and_fragments"
+  }
+}
