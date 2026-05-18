@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-extension-upgrade-extensions",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Upgrade npm-installed Pi extensions with up-to-date checks.",
   "license": "MIT",
   "keywords": [
