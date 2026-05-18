@@ -1,0 +1,28 @@
+{
+  "name": "@firstpick/pi-extension-grill-me",
+  "version": "0.1.0",
+  "description": "Deterministic design interview command and tools for Pi.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "extension",
+    "design",
+    "interview"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ]
+}
