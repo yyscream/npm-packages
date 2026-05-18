@@ -1,6 +1,6 @@
 # @firstpick/pi-skill-tech-deep-dive
 
-Pi skill package for `tech-deep-dive`.
+A Pi skill for tasks involving choosing or evaluating libraries, frameworks, tools, platforms, models, databases, APIs, or architectures for a use case. Produces criteria scoring, ecosystem assessment, and recommendations.
 
 ## What it does
 
@@ -32,5 +32,3 @@ None.
 User: Review this change for the concerns covered by `tech-deep-dive`.
 Agent: Invokes the `tech-deep-dive` skill, follows its workflow, and reports the result.
 ```
-
-Agents should invoke this skill when choosing or evaluating libraries, frameworks, tools, platforms, models, databases, APIs, or architectures for a use case. Produces criteria scoring, ecosystem assessment, and recommendations.

@@ -1,6 +1,6 @@
 # @firstpick/pi-skill-design-patterns
 
-Pi skill package for `design-patterns`.
+A Pi skill for tasks involving choosing patterns, designing traits/interfaces/components, deciding abstraction boundaries, evaluating dependency injection/callbacks, or comparing implementation approaches in Rust, TypeScript/React, or Django/Python.
 
 ## What it does
 
@@ -32,5 +32,3 @@ None.
 User: Review this change for the concerns covered by `design-patterns`.
 Agent: Invokes the `design-patterns` skill, follows its workflow, and reports the result.
 ```
-
-Agents should invoke this skill when choosing patterns, designing traits/interfaces/components, deciding abstraction boundaries, evaluating dependency injection/callbacks, or comparing implementation approaches in Rust, TypeScript/React, or Django/Python.

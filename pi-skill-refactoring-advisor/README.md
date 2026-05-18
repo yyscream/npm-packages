@@ -1,6 +1,6 @@
 # @firstpick/pi-skill-refactoring-advisor
 
-Pi skill package for `refactoring-advisor`.
+A Pi skill for refactors, code smells, migrations, duplication removal, module splitting, API cleanup, or restructuring plans. Emphasizes small safe steps, behavior preservation, and verification after each change.
 
 ## What it does
 
@@ -32,5 +32,3 @@ None.
 User: Review this change for the concerns covered by `refactoring-advisor`.
 Agent: Invokes the `refactoring-advisor` skill, follows its workflow, and reports the result.
 ```
-
-Agents should invoke this skill for refactors, code smells, migrations, duplication removal, module splitting, API cleanup, or restructuring plans. Emphasizes small safe steps, behavior preservation, and verification after each change.

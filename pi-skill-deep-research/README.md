@@ -1,6 +1,6 @@
 # @firstpick/pi-skill-deep-research
 
-Pi skill package for `deep-research`.
+A Pi skill for high-stakes or complex research needing multi-source evidence, scientific/technical fact-checking, decision traces, or rigorous verification. Runs deterministic two-phase research with schema/policy validation.
 
 ## What it does
 
@@ -32,5 +32,3 @@ None.
 User: Review this change for the concerns covered by `deep-research`.
 Agent: Invokes the `deep-research` skill, follows its workflow, and reports the result.
 ```
-
-Agents should invoke this skill for high-stakes or complex research needing multi-source evidence, scientific/technical fact-checking, decision traces, or rigorous verification. Runs deterministic two-phase research with schema/policy validation.

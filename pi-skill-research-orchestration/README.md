@@ -1,6 +1,6 @@
 # @firstpick/pi-skill-research-orchestration
 
-Pi skill package for `research-orchestration`.
+A Pi skill for broad multi-claim research projects needing planning, parallel investigation, source merging, gap closure, citation audit, and final synthesis when narrower research skills are insufficient.
 
 ## What it does
 
@@ -32,5 +32,3 @@ None.
 User: Review this change for the concerns covered by `research-orchestration`.
 Agent: Invokes the `research-orchestration` skill, follows its workflow, and reports the result.
 ```
-
-Agents should invoke this skill for broad multi-claim research projects needing planning, parallel investigation, source merging, gap closure, citation audit, and final synthesis when narrower research skills are insufficient.

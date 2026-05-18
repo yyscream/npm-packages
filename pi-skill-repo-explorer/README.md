@@ -1,6 +1,6 @@
 # @firstpick/pi-skill-repo-explorer
 
-Pi skill package for `repo-explorer`.
+A Pi skill for use before modifying unfamiliar codebases, answering where/how something is implemented, tracing dependencies, mapping repo structure, or planning changes. Explores a repository and returns a strict JSON handoff with key files, symbols, risks, and evidence.
 
 ## What it does
 
@@ -32,5 +32,3 @@ None.
 User: Review this change for the concerns covered by `repo-explorer`.
 Agent: Invokes the `repo-explorer` skill, follows its workflow, and reports the result.
 ```
-
-Agents should invoke this skill before modifying unfamiliar codebases, answering where/how something is implemented, tracing dependencies, mapping repo structure, or planning changes. Explores a repository and returns a strict JSON handoff with key files, symbols, risks, and evidence.

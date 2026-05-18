@@ -1,6 +1,6 @@
 # @firstpick/pi-skill-server-audit
 
-Pi skill package for `server-audit`.
+A Pi skill for Linux server security reviews, SSH hardening, firewall/open-port audits, user/permission checks, exposed services, or host hardening requests. Produces severity-rated findings and practical remediation steps.
 
 ## What it does
 
@@ -32,5 +32,3 @@ None.
 User: Review this change for the concerns covered by `server-audit`.
 Agent: Invokes the `server-audit` skill, follows its workflow, and reports the result.
 ```
-
-Agents should invoke this skill for Linux server security reviews, SSH hardening, firewall/open-port audits, user/permission checks, exposed services, or host hardening requests. Produces severity-rated findings and practical remediation steps.

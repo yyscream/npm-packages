@@ -1,6 +1,6 @@
 # @firstpick/pi-skill-competitor-analysis
 
-Pi skill package for `competitor-analysis`.
+A Pi skill for tasks involving comparing competing products, services, libraries, tools, vendors, or approaches for market/product positioning, feature matrices, strategic trade-offs, pricing, adoption, or differentiation.
 
 ## What it does
 
@@ -32,5 +32,3 @@ None.
 User: Review this change for the concerns covered by `competitor-analysis`.
 Agent: Invokes the `competitor-analysis` skill, follows its workflow, and reports the result.
 ```
-
-Agents should invoke this skill when comparing competing products, services, libraries, tools, vendors, or approaches for market/product positioning, feature matrices, strategic trade-offs, pricing, adoption, or differentiation.

@@ -1,6 +1,6 @@
 # @firstpick/pi-skill-tech-debt-tracker
 
-Pi skill package for `tech-debt-tracker`.
+A Pi skill for tasks involving identifying, categorizing, prioritizing, or planning technical debt work, debt sprints, cleanup backlogs, TODO consolidation, or long-term maintainability risks. Tracks debt with severity/effort.
 
 ## What it does
 
@@ -32,5 +32,3 @@ None.
 User: Review this change for the concerns covered by `tech-debt-tracker`.
 Agent: Invokes the `tech-debt-tracker` skill, follows its workflow, and reports the result.
 ```
-
-Agents should invoke this skill when identifying, categorizing, prioritizing, or planning technical debt work, debt sprints, cleanup backlogs, TODO consolidation, or long-term maintainability risks. Tracks debt with severity/effort.

@@ -1,6 +1,6 @@
 # @firstpick/pi-skill-tauri-django-react
 
-Pi skill package for `tauri-django-react`.
+A Pi skill for Tauri + Django + React desktop apps, especially backend lifecycle, CORS/auth, frontend integration, build packaging, dual desktop/web deployment, Rust commands, and platform-specific gotchas.
 
 ## What it does
 
@@ -32,5 +32,3 @@ None.
 User: Review this change for the concerns covered by `tauri-django-react`.
 Agent: Invokes the `tauri-django-react` skill, follows its workflow, and reports the result.
 ```
-
-Agents should invoke this skill for Tauri + Django + React desktop apps, especially backend lifecycle, CORS/auth, frontend integration, build packaging, dual desktop/web deployment, Rust commands, and platform-specific gotchas.

@@ -1,6 +1,6 @@
 # @firstpick/pi-skill-architecture-review
 
-Pi skill package for `architecture-review`.
+A Pi skill for architecture reviews, module boundaries, dependency direction, coupling/cohesion, SOLID concerns, system design trade-offs, layering, service boundaries, or design decisions before implementation.
 
 ## What it does
 
@@ -32,5 +32,3 @@ None.
 User: Review this change for the concerns covered by `architecture-review`.
 Agent: Invokes the `architecture-review` skill, follows its workflow, and reports the result.
 ```
-
-Agents should invoke this skill for architecture reviews, module boundaries, dependency direction, coupling/cohesion, SOLID concerns, system design trade-offs, layering, service boundaries, or design decisions before implementation.

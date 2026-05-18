@@ -1,6 +1,6 @@
 # @firstpick/pi-skill-acceptance-tester
 
-Pi skill package for `acceptance-tester`.
+A Pi skill for use as the final gate before release, handoff, or claiming completion for substantial changes. Runs acceptance/readiness checks, determines pass/fail, and gives a go/no-go recommendation.
 
 ## What it does
 
@@ -32,5 +32,3 @@ None.
 User: Review this change for the concerns covered by `acceptance-tester`.
 Agent: Invokes the `acceptance-tester` skill, follows its workflow, and reports the result.
 ```
-
-Agents should invoke this skill as the final gate before release, handoff, or claiming completion for substantial changes. Runs acceptance/readiness checks, determines pass/fail, and gives a go/no-go recommendation.

@@ -1,6 +1,6 @@
 # @firstpick/pi-skill-code-security
 
-Pi skill package for `code-security`.
+A Pi skill for code security reviews, leaked secret checks, dependency risk, unsafe shell/Python/TypeScript/Rust patterns, auth/input-validation flaws, SAST-style audits, or supply-chain concerns in repositories.
 
 ## What it does
 
@@ -32,5 +32,3 @@ None.
 User: Review this change for the concerns covered by `code-security`.
 Agent: Invokes the `code-security` skill, follows its workflow, and reports the result.
 ```
-
-Agents should invoke this skill for code security reviews, leaked secret checks, dependency risk, unsafe shell/Python/TypeScript/Rust patterns, auth/input-validation flaws, SAST-style audits, or supply-chain concerns in repositories.

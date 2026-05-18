@@ -1,6 +1,6 @@
 # @firstpick/pi-skill-deployment-automation
 
-Pi skill package for `deployment-automation`.
+A Pi skill for Docker Compose deployments, container updates, stack health checks, rollbacks, compose-file changes, image upgrades, failed deploys, or service restart planning. Provides safe deployment and rollback workflows.
 
 ## What it does
 
@@ -32,5 +32,3 @@ None.
 User: Review this change for the concerns covered by `deployment-automation`.
 Agent: Invokes the `deployment-automation` skill, follows its workflow, and reports the result.
 ```
-
-Agents should invoke this skill for Docker Compose deployments, container updates, stack health checks, rollbacks, compose-file changes, image upgrades, failed deploys, or service restart planning. Provides safe deployment and rollback workflows.

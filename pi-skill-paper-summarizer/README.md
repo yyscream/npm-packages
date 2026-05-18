@@ -1,6 +1,6 @@
 # @firstpick/pi-skill-paper-summarizer
 
-Pi skill package for `paper-summarizer`.
+A Pi skill for academic or technical papers, arXiv/PubMed/IEEE/ACM links, PDFs, methodology review, limitations, practical implications, or extracting findings for engineering decisions.
 
 ## What it does
 
@@ -32,5 +32,3 @@ None.
 User: Review this change for the concerns covered by `paper-summarizer`.
 Agent: Invokes the `paper-summarizer` skill, follows its workflow, and reports the result.
 ```
-
-Agents should invoke this skill for academic or technical papers, arXiv/PubMed/IEEE/ACM links, PDFs, methodology review, limitations, practical implications, or extracting findings for engineering decisions.

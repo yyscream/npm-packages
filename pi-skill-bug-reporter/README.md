@@ -1,6 +1,6 @@
 # @firstpick/pi-skill-bug-reporter
 
-Pi skill package for `bug-reporter`.
+A Pi skill for tasks involving defects, regressions, failed tests, unexpected behavior, or spec mismatches are found. Produces structured reproducible bug reports with severity, evidence, environment, and actionable next steps.
 
 ## What it does
 
@@ -32,5 +32,3 @@ None.
 User: Review this change for the concerns covered by `bug-reporter`.
 Agent: Invokes the `bug-reporter` skill, follows its workflow, and reports the result.
 ```
-
-Agents should invoke this skill when defects, regressions, failed tests, unexpected behavior, or spec mismatches are found. Produces structured reproducible bug reports with severity, evidence, environment, and actionable next steps.

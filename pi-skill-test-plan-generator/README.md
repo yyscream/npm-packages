@@ -1,6 +1,6 @@
 # @firstpick/pi-skill-test-plan-generator
 
-Pi skill package for `test-plan-generator`.
+A Pi skill for tasks involving planning tests from specs, architecture docs, PRs, risky changes, new features, bug fixes, or release work. Generates prioritized unit, integration, E2E, regression, and edge-case coverage.
 
 ## What it does
 
@@ -32,5 +32,3 @@ None.
 User: Review this change for the concerns covered by `test-plan-generator`.
 Agent: Invokes the `test-plan-generator` skill, follows its workflow, and reports the result.
 ```
-
-Agents should invoke this skill when planning tests from specs, architecture docs, PRs, risky changes, new features, bug fixes, or release work. Generates prioritized unit, integration, E2E, regression, and edge-case coverage.

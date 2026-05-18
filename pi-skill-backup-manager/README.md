@@ -1,6 +1,6 @@
 # @firstpick/pi-skill-backup-manager
 
-Pi skill package for `backup-manager`.
+A Pi skill for backup health checks, restore testing, NAS/Gitea backup integrity, 3-2-1 strategy review, backup script audits, or verifying repositories and archives can be restored safely.
 
 ## What it does
 
@@ -32,5 +32,3 @@ None.
 User: Review this change for the concerns covered by `backup-manager`.
 Agent: Invokes the `backup-manager` skill, follows its workflow, and reports the result.
 ```
-
-Agents should invoke this skill for backup health checks, restore testing, NAS/Gitea backup integrity, 3-2-1 strategy review, backup script audits, or verifying repositories and archives can be restored safely.
