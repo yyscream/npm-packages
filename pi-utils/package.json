@@ -3,7 +3,16 @@
   "version": "0.1.4",
   "description": "Shared utilities for Firstpick Pi extension packages.",
   "main": "index.ts",
-  "exports": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./paths": "./src/paths.ts",
+    "./env": "./src/env.ts",
+    "./text": "./src/text.ts",
+    "./tokens": "./src/tokens.ts",
+    "./async": "./src/async.ts",
+    "./ui": "./src/ui/working-indicator.ts",
+    "./local-wiki": "./src/local-wiki.ts"
+  },
   "license": "MIT",
   "keywords": [
     "pi-package",
@@ -21,6 +30,7 @@
   },
   "files": [
     "index.ts",
+    "src",
     "README.md",
     "LICENSE"
   ]
