@@ -44,6 +44,7 @@ type TokenBreakdownSource = {
 const DEFAULT_DAYS = 14;
 const MAX_BAR_WIDTH = 24;
 const COST_BAR_WIDTH = 10;
+const INITIAL_INPUT_OVERHEAD_MULTIPLIER = 1.5;
 
 function addPromptSource(sources: PromptInjectionSource[], label: string, content: string | undefined): number {
   if (!content) return 0;
@@ -173,21 +174,27 @@ function buildPromptInjectionSources(systemPrompt: string, options: BuildSystemP
 }
 
 function formatPromptInjectionLines(systemPrompt: string, options: BuildSystemPromptOptions | null): string[] {
-  const sources = buildPromptInjectionSources(systemPrompt, options)
+  const promptSources = buildPromptInjectionSources(systemPrompt, options)
     .map((source) => ({ ...source, tokens: estimateTokensFromCharCount(source.chars) }))
     .sort((a, b) => b.tokens - a.tokens || b.chars - a.chars);
-  const totalTokens = estimatePromptInjectionTokens(systemPrompt);
+  const promptTextTokens = estimatePromptInjectionTokens(systemPrompt);
+  const estimatedInitialInputTokens = Math.round(promptTextTokens * INITIAL_INPUT_OVERHEAD_MULTIPLIER);
+  const estimatedStructuredOverheadTokens = Math.max(0, estimatedInitialInputTokens - promptTextTokens);
+  const sources = [
+    { label: "Estimated structured tools / request overhead", chars: 0, tokens: estimatedStructuredOverheadTokens },
+    ...promptSources,
+  ].filter((source) => source.tokens > 0);
   const labelWidth = Math.max("Source".length, ...sources.map((source) => source.label.length));
   const tokenWidth = Math.max("Tokens".length, ...sources.map((source) => formatTokens(source.tokens).length));
   const percentWidth = "%".length;
   const separator = `├${"─".repeat(labelWidth + 2)}┼${"─".repeat(tokenWidth + 2)}┼${"─".repeat(percentWidth + 6)}┤`;
   const rows = sources.map((source) => {
-    const percent = totalTokens > 0 ? `${((source.tokens / totalTokens) * 100).toFixed(1)}%` : "0.0%";
+    const percent = estimatedInitialInputTokens > 0 ? `${((source.tokens / estimatedInitialInputTokens) * 100).toFixed(1)}%` : "0.0%";
     return `│ ${source.label.padEnd(labelWidth)} │ ${formatTokens(source.tokens).padStart(tokenWidth)} │ ${percent.padStart(percentWidth + 4)} │`;
   });
 
   return [
-    `Prompt injection: PI: ${formatTokens(totalTokens)} tok`,
+    `Prompt injection: PI: ${formatTokens(estimatedInitialInputTokens)} tok estimated initial input (prompt text ${formatTokens(promptTextTokens)} × ${INITIAL_INPUT_OVERHEAD_MULTIPLIER})`,
     `┌${"─".repeat(labelWidth + 2)}┬${"─".repeat(tokenWidth + 2)}┬${"─".repeat(percentWidth + 6)}┐`,
     `│ ${"Source".padEnd(labelWidth)} │ ${"Tokens".padStart(tokenWidth)} │ ${"%".padStart(percentWidth + 4)} │`,
     separator,
