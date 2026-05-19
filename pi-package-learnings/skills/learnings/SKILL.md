@@ -65,7 +65,16 @@ or, from this package directory:
 
 ## Adding a learning
 
-Only add a learning when a real troubleshooting path produced a solution. Keep it short and precise.
+This is an implicit completion requirement, not an optional reminder.
+
+At the end of every troubleshooting/configuration/repair task where a real solution was found, automatically create or update one concise LEARNINGS `.md` note before the final answer. Do not wait for the user to ask. This applies especially when this skill was used for inspection, repair, cleanup, setup, repeated-issue retrieval, or LEARNINGS maintenance.
+
+Skip writing a note only when one of these is true:
+
+- no solution was found
+- the task was pure explanation/research with no fix or reusable operational lesson
+- the user explicitly says not to write a learning
+- writing would duplicate an existing note; in that case update the existing note only if the new solution materially changes it
 
 Use this format:
 
@@ -78,17 +87,15 @@ Use this format:
 - Verification: command/output or observed behavior proving it worked.
 ```
 
-If no solution was found, either skip creating a note or write only:
+If no solution was found, skip creating a note unless the user explicitly asks for a failed-attempt record.
 
-```text
-No solution found
-```
-
-After adding a note, regenerate summary/index:
+After adding or updating a note, always regenerate summary/index:
 
 ```bash
 ~/.pi/agent/bin/learnings-summary
 ```
+
+Before the final answer, verify the note exists and mention the path briefly.
 
 ## Maintenance workflow
 

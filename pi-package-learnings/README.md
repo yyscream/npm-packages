@@ -10,7 +10,7 @@ This is a Pi package with four parts:
 
 | Part | Purpose |
 | --- | --- |
-| Extension | Adds the interactive `/learnings-setup` command. |
+| Extension | Adds `/learnings-setup` plus LEARNINGS agent tools (`learnings_search`, `learnings_read`, `learnings_add`, `learnings_sync`). |
 | Skill | Tells agents when and how to use LEARNINGS safely. |
 | Prompt templates | Adds `/sum-LEARNINGS` and `/ret-LEARNINGS`. |
 | Scripts | Generate the archive index, manifest, summary, and sync log. |

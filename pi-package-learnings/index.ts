@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getSettingsListTheme, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Container, Input, Key, matchesKey, type SettingItem, SettingsList, truncateToWidth } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
 
 const DEFAULT_DIR = "/mnt/SSD_NVME/LEARNINGS";
 const DEFAULT_TIMER = "20:00";
@@ -298,6 +299,98 @@ function healthLines(targetDir: string): string[] {
   return lines;
 }
 
+type ResolvedLearningsDir = { dir: string; source: "env" | "symlink" | "default" };
+
+function resolveLearningsDir(): ResolvedLearningsDir {
+  const configured = readConfiguredDir();
+  if (configured) return { dir: normalizeDir(configured), source: "env" };
+
+  const stable = symlinkPath();
+  if (fs.existsSync(stable)) {
+    try {
+      return { dir: normalizeDir(fs.realpathSync(stable)), source: "symlink" };
+    } catch {
+      return { dir: normalizeDir(stable), source: "symlink" };
+    }
+  }
+
+  return { dir: normalizeDir(DEFAULT_DIR), source: "default" };
+}
+
+function isPathInside(base: string, candidate: string): boolean {
+  const rel = path.relative(base, candidate);
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+function safeResolveInLearningsDir(rootDir: string, reference: string): string {
+  const root = normalizeDir(rootDir);
+  const candidate = normalizeDir(path.isAbsolute(reference) ? reference : path.join(root, reference));
+  if (!isPathInside(root, candidate)) throw new Error(`Reference escapes LEARNINGS dir: ${reference}`);
+  return candidate;
+}
+
+function listMarkdownFiles(dir: string): string[] {
+  if (!fs.existsSync(dir)) return [];
+  const out: string[] = [];
+  const stack = [dir];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current) continue;
+    const entries = fs.readdirSync(current, { withFileTypes: true });
+    for (const entry of entries) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) stack.push(full);
+      else if (entry.isFile() && entry.name.toLowerCase().endsWith(".md")) out.push(full);
+    }
+  }
+  return out.sort();
+}
+
+function learningFiles(rootDir: string): string[] {
+  const reserved = new Set(["README.md", "INDEX.md", "LEARNINGS-SUMMARY.md"]);
+  const top = fs.existsSync(rootDir)
+    ? fs.readdirSync(rootDir)
+      .filter((name) => name.toLowerCase().endsWith(".md") && !reserved.has(name))
+      .map((name) => path.join(rootDir, name))
+    : [];
+  const archived = listMarkdownFiles(path.join(rootDir, "archive"));
+  return [...top, ...archived].filter((file) => fs.existsSync(file));
+}
+
+function titleFromContent(content: string, fallback: string): string {
+  const match = content.match(/^#\s+(.+)$/m);
+  return match?.[1]?.trim() || fallback;
+}
+
+function makeSnippet(content: string, query: string, maxChars = 260): string {
+  const lower = content.toLowerCase();
+  const idx = lower.indexOf(query.toLowerCase());
+  if (idx < 0) return content.slice(0, maxChars).replace(/\s+/g, " ").trim();
+  const start = Math.max(0, idx - Math.floor(maxChars * 0.35));
+  const end = Math.min(content.length, start + maxChars);
+  return content.slice(start, end).replace(/\s+/g, " ").trim();
+}
+
+function extractReferencedMarkdownPaths(text: string): string[] {
+  const refs = new Set<string>();
+  const regex = /([A-Za-z0-9_./-]+\.md)/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(text)) !== null) refs.add(match[1]);
+  return [...refs];
+}
+
+function slugify(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-{2,}/g, "-") || `learning-${new Date().toISOString().slice(0, 10)}`;
+}
+
+async function runLearningsSummary(): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return run(path.join(packageRoot(), "scripts", "learnings-summary"), []);
+}
+
 async function setup(args: string, ctx: ExtensionCommandContext): Promise<void> {
   const parsed = parseArgs(args);
   const configured = readConfiguredDir();
@@ -389,6 +482,244 @@ async function setup(args: string, ctx: ExtensionCommandContext): Promise<void> 
 }
 
 export default function learningsExtension(pi: ExtensionAPI): void {
+  pi.registerTool({
+    name: "learnings_search",
+    label: "LEARNINGS Search",
+    description: "Search LEARNINGS-SUMMARY.md, INDEX.md, and archived learning notes. Returns matching entries and referenced files.",
+    parameters: Type.Object({
+      query: Type.String({ description: "Search query string" }),
+      limit: Type.Optional(Type.Number({ minimum: 1, maximum: 50, description: "Maximum number of matches to return (default 20)" })),
+    }),
+    async execute(_toolCallId, params) {
+      const query = params.query.trim();
+      if (!query) throw new Error("query must be non-empty");
+
+      const resolved = resolveLearningsDir();
+      const root = resolved.dir;
+      const limit = typeof params.limit === "number" ? Math.min(50, Math.max(1, Math.trunc(params.limit))) : 20;
+
+      const searchFiles = [
+        { source: "summary", path: path.join(root, "LEARNINGS-SUMMARY.md") },
+        { source: "index", path: path.join(root, "INDEX.md") },
+        ...learningFiles(root).map((file) => ({ source: "note", path: file })),
+      ].filter((entry) => fs.existsSync(entry.path));
+
+      const matches: Array<{ source: string; file: string; title?: string; snippet: string; references: string[] }> = [];
+      for (const entry of searchFiles) {
+        if (matches.length >= limit) break;
+        const content = fs.readFileSync(entry.path, "utf8");
+        if (!content.toLowerCase().includes(query.toLowerCase())) continue;
+        const title = entry.source === "note" ? titleFromContent(content, path.basename(entry.path, ".md")) : undefined;
+        const snippet = makeSnippet(content, query);
+        const refs = extractReferencedMarkdownPaths(content).slice(0, 12);
+        matches.push({
+          source: entry.source,
+          file: entry.path,
+          title,
+          snippet,
+          references: refs,
+        });
+      }
+
+      const referencedFiles = new Set<string>();
+      for (const match of matches) {
+        for (const ref of match.references) {
+          try {
+            const candidate = safeResolveInLearningsDir(root, ref);
+            if (fs.existsSync(candidate)) referencedFiles.add(candidate);
+          } catch {
+            // ignore references outside root
+          }
+        }
+      }
+
+      const text = matches.length === 0
+        ? `No LEARNINGS matches for '${query}' in ${root}`
+        : [
+          `LEARNINGS matches for '${query}' (${matches.length})`,
+          ...matches.map((m, i) => `${i + 1}. [${m.source}] ${m.title ? `${m.title} :: ` : ""}${m.file}\n   ${m.snippet}`),
+          referencedFiles.size > 0 ? "" : "",
+          referencedFiles.size > 0 ? `Referenced files:\n${[...referencedFiles].map((file) => `- ${file}`).join("\n")}` : "",
+        ].filter(Boolean).join("\n");
+
+      return {
+        content: [{ type: "text", text }],
+        details: {
+          query,
+          archiveDir: root,
+          source: resolved.source,
+          count: matches.length,
+          matches,
+          referencedFiles: [...referencedFiles],
+        },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "learnings_read",
+    label: "LEARNINGS Read",
+    description: "Read one LEARNINGS note by slug/title/reference. Resolves archive paths safely.",
+    parameters: Type.Object({
+      reference: Type.String({ description: "Learning slug, title, or markdown reference/path" }),
+      maxChars: Type.Optional(Type.Number({ minimum: 1000, maximum: 100000, description: "Maximum characters to return (default 20000)" })),
+    }),
+    async execute(_toolCallId, params) {
+      const ref = params.reference.trim();
+      if (!ref) throw new Error("reference must be non-empty");
+
+      const resolved = resolveLearningsDir();
+      const root = resolved.dir;
+      const maxChars = typeof params.maxChars === "number" ? Math.min(100000, Math.max(1000, Math.trunc(params.maxChars))) : 20000;
+
+      const candidates = new Set<string>();
+      const withExt = ref.toLowerCase().endsWith(".md") ? ref : `${ref}.md`;
+      for (const rel of [ref, withExt, path.join("archive", ref), path.join("archive", withExt)]) {
+        try {
+          candidates.add(safeResolveInLearningsDir(root, rel));
+        } catch {
+          // skip
+        }
+      }
+      if (path.isAbsolute(ref)) {
+        try {
+          candidates.add(safeResolveInLearningsDir(root, ref));
+        } catch {
+          // skip
+        }
+      }
+
+      const files = learningFiles(root);
+      const refLower = ref.toLowerCase();
+      const byExactBasename = files.find((file) => path.basename(file, ".md").toLowerCase() === refLower);
+      const byFuzzyBasename = files.find((file) => path.basename(file, ".md").toLowerCase().includes(refLower));
+      const byTitle = files.find((file) => {
+        const content = fs.readFileSync(file, "utf8");
+        return titleFromContent(content, "").toLowerCase().includes(refLower);
+      });
+      if (byExactBasename) candidates.add(byExactBasename);
+      if (byFuzzyBasename) candidates.add(byFuzzyBasename);
+      if (byTitle) candidates.add(byTitle);
+
+      const selected = [...candidates].find((candidate) => fs.existsSync(candidate) && candidate.toLowerCase().endsWith(".md"));
+      if (!selected) throw new Error(`Learning not found for reference: ${ref}`);
+
+      const full = fs.readFileSync(selected, "utf8");
+      const truncated = full.length > maxChars;
+      const content = truncated ? `${full.slice(0, maxChars)}\n\n[truncated: ${full.length - maxChars} chars omitted]` : full;
+
+      return {
+        content: [{ type: "text", text: `${selected}\n\n${content}` }],
+        details: {
+          reference: ref,
+          archiveDir: root,
+          source: resolved.source,
+          path: selected,
+          truncated,
+          fullChars: full.length,
+          returnedChars: content.length,
+        },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "learnings_add",
+    label: "LEARNINGS Add",
+    description: "Create or update a concise LEARNINGS note and regenerate summary/index.",
+    parameters: Type.Object({
+      titleOrSlug: Type.String({ description: "Learning title or slug" }),
+      issue: Type.String({ description: "What happened" }),
+      tried: Type.String({ description: "Key diagnostics/fixes attempted" }),
+      solution: Type.String({ description: "What worked at the end" }),
+      verification: Type.String({ description: "Command/output or observed behavior proving it worked" }),
+    }),
+    async execute(_toolCallId, params) {
+      const titleOrSlug = params.titleOrSlug.trim();
+      if (!titleOrSlug) throw new Error("titleOrSlug must be non-empty");
+      const issue = params.issue.trim();
+      const tried = params.tried.trim();
+      const solution = params.solution.trim();
+      const verification = params.verification.trim();
+      if (!issue || !tried || !solution || !verification) throw new Error("issue, tried, solution, and verification must be non-empty");
+
+      const resolved = resolveLearningsDir();
+      const root = resolved.dir;
+      fs.mkdirSync(root, { recursive: true });
+
+      const slug = slugify(titleOrSlug);
+      const notePath = safeResolveInLearningsDir(root, `${slug}.md`);
+      const exists = fs.existsSync(notePath);
+      const content = [
+        `# ${slug}`,
+        "",
+        `- Issue: ${issue}`,
+        `- Tried: ${tried}`,
+        `- Solution: ${solution}`,
+        `- Verification: ${verification}`,
+        "",
+      ].join("\n");
+      fs.writeFileSync(notePath, content, "utf8");
+
+      const summary = await runLearningsSummary();
+      const summaryOut = summary.stdout.trim() || summary.stderr.trim() || "(no summary output)";
+      const status = summary.code === 0 ? "ok" : "error";
+
+      return {
+        content: [{ type: "text", text: `${exists ? "Updated" : "Created"} ${notePath}\nSummary: ${summaryOut}` }],
+        details: {
+          archiveDir: root,
+          source: resolved.source,
+          slug,
+          path: notePath,
+          updated: exists,
+          summary: { status, code: summary.code, stdout: summary.stdout, stderr: summary.stderr },
+        },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "learnings_sync",
+    label: "LEARNINGS Sync",
+    description: "Run LEARNINGS summary/index generation and return status/errors.",
+    parameters: Type.Object({}),
+    async execute() {
+      const resolved = resolveLearningsDir();
+      const summary = await runLearningsSummary();
+      const status = summary.code === 0 ? "ok" : "error";
+      const out = summary.stdout.trim();
+      const err = summary.stderr.trim();
+      const summaryPath = out.split(/\r?\n/).filter(Boolean).pop() || path.join(resolved.dir, "LEARNINGS-SUMMARY.md");
+      const health = healthLines(resolved.dir);
+
+      return {
+        content: [{
+          type: "text",
+          text: [
+            `Sync status: ${status}`,
+            `Archive: ${resolved.dir}`,
+            `Summary path: ${summaryPath}`,
+            out ? `stdout: ${out}` : "",
+            err ? `stderr: ${err}` : "",
+            "",
+            ...health,
+          ].filter(Boolean).join("\n"),
+        }],
+        details: {
+          archiveDir: resolved.dir,
+          source: resolved.source,
+          status,
+          code: summary.code,
+          stdout: summary.stdout,
+          stderr: summary.stderr,
+          summaryPath,
+          health,
+        },
+      };
+    },
+  });
+
   pi.registerCommand("learnings-setup", {
     description: "Interactively configure the LEARNINGS archive, symlink/env, scripts, summary, and optional daily timer. Usage: /learnings-setup [--dir PATH] [--timer HH:MM|--no-timer] [--check]",
     handler: setup,
