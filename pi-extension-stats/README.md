@@ -27,6 +27,7 @@ No required configuration.
 - `/stats [days|all]` — show token usage dashboard (default: last 14 days).
 - `/stats tokens` — show current context token breakdown by source/type.
 - `/stats-pi` — show estimated initial prompt input token breakdown. It counts Pi's system prompt text, active provider-level tool schemas, framing overhead, and optional historical calibration.
+- `/calibrate` — start an isolated calibration session with a fixed probe prompt, then update `/stats-pi` and the footer `PI: X tok` estimate from the first assistant response usage. `/calibrate current` reuses the current branch if it already has a suitable first-turn usage sample.
 - `/stats-last [days|all]` — show non-zero daily usage graph.
 - `/stats-most-expense [days|all]` — show most expensive sessions.
 - `/stats-model-compare [days|all]` — show model token/cost comparison.
@@ -47,7 +48,7 @@ baseEstimate = promptTextTokens + toolSchemaTokens + framingTokens
 estimatedInitialInput = baseEstimate × historicalCalibrationMultiplier
 ```
 
-The historical multiplier is learned opportunistically from future sessions by comparing the pre-call estimate with the provider-reported first assistant `usage.input + usage.cacheRead + usage.cacheWrite` after subtracting the first user prompt estimate. Without samples, `/stats-pi` reports an uncalibrated estimate and a conservative range. Provider-reported usage in Pi session JSONL remains the authoritative post-call value.
+The historical multiplier is learned opportunistically from future sessions by comparing the pre-call estimate with the provider-reported first assistant `usage.input + usage.cacheRead + usage.cacheWrite` after subtracting the first user prompt estimate. `/calibrate` performs the same calculation on demand by opening an isolated session and sending a fixed probe prompt; `/calibrate current` can reuse the current branch once its first assistant response has usage data. Without samples, `/stats-pi` reports an uncalibrated estimate and a conservative range. Provider-reported usage in Pi session JSONL remains the authoritative post-call value.
 
 ## Tools
 

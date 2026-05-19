@@ -62,6 +62,7 @@ const DEFAULT_DAYS = 14;
 const MAX_BAR_WIDTH = 24;
 const COST_BAR_WIDTH = 10;
 const FIRST_USER_MESSAGE_FRAMING_TOKENS = 16;
+const CALIBRATION_PROMPT = "Calibration probe: reply with exactly `calibration-ok` and no other text.";
 
 function addPromptSource(sources: PromptInjectionSource[], label: string, content: string | undefined): number {
   if (!content) return 0;
@@ -712,6 +713,44 @@ export default function statsExtension(pi: ExtensionAPI) {
     }
   };
 
+  const calibrateFromCurrentBranch = (ctx: ExtensionCommandContext): { ok: true; record: NonNullable<ReturnType<typeof buildInitialPromptCalibrationRecord>> } | { ok: false; reason: string } => {
+    let firstUserTokens: number | null = null;
+    let firstAssistantWithUsage: Record<string, any> | null = null;
+
+    for (const entry of ctx.sessionManager.getBranch()) {
+      const record = (entry && typeof entry === "object" ? entry : {}) as Record<string, any>;
+      if (record.type !== "message") continue;
+
+      const message = (record.message && typeof record.message === "object" ? record.message : {}) as Record<string, any>;
+      if (message.role === "user" && firstUserTokens === null) {
+        firstUserTokens = estimatePromptInjectionTokens(stringifyContextValue(message.content)) + FIRST_USER_MESSAGE_FRAMING_TOKENS;
+      }
+      if (message.role === "assistant" && message.usage) {
+        firstAssistantWithUsage = message;
+        break;
+      }
+    }
+
+    if (firstUserTokens === null) return { ok: false, reason: "No initial user message found in the current branch." };
+    if (!firstAssistantWithUsage) return { ok: false, reason: "No assistant response with usage data found yet. Run /calibrate after the first assistant response finishes." };
+
+    const usage = firstAssistantWithUsage.usage as Record<string, unknown>;
+    const actualInitialInputTokens =
+      (Number(usage.input ?? 0) || 0) + (Number(usage.cacheRead ?? 0) || 0) + (Number(usage.cacheWrite ?? 0) || 0);
+    if (actualInitialInputTokens <= 0) return { ok: false, reason: "The first assistant response has no input/cache token usage to calibrate from." };
+
+    const estimate = estimateInitialPromptForContext(ctx.getSystemPrompt(), null);
+    const record = buildInitialPromptCalibrationRecord({
+      estimate,
+      actualInitialInputTokens,
+      firstUserTokens,
+      provider: String(firstAssistantWithUsage.provider ?? ctx.model?.provider ?? "unknown"),
+      model: String(firstAssistantWithUsage.responseModel ?? firstAssistantWithUsage.model ?? ctx.model?.id ?? "unknown"),
+    });
+    if (!record) return { ok: false, reason: "Calibration sample was outside the accepted sanity range (0.25×–4×)." };
+    return { ok: true, record };
+  };
+
   pi.on("session_start", async () => {
     pendingInitialPromptMeasurement = null;
   });
@@ -856,6 +895,41 @@ export default function statsExtension(pi: ExtensionAPI) {
       const systemPrompt = ctx.getSystemPrompt();
       const promptEstimate = estimateInitialPromptForContext(systemPrompt, getPromptCalibration(ctx));
       ctx.ui.notify(formatPromptInjectionLines(systemPrompt, latestSystemPromptOptions, promptEstimate).join("\n"), "info");
+    },
+  });
+
+  pi.registerCommand("calibrate", {
+    description: "Start an isolated calibration turn to calibrate PI initial prompt token estimates.",
+    handler: async (args, ctx) => {
+      const mode = args.trim().toLowerCase();
+      if (mode === "current" || mode === "here") {
+        const result = calibrateFromCurrentBranch(ctx);
+        if (!result.ok) {
+          ctx.ui.notify(`Calibration failed: ${result.reason}`, "warning");
+          return;
+        }
+
+        appendInitialPromptCalibrationRecord(pi.appendEntry, result.record);
+        const calibration = getPromptCalibration(ctx);
+        const estimate = estimateInitialPromptForContext(ctx.getSystemPrompt(), calibration);
+        ctx.ui.notify(
+          `Calibrated PI estimate: ~${formatTokens(estimate.total)} tok (scale ×${estimate.calibrationMultiplier.toFixed(2)}, ${estimate.calibrationSamples} samples). Run /stats-pi for details.`,
+          "info",
+        );
+        return;
+      }
+
+      if (!ctx.isIdle()) {
+        ctx.ui.notify("Calibration needs an idle agent so it can start a clean probe turn.", "warning");
+        return;
+      }
+
+      ctx.ui.notify("Starting isolated calibration session…", "info");
+      await ctx.newSession({
+        withSession: async (newCtx) => {
+          await newCtx.sendUserMessage(CALIBRATION_PROMPT);
+        },
+      });
     },
   });
 

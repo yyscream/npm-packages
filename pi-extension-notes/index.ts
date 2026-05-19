@@ -1,8 +1,10 @@
+import { spawn } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { getAgentDir, envFlag, slugify } from "@firstpick/pi-utils";
-import type { AutocompleteItem } from "@earendil-works/pi-tui";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, getAgentEnvPath, resolveEnvValue, slugify, upsertEnvValue } from "@firstpick/pi-utils";
+import { Text, type AutocompleteItem } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 type NoteMeta = {
@@ -30,8 +32,12 @@ function getIndexFile(): string {
 	return path.join(getNotesDir(), "index.json");
 }
 
+const INCLUDE_RULES_ENV = "PI_NOTES_INCLUDE_RULES_IN_PROMPT";
+
 function includeRulesInPrompt(): boolean {
-	return envFlag("PI_NOTES_INCLUDE_RULES_IN_PROMPT", false);
+	const raw = resolveEnvValue(INCLUDE_RULES_ENV, { includeWorkspace: true, cwd: process.cwd() }).value?.trim().toLowerCase();
+	if (!raw) return false;
+	return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
 }
 
 function ensureStorage(): void {
@@ -110,6 +116,66 @@ function parseNoteArgs(args: string): { title: string; content: string } | null 
 	const content = trimmed;
 	const title = `${firstTwoWordsForAutoTitle(trimmed)}_${formatTimestampForAutoTitle(new Date())}`;
 	return { title, content };
+}
+
+function parseInteractiveNote(text: string): { title: string; content: string } | null {
+	const trimmed = text.trim();
+	if (!trimmed) return null;
+
+	const lines = trimmed.split(/\r?\n/);
+	const firstLine = lines[0]?.trim() ?? "";
+	if (firstLine.startsWith("# ")) {
+		const title = firstLine.replace(/^#+\s*/, "").trim();
+		const content = lines.slice(1).join("\n").trim();
+		if (title && content) return { title, content };
+	}
+
+	return parseNoteArgs(trimmed);
+}
+
+async function openExternalNoteEditor(ctx: ExtensionCommandContext, prefill: string): Promise<{ content: string; changed: boolean } | undefined> {
+	const editorCmd = process.env.VISUAL || process.env.EDITOR;
+	if (!editorCmd) {
+		ctx.ui.notify("No editor configured. Set $VISUAL or $EDITOR.", "warning");
+		return undefined;
+	}
+
+	return ctx.ui.custom<{ content: string; changed: boolean } | undefined>((tui, _theme, _keybindings, done) => {
+		const tmpFile = path.join(os.tmpdir(), `pi-note-${Date.now()}.md`);
+
+		queueMicrotask(async () => {
+			try {
+				fs.writeFileSync(tmpFile, prefill, "utf8");
+				tui.stop();
+				const [editor, ...editorArgs] = editorCmd.split(" ");
+				process.stdout.write(`Launching external editor: ${editorCmd}\nPi will resume when the editor exits.\n`);
+				const status = await new Promise<number | null>((resolve) => {
+					const child = spawn(editor, [...editorArgs, tmpFile], {
+						stdio: "inherit",
+						shell: process.platform === "win32",
+					});
+					child.on("error", () => resolve(null));
+					child.on("close", (code) => resolve(code));
+				});
+				if (status === 0) {
+					const content = fs.readFileSync(tmpFile, "utf8").replace(/\n$/, "");
+					done({ content, changed: content !== prefill.replace(/\n$/, "") });
+				} else {
+					done(undefined);
+				}
+			} finally {
+				try {
+					fs.unlinkSync(tmpFile);
+				} catch {
+					// Ignore cleanup errors.
+				}
+				tui.start();
+				tui.requestRender(true);
+			}
+		});
+
+		return new Text(`Launching external editor: ${editorCmd}`, 1, 1);
+	}, { overlay: true });
 }
 
 function scoreNote(note: NoteMeta, query: string): number {
@@ -193,17 +259,108 @@ export default function notesExtension(pi: ExtensionAPI) {
 		}
 	};
 
+	const noteCompletions = (prefix: string): AutocompleteItem[] | null => {
+		refreshIndex();
+		const items = rankNotes(index.notes, prefix)
+			.slice(0, 25)
+			.map((n) => ({
+				value: n.slug,
+				label: n.slug,
+				description: `${n.isRule ? "[rule] " : ""}${n.title}`,
+			}));
+		return items.length > 0 ? items : null;
+	};
+
+	const pickNote = async (ctx: ExtensionCommandContext, title: string): Promise<NoteMeta | undefined> => {
+		const notes = listNotes();
+		if (notes.length === 0) {
+			ctx.ui.notify("No notes saved yet. Use /note ...", "info");
+			return undefined;
+		}
+		if (!ctx.hasUI) return undefined;
+
+		const options = notes.slice(0, 40).map((n) => `${n.slug} :: ${n.title}`);
+		const picked = await ctx.ui.select(title, options);
+		if (!picked) {
+			ctx.ui.notify("Cancelled", "info");
+			return undefined;
+		}
+		return resolveNote(index.notes, picked.split(" :: ")[0] ?? "");
+	};
+
+	const saveNoteContent = (note: NoteMeta, content: string): void => {
+		const updatedAt = new Date().toISOString();
+		note.updatedAt = updatedAt;
+		note.isRule = isRuleNote(note.title, content);
+		note.preview = content.replace(/\s+/g, " ").trim().slice(0, 120);
+		fs.writeFileSync(path.join(getNotesDir(), note.file), content, "utf8");
+		saveIndex(index);
+		contentCache.set(note.slug, content);
+	};
+
+	const saveNoteTitle = (note: NoteMeta, newTitle: string, ctx: ExtensionCommandContext): boolean => {
+		const title = newTitle.trim();
+		if (!title) {
+			ctx.ui.notify("Title not updated: empty title.", "warning");
+			return false;
+		}
+
+		let newSlug = slugify(title);
+		if (!newSlug) newSlug = `note-${Date.now()}`;
+		if (newSlug !== note.slug && index.notes[newSlug]) {
+			ctx.ui.notify(`Title not updated: note slug already exists (${newSlug}).`, "warning");
+			return false;
+		}
+
+		const oldSlug = note.slug;
+		const oldFile = path.join(getNotesDir(), note.file);
+		const newFileName = `${newSlug}.md`;
+		const newFile = path.join(getNotesDir(), newFileName);
+		const content = readNoteContent(note) ?? "";
+
+		if (newSlug !== oldSlug) {
+			try {
+				if (fs.existsSync(oldFile)) fs.renameSync(oldFile, newFile);
+				else fs.writeFileSync(newFile, content, "utf8");
+			} catch (error) {
+				ctx.ui.notify(`Failed to rename note file: ${error instanceof Error ? error.message : String(error)}`, "error");
+				return false;
+			}
+			delete index.notes[oldSlug];
+			contentCache.delete(oldSlug);
+		}
+
+		note.slug = newSlug;
+		note.title = title;
+		note.file = newFileName;
+		note.updatedAt = new Date().toISOString();
+		note.isRule = isRuleNote(title, content);
+		index.notes[newSlug] = note;
+		saveIndex(index);
+		contentCache.set(newSlug, content);
+		return true;
+	};
+
 	pi.on("session_start", async (_event, _ctx) => {
 		refreshIndex();
 	});
 
 	pi.registerCommand("note", {
-		description: "Save a note. Use '/note title :: content' or '/note content'",
+		description: "Save a note. Use '/note title :: content', '/note content', or '/note' to open the editor.",
 		handler: async (args, ctx) => {
-			const parsed = parseNoteArgs(args);
+			let parsed = parseNoteArgs(args);
 			if (!parsed) {
-				ctx.ui.notify("Usage: /note <title> :: <content>  (or /note <content>)", "warning");
-				return;
+				const edited = await openExternalNoteEditor(ctx, "# Note title\n\nWrite note content here...");
+				if (edited === undefined) return;
+				if (!edited.changed) {
+					ctx.ui.notify("Note not saved: editor content was unchanged.", "info");
+					return;
+				}
+				parsed = parseInteractiveNote(edited.content);
+				if (!parsed) {
+					ctx.ui.notify("Note not saved: add a title and content, or use '<title> :: <content>'.", "warning");
+					return;
+				}
 			}
 
 			refreshIndex();
@@ -314,41 +471,147 @@ export default function notesExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("note-update", {
-		description: "Update a note. Use '/note-update <slug|title> :: <content>'",
+		description: "Choose whether to update a note title/filename or content.",
+		handler: async (_args, ctx) => {
+			if (!ctx.hasUI) {
+				ctx.ui.notify("Use /note-title-update or /note-content-update.", "warning");
+				return;
+			}
+			refreshIndex();
+			const choice = await ctx.ui.select("Update note", ["Title / filename", "Content"]);
+			if (!choice) {
+				ctx.ui.notify("Cancelled", "info");
+				return;
+			}
+
+			const note = await pickNote(ctx, choice === "Title / filename" ? "Select note title to update" : "Select note content to update");
+			if (!note) return;
+
+			if (choice === "Title / filename") {
+				const newTitle = await ctx.ui.input(`New title for ${note.slug}`, note.title);
+				if (newTitle === undefined) {
+					ctx.ui.notify("Cancelled", "info");
+					return;
+				}
+				if (newTitle.trim() === note.title) {
+					ctx.ui.notify("Title not updated: title was unchanged.", "info");
+					return;
+				}
+				const oldSlug = note.slug;
+				if (saveNoteTitle(note, newTitle, ctx)) ctx.ui.notify(`Updated note title '${oldSlug}' → '${note.slug}'`, "info");
+				return;
+			}
+
+			const currentContent = readNoteContent(note);
+			if (currentContent == null) {
+				ctx.ui.notify(`Failed to read note '${note.slug}'`, "error");
+				return;
+			}
+			const edited = await openExternalNoteEditor(ctx, currentContent);
+			if (edited === undefined) return;
+			if (!edited.changed) {
+				ctx.ui.notify("Note not updated: editor content was unchanged.", "info");
+				return;
+			}
+			saveNoteContent(note, edited.content);
+			ctx.ui.notify(`Updated note content '${note.title}' (${note.slug})`, "info");
+		},
+	});
+
+	pi.registerCommand("note-content-update", {
+		description: "Update note content. Use '/note-content-update', '/note-content-update <slug|title>', or '/note-content-update <slug|title> :: <content>'",
+		getArgumentCompletions: noteCompletions,
 		handler: async (args, ctx) => {
 			refreshIndex();
 			const parsed = parseNoteUpdateArgs(args);
-			if (!parsed) {
-				ctx.ui.notify("Usage: /note-update <slug|title> :: <content>", "warning");
-				return;
+			let note: NoteMeta | undefined;
+			let content: string | undefined;
+
+			if (parsed) {
+				note = resolveNote(index.notes, parsed.query);
+				content = parsed.content;
+			} else {
+				const query = args.trim();
+				note = query ? resolveNote(index.notes, query) : await pickNote(ctx, "Select note content to update");
+				if (!note) {
+					ctx.ui.notify(query ? `Note not found: ${query}` : "Note not found", "warning");
+					return;
+				}
+
+				const currentContent = readNoteContent(note);
+				if (currentContent == null) {
+					ctx.ui.notify(`Failed to read note '${note.slug}'`, "error");
+					return;
+				}
+
+				const edited = await openExternalNoteEditor(ctx, currentContent);
+				if (edited === undefined) return;
+				if (!edited.changed) {
+					ctx.ui.notify("Note not updated: editor content was unchanged.", "info");
+					return;
+				}
+				content = edited.content;
 			}
 
-			const note = resolveNote(index.notes, parsed.query);
 			if (!note) {
-				ctx.ui.notify(`Note not found: ${parsed.query}`, "warning");
+				ctx.ui.notify(`Note not found: ${parsed?.query ?? args.trim()}`, "warning");
 				return;
 			}
 
-			const updatedAt = new Date().toISOString();
-			note.updatedAt = updatedAt;
-			note.isRule = isRuleNote(note.title, parsed.content);
-			note.preview = parsed.content.replace(/\s+/g, " ").trim().slice(0, 120);
-
-			fs.writeFileSync(path.join(getNotesDir(), note.file), parsed.content, "utf8");
-			saveIndex(index);
-			contentCache.set(note.slug, parsed.content);
-
+			saveNoteContent(note, content);
 			ctx.ui.notify(
 				note.isRule
-					? `Updated rule note '${note.title}' (${note.slug})${includeRulesInPrompt() ? " — included in system prompt" : ""}`
-					: `Updated note '${note.title}' (${note.slug})`,
+					? `Updated rule note content '${note.title}' (${note.slug})${includeRulesInPrompt() ? " — included in system prompt" : ""}`
+					: `Updated note content '${note.title}' (${note.slug})`,
 				"info",
 			);
 		},
 	});
 
+	pi.registerCommand("note-title-update", {
+		description: "Update note title and filename. Use '/note-title-update', or '/note-title-update <slug|title> :: <new title>'",
+		getArgumentCompletions: noteCompletions,
+		handler: async (args, ctx) => {
+			refreshIndex();
+			const parsed = parseNoteUpdateArgs(args);
+			let note: NoteMeta | undefined;
+			let newTitle: string | undefined;
+
+			if (parsed) {
+				note = resolveNote(index.notes, parsed.query);
+				newTitle = parsed.content;
+			} else {
+				const query = args.trim();
+				note = query ? resolveNote(index.notes, query) : await pickNote(ctx, "Select note title to update");
+				if (!note) {
+					ctx.ui.notify(query ? `Note not found: ${query}` : "Note not found", "warning");
+					return;
+				}
+				newTitle = await ctx.ui.input(`New title for ${note.slug}`, note.title);
+				if (newTitle === undefined) {
+					ctx.ui.notify("Cancelled", "info");
+					return;
+				}
+			}
+
+			if (!note) {
+				ctx.ui.notify(`Note not found: ${parsed?.query ?? args.trim()}`, "warning");
+				return;
+			}
+			if (newTitle.trim() === note.title) {
+				ctx.ui.notify("Title not updated: title was unchanged.", "info");
+				return;
+			}
+
+			const oldSlug = note.slug;
+			if (saveNoteTitle(note, newTitle, ctx)) {
+				ctx.ui.notify(`Updated note title '${oldSlug}' → '${note.slug}'`, "info");
+			}
+		},
+	});
+
 	pi.registerCommand("note-delete", {
-		description: "Delete a note: /note-delete <slug|title>",
+		description: "Delete a note. Use '/note-delete' to pick, or '/note-delete <slug|title>'",
 		getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
 			refreshIndex();
 			const items = rankNotes(index.notes, prefix)
@@ -362,10 +625,26 @@ export default function notesExtension(pi: ExtensionAPI) {
 		},
 		handler: async (args, ctx) => {
 			refreshIndex();
-			const query = args.trim();
+			let query = args.trim();
+
 			if (!query) {
-				ctx.ui.notify("Usage: /note-delete <slug|title>", "warning");
-				return;
+				const notes = listNotes();
+				if (notes.length === 0) {
+					ctx.ui.notify("No notes saved yet. Use /note ...", "info");
+					return;
+				}
+				if (!ctx.hasUI) {
+					ctx.ui.notify("Usage: /note-delete <slug|title>", "warning");
+					return;
+				}
+
+				const options = notes.slice(0, 40).map((n) => `${n.slug} :: ${n.title}`);
+				const picked = await ctx.ui.select("Select note to delete", options);
+				if (!picked) {
+					ctx.ui.notify("Cancelled", "info");
+					return;
+				}
+				query = picked.split(" :: ")[0] ?? "";
 			}
 
 			const note = resolveNote(index.notes, query);
@@ -543,10 +822,33 @@ export default function notesExtension(pi: ExtensionAPI) {
 	pi.registerCommand("note-status", {
 		description: "Show notes extension configuration",
 		handler: async (_args, ctx) => {
+			const resolved = resolveEnvValue(INCLUDE_RULES_ENV, { includeWorkspace: true, cwd: ctx.cwd });
+			const source = resolved.source ? ` · source=${resolved.source}${resolved.path ? ` (${resolved.path})` : ""}` : "";
 			ctx.ui.notify(
-				`notes: dir=${getNotesDir()} · includeRulesInPrompt=${includeRulesInPrompt() ? "on" : "off"}`,
+				`notes: dir=${getNotesDir()} · includeRulesInPrompt=${includeRulesInPrompt() ? "on" : "off"}${source}`,
 				"info",
 			);
+		},
+	});
+
+	pi.registerCommand("notes-rules", {
+		description: "Turn automatic rule-note prompt injection ON or OFF.",
+		handler: async (_args, ctx) => {
+			if (!ctx.hasUI) {
+				ctx.ui.notify("Usage: /notes-rules requires interactive UI", "warning");
+				return;
+			}
+
+			const current = includeRulesInPrompt() ? "ON" : "OFF";
+			const choice = await ctx.ui.select(`Rule note prompt injection is ${current}`, ["ON", "OFF"]);
+			if (!choice) {
+				ctx.ui.notify("Cancelled", "info");
+				return;
+			}
+
+			process.env[INCLUDE_RULES_ENV] = choice === "ON" ? "on" : "off";
+			upsertEnvValue(getAgentEnvPath(), INCLUDE_RULES_ENV, process.env[INCLUDE_RULES_ENV]);
+			ctx.ui.notify(`Rule note prompt injection set to ${choice}. Saved to ${getAgentEnvPath()}.`, "info");
 		},
 	});
 
