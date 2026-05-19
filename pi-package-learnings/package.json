@@ -1,0 +1,43 @@
+{
+  "name": "pi-package-learnings",
+  "version": "0.1.0",
+  "description": "File-based troubleshooting LEARNINGS archive for Pi agents, with retrieval workflow, summary prompts, and sync scripts.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "skill",
+    "extension",
+    "prompt-template",
+    "learnings",
+    "troubleshooting-memory"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ],
+    "prompts": [
+      "./prompts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "bin": {
+    "pi-learnings-sync": "./scripts/learnings-sync",
+    "pi-learnings-summary": "./scripts/learnings-summary"
+  },
+  "files": [
+    "index.ts",
+    "skills",
+    "prompts",
+    "scripts",
+    "README.md",
+    "LICENSE"
+  ]
+}
