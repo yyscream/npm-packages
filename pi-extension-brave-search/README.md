@@ -6,7 +6,9 @@ Brave Search tool integration for Pi.
 
 - Adds the `brave_search` tool for live web search from Pi.
 - Returns formatted results plus structured metadata.
-- Applies sane limits to keep output stable and context-safe.
+- Supports Brave result filters, extra snippets, spellcheck, clean text output, and Goggles.
+- Deduplicates normalized URLs across returned result blocks.
+- Applies sane limits and request pacing to keep output stable, context-safe, and compatible with low-rate plans.
 - Resolves API key in this order:
   1. `process.env.BRAVE_SEARCH_API_KEY`
   2. `./.env` (current working directory)
@@ -31,12 +33,15 @@ If no key is configured when Pi starts, the extension prompts you to enter one a
 
 - `/brave-search-status` — show whether Brave Search is configured and where key resolution succeeded.
 - `/brave-search-setup` — run the interactive setup prompt again when no key is configured.
+- `/brave-search-results` — show and adjust the default web result count saved as `BRAVE_SEARCH_RESULT_COUNT`.
 
 ## Tools
 
 - `brave_search`
-  - Inputs: `query`, optional `count`, `country`, `search_lang`, `freshness`, `safesearch`
-  - Output: formatted search results + metadata
+  - Inputs: `query`, optional `count`, `country`, `search_lang`, `freshness`, `safesearch`, `result_filter`, `extra_snippets`, `spellcheck`, `text_decorations`, `goggles`
+  - Output: formatted search results + metadata, including `responseTypes`, requested web result count, count warning, canonical URLs, result type, original index, duplicate count, and optional extra snippets
+
+Useful `result_filter` values include `web`, `news`, `videos`, `faq`, `discussions`, `infobox`, and `locations`. `count` applies to web results only in Brave's API. Brave Web Search supports `count` from 1 to 20 per request; the extension warns at 16+ and clamps invalid saved defaults into the supported range.
 
 ## Example view
 
