@@ -1,4 +1,21 @@
 #!/usr/bin/env bash
+# install-pi-add.sh
+#
+# What this script does:
+# - Discovers local Pi package.json files in this repository for extensions, skills, and packages
+#   (pi-extension-*/, pi-skill-*/, pi-package-*/).
+# - Lets you choose which packages to install (interactive by default), or installs all with --all.
+# - Compares local package versions with installed versions and skips unchanged ones unless --force is used.
+# - Runs `pi install npm:<package>` for each selected package (or only prints commands with --dry-run).
+#
+# How to use:
+# - Run `./install-pi-add.sh` for interactive selection.
+# - Run `./install-pi-add.sh --all` for non-interactive install of all discovered Pi packages.
+# - Add `--dry-run` to preview actions and `--force` to reinstall same-version packages.
+#
+# Why this script exists:
+# - It provides a repeatable, repo-local workflow to install/test local Pi packages from source
+#   without manually running install commands for each extension/skill/package.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,7 +26,9 @@ FORCE_INSTALL=0
 usage() {
   cat <<'EOF'
 Usage:
-  install-pi-extensions.sh [options]
+  install-pi-add.sh [options]
+
+Discovers and installs local Pi extension/skill/package npm packages.
 
 Options:
   --all          Install all discovered packages (non-interactive)
@@ -18,10 +37,10 @@ Options:
   -h, --help     Show this help
 
 Examples:
-  ./install-pi-extensions.sh
-  ./install-pi-extensions.sh --all
-  ./install-pi-extensions.sh --all --force
-  ./install-pi-extensions.sh --dry-run
+  ./install-pi-add.sh
+  ./install-pi-add.sh --all
+  ./install-pi-add.sh --all --force
+  ./install-pi-add.sh --dry-run
 EOF
 }
 
@@ -66,20 +85,41 @@ if ! command -v npm >/dev/null 2>&1; then
   exit 1
 fi
 
-mapfile -t PACKAGE_JSON_FILES < <(printf '%s\n' "$ROOT_DIR"/pi-extension-*/package.json)
+PACKAGE_JSON_FILES=()
+for pattern in \
+  "$ROOT_DIR"/pi-extension-*/package.json \
+  "$ROOT_DIR"/pi-skill-*/package.json \
+  "$ROOT_DIR"/pi-package-*/package.json
+  do
+  for package_json in $pattern; do
+    if [[ -f "$package_json" ]]; then
+      PACKAGE_JSON_FILES+=("$package_json")
+    fi
+  done
+done
 
 if [[ ${#PACKAGE_JSON_FILES[@]} -eq 0 ]]; then
-  echo "No pi-extension package.json files found under $ROOT_DIR"
+  echo "No local pi-extension/pi-skill/pi-package package.json files found under $ROOT_DIR"
   exit 0
 fi
 
-echo "Discovered ${#PACKAGE_JSON_FILES[@]} extension package(s)."
+echo "Discovered ${#PACKAGE_JSON_FILES[@]} local Pi package(s) (extensions/skills/packages)."
 
 PACKAGE_NAMES=()
 declare -A PACKAGE_REPO_VERSIONS=()
+declare -A PACKAGE_KINDS=()
 for package_json in "${PACKAGE_JSON_FILES[@]}"; do
   package_name="$(node -p "require(process.argv[1]).name" "$package_json" 2>/dev/null || true)"
   package_version="$(node -p "require(process.argv[1]).version" "$package_json" 2>/dev/null || true)"
+  package_dir_name="$(basename "$(dirname "$package_json")")"
+  package_kind="package"
+  if [[ "$package_dir_name" == pi-extension-* ]]; then
+    package_kind="extension"
+  elif [[ "$package_dir_name" == pi-skill-* ]]; then
+    package_kind="skill"
+  elif [[ "$package_dir_name" == pi-package-* ]]; then
+    package_kind="package"
+  fi
   if [[ -z "$package_name" || "$package_name" == "undefined" ]]; then
     echo "WARN: skipping '$package_json' because package name could not be read." >&2
     continue
@@ -90,6 +130,7 @@ for package_json in "${PACKAGE_JSON_FILES[@]}"; do
   fi
   PACKAGE_NAMES+=("$package_name")
   PACKAGE_REPO_VERSIONS["$package_name"]="$package_version"
+  PACKAGE_KINDS["$package_name"]="$package_kind"
 done
 
 if [[ ${#PACKAGE_NAMES[@]} -eq 0 ]]; then
@@ -108,7 +149,8 @@ else
 
   echo "Select package numbers to install (space/comma separated), or type 'all':"
   for idx in "${!PACKAGE_NAMES[@]}"; do
-    printf "  %2d) %s\n" "$((idx + 1))" "${PACKAGE_NAMES[$idx]}"
+    package_name="${PACKAGE_NAMES[$idx]}"
+    printf "  %2d) %s [%s]\n" "$((idx + 1))" "$package_name" "${PACKAGE_KINDS[$package_name]}"
   done
   printf "> "
   read -r selection
@@ -158,21 +200,23 @@ for package_name in "${SELECTED_PACKAGES[@]}"; do
     installed_version="$(node -p "require(process.argv[1]).version" "$installed_package_json" 2>/dev/null || true)"
   fi
 
+  package_kind="${PACKAGE_KINDS[$package_name]}"
+
   if [[ $FORCE_INSTALL -eq 0 && -n "$installed_version" && "$installed_version" == "$repo_version" ]]; then
-    echo "Skipping npm:${package_name} (already installed at version $installed_version)"
+    echo "Skipping ${package_kind} npm:${package_name} (already installed at version $installed_version)"
     SKIPPED_UP_TO_DATE+=("${package_name}@${installed_version}")
     continue
   fi
 
   install_target="npm:${package_name}"
   if [[ $FORCE_INSTALL -eq 1 && -n "$installed_version" && "$installed_version" == "$repo_version" ]]; then
-    echo "Installing $install_target (force reinstall version $repo_version)"
+    echo "Installing ${package_kind} $install_target (force reinstall version $repo_version)"
     UPDATED_PACKAGES+=("${package_name} (forced reinstall ${repo_version})")
   elif [[ -n "$installed_version" ]]; then
-    echo "Installing $install_target (updating $installed_version -> $repo_version)"
+    echo "Installing ${package_kind} $install_target (updating $installed_version -> $repo_version)"
     UPDATED_PACKAGES+=("${package_name} (${installed_version} -> ${repo_version})")
   else
-    echo "Installing $install_target (target version $repo_version)"
+    echo "Installing ${package_kind} $install_target (target version $repo_version)"
     NEWLY_INSTALLED+=("${package_name}@${repo_version}")
   fi
 
