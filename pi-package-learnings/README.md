@@ -26,7 +26,7 @@ The package code is separate from the archive data. Your actual LEARNINGS notes 
 Install the published npm package:
 
 ```bash
-pi install npm:pi-package-learnings
+pi install npm:@firstpick/pi-package-learnings
 ```
 
 Reload or restart Pi if needed, then run:

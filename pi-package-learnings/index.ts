@@ -19,6 +19,7 @@ function packageRoot(): string {
     path.join(process.cwd(), "pi-package-learnings"),
     path.join(os.homedir(), "npm-packages", "pi-package-learnings"),
     path.join(os.homedir(), ".bun", "install", "global", "node_modules", "pi-package-learnings"),
+    path.join(os.homedir(), ".bun", "install", "global", "node_modules", "@firstpick", "pi-package-learnings"),
   ];
   const root = candidates.find((candidate) => fs.existsSync(path.join(candidate, "scripts", "sync-learnings.py")));
   return root || __dirname;

@@ -1,5 +1,5 @@
 {
-  "name": "pi-package-learnings",
+  "name": "@firstpick/pi-package-learnings",
   "version": "0.1.0",
   "description": "File-based troubleshooting LEARNINGS archive for Pi agents, with retrieval workflow, summary prompts, and sync scripts.",
   "license": "MIT",
