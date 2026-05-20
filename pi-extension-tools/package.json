@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-extension-tools",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Interactive active-tool manager for Pi.",
   "license": "MIT",
   "keywords": [

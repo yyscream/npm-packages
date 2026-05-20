@@ -5,6 +5,7 @@ Release orchestration command for this npm-packages workspace.
 ## What it does
 
 - Adds `/release-npm` command.
+- Adds `/release-npm-setup` command to configure the npm auth token via Pi native input.
 - Runs release preflight checks before asking to publish.
 - Shows a summary of planned version changes and publish actions in the confirmation prompt.
 - Publishes only after explicit confirmation.
@@ -26,7 +27,13 @@ pi install npm:@firstpick/pi-extension-release-npm
 
 ## Configuration
 
-No required configuration.
+Publishing requires valid npm credentials. Run `/release-npm-setup`, paste an npm access token, and the extension will run:
+
+```bash
+npm config set //registry.npmjs.org/:_authToken "<token>"
+```
+
+It then verifies the token with `npm whoami`.
 
 ## Expected workspace structure
 
@@ -88,6 +95,7 @@ Readiness checks require or verify:
 
 ## Commands
 
+- `/release-npm-setup` — prompts for an npm token with Pi native input, saves it using `npm config set //registry.npmjs.org/:_authToken <token>`, then verifies with `npm whoami`.
 - `/release-npm` — runs `./release-workflow.sh --plan --all`, shows the planned version/publish summary plus exact package targets, prompts for confirmation, then runs `./release-workflow.sh --publish --target <dir>` only for those detected targets. It does not install packages after publishing.
 - `/release-toggle` — toggles active release output between compact and expanded mode.
 - `/release-abort` — aborts the active release subprocess.

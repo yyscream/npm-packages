@@ -97,6 +97,35 @@ async function runCommand(cwd: string, command: string): Promise<CommandResult> 
   });
 }
 
+async function runNpmConfigSetToken(cwd: string, token: string): Promise<CommandResult> {
+  return await new Promise((resolve) => {
+    const child = spawn("npm", ["config", "set", "//registry.npmjs.org/:_authToken", token], {
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    child.stdout.on("data", (d) => { output += String(d); });
+    child.stderr.on("data", (d) => { output += String(d); });
+    child.on("error", (error) => resolve({ ok: false, output: error.message }));
+    child.on("close", (code) => resolve({ ok: code === 0, output }));
+  });
+}
+
+async function verifyNpmAuth(cwd: string): Promise<CommandResult> {
+  return await new Promise((resolve) => {
+    const child = spawn("npm", ["whoami"], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    let output = "";
+    child.stdout.on("data", (d) => { output += String(d); });
+    child.stderr.on("data", (d) => { output += String(d); });
+    child.on("error", (error) => resolve({ ok: false, output: error.message }));
+    child.on("close", (code) => resolve({ ok: code === 0, output }));
+  });
+}
+
+function redactTokenLikeOutput(output: string): string {
+  return output.replace(/npm_[A-Za-z0-9_=-]+/g, "npm_[redacted]").trim();
+}
+
 async function runScriptLive(
   cwd: string,
   script: string,
@@ -314,6 +343,35 @@ function truncateLine(line: string, width: number): string {
 }
 
 export default function releaseNpmExtension(pi: ExtensionAPI) {
+  pi.registerCommand("release-npm-setup", {
+    description: "Configure npm auth token for release publishing",
+    handler: async (_args, ctx) => {
+      const token = (await ctx.ui.input("npm auth token", "Paste npm token for registry.npmjs.org"))?.trim();
+      if (!token) {
+        ctx.ui.notify("npm token setup cancelled: no token entered.", "warning");
+        return;
+      }
+
+      ctx.ui.notify("Saving npm auth token with npm config set...", "info");
+      const setResult = await runNpmConfigSetToken(ctx.cwd, token);
+      if (!setResult.ok) {
+        const detail = redactTokenLikeOutput(setResult.output);
+        ctx.ui.notify(`Failed to save npm token.${detail ? ` ${detail}` : ""}`, "error");
+        return;
+      }
+
+      const authResult = await verifyNpmAuth(ctx.cwd);
+      if (!authResult.ok) {
+        const detail = redactTokenLikeOutput(authResult.output);
+        ctx.ui.notify(`npm token saved, but npm whoami failed.${detail ? ` ${detail}` : ""}`, "warning");
+        return;
+      }
+
+      const username = authResult.output.trim();
+      ctx.ui.notify(`npm token saved and verified${username ? ` as ${username}` : ""}.`, "success");
+    },
+  });
+
   pi.registerCommand("release-npm-logs", {
     description: "Select and display saved /release-npm run logs",
     handler: async (args, ctx) => {
