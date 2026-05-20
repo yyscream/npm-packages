@@ -6,6 +6,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # Keep DOTFILES_* env vars as backwards-compatible aliases for older usage.
 EXT_DIR="${PI_EXT_DIR:-${DOTFILES_EXT_DIR:-$HOME/.pi/agent/extensions}}"
 SKILL_DIR="${PI_SKILL_DIR:-${DOTFILES_SKILL_DIR:-$HOME/.pi/agent/skills}}"
+THEME_DIR="${PI_THEME_DIR:-${DOTFILES_THEME_DIR:-$HOME/.pi/agent/themes}}"
 DRY_RUN=0
 
 usage() {
@@ -22,6 +23,8 @@ Ensures local npm-packages Pi resources are live-linked for development:
   extension, because it is a shared utility package
 - every packaged skill under pi-extension-*/skills/<skill-name>/SKILL.md gets a
   ~/.pi/agent/skills/<skill-name> symlink to that package skill directory
+- every theme under pi-package-*/themes/*.json gets a
+  ~/.pi/agent/themes/<theme>.json symlink to that package theme file
 
 If a non-symlink file/directory already exists at the destination, it is renamed to:
   <path>.hardcoded.<timestamp>.bak
@@ -36,6 +39,8 @@ Env:
   DOTFILES_EXT_DIR    Backwards-compatible alias for PI_EXT_DIR
   PI_SKILL_DIR        Override target skills directory
   DOTFILES_SKILL_DIR  Backwards-compatible alias for PI_SKILL_DIR
+  PI_THEME_DIR        Override target themes directory
+  DOTFILES_THEME_DIR  Backwards-compatible alias for PI_THEME_DIR
 EOF
 }
 
@@ -62,7 +67,7 @@ if [[ ! -d "$ROOT_DIR" ]]; then
   exit 1
 fi
 
-mkdir -p "$EXT_DIR" "$SKILL_DIR"
+mkdir -p "$EXT_DIR" "$SKILL_DIR" "$THEME_DIR"
 
 ts_now() {
   date +"%Y%m%d-%H%M%S"
@@ -344,6 +349,59 @@ sync_skill_symlinks() {
     "$count_total" "$count_ok" "$count_linked" "$count_relinked" "$count_renamed" "$count_skipped"
 }
 
+sync_theme_symlinks() {
+  local count_total=0 count_ok=0 count_linked=0 count_relinked=0 count_renamed=0 count_skipped=0
+
+  shopt -s nullglob
+  for theme_file in "$ROOT_DIR"/pi-package-*/themes/*.json; do
+    [[ -f "$theme_file" ]] || continue
+    count_total=$((count_total+1))
+
+    local theme_name dest source_real dest_real stamp backup
+    theme_name="$(basename "$theme_file")"
+    dest="$THEME_DIR/$theme_name"
+
+    source_real="$(realpath_safe "$theme_file")"
+    if [[ -z "$source_real" ]]; then
+      echo "SKIP  theme $theme_name -> cannot resolve source realpath: $theme_file"
+      count_skipped=$((count_skipped+1))
+      continue
+    fi
+
+    if [[ -L "$dest" ]]; then
+      dest_real="$(realpath_safe "$dest")"
+      if [[ "$dest_real" == "$source_real" ]]; then
+        echo "OK    $dest -> $source_real"
+        count_ok=$((count_ok+1))
+        continue
+      fi
+
+      echo "FIX   $dest (wrong theme symlink target)"
+      run_cmd rm -f "$dest"
+      run_cmd ln -s "$theme_file" "$dest"
+      count_relinked=$((count_relinked+1))
+      continue
+    fi
+
+    if [[ -e "$dest" ]]; then
+      stamp="$(ts_now)"
+      backup="$(backup_path "$dest" "$stamp")"
+      echo "MOVE  $dest -> $backup"
+      run_cmd mv "$dest" "$backup"
+      count_renamed=$((count_renamed+1))
+    fi
+
+    echo "LINK  $dest -> $theme_file"
+    run_cmd ln -s "$theme_file" "$dest"
+    count_linked=$((count_linked+1))
+  done
+  shopt -u nullglob
+
+  printf 'Themes:     total=%d ok=%d linked=%d relinked=%d renamed=%d skipped=%d\n' \
+    "$count_total" "$count_ok" "$count_linked" "$count_relinked" "$count_renamed" "$count_skipped"
+}
+
 sync_extension_symlinks
 sync_skill_symlinks
+sync_theme_symlinks
 ensure_shared_deps

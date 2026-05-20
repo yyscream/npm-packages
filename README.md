@@ -2,7 +2,7 @@
 
 This repository contains my public JavaScript/TypeScript packages published via npm (using Bun and/or npm).
 
-Right now it contains **Pi extension packages**.
+Right now it contains **Pi extension, skill, package, and theme bundle packages**.
 
 ## Skill packages
 
@@ -39,6 +39,13 @@ Extension-bundled skills kept as direct Pi config includes instead of duplicate 
 - `@firstpick/pi-skill-vulnerability-scanner` (`pi-skill-vulnerability-scanner`) — Use automatically when checking CVEs or known vulnerabilities in installed packages, dependencies, Docker images, OS packages, exposed services, or software versions. Produces severity-rated scan reports.
 
 ## Packages
+
+### `@firstpick/pi-themes-bundle`
+Adds Firstpick's custom Pi coding-agent themes.
+
+- Theme bundle loaded via `pi.themes: ["./themes"]`
+- Includes Catppuccin, Dracula, Tokyo Night, Gruvbox, Nord, Rosé Pine, One Dark, Solarized, and Everforest themes
+- No commands or tools; select themes through `/settings` or `settings.json`
 
 ### `@firstpick/pi-extension-archwiki-local`
 Adds local ArchWiki retrieval tools to Pi using the installed `arch-wiki-docs` package.
