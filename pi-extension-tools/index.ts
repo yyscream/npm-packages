@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, ToolInfo } from "@earendil-works/pi-coding-agent";
 import { getSettingsListTheme } from "@earendil-works/pi-coding-agent";
-import { Container, type SettingItem, SettingsList } from "@earendil-works/pi-tui";
+import { Container, getKeybindings, Key, matchesKey, type SettingItem, SettingsList } from "@earendil-works/pi-tui";
 
 type ToolsState = {
   enabledTools: string[];
@@ -210,6 +210,7 @@ export default function toolsExtension(pi: ExtensionAPI) {
             persistState();
           },
           () => done(undefined),
+          { enableSearch: true },
         );
 
         container.addChild(settingsList);
@@ -222,6 +223,11 @@ export default function toolsExtension(pi: ExtensionAPI) {
             container.invalidate();
           },
           handleInput(data: string) {
+            const kb = getKeybindings();
+            if (kb.matches(data, "app.models.save") || matchesKey(data, Key.ctrl("s")) || data === "\x13") {
+              done(undefined);
+              return;
+            }
             settingsList.handleInput?.(data);
             tui.requestRender();
           },
