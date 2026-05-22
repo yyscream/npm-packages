@@ -106,8 +106,8 @@ fi
 echo "Discovered ${#PACKAGE_JSON_FILES[@]} local Pi package(s) (extensions/skills/packages)."
 
 PACKAGE_NAMES=()
-declare -A PACKAGE_REPO_VERSIONS=()
-declare -A PACKAGE_KINDS=()
+PACKAGE_REPO_VERSIONS=()
+PACKAGE_KINDS=()
 for package_json in "${PACKAGE_JSON_FILES[@]}"; do
   package_name="$(node -p "require(process.argv[1]).name" "$package_json" 2>/dev/null || true)"
   package_version="$(node -p "require(process.argv[1]).version" "$package_json" 2>/dev/null || true)"
@@ -129,8 +129,8 @@ for package_json in "${PACKAGE_JSON_FILES[@]}"; do
     continue
   fi
   PACKAGE_NAMES+=("$package_name")
-  PACKAGE_REPO_VERSIONS["$package_name"]="$package_version"
-  PACKAGE_KINDS["$package_name"]="$package_kind"
+  PACKAGE_REPO_VERSIONS+=("$package_version")
+  PACKAGE_KINDS+=("$package_kind")
 done
 
 if [[ ${#PACKAGE_NAMES[@]} -eq 0 ]]; then
@@ -150,7 +150,7 @@ else
   echo "Select package numbers to install (space/comma separated), or type 'all':"
   for idx in "${!PACKAGE_NAMES[@]}"; do
     package_name="${PACKAGE_NAMES[$idx]}"
-    printf "  %2d) %s [%s]\n" "$((idx + 1))" "$package_name" "${PACKAGE_KINDS[$package_name]}"
+    printf "  %2d) %s [%s]\n" "$((idx + 1))" "$package_name" "${PACKAGE_KINDS[$idx]}"
   done
   printf "> "
   read -r selection
@@ -161,7 +161,8 @@ else
     exit 0
   fi
 
-  if [[ "${trimmed_selection,,}" == "all" ]]; then
+  lower_trimmed_selection="$(printf '%s' "$trimmed_selection" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$lower_trimmed_selection" == "all" ]]; then
     SELECTED_PACKAGES=("${PACKAGE_NAMES[@]}")
   else
     normalized_selection="${selection//,/ }"
@@ -190,7 +191,19 @@ UPDATED_PACKAGES=()
 SKIPPED_UP_TO_DATE=()
 
 for package_name in "${SELECTED_PACKAGES[@]}"; do
-  repo_version="${PACKAGE_REPO_VERSIONS[$package_name]}"
+  package_index=-1
+  for idx in "${!PACKAGE_NAMES[@]}"; do
+    if [[ "${PACKAGE_NAMES[$idx]}" == "$package_name" ]]; then
+      package_index="$idx"
+      break
+    fi
+  done
+  if [[ "$package_index" -lt 0 ]]; then
+    echo "WARN: skipping '$package_name' because its metadata could not be found." >&2
+    continue
+  fi
+
+  repo_version="${PACKAGE_REPO_VERSIONS[$package_index]}"
   installed_package_json=""
   if [[ -n "$NPM_GLOBAL_ROOT" ]]; then
     installed_package_json="$NPM_GLOBAL_ROOT/$package_name/package.json"
@@ -200,7 +213,7 @@ for package_name in "${SELECTED_PACKAGES[@]}"; do
     installed_version="$(node -p "require(process.argv[1]).version" "$installed_package_json" 2>/dev/null || true)"
   fi
 
-  package_kind="${PACKAGE_KINDS[$package_name]}"
+  package_kind="${PACKAGE_KINDS[$package_index]}"
 
   if [[ $FORCE_INSTALL -eq 0 && -n "$installed_version" && "$installed_version" == "$repo_version" ]]; then
     echo "Skipping ${package_kind} npm:${package_name} (already installed at version $installed_version)"
@@ -230,15 +243,15 @@ done
 echo
 echo "Summary:"
 echo "  Newly installed: ${#NEWLY_INSTALLED[@]}"
-for entry in "${NEWLY_INSTALLED[@]}"; do
+for entry in ${NEWLY_INSTALLED[@]+"${NEWLY_INSTALLED[@]}"}; do
   echo "    - $entry"
 done
 echo "  Updated packages: ${#UPDATED_PACKAGES[@]}"
-for entry in "${UPDATED_PACKAGES[@]}"; do
+for entry in ${UPDATED_PACKAGES[@]+"${UPDATED_PACKAGES[@]}"}; do
   echo "    - $entry"
 done
 echo "  Skipped (already up to date): ${#SKIPPED_UP_TO_DATE[@]}"
-for entry in "${SKIPPED_UP_TO_DATE[@]}"; do
+for entry in ${SKIPPED_UP_TO_DATE[@]+"${SKIPPED_UP_TO_DATE[@]}"}; do
   echo "    - $entry"
 done
 
