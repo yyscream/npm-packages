@@ -1,11 +1,11 @@
 # pi-extension-setup-skills
 
-Adds `/setup-skills`, an interactive Pi UI for enabling/disabling skills.
+Adds `/skills`, an interactive Pi UI for enabling/disabling skills.
 
 ## Usage
 
 ```text
-/setup-skills
+/skills
 ```
 
 Controls:

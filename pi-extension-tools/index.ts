@@ -2,8 +2,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, ToolInfo } from "@earendil-works/pi-coding-agent";
-import { getSettingsListTheme } from "@earendil-works/pi-coding-agent";
-import { Container, getKeybindings, Key, matchesKey, type SettingItem, SettingsList } from "@earendil-works/pi-tui";
+import { DynamicBorder, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
+import { Container, getKeybindings, Key, matchesKey, type SettingItem, SettingsList, Text } from "@earendil-works/pi-tui";
 
 type ToolsState = {
   enabledTools: string[];
@@ -178,22 +178,23 @@ export default function toolsExtension(pi: ExtensionAPI) {
         return;
       }
 
-      await ctx.ui.custom((tui, theme, _kb, done) => {
-        const items: SettingItem[] = allTools
-          .slice()
-          .sort((a, b) => sourceLabel(a).localeCompare(sourceLabel(b)) || a.name.localeCompare(b.name))
-          .map((tool) => ({
-            id: tool.name,
-            label: `${tool.name} (${sourceLabel(tool)})`,
-            currentValue: enabledTools.has(tool.name) ? "enabled" : "disabled",
-            values: ["enabled", "disabled"],
-          }));
+      const initial = new Set(enabledTools);
+      const saved = await ctx.ui.custom<Set<string> | undefined>((tui, theme, _kb, done) => {
+        const selected = new Set(enabledTools);
+        const sortedTools = allTools.slice().sort((a, b) => sourceLabel(a).localeCompare(sourceLabel(b)) || a.name.localeCompare(b.name));
+        const items: SettingItem[] = sortedTools.map((tool) => ({
+          id: tool.name,
+          label: `${tool.name} (${sourceLabel(tool)})`,
+          currentValue: selected.has(tool.name) ? "enabled" : "disabled",
+          values: ["enabled", "disabled"],
+        }));
 
         const container = new Container();
+        container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
         container.addChild(
           new (class {
             render() {
-              return [theme.fg("accent", theme.bold(`Tool Configuration (${enabledTools.size}/${allTools.length} active)`)), ""];
+              return [theme.fg("accent", theme.bold(`Tools (${selected.size}/${allTools.length} active)`))];
             }
             invalidate() {}
           })(),
@@ -204,16 +205,16 @@ export default function toolsExtension(pi: ExtensionAPI) {
           Math.min(items.length + 2, 20),
           getSettingsListTheme(),
           (id, newValue) => {
-            if (newValue === "enabled") enabledTools.add(id);
-            else enabledTools.delete(id);
-            applyTools();
-            persistState();
+            if (newValue === "enabled") selected.add(id);
+            else selected.delete(id);
           },
           () => done(undefined),
           { enableSearch: true },
         );
 
         container.addChild(settingsList);
+        container.addChild(new Text(theme.fg("dim", "  Ctrl+S save • q cancel"), 0, 0));
+        container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
 
         return {
           render(width: number) {
@@ -223,9 +224,13 @@ export default function toolsExtension(pi: ExtensionAPI) {
             container.invalidate();
           },
           handleInput(data: string) {
+            if (data === "q") {
+              done(undefined);
+              return;
+            }
             const kb = getKeybindings();
             if (kb.matches(data, "app.models.save") || matchesKey(data, Key.ctrl("s")) || data === "\x13") {
-              done(undefined);
+              done(selected);
               return;
             }
             settingsList.handleInput?.(data);
@@ -233,6 +238,21 @@ export default function toolsExtension(pi: ExtensionAPI) {
           },
         };
       });
+
+      if (!saved) {
+        ctx.ui.notify("Tool setup cancelled.", "info");
+        return;
+      }
+
+      const changed = allTools.filter((tool) => initial.has(tool.name) !== saved.has(tool.name)).length;
+      enabledTools = saved;
+      applyTools();
+      persistState();
+      ctx.ui.notify(`Tool setup saved (${changed} changed).`, "info");
+      if (changed > 0 && ctx.hasUI) {
+        const reload = await ctx.ui.select("Reload Pi now to apply tool changes?", ["Yes", "No"]);
+        if (reload === "Yes") await ctx.reload();
+      }
     },
   });
 

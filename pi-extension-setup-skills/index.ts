@@ -262,7 +262,7 @@ async function selectSkills(
 
     const container = new Container();
     container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
-    container.addChild(new Text(theme.fg("accent", theme.bold("Setup Skills")), 0, 0));
+    container.addChild(new Text(theme.fg("accent", theme.bold("Skills")), 0, 0));
 
     const settingsList = new SettingsList(
       items,
@@ -304,7 +304,7 @@ async function selectSkills(
 }
 
 export default function setupSkillsExtension(pi: ExtensionAPI): void {
-  pi.registerCommand("setup-skills", {
+  pi.registerCommand("skills", {
     description: "Enable/disable local Pi skills with a multi-selection list",
     handler: async (_args, ctx) => {
       const settingsPath = getAgentSettingsPath();
