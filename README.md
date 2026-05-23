@@ -40,6 +40,34 @@ Extension-bundled skills kept as direct Pi config includes instead of duplicate 
 
 ## Packages
 
+### `@firstpick/pi-prompts-code-workflows`
+Adds reusable prompt templates for code review, bug fixing, issue analysis, and incident triage.
+
+- Prompt templates loaded via `pi.prompts: ["./prompts"]`
+- Includes `/fix`, `/incident`, `/issue-fix`, `/issue-new`, `/review`, and `/sum-issue`
+- Generalized for public repositories and maintainer-friendly workflows
+
+### `@firstpick/pi-prompts-git-pr`
+Adds reusable prompt templates for commits, pull requests, and PR review workflows.
+
+- Prompt templates loaded via `pi.prompts: ["./prompts"]`
+- Includes `/check-pr`, `/git-staged-msg`, `/pr`, `/pr-review-branch`, `/pr-review-implement`, and `/pr-update`
+- Detects the repository default branch instead of assuming only `main`
+
+### `@firstpick/pi-prompts-release-docs`
+Adds reusable prompt templates for release preparation, announcements, and documentation updates.
+
+- Prompt templates loaded via `pi.prompts: ["./prompts"]`
+- Includes `/announce-branch`, `/announce-version`, `/readme-update`, `/release-new`, `/ship`, `/summary`, and `/wiki-update`
+- Writes generated release/announcement artifacts under project-local `dev/` paths
+
+### `@firstpick/pi-prompts-agent-memory`
+Adds a reusable prompt template for durable Pi agent memory curation.
+
+- Prompt templates loaded via `pi.prompts: ["./prompts"]`
+- Includes `/update-memory`
+- Uses standard Pi memory paths under `~/.pi/agent/`
+
 ### `@firstpick/pi-themes-bundle`
 Adds Firstpick's custom Pi coding-agent themes.
 

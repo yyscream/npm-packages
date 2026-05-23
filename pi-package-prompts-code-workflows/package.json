@@ -1,0 +1,17 @@
+{
+  "name": "@firstpick/pi-prompts-code-workflows",
+  "version": "0.1.0",
+  "description": "Reusable Pi prompt templates for code review, bug fixing, issue analysis, and incident triage.",
+  "license": "MIT",
+  "keywords": ["pi-package","pi","pi-coding-agent","prompt-template","prompts","code-review","debugging","issue-triage"],
+  "pi": {
+    "prompts": [
+      "./prompts"
+    ]
+  },
+  "files": [
+    "prompts",
+    "README.md",
+    "LICENSE"
+  ]
+}

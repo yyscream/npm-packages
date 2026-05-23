@@ -1,0 +1,17 @@
+{
+  "name": "@firstpick/pi-prompts-release-docs",
+  "version": "0.1.0",
+  "description": "Reusable Pi prompt templates for release notes, announcements, README updates, and wiki updates.",
+  "license": "MIT",
+  "keywords": ["pi-package","pi","pi-coding-agent","prompt-template","prompts","release-notes","documentation","changelog"],
+  "pi": {
+    "prompts": [
+      "./prompts"
+    ]
+  },
+  "files": [
+    "prompts",
+    "README.md",
+    "LICENSE"
+  ]
+}
