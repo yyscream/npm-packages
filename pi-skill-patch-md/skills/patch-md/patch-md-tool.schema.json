@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://firstpick.dev/schemas/patch-md-tool.schema.json",
+  "title": "patch_md_extract output",
+  "type": "object",
+  "required": ["ok", "patch", "errors", "warnings"],
+  "properties": {
+    "ok": { "type": "boolean" },
+    "patch": {
+      "type": "object",
+      "required": [
+        "title",
+        "purpose",
+        "rootCause",
+        "expectedOutcome",
+        "pathVariables",
+        "scopeFiles",
+        "changes",
+        "verification",
+        "operationalNotes"
+      ],
+      "properties": {
+        "title": { "type": "string", "minLength": 1 },
+        "purpose": { "type": "string", "minLength": 1 },
+        "rootCause": { "type": "string", "minLength": 1 },
+        "expectedOutcome": { "type": "string", "minLength": 0 },
+        "pathVariables": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "scopeFiles": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1
+        },
+        "changes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["index", "title", "file", "whatChanged", "why"],
+            "properties": {
+              "index": { "type": "integer", "minimum": 1 },
+              "title": { "type": "string", "minLength": 1 },
+              "file": { "type": "string", "minLength": 1 },
+              "whatChanged": { "type": "string", "minLength": 1 },
+              "why": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": false
+          },
+          "minItems": 1
+        },
+        "verification": {
+          "type": "object",
+          "required": ["runFrom", "commands", "expected"],
+          "properties": {
+            "runFrom": { "type": "string" },
+            "commands": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "minItems": 1
+            },
+            "expected": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            }
+          },
+          "additionalProperties": false
+        },
+        "operationalNotes": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "additionalProperties": false
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "message", "section"],
+        "properties": {
+          "code": { "type": "string", "minLength": 1 },
+          "message": { "type": "string", "minLength": 1 },
+          "section": { "type": ["string", "null"] }
+        },
+        "additionalProperties": false
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    }
+  },
+  "additionalProperties": false
+}
