@@ -18,10 +18,13 @@ const QUERY_EXPANSIONS: Record<string, string[]> = {
   nvidia: ["NVIDIA", "env", "Wayland", "GBM"], keyboard: ["input", "kb_layout", "keybinds", "bind"],
   mouse: ["input", "cursor", "sensitivity"], touchpad: ["input", "gestures", "natural_scroll"],
   bind: ["keybinds", "binds", "dispatcher"], keybind: ["bind", "dispatcher", "hyprctl dispatch"],
-  rules: ["windowrule", "windowrulev2", "workspace rules"], portal: ["xdg-desktop-portal-hyprland", "screenshare", "screen sharing"],
+  rules: ["windowrule", "windowrulev2", "workspace rules"], windowrule: ["window rules", "windowrulev2", "rules"],
+  portal: ["xdg-desktop-portal-hyprland", "screenshare", "screen sharing"],
   screenshots: ["grim", "slurp", "portal", "screenshare"], crash: ["crashes", "debug", "logs", "coredump"],
   config: ["hyprland.conf", "variables", "keywords"], plugin: ["plugins", "hyprpm"], hyprpm: ["plugins", "plugin"],
 };
+const SEARCH_STOPWORDS = ["a", "an", "and", "are", "as", "at", "be", "by", "can", "docs", "for", "from", "help", "how", "hypr", "hyprland", "i", "in", "is", "it", "of", "on", "or", "the", "this", "to", "use", "using", "wiki", "with", "you", "your"];
+const TERM_WEIGHTS: Record<string, number> = { basics: 0.6, config: 0.65, configuring: 0.65, ecosystem: 0.7, general: 0.6, installation: 0.75, variables: 0.75, wayland: 0.75 };
 
 async function exists(filePath: string): Promise<boolean> { try { await fs.access(filePath); return true; } catch { return false; } }
 async function runCommand(command: string, args: string[], cwd?: string): Promise<{ ok: boolean; stdout: string; stderr: string; error?: string }> { return await new Promise((resolve) => execFile(command, args, { cwd, timeout: 120000 }, (error, stdout, stderr) => resolve({ ok: !error, stdout, stderr, error: error instanceof Error ? error.message : undefined }))); }
@@ -32,10 +35,12 @@ const wiki = createLocalWikiEngine({
   displayName: "Hyprland Wiki",
   docsPath: REPO_PATH,
   cacheDir: CACHE_DIR,
-  schemaVersion: 1,
+  schemaVersion: 2,
   fileExtensions: /\.mdx?$/i,
   format: "markdown",
   queryExpansions: QUERY_EXPANSIONS,
+  searchStopwords: SEARCH_STOPWORDS,
+  termWeights: TERM_WEIGHTS,
   missingDocsMessage: MISSING_REPO_MESSAGE,
   metadataExtra: async () => ({ gitRevision: await gitRevision(), gitRemote: await gitRemote() }),
   statusExtra: async () => ({ gitRevision: await gitRevision(), gitRemote: await gitRemote() }),
@@ -58,9 +63,38 @@ async function executeSetup(): Promise<{ ok: boolean; message: string }> {
 
 const searchParams = Type.Object({ query: Type.String({ description: "Search query, e.g. 'monitor rules'" }), limit: Type.Optional(Type.Number({ minimum: 1, maximum: 50 })), includeSnippets: Type.Optional(Type.Boolean()) });
 const readParams = Type.Object({ page: Type.String({ description: "Hyprland Wiki page title, slug, or absolute local Markdown path" }), maxChars: Type.Optional(Type.Number({ minimum: 1000, maximum: 100000 })) });
-const sectionsParams = Type.Object({ page: Type.String({ description: "Hyprland Wiki page title, slug, or absolute local Markdown path" }) });
-const extractParams = Type.Object({ page: Type.String({ description: "Hyprland Wiki page title, slug, or absolute local Markdown path" }), section: Type.Optional(Type.String()), query: Type.Optional(Type.String()), maxChars: Type.Optional(Type.Number({ minimum: 1000, maximum: 100000 })) });
+const sectionsParams = Type.Object({ page: Type.String({ description: "Hyprland Wiki page title, slug, or absolute local Markdown path" }), maxSections: Type.Optional(Type.Number({ minimum: 1, maximum: 300 })) });
+const extractParams = Type.Object({ page: Type.String({ description: "Hyprland Wiki page title, slug, or absolute local Markdown path" }), section: Type.Optional(Type.String()), query: Type.Optional(Type.String()), maxChars: Type.Optional(Type.Number({ minimum: 1000, maximum: 100000 })), maxSections: Type.Optional(Type.Number({ minimum: 1, maximum: 50 })) });
 const relatedParams = Type.Object({ page: Type.String({ description: "Hyprland Wiki page title, slug, or absolute local Markdown path" }), limit: Type.Optional(Type.Number({ minimum: 1, maximum: 50 })) });
+const smokeParams = Type.Object({ maxSearchResults: Type.Optional(Type.Number({ minimum: 3, maximum: 10 })) });
+
+async function executeSmokeTest(params: { maxSearchResults?: number } = {}) {
+  const checks: Array<{ name: string; ok: boolean; detail: string; chars?: number }> = [];
+  const addCheck = (name: string, ok: boolean, detail: string, payload?: unknown) => checks.push({ name, ok, detail, chars: payload === undefined ? undefined : JSON.stringify(payload).length });
+  const status = await wiki.status();
+  addCheck("corpus available", Boolean(status.available), `${status.pageCount} indexed files at ${status.docsPath}`);
+  if (!status.available) return { ok: false, status, checks };
+
+  const limit = Math.max(3, Math.min(params.maxSearchResults ?? 5, 10));
+  const searchCases = [
+    { name: "monitors", query: "monitor resolution scale", expectedPath: "content/Configuring/Basics/Monitors.md" },
+    { name: "window rules", query: "windowrule float opacity", expectedPath: "content/Configuring/Basics/Window-Rules.md" },
+    { name: "portal", query: "xdg desktop portal screenshare", expectedPath: "content/Hypr Ecosystem/xdg-desktop-portal-hyprland.md" },
+    { name: "plugins", query: "hyprpm plugins", expectedPath: "content/Plugins/Using-Plugins.md" },
+    { name: "nvidia", query: "nvidia wayland hyprland env", expectedPath: "content/Nvidia/_index.md" },
+  ];
+  for (const testCase of searchCases) {
+    const result = await wiki.search({ query: testCase.query, limit, includeSnippets: false });
+    addCheck(`search: ${testCase.name}`, result.results.some((entry) => entry.path.endsWith(testCase.expectedPath)), `expected page found in top ${limit}`, result.results);
+  }
+  const sections = await wiki.sections({ page: "Window-Rules", maxSections: 40 });
+  addCheck("sections: window rules title", sections.title === "Window Rules" && sections.sections.some((section) => section.title === "Window Rules"), `${sections.title}; ${sections.sections.length}/${sections.sectionCount} headings`, sections.sections);
+  const extract = await wiki.extract({ page: "Window-Rules", section: "Window Rules", maxChars: 4000, maxSections: 2 });
+  addCheck("extract: window rules", extract.text.includes("window") && !extract.text.includes("# Or target windows:"), `${extract.text.length} chars, omitted ${extract.omittedSectionCount}`, extract.text);
+  const read = await wiki.read({ page: "Window-Rules", maxChars: 2000 });
+  addCheck("read: bounded output", read.text.length <= 2100 && read.truncated, `${read.text.length} chars, truncated=${read.truncated}`, read.text);
+  return { ok: checks.every((check) => check.ok), status, checks };
+}
 
 export default function hyprlandWikiExtension(pi: ExtensionAPI) {
   pi.on?.("before_agent_start", async (event, ctx) => {
@@ -72,9 +106,11 @@ export default function hyprlandWikiExtension(pi: ExtensionAPI) {
   });
   pi.registerCommand("hyprwiki-status", { description: "Show local Hyprland Wiki path, Git revision, page count, and cache freshness", handler: async (_args, ctx) => ctx.ui.notify(JSON.stringify(await wiki.status(), null, 2), "info") });
   pi.registerCommand("hyprwiki-local-setup", { description: "Clone or update the local Hyprland Wiki repository", handler: async (_args, ctx) => { const result = await executeSetup(); ctx.ui.notify(result.message, result.ok ? "info" : "warning"); } });
+  pi.registerCommand("hyprwiki-smoke-test", { description: "Run compact local Hyprland Wiki parser/search/extract smoke tests", handler: async (_args, ctx) => ctx.ui.notify(JSON.stringify(await executeSmokeTest(), null, 2), "info") });
   pi.registerTool({ name: "hyprwiki_search", label: "Hyprland Wiki Search", description: `Search local Hyprland Wiki Markdown pages from ${REPO_PATH}.`, promptSnippet: "Search local official Hyprland Wiki pages before using web sources for Hyprland questions", promptGuidelines: ["Use hyprwiki_search first for Hyprland questions before consulting web sources.", "Use hyprwiki_extract after search to retrieve focused sections with citations."], parameters: searchParams, async execute(_id, params) { return jsonToolResult(await wiki.search(params)); } });
   pi.registerTool({ name: "hyprwiki_read", label: "Hyprland Wiki Read", description: "Read a local Hyprland Wiki page as Markdown text with a local path citation.", promptSnippet: "Read local Hyprland Wiki page text by title, slug, or absolute local Markdown path", promptGuidelines: ["Use hyprwiki_read only when broad Hyprland Wiki context is needed; prefer hyprwiki_extract for focused answers."], parameters: readParams, async execute(_id, params) { return jsonToolResult(await wiki.read(params)); } });
   pi.registerTool({ name: "hyprwiki_sections", label: "Hyprland Wiki Sections", description: "List headings/sections for a local Hyprland Wiki page.", promptSnippet: "List headings from a local Hyprland Wiki page", promptGuidelines: ["Use hyprwiki_sections to choose exact local sections before extraction."], parameters: sectionsParams, async execute(_id, params) { return jsonToolResult(await wiki.sections(params)); } });
   pi.registerTool({ name: "hyprwiki_extract", label: "Hyprland Wiki Extract", description: "Extract a named or query-relevant section from a local Hyprland Wiki page.", promptSnippet: "Extract focused local Hyprland Wiki sections by heading or query", promptGuidelines: ["Use hyprwiki_extract to cite exact local sections in final answers."], parameters: extractParams, async execute(_id, params) { return jsonToolResult(await wiki.extract(params)); } });
   pi.registerTool({ name: "hyprwiki_related", label: "Hyprland Wiki Related", description: "Return local Hyprland Wiki pages linked from a given local page.", promptSnippet: "Find locally linked Hyprland Wiki pages related to a page", promptGuidelines: ["Use hyprwiki_related when a Hyprland issue spans connected topics."], parameters: relatedParams, async execute(_id, params) { return jsonToolResult(await wiki.related(params)); } });
+  pi.registerTool({ name: "hyprwiki_smoke_test", label: "Hyprland Wiki Smoke Test", description: "Run a compact parser, search, extraction, and read smoke test for local Hyprland Wiki.", promptSnippet: "Smoke-test local Hyprland Wiki parser/search behavior", promptGuidelines: ["Use hyprwiki_smoke_test after package changes or corpus updates to verify search quality and bounded output."], parameters: smokeParams, async execute(_id, params) { return jsonToolResult(await executeSmokeTest(params)); } });
 }

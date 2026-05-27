@@ -33,6 +33,7 @@
   "files": [
     "index.ts",
     "skills",
+    "references",
     "README.md",
     "LICENSE"
   ]

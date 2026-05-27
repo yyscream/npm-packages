@@ -16,18 +16,22 @@ Sparse checkout patterns exclude common images, archives, media, fonts, and bina
 
 - `/nixoswiki-status` — show docs path, page count, repository revisions, and cache timestamp.
 - `/nixoswiki-local-setup` — clone/update the three official documentation sources.
+- `/nixoswiki-smoke-test` — run compact parser/search/extract/read checks against representative NixOS/Nix topics.
 
 Set `NIXOSWIKI_DOCS_PATH=/path/to/docs` to override the corpus path, useful for tests.
 
 ## Tools
 
-- `nixoswiki_search`
+- `nixoswiki_search` — compact output by default, optional snippets, query expansions, and corpus-specific stopword/downweight tuning.
 - `nixoswiki_read`
-- `nixoswiki_sections`
-- `nixoswiki_extract`
+- `nixoswiki_sections` — supports `maxSections` and omitted-count metadata.
+- `nixoswiki_extract` — supports `maxSections`, truncation, and omitted-count metadata.
 - `nixoswiki_related`
+- `nixoswiki_smoke_test`
 
 ## Skill references
+
+Markdown parsing uses frontmatter titles when present, ignores headings inside fenced code blocks, and strips common `{#anchor}` suffixes from headings/titles.
 
 The packaged `nixos-local` skill includes reference notes matching the ArchWiki-local style:
 

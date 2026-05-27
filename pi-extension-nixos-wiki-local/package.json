@@ -34,6 +34,7 @@
   "files": [
     "index.ts",
     "skills",
+    "references",
     "tests",
     "README.md",
     "LICENSE"

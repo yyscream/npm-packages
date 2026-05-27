@@ -8,7 +8,7 @@ import { createLocalWikiEngine } from "@firstpick/pi-utils";
 
 const DOCS_PATH = "/usr/share/doc/arch-wiki/html/en";
 const CACHE_DIR = path.join(os.homedir(), ".cache", "pi", "archwiki-local");
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const INSTALL_COMMAND = "sudo pacman -S arch-wiki-docs";
 const MISSING_DOCS_MESSAGE = `Local ArchWiki docs are not installed at ${DOCS_PATH}. Install them with: ${INSTALL_COMMAND}`;
 const QUERY_EXPANSIONS: Record<string, string[]> = {
@@ -22,6 +22,8 @@ const QUERY_EXPANSIONS: Record<string, string[]> = {
   snapshots: ["Btrfs", "Snapper", "Timeshift"], luks: ["dm-crypt", "cryptsetup", "initramfs", "mkinitcpio"],
   initramfs: ["mkinitcpio", "hooks", "boot"],
 };
+const SEARCH_STOPWORDS = ["a", "an", "and", "are", "arch", "archlinux", "as", "at", "be", "by", "can", "docs", "for", "from", "help", "how", "i", "in", "is", "it", "linux", "of", "on", "or", "the", "this", "to", "use", "using", "wiki", "with", "you", "your"];
+const TERM_WEIGHTS: Record<string, number> = { configuration: 0.65, desktop: 0.75, guide: 0.45, installation: 0.7, linux: 0.35, service: 0.7, setup: 0.65, system: 0.55, troubleshooting: 0.75 };
 const ARCH_LINUX_PROMPT_RE = /\b(arch\s*linux|archlinux|arch-based|endeavouros|endeavour\s*os|cachyos|cachy\s*os|manjaro|garuda|artix|blackarch|arcolinux|archlabs|rebornos|crystal\s*linux|xerolinux|pacman|makepkg|pkgbuild|aur|mkinitcpio|initramfs|systemd|journalctl|systemctl|networkmanager|resolvectl|systemd-resolved|pipewire|wireplumber|alsa|wayland|xorg|nvidia|amdgpu|bluetooth|bluez|btrfs|luks|dm-crypt|pacman-key|keyring|invalid signature|corrupted package)\b/i;
 
 async function exists(filePath: string): Promise<boolean> { try { await fs.access(filePath); return true; } catch { return false; } }
@@ -53,6 +55,8 @@ const wiki = createLocalWikiEngine({
   fileExtensions: /\.html?$/i,
   format: "html",
   queryExpansions: QUERY_EXPANSIONS,
+  searchStopwords: SEARCH_STOPWORDS,
+  termWeights: TERM_WEIGHTS,
   missingDocsMessage: MISSING_DOCS_MESSAGE,
   titleFromHtml: stripHtmlTitle,
   transformText: transformArchText,
@@ -76,9 +80,38 @@ async function executeSetup() {
 
 const searchParams = Type.Object({ query: Type.String({ description: "Search query, e.g. 'pacman invalid signature'" }), limit: Type.Optional(Type.Number({ minimum: 1, maximum: 50 })), language: Type.Optional(Type.String()), includeSnippets: Type.Optional(Type.Boolean()) });
 const readParams = Type.Object({ page: Type.String({ description: "ArchWiki page title, slug, or absolute local HTML path" }), maxChars: Type.Optional(Type.Number({ minimum: 1000, maximum: 100000 })) });
-const sectionsParams = Type.Object({ page: Type.String({ description: "ArchWiki page title, slug, or absolute local HTML path" }) });
-const extractParams = Type.Object({ page: Type.String({ description: "ArchWiki page title, slug, or absolute local HTML path" }), section: Type.Optional(Type.String()), query: Type.Optional(Type.String()), maxChars: Type.Optional(Type.Number({ minimum: 1000, maximum: 100000 })) });
+const sectionsParams = Type.Object({ page: Type.String({ description: "ArchWiki page title, slug, or absolute local HTML path" }), maxSections: Type.Optional(Type.Number({ minimum: 1, maximum: 300 })) });
+const extractParams = Type.Object({ page: Type.String({ description: "ArchWiki page title, slug, or absolute local HTML path" }), section: Type.Optional(Type.String()), query: Type.Optional(Type.String()), maxChars: Type.Optional(Type.Number({ minimum: 1000, maximum: 100000 })), maxSections: Type.Optional(Type.Number({ minimum: 1, maximum: 50 })) });
 const relatedParams = Type.Object({ page: Type.String({ description: "ArchWiki page title, slug, or absolute local HTML path" }), limit: Type.Optional(Type.Number({ minimum: 1, maximum: 50 })) });
+const smokeParams = Type.Object({ maxSearchResults: Type.Optional(Type.Number({ minimum: 3, maximum: 10 })) });
+
+async function executeSmokeTest(params: { maxSearchResults?: number } = {}) {
+  const checks: Array<{ name: string; ok: boolean; detail: string; chars?: number }> = [];
+  const addCheck = (name: string, ok: boolean, detail: string, payload?: unknown) => checks.push({ name, ok, detail, chars: payload === undefined ? undefined : JSON.stringify(payload).length });
+  const status = await wiki.status();
+  addCheck("corpus available", Boolean(status.available), `${status.pageCount} indexed files at ${status.docsPath}`);
+  if (!status.available) return { ok: false, status, checks };
+
+  const limit = Math.max(3, Math.min(params.maxSearchResults ?? 5, 10));
+  const searchCases = [
+    { name: "package signing", query: "pacman invalid signature keyring", expectedPath: "Pacman/Package_signing.html" },
+    { name: "pipewire", query: "pipewire no audio wireplumber", expectedPath: "PipeWire.html" },
+    { name: "dns", query: "networkmanager dns systemd resolved", expectedPath: "Systemd-resolved.html" },
+    { name: "aur", query: "aur makepkg pkgbuild", expectedPath: "Arch_User_Repository.html" },
+    { name: "luks", query: "mkinitcpio luks encrypt boot", expectedPath: "Dm-crypt/Encrypting_an_entire_system.html" },
+  ];
+  for (const testCase of searchCases) {
+    const result = await wiki.search({ query: testCase.query, limit, includeSnippets: false });
+    addCheck(`search: ${testCase.name}`, result.results.some((entry) => entry.path.endsWith(testCase.expectedPath)), `expected page found in top ${limit}`, result.results);
+  }
+  const sections = await wiki.sections({ page: "Pacman/Package_signing", maxSections: 40 });
+  addCheck("sections: package signing", sections.sections.length >= 5 && sections.omittedSectionCount >= 0, `${sections.sections.length}/${sections.sectionCount} headings, omitted ${sections.omittedSectionCount}`, sections.sections);
+  const extract = await wiki.extract({ page: "Pacman/Package_signing", section: "Invalid signature errors", maxChars: 4000, maxSections: 2 });
+  addCheck("extract: invalid signature", extract.text.includes("signature") && !extract.truncated, `${extract.text.length} chars, omitted ${extract.omittedSectionCount}`, extract.text);
+  const read = await wiki.read({ page: "Pacman/Package_signing", maxChars: 2000 });
+  addCheck("read: bounded output", read.text.length <= 2100 && read.truncated, `${read.text.length} chars, truncated=${read.truncated}`, read.text);
+  return { ok: checks.every((check) => check.ok), status, checks };
+}
 
 export default function archWikiLocalExtension(pi: ExtensionAPI) {
   pi.on?.("before_agent_start", async (event, ctx) => {
@@ -89,9 +122,11 @@ export default function archWikiLocalExtension(pi: ExtensionAPI) {
   });
   pi.registerCommand("archwiki-status", { description: "Show local ArchWiki docs path, page count, package version, and cache freshness", handler: async (_args, ctx) => ctx.ui.notify(JSON.stringify(await wiki.status(), null, 2), "info") });
   pi.registerCommand("archwiki-local-setup", { description: "Install the local ArchWiki documentation package (arch-wiki-docs) when possible", handler: async (_args, ctx) => { const result = await executeSetup(); ctx.ui.notify(result.message, result.ok ? "info" : "warning"); } });
+  pi.registerCommand("archwiki-smoke-test", { description: "Run compact local ArchWiki parser/search/extract smoke tests", handler: async (_args, ctx) => ctx.ui.notify(JSON.stringify(await executeSmokeTest(), null, 2), "info") });
   pi.registerTool({ name: "archwiki_search", label: "ArchWiki Search", description: "Search installed local English ArchWiki pages from arch-wiki-docs.", promptSnippet: "Search local ArchWiki pages before using web sources for Arch/Linux troubleshooting", promptGuidelines: ["Use archwiki_search first for Arch Linux and Linux troubleshooting questions before consulting web sources.", "Use archwiki_extract after archwiki_search to retrieve focused local ArchWiki sections with citations."], parameters: searchParams, async execute(_id, params) { const payload = await wiki.search(params); return jsonToolResult({ language: params.language ?? "en", ...payload }); } });
   pi.registerTool({ name: "archwiki_read", label: "ArchWiki Read", description: "Read a local ArchWiki page as clean text with a local path citation.", promptSnippet: "Read clean local ArchWiki page text by title, slug, or absolute local path", promptGuidelines: ["Use archwiki_read only when broad ArchWiki page context is needed; prefer archwiki_extract for focused answers."], parameters: readParams, async execute(_id, params) { return jsonToolResult(await wiki.read(params)); } });
   pi.registerTool({ name: "archwiki_sections", label: "ArchWiki Sections", description: "List headings/sections for a local ArchWiki page.", promptSnippet: "List headings from a local ArchWiki page", promptGuidelines: ["Use archwiki_sections to choose exact local ArchWiki sections before extraction."], parameters: sectionsParams, async execute(_id, params) { return jsonToolResult(await wiki.sections(params)); } });
   pi.registerTool({ name: "archwiki_extract", label: "ArchWiki Extract", description: "Extract a named or query-relevant section from a local ArchWiki page.", promptSnippet: "Extract focused local ArchWiki sections by heading or query", promptGuidelines: ["Use archwiki_extract to cite exact local ArchWiki sections in final answers."], parameters: extractParams, async execute(_id, params) { return jsonToolResult(await wiki.extract(params)); } });
   pi.registerTool({ name: "archwiki_related", label: "ArchWiki Related", description: "Return local ArchWiki pages linked from a given local ArchWiki page.", promptSnippet: "Find locally linked ArchWiki pages related to a page", promptGuidelines: ["Use archwiki_related when an Arch/Linux issue spans multiple subsystems."], parameters: relatedParams, async execute(_id, params) { return jsonToolResult(await wiki.related(params)); } });
+  pi.registerTool({ name: "archwiki_smoke_test", label: "ArchWiki Smoke Test", description: "Run a compact parser, search, extraction, and read smoke test for local ArchWiki.", promptSnippet: "Smoke-test local ArchWiki parser/search behavior", promptGuidelines: ["Use archwiki_smoke_test after package changes or corpus updates to verify search quality and bounded output."], parameters: smokeParams, async execute(_id, params) { return jsonToolResult(await executeSmokeTest(params)); } });
 }

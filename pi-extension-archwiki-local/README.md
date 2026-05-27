@@ -31,13 +31,16 @@ The skill is for Arch Linux and Arch-based distributions, not only vanilla Arch.
   sudo pacman -S arch-wiki-docs
   ```
 
+- `/archwiki-smoke-test` — runs compact local parser/search/extract/read checks against representative ArchWiki topics.
+
 ## Registered tools
 
-- `archwiki_search` — searches local pages with query normalization, query expansion, weighted ranking, snippets, and score explanations.
+- `archwiki_search` — searches local pages with query normalization, query expansion, stopword/downweight tuning, compact output by default, and optional snippets.
 - `archwiki_read` — reads a page as clean text with local path citation.
-- `archwiki_sections` — lists extracted headings.
-- `archwiki_extract` — extracts a named or query-relevant section.
+- `archwiki_sections` — lists extracted headings with `maxSections` and omitted-count metadata.
+- `archwiki_extract` — extracts a named or query-relevant section with `maxSections`, truncation, and omitted-count metadata.
 - `archwiki_related` — returns locally linked ArchWiki pages.
+- `archwiki_smoke_test` — runs parser/search/extract/read smoke checks.
 
 ## Notes
 

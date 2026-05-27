@@ -37,9 +37,11 @@ assert.deepEqual([...tools.keys()].sort(), [
   "nixoswiki_related",
   "nixoswiki_search",
   "nixoswiki_sections",
+  "nixoswiki_smoke_test",
 ]);
 assert(commands.has("nixoswiki-status"));
 assert(commands.has("nixoswiki-local-setup"));
+assert(commands.has("nixoswiki-smoke-test"));
 
 const search = await tools.get("nixoswiki_search")!.execute("1", { query: "flake check", limit: 3 });
 assert.equal(search.details.results[0].title, "Nix Flakes");

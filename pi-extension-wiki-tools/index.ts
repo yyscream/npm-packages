@@ -301,7 +301,8 @@ async function validatePackage(targetDir: string, cwd: string) {
   checks.push({ name: "index.ts", ok: await exists(indexPath), detail: indexPath });
   if (await exists(indexPath)) {
     const indexText = await fs.readFile(indexPath, "utf8");
-    checks.push({ name: "setup command", ok: indexText.includes("-wiki-local-setup") && indexText.includes("executeSetup"), detail: "index.ts registers an idempotent local docs setup command" });
+    const registersSetupCommand = /registerCommand\(\s*["'`][^"'`]*-local-setup["'`]/.test(indexText) || indexText.includes("-wiki-local-setup");
+    checks.push({ name: "setup command", ok: registersSetupCommand && indexText.includes("executeSetup"), detail: "index.ts registers an idempotent local docs setup command" });
   }
 
   let packageJson: any;

@@ -17,18 +17,22 @@ sudo pacman -S arch-wiki-docs
 
 If `/usr/share/doc/arch-wiki/html/en/` is missing or empty, warn the user to install `arch-wiki-docs` with the command above and abort ArchWiki-local troubleshooting. If the extension command is available, the user can also run `/archwiki-local-setup` to install it when non-interactive sudo/root access permits.
 
+After package/corpus changes, verify local behavior with `/archwiki-smoke-test` or `archwiki_smoke_test({ maxSearchResults: 5 })`.
+
 ## Required workflow
 
-1. Start with `archwiki_search` for Arch/Linux issues.
-2. Use `archwiki_extract` for focused sections relevant to the symptom.
-3. Use `archwiki_read` only when broad page context is needed.
-4. Use `archwiki_related` when the issue spans subsystems.
-5. Detect the distro when relevant, especially EndeavourOS or CachyOS, using read-only evidence.
-6. Load distro-specific reference docs when the distro is known or mentioned.
-7. Run read-only local diagnostics when system evidence is relevant.
-8. Compare documentation guidance with observed system state.
-9. Cite local ArchWiki page paths and section names in final answers.
-10. Ask before destructive or user-facing system changes.
+1. Start with `archwiki_search({ query, limit: 5, includeSnippets: false })` for Arch/Linux issues.
+2. Use `archwiki_sections({ page, maxSections: 40-80 })` when the right page is found but the relevant heading is unclear.
+3. Prefer exact `archwiki_extract({ page, section, maxChars: 4000-8000, maxSections: 2-5 })` for final citations.
+4. Use query extraction only for exploration, then switch to exact section names when possible.
+5. Use `archwiki_read` only when broad page context is needed.
+6. Use `archwiki_related` when the issue spans subsystems.
+7. Detect the distro when relevant, especially EndeavourOS or CachyOS, using read-only evidence.
+8. Load distro-specific reference docs when the distro is known or mentioned.
+9. Run read-only local diagnostics when system evidence is relevant.
+10. Compare documentation guidance with observed system state.
+11. Cite local ArchWiki page paths and section names in final answers.
+12. Ask before destructive or user-facing system changes.
 
 ## Source priority
 
@@ -40,12 +44,13 @@ If `/usr/share/doc/arch-wiki/html/en/` is missing or empty, warn the user to ins
 
 ## Tool usage
 
-- `archwiki_search({ query })`: find candidate pages.
-- `archwiki_sections({ page })`: inspect available headings.
-- `archwiki_extract({ page, section })`: retrieve a focused section.
-- `archwiki_extract({ page, query })`: retrieve query-relevant sections.
-- `archwiki_read({ page })`: retrieve clean readable page text.
-- `archwiki_related({ page })`: discover linked local pages.
+- `archwiki_search({ query, limit, includeSnippets })`: find candidate pages. Keep `limit` at 5 unless exploring broadly; snippets default off.
+- `archwiki_sections({ page, maxSections })`: inspect available headings before extracting from large pages.
+- `archwiki_extract({ page, section, maxChars, maxSections })`: retrieve focused exact sections; best for final answers.
+- `archwiki_extract({ page, query, maxChars, maxSections })`: retrieve query-relevant sections; best for exploration.
+- `archwiki_read({ page, maxChars })`: retrieve clean readable page text; use sparingly.
+- `archwiki_related({ page, limit })`: discover linked local pages.
+- `archwiki_smoke_test({ maxSearchResults })`: verify parser/search/extract/read behavior after package or corpus updates.
 
 ## Diagnostics policy
 
@@ -80,6 +85,13 @@ systemctl disable <unit>
 systemctl mask <unit>
 mount # with write-changing intent
 ```
+
+## Token/output discipline
+
+- Prefer `search -> sections -> exact section extract` for final answers.
+- Keep search limits small (`limit: 5-10`) and snippets off unless needed.
+- Use `maxSections` around 2-5 and `maxChars` around 4000-8000 for focused extracts.
+- If `omittedSectionCount` or `truncated: true` affects confidence, say so explicitly.
 
 ## Citation format
 

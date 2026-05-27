@@ -59,6 +59,8 @@ export interface LocalWikiEngineConfig {
   fileExtensions: RegExp;
   format: LocalWikiFormat;
   queryExpansions?: Record<string, string[]>;
+  searchStopwords?: Iterable<string>;
+  termWeights?: Record<string, number>;
   missingDocsMessage?: string;
   ignoredDirs?: string[];
   sourceName?: (filePath: string, docsPath: string) => string | undefined;
@@ -74,6 +76,7 @@ export function createLocalWikiEngine(config: LocalWikiEngineConfig) {
   const metadataCache = path.join(config.cacheDir, "metadata.json");
   const ignoredDirs = new Set([".git", "node_modules", "result", ...(config.ignoredDirs ?? [])]);
   const missingDocsMessage = config.missingDocsMessage ?? `Local ${config.displayName} docs are not available at ${config.docsPath}.`;
+  const searchStopwords = new Set([...(config.searchStopwords ?? [])].map((word) => normalizeQuery(word)).filter(Boolean));
 
   async function localExists(filePath: string): Promise<boolean> {
     try { await fsp.access(filePath); return true; } catch { return false; }
@@ -119,7 +122,36 @@ export function createLocalWikiEngine(config: LocalWikiEngineConfig) {
   }
 
   function stripMarkdownDecorators(input: string): string {
-    return input.replace(/^#+\s*/, "").replace(/[*_`~]/g, "").replace(/\[([^\]]+)\]\([^\)]+\)/g, "$1").trim();
+    return input
+      .replace(/^#+\s*/, "")
+      .replace(/\s*\{#[^}]+\}\s*$/g, "")
+      .replace(/[*_`~]/g, "")
+      .replace(/\[([^\]]+)\]\([^\)]+\)/g, "$1")
+      .trim();
+  }
+
+  function stripYamlFrontmatter(markdown: string): string {
+    return markdown.replace(/^---\s*\n[\s\S]*?\n---\s*\n?/, "");
+  }
+
+  function yamlFrontmatterTitle(markdown: string): string | undefined {
+    const frontmatter = markdown.match(/^---\s*\n([\s\S]*?)\n---\s*\n?/);
+    const raw = frontmatter?.[1]?.match(/^title:\s*["']?(.+?)["']?\s*$/m)?.[1];
+    return raw ? stripMarkdownDecorators(raw) : undefined;
+  }
+
+  function firstMarkdownHeading(markdown: string): string | undefined {
+    let inFence = false;
+    for (const line of stripYamlFrontmatter(markdown).split(/\n/)) {
+      if (/^\s*(```|~~~)/.test(line)) {
+        inFence = !inFence;
+        continue;
+      }
+      if (inFence) continue;
+      const match = line.match(/^#\s+(.+)$/);
+      if (match) return match[1].trim();
+    }
+    return undefined;
   }
 
   function decodeEntities(input: string): string {
@@ -137,10 +169,17 @@ export function createLocalWikiEngine(config: LocalWikiEngineConfig) {
   }
 
   function markdownSections(markdown: string, fallbackTitle: string): LocalWikiSection[] {
+    const body = stripYamlFrontmatter(markdown);
     const sections: LocalWikiSection[] = [];
     let current: LocalWikiSection | undefined;
-    for (const line of markdown.split(/\n/)) {
-      const match = line.match(/^(#{1,6})\s+(.+)$/);
+    let inFence = false;
+    for (const line of body.split(/\n/)) {
+      if (/^\s*(```|~~~)/.test(line)) {
+        inFence = !inFence;
+        if (current) current.text += `${line}\n`;
+        continue;
+      }
+      const match = !inFence ? line.match(/^(#{1,6})\s+(.+)$/) : undefined;
       if (match) {
         const title = stripMarkdownDecorators(match[2]);
         if (title.toLowerCase() === "contents") continue;
@@ -151,7 +190,7 @@ export function createLocalWikiEngine(config: LocalWikiEngineConfig) {
       }
       if (current) current.text += `${line}\n`;
     }
-    if (!current) sections.push({ title: fallbackTitle, level: 1, anchor: anchorFromHeading(fallbackTitle), text: markdown.trim() });
+    if (!current) sections.push({ title: fallbackTitle, level: 1, anchor: anchorFromHeading(fallbackTitle), text: body.trim() });
     else current.text = current.text.trim();
     return sections;
   }
@@ -168,7 +207,7 @@ export function createLocalWikiEngine(config: LocalWikiEngineConfig) {
   }
 
   function markdownTitle(markdown: string, filePath: string): string {
-    return stripMarkdownDecorators(markdown.match(/^#\s+(.+)$/m)?.[1]?.trim() || titleFromPath(filePath));
+    return stripMarkdownDecorators(yamlFrontmatterTitle(markdown) || firstMarkdownHeading(markdown) || titleFromPath(filePath));
   }
 
   function htmlTitle(html: string, filePath: string): string {
@@ -211,10 +250,11 @@ export function createLocalWikiEngine(config: LocalWikiEngineConfig) {
 
   function parsePage(raw: string, filePath: string, mtimeMs: number): LocalWikiPage {
     const title = config.format === "html" ? htmlTitle(raw, filePath) : markdownTitle(raw, filePath);
-    const baseText = config.format === "html" ? htmlToText(raw) : normalizeWhitespace(raw);
+    const markdownBody = config.format === "html" ? raw : stripYamlFrontmatter(raw);
+    const baseText = config.format === "html" ? htmlToText(raw) : normalizeWhitespace(markdownBody);
     const text = config.transformText?.(baseText, title, filePath) ?? baseText;
     const sections = markdownSections(text, title);
-    return { title, slug: path.relative(config.docsPath, filePath).replace(config.fileExtensions, ""), path: filePath, source: config.sourceName?.(filePath, config.docsPath), headings: sections.map((s) => s.title), sections, links: config.format === "html" ? htmlLinks(raw, filePath) : markdownLinks(text, filePath), text, mtimeMs };
+    return { title, slug: path.relative(config.docsPath, filePath).replace(config.fileExtensions, ""), path: filePath, source: config.sourceName?.(filePath, config.docsPath), headings: sections.map((s) => s.title), sections, links: config.format === "html" ? htmlLinks(raw, filePath) : markdownLinks(markdownBody, filePath), text, mtimeMs };
   }
 
   function limitText(text: string, maxChars = 12000): { text: string; truncated: boolean } {
@@ -257,10 +297,19 @@ export function createLocalWikiEngine(config: LocalWikiEngineConfig) {
   }
 
   function expandQuery(query: string): string[] {
-    const tokens = normalizeQuery(query).split(/\s+/).filter(Boolean);
+    const tokens = normalizeQuery(query).split(/\s+/).filter((token) => token && !searchStopwords.has(token));
     const expanded = new Set(tokens);
-    for (const token of tokens) for (const extra of config.queryExpansions?.[token] ?? []) expanded.add(normalizeQuery(extra));
+    for (const token of tokens) {
+      for (const extra of config.queryExpansions?.[token] ?? []) {
+        const normalized = normalizeQuery(extra);
+        if (normalized && !searchStopwords.has(normalized)) expanded.add(normalized);
+      }
+    }
     return [...expanded].filter(Boolean);
+  }
+
+  function tokenWeight(token: string): number {
+    return config.termWeights?.[token] ?? 1;
   }
 
   function makeSnippet(text: string, tokens: string[], max = 280): string | undefined {
@@ -282,14 +331,15 @@ export function createLocalWikiEngine(config: LocalWikiEngineConfig) {
     const matchedFields = new Set<string>();
     const scoreExplanation: string[] = [];
     for (const token of tokens) {
-      if (title.includes(token)) { score += 25; matchedFields.add("title"); scoreExplanation.push(`title matched '${token}'`); }
-      if (slug.includes(token)) { score += 12; matchedFields.add("slug"); }
-      if (source.includes(token)) { score += 8; matchedFields.add("source"); }
-      if (headings.includes(token)) { score += 10; matchedFields.add("headings"); }
+      const weight = tokenWeight(token);
+      if (title.includes(token)) { score += 25 * weight; matchedFields.add("title"); scoreExplanation.push(`title matched '${token}'`); }
+      if (slug.includes(token)) { score += 12 * weight; matchedFields.add("slug"); }
+      if (source.includes(token)) { score += 8 * weight; matchedFields.add("source"); }
+      if (headings.includes(token)) { score += 10 * weight; matchedFields.add("headings"); }
       const textMatches = text.split(token).length - 1;
-      if (textMatches > 0) { score += Math.min(15, textMatches); matchedFields.add("text"); }
+      if (textMatches > 0) { score += Math.min(15, textMatches) * weight; matchedFields.add("text"); }
     }
-    return score > 0 ? { title: page.title, path: page.path, source: page.source, score, matchedFields: [...matchedFields], scoreExplanation, snippet: makeSnippet(page.text, tokens) } : undefined;
+    return score > 0 ? { title: page.title, path: page.path, source: page.source, score: Number(score.toFixed(2)), matchedFields: [...matchedFields], scoreExplanation, snippet: makeSnippet(page.text, tokens) } : undefined;
   }
 
   function findPage(pages: LocalWikiPage[], pageRef: string): LocalWikiPage | undefined {
@@ -308,9 +358,9 @@ export function createLocalWikiEngine(config: LocalWikiEngineConfig) {
   async function search(params: { query: string; limit?: number; includeSnippets?: boolean }) {
     const { pages } = await loadCache();
     const tokens = expandQuery(params.query);
-    const limit = Math.max(1, Math.min(params.limit ?? 10, 50));
+    const limit = Math.max(1, Math.min(params.limit ?? 8, 50));
     const results = pages.map((p) => scorePage(p, tokens)).filter((x): x is LocalWikiSearchResult => Boolean(x)).sort((a, b) => b.score - a.score).slice(0, limit);
-    return { query: params.query, expandedTokens: tokens, results: params.includeSnippets === false ? results.map(({ snippet, ...rest }) => rest) : results };
+    return { query: params.query, expandedTokens: tokens, results: params.includeSnippets === true ? results : results.map(({ snippet, ...rest }) => rest) };
   }
 
   async function loadPage(pageRef: string): Promise<LocalWikiPage> {
@@ -326,23 +376,27 @@ export function createLocalWikiEngine(config: LocalWikiEngineConfig) {
     return { title: page.title, source: page.source, path: page.path, citation: `${page.path} — ${page.title}`, truncated: limited.truncated, text: limited.text };
   }
 
-  async function sections(params: { page: string }) {
+  async function sections(params: { page: string; maxSections?: number }) {
     const page = await loadPage(params.page);
-    return { title: page.title, source: page.source, path: page.path, sections: page.sections.map((s) => ({ title: s.title, level: s.level, anchor: s.anchor })) };
+    const maxSections = Math.max(1, Math.min(params.maxSections ?? 80, 300));
+    const selected = page.sections.slice(0, maxSections);
+    return { title: page.title, source: page.source, path: page.path, sectionCount: page.sections.length, omittedSectionCount: Math.max(0, page.sections.length - selected.length), sections: selected.map((s) => ({ title: s.title, level: s.level, anchor: s.anchor })) };
   }
 
-  async function extract(params: { page: string; section?: string; query?: string; maxChars?: number }) {
+  async function extract(params: { page: string; section?: string; query?: string; maxChars?: number; maxSections?: number }) {
     const page = await loadPage(params.page);
     let matchedSections = page.sections;
     if (params.section) { const needle = normalizeQuery(params.section); matchedSections = matchedSections.filter((s) => normalizeQuery(s.title).includes(needle)); }
     if (params.query) {
       const tokens = expandQuery(params.query);
-      matchedSections = matchedSections.map((section) => ({ section, score: tokens.reduce((sum, token) => sum + (normalizeQuery(`${section.title} ${section.text}`).includes(token) ? 1 : 0), 0) })).filter((i) => i.score > 0).sort((a, b) => b.score - a.score).map((i) => i.section);
+      matchedSections = matchedSections.map((section) => ({ section, score: tokens.reduce((sum, token) => sum + (normalizeQuery(`${section.title} ${section.text}`).includes(token) ? tokenWeight(token) : 0), 0) })).filter((i) => i.score > 0).sort((a, b) => b.score - a.score).map((i) => i.section);
     }
-    if (!params.section && !params.query) matchedSections = matchedSections.slice(0, 5);
+    const maxSections = Math.max(1, Math.min(params.maxSections ?? (params.section || params.query ? 6 : 5), 50));
+    const totalMatchedSections = matchedSections.length;
+    matchedSections = matchedSections.slice(0, maxSections);
     const joined = matchedSections.map((s) => `${"#".repeat(Math.min(s.level, 6))} ${s.title}\n\n${s.text}`).join("\n\n");
-    const limited = limitText(joined || page.text, params.maxChars ?? 12000);
-    return { title: page.title, source: page.source, path: page.path, citation: `${page.path} — ${matchedSections.map((s) => s.title).join(", ") || page.title}`, matchedSections: matchedSections.map((s) => ({ title: s.title, level: s.level, anchor: s.anchor })), truncated: limited.truncated, text: limited.text };
+    const limited = limitText(joined || page.text, params.maxChars ?? 10000);
+    return { title: page.title, source: page.source, path: page.path, citation: `${page.path} — ${matchedSections.map((s) => s.title).join(", ") || page.title}`, matchedSections: matchedSections.map((s) => ({ title: s.title, level: s.level, anchor: s.anchor })), totalMatchedSections, omittedSectionCount: Math.max(0, totalMatchedSections - matchedSections.length), truncated: limited.truncated, text: limited.text };
   }
 
   async function related(params: { page: string; limit?: number }) {
