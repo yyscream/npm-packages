@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-extension-archwiki-local",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Local ArchWiki search and retrieval tools for Pi using the installed arch-wiki-docs package.",
   "license": "MIT",
   "keywords": [

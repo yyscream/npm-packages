@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-extension-nixos-wiki-local",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local NixOS/Nix documentation search and retrieval tools for Pi backed by minimal sparse clones of official repositories.",
   "license": "MIT",
   "keywords": [
