@@ -97,29 +97,46 @@ async function runCommand(cwd: string, command: string): Promise<CommandResult> 
   });
 }
 
-async function runNpmConfigSetToken(cwd: string, token: string): Promise<CommandResult> {
-  return await new Promise((resolve) => {
-    const child = spawn("npm", ["config", "set", "//registry.npmjs.org/:_authToken", token], {
-      cwd,
-      stdio: ["ignore", "pipe", "pipe"],
+async function runNpmCommand(cwd: string, args: string[]): Promise<CommandResult> {
+  const candidates = process.platform === "win32"
+    ? ["npm.cmd", "npm"]
+    : ["npm"];
+
+  for (const command of candidates) {
+    const result = await new Promise<CommandResult>((resolve) => {
+      const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+      let output = "";
+      let settled = false;
+      const settle = (value: CommandResult) => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
+
+      child.stdout.on("data", (d) => { output += String(d); });
+      child.stderr.on("data", (d) => { output += String(d); });
+      child.on("error", (error) => {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          settle({ ok: false, output: "ENOENT" });
+          return;
+        }
+        settle({ ok: false, output: error.message });
+      });
+      child.on("close", (code) => settle({ ok: code === 0, output }));
     });
-    let output = "";
-    child.stdout.on("data", (d) => { output += String(d); });
-    child.stderr.on("data", (d) => { output += String(d); });
-    child.on("error", (error) => resolve({ ok: false, output: error.message }));
-    child.on("close", (code) => resolve({ ok: code === 0, output }));
-  });
+
+    if (result.ok || result.output !== "ENOENT") return result;
+  }
+
+  return { ok: false, output: "npm executable not found in PATH" };
+}
+
+async function runNpmConfigSetToken(cwd: string, token: string): Promise<CommandResult> {
+  return await runNpmCommand(cwd, ["config", "set", "//registry.npmjs.org/:_authToken", token]);
 }
 
 async function verifyNpmAuth(cwd: string): Promise<CommandResult> {
-  return await new Promise((resolve) => {
-    const child = spawn("npm", ["whoami"], { cwd, stdio: ["ignore", "pipe", "pipe"] });
-    let output = "";
-    child.stdout.on("data", (d) => { output += String(d); });
-    child.stderr.on("data", (d) => { output += String(d); });
-    child.on("error", (error) => resolve({ ok: false, output: error.message }));
-    child.on("close", (code) => resolve({ ok: code === 0, output }));
-  });
+  return await runNpmCommand(cwd, ["whoami"]);
 }
 
 function redactTokenLikeOutput(output: string): string {
