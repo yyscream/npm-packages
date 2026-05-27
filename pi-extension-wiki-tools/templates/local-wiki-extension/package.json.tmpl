@@ -1,0 +1,33 @@
+{
+  "name": "{{packageName}}",
+  "version": "0.1.0",
+  "description": "Local {{displayName}} search and retrieval tools for Pi backed by a local documentation corpus.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "extension",
+    "wiki",
+    "documentation",
+    "{{extensionId}}"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "files": [
+    "index.ts",
+    "skills",
+    "README.md",
+    "LICENSE"
+  ]
+}

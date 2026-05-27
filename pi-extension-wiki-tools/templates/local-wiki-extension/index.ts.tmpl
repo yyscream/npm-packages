@@ -1,0 +1,476 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { execFile } from "node:child_process";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+
+type DocFormat = "markdown" | "html";
+
+interface WikiPage {
+  title: string;
+  slug: string;
+  path: string;
+  headings: string[];
+  sections: WikiSection[];
+  links: WikiLink[];
+  text: string;
+  mtimeMs: number;
+}
+
+interface WikiSection {
+  title: string;
+  level: number;
+  anchor: string;
+  text: string;
+}
+
+interface WikiLink {
+  title: string;
+  path: string;
+}
+
+interface CacheMetadata {
+  schemaVersion: number;
+  docsPath: string;
+  generatedAt: string;
+  pageCount: number;
+  newestMtimeMs: number;
+  gitRevision?: string;
+}
+
+interface SearchResult {
+  title: string;
+  path: string;
+  score: number;
+  matchedFields: string[];
+  scoreExplanation: string[];
+  snippet?: string;
+}
+
+interface LoadedCache {
+  pages: WikiPage[];
+  metadata: CacheMetadata;
+}
+
+const CONFIG = {
+  extensionId: "{{extensionId}}",
+  displayName: "{{displayName}}",
+  topicName: "{{topicName}}",
+  skillName: "{{skillName}}",
+  docsPath: "{{docsPath}}".replace(/^~(?=\/|$)/, os.homedir()),
+  repoUrl: "{{repoUrl}}", // empty string for preinstalled docs
+  setupCommand: "{{setupCommand}}",
+  fileExtensions: /{{fileExtensionsRegex}}/i,
+  format: "markdown" as DocFormat, // change to "html" for HTML corpora
+  cacheDir: path.join(os.homedir(), ".cache", "pi", "{{extensionId}}-wiki-local"),
+  schemaVersion: 1,
+  promptDetection: /{{promptDetectionRegex}}/i,
+  queryExpansions: {
+    // Add domain language here. Example:
+    // config: ["settings", "configuration", "options"],
+    // install: ["setup", "getting started", "requirements"],
+  } as Record<string, string[]>,
+};
+
+const PAGES_CACHE = path.join(CONFIG.cacheDir, "pages.json");
+const METADATA_CACHE = path.join(CONFIG.cacheDir, "metadata.json");
+const MISSING_DOCS_MESSAGE = `Local ${CONFIG.displayName} docs are not available at ${CONFIG.docsPath}. Run ${CONFIG.setupCommand} to set them up.`;
+
+async function exists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function runCommand(command: string, args: string[], cwd?: string): Promise<{ ok: boolean; stdout: string; stderr: string; error?: string }> {
+  return await new Promise((resolve) => {
+    execFile(command, args, { cwd, timeout: 120000 }, (error, stdout, stderr) => {
+      resolve({ ok: !error, stdout, stderr, error: error instanceof Error ? error.message : undefined });
+    });
+  });
+}
+
+async function gitRevision(): Promise<string | undefined> {
+  if (!await exists(path.join(CONFIG.docsPath, ".git"))) return undefined;
+  const result = await runCommand("git", ["rev-parse", "--short", "HEAD"], CONFIG.docsPath);
+  return result.ok ? result.stdout.trim() || undefined : undefined;
+}
+
+async function listDocFiles(dir: string): Promise<string[]> {
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  const files: string[] = [];
+  for (const entry of entries) {
+    if (entry.name === ".git" || entry.name === "node_modules") continue;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) files.push(...await listDocFiles(full));
+    if (entry.isFile() && CONFIG.fileExtensions.test(entry.name)) files.push(full);
+  }
+  return files.sort();
+}
+
+async function corpusAvailable(): Promise<boolean> {
+  try {
+    const stat = await fs.stat(CONFIG.docsPath);
+    if (!stat.isDirectory()) return false;
+    return (await listDocFiles(CONFIG.docsPath)).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+async function corpusStats(): Promise<{ pageCount: number; newestMtimeMs: number }> {
+  if (!await exists(CONFIG.docsPath)) return { pageCount: 0, newestMtimeMs: 0 };
+  const files = await listDocFiles(CONFIG.docsPath);
+  let newestMtimeMs = 0;
+  for (const file of files) newestMtimeMs = Math.max(newestMtimeMs, (await fs.stat(file)).mtimeMs);
+  return { pageCount: files.length, newestMtimeMs };
+}
+
+function decodeEntities(input: string): string {
+  const entityMap: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
+  return input
+    .replace(/&#(x[0-9a-f]+|\d+);/gi, (_m, value: string) => {
+      const code = value.toLowerCase().startsWith("x") ? Number.parseInt(value.slice(1), 16) : Number.parseInt(value, 10);
+      return Number.isFinite(code) ? String.fromCodePoint(code) : _m;
+    })
+    .replace(/&([a-z]+);/gi, (m, name: string) => entityMap[name.toLowerCase()] ?? m);
+}
+
+function stripTags(input: string): string {
+  return decodeEntities(input.replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
+}
+
+function normalizeWhitespace(input: string): string {
+  return input.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/[ \t]{2,}/g, " ").trim();
+}
+
+function titleFromPath(filePath: string): string {
+  return path.basename(filePath, path.extname(filePath)).replace(/[-_]+/g, " ").trim();
+}
+
+function anchorFromHeading(raw: string): string {
+  return raw.toLowerCase().replace(/`/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+
+function stripMarkdownDecorators(input: string): string {
+  return input.replace(/^#+\s*/, "").replace(/[*_`~]/g, "").replace(/\[([^\]]+)\]\([^\)]+\)/g, "$1").trim();
+}
+
+function markdownTitle(markdown: string, filePath: string): string {
+  const firstHeading = markdown.match(/^#\s+(.+)$/m)?.[1]?.trim();
+  return stripMarkdownDecorators(firstHeading || titleFromPath(filePath));
+}
+
+function markdownSections(markdown: string, fallbackTitle: string): WikiSection[] {
+  const lines = markdown.split(/\n/);
+  const sections: WikiSection[] = [];
+  let current: WikiSection | undefined;
+  for (const line of lines) {
+    const match = line.match(/^(#{1,6})\s+(.+)$/);
+    if (match) {
+      if (current) current.text = current.text.trim();
+      const title = stripMarkdownDecorators(match[2]);
+      current = { title, level: match[1].length, anchor: anchorFromHeading(title), text: "" };
+      sections.push(current);
+      continue;
+    }
+    if (current) current.text += `${line}\n`;
+  }
+  if (!current) sections.push({ title: fallbackTitle, level: 1, anchor: anchorFromHeading(fallbackTitle), text: markdown.trim() });
+  else current.text = current.text.trim();
+  return sections;
+}
+
+function resolveLocalPath(currentFile: string, href: string): string | undefined {
+  if (/^(https?:|mailto:|#)/i.test(href)) return undefined;
+  const cleanHref = href.split("#")[0].split("?")[0];
+  if (!cleanHref) return undefined;
+  const withExt = path.extname(cleanHref) ? cleanHref : `${cleanHref}${CONFIG.format === "html" ? ".html" : ".md"}`;
+  const resolved = path.normalize(path.resolve(path.dirname(currentFile), withExt));
+  return resolved.startsWith(CONFIG.docsPath) ? resolved : undefined;
+}
+
+function markdownLinks(markdown: string, currentFile: string): WikiLink[] {
+  const links = new Map<string, WikiLink>();
+  const re = /\[([^\]]+)\]\(([^\)]+)\)/g;
+  for (const match of markdown.matchAll(re)) {
+    const resolved = resolveLocalPath(currentFile, match[2].trim());
+    if (!resolved) continue;
+    links.set(resolved, { title: stripMarkdownDecorators(match[1]) || titleFromPath(resolved), path: resolved });
+  }
+  return [...links.values()];
+}
+
+function htmlToText(html: string): string {
+  let body = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i)?.[1] ?? html;
+  body = body.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ");
+  body = body.replace(/<(h[1-6])[^>]*>([\s\S]*?)<\/\1>/gi, (_m, tag: string, inner: string) => `\n\n${"#".repeat(Number(tag.slice(1)))} ${stripTags(inner)}\n\n`);
+  body = body.replace(/<pre[^>]*>([\s\S]*?)<\/pre>/gi, (_m, inner: string) => `\n\n\`\`\`\n${stripTags(inner)}\n\`\`\`\n\n`);
+  body = body.replace(/<code[^>]*>([\s\S]*?)<\/code>/gi, (_m, inner: string) => `\`${stripTags(inner)}\``);
+  body = body.replace(/<li[^>]*>/gi, "\n- ").replace(/<br\s*\/?>/gi, "\n");
+  body = body.replace(/<\/(p|div|section|article|table|tr|ul|ol|dl)>/gi, "\n");
+  return normalizeWhitespace(decodeEntities(body.replace(/<[^>]+>/g, " ")));
+}
+
+function htmlTitle(html: string, filePath: string): string {
+  return stripTags(html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? "") || titleFromPath(filePath);
+}
+
+function htmlLinks(html: string, currentFile: string): WikiLink[] {
+  const links = new Map<string, WikiLink>();
+  const re = /<a\s+[^>]*href=["']([^"'#?]+)(?:#[^"']*)?["'][^>]*>([\s\S]*?)<\/a>/gi;
+  for (const match of html.matchAll(re)) {
+    const resolved = resolveLocalPath(currentFile, decodeEntities(match[1]));
+    if (!resolved) continue;
+    links.set(resolved, { title: stripTags(match[2]) || titleFromPath(resolved), path: resolved });
+  }
+  return [...links.values()];
+}
+
+function parsePage(raw: string, filePath: string, mtimeMs: number): WikiPage {
+  if (CONFIG.format === "html") {
+    const title = htmlTitle(raw, filePath);
+    const text = htmlToText(raw);
+    const sections = markdownSections(text, title);
+    return { title, slug: path.relative(CONFIG.docsPath, filePath).replace(CONFIG.fileExtensions, ""), path: filePath, headings: sections.map((s) => s.title), sections, links: htmlLinks(raw, filePath), text, mtimeMs };
+  }
+  const title = markdownTitle(raw, filePath);
+  const text = normalizeWhitespace(raw);
+  const sections = markdownSections(text, title);
+  return { title, slug: path.relative(CONFIG.docsPath, filePath).replace(CONFIG.fileExtensions, ""), path: filePath, headings: sections.map((s) => s.title), sections, links: markdownLinks(text, filePath), text, mtimeMs };
+}
+
+function limitText(text: string, maxChars = 12000): { text: string; truncated: boolean } {
+  if (text.length <= maxChars) return { text, truncated: false };
+  return { text: `${text.slice(0, maxChars)}\n\n[truncated at ${maxChars} characters]`, truncated: true };
+}
+
+async function buildCache(): Promise<LoadedCache> {
+  if (!await corpusAvailable()) throw new Error(MISSING_DOCS_MESSAGE);
+  await fs.mkdir(CONFIG.cacheDir, { recursive: true });
+  const files = await listDocFiles(CONFIG.docsPath);
+  const pages: WikiPage[] = [];
+  let newestMtimeMs = 0;
+  for (const file of files) {
+    const stat = await fs.stat(file);
+    newestMtimeMs = Math.max(newestMtimeMs, stat.mtimeMs);
+    pages.push(parsePage(await fs.readFile(file, "utf8"), file, stat.mtimeMs));
+  }
+  const metadata: CacheMetadata = { schemaVersion: CONFIG.schemaVersion, docsPath: CONFIG.docsPath, generatedAt: new Date().toISOString(), pageCount: pages.length, newestMtimeMs, gitRevision: await gitRevision() };
+  await fs.writeFile(PAGES_CACHE, JSON.stringify(pages, null, 2));
+  await fs.writeFile(METADATA_CACHE, JSON.stringify(metadata, null, 2));
+  return { pages, metadata };
+}
+
+async function cacheFresh(metadata: CacheMetadata): Promise<boolean> {
+  const stats = await corpusStats();
+  return metadata.schemaVersion === CONFIG.schemaVersion && metadata.docsPath === CONFIG.docsPath && metadata.pageCount === stats.pageCount && metadata.newestMtimeMs === stats.newestMtimeMs;
+}
+
+async function loadCache(): Promise<LoadedCache> {
+  try {
+    const [pagesRaw, metadataRaw] = await Promise.all([fs.readFile(PAGES_CACHE, "utf8"), fs.readFile(METADATA_CACHE, "utf8")]);
+    const metadata = JSON.parse(metadataRaw) as CacheMetadata;
+    if (await cacheFresh(metadata)) return { pages: JSON.parse(pagesRaw) as WikiPage[], metadata };
+  } catch {
+    // Rebuild below.
+  }
+  return buildCache();
+}
+
+function normalizeQuery(input: string): string {
+  return input.toLowerCase().replace(/[^a-z0-9_./+-]+/g, " ").trim();
+}
+
+function expandQuery(query: string): string[] {
+  const normalized = normalizeQuery(query);
+  const tokens = normalized.split(/\s+/).filter(Boolean);
+  const expanded = new Set(tokens);
+  for (const token of tokens) for (const extra of CONFIG.queryExpansions[token] ?? []) expanded.add(normalizeQuery(extra));
+  return [...expanded].filter(Boolean);
+}
+
+function makeSnippet(text: string, tokens: string[], max = 260): string | undefined {
+  const lower = text.toLowerCase();
+  const index = tokens.map((t) => lower.indexOf(t.toLowerCase())).filter((i) => i >= 0).sort((a, b) => a - b)[0];
+  if (index === undefined) return undefined;
+  const start = Math.max(0, index - Math.floor(max / 2));
+  const snippet = text.slice(start, start + max).replace(/\s+/g, " ").trim();
+  return `${start > 0 ? "…" : ""}${snippet}${start + max < text.length ? "…" : ""}`;
+}
+
+function scorePage(page: WikiPage, tokens: string[]): SearchResult | undefined {
+  const title = normalizeQuery(page.title);
+  const slug = normalizeQuery(page.slug);
+  const headings = normalizeQuery(page.headings.join(" "));
+  const text = normalizeQuery(page.text);
+  let score = 0;
+  const matchedFields = new Set<string>();
+  const scoreExplanation: string[] = [];
+  for (const token of tokens) {
+    if (title.includes(token)) { score += 20; matchedFields.add("title"); scoreExplanation.push(`title matched '${token}'`); }
+    if (slug.includes(token)) { score += 10; matchedFields.add("slug"); }
+    if (headings.includes(token)) { score += 8; matchedFields.add("headings"); }
+    const textMatches = text.split(token).length - 1;
+    if (textMatches > 0) { score += Math.min(12, textMatches); matchedFields.add("text"); }
+  }
+  if (score <= 0) return undefined;
+  return { title: page.title, path: page.path, score, matchedFields: [...matchedFields], scoreExplanation, snippet: makeSnippet(page.text, tokens) };
+}
+
+function findPage(pages: WikiPage[], pageRef: string): WikiPage | undefined {
+  const normalized = normalizeQuery(pageRef);
+  return pages.find((page) => page.path === pageRef)
+    ?? pages.find((page) => normalizeQuery(page.slug) === normalized)
+    ?? pages.find((page) => normalizeQuery(page.title) === normalized)
+    ?? pages.find((page) => normalizeQuery(page.slug).includes(normalized) || normalizeQuery(page.title).includes(normalized));
+}
+
+function jsonText(value: unknown): string {
+  return JSON.stringify(value, null, 2);
+}
+
+async function executeStatus() {
+  const available = await corpusAvailable();
+  const stats = await corpusStats();
+  let cacheGeneratedAt: string | undefined;
+  try { cacheGeneratedAt = (JSON.parse(await fs.readFile(METADATA_CACHE, "utf8")) as CacheMetadata).generatedAt; } catch {}
+  const payload = { displayName: CONFIG.displayName, docsPath: CONFIG.docsPath, available, pageCount: stats.pageCount, gitRevision: await gitRevision(), cacheGeneratedAt };
+  return { content: [{ type: "text" as const, text: jsonText(payload) }], details: payload };
+}
+
+async function executeSetup(): Promise<{ ok: boolean; message: string }> {
+  if (!CONFIG.repoUrl) {
+    return { ok: false, message: `No repoUrl configured. Populate ${CONFIG.docsPath} with local docs, then retry the wiki tools.` };
+  }
+  if (!await exists(CONFIG.docsPath)) {
+    const parent = path.dirname(CONFIG.docsPath);
+    await fs.mkdir(parent, { recursive: true });
+    const clone = await runCommand("git", ["clone", CONFIG.repoUrl, CONFIG.docsPath], parent);
+    return { ok: clone.ok, message: clone.ok ? `Cloned ${CONFIG.displayName} docs to ${CONFIG.docsPath}.` : `Clone failed: ${clone.stderr || clone.error}` };
+  }
+  if (await exists(path.join(CONFIG.docsPath, ".git"))) {
+    const pull = await runCommand("git", ["pull", "--ff-only"], CONFIG.docsPath);
+    return { ok: pull.ok, message: pull.ok ? `Updated ${CONFIG.displayName} docs at ${CONFIG.docsPath}.` : `Update failed: ${pull.stderr || pull.error}` };
+  }
+  return { ok: await corpusAvailable(), message: `Docs path exists but is not a Git checkout: ${CONFIG.docsPath}` };
+}
+
+async function executeSearch(params: { query: string; limit?: number; includeSnippets?: boolean }) {
+  const { pages } = await loadCache();
+  const tokens = expandQuery(params.query);
+  const limit = Math.max(1, Math.min(params.limit ?? 10, 50));
+  const results = pages.map((page) => scorePage(page, tokens)).filter((x): x is SearchResult => Boolean(x)).sort((a, b) => b.score - a.score).slice(0, limit);
+  const payload = { query: params.query, expandedTokens: tokens, results: params.includeSnippets === false ? results.map(({ snippet, ...rest }) => rest) : results };
+  return { content: [{ type: "text" as const, text: jsonText(payload) }], details: payload };
+}
+
+async function loadPage(pageRef: string): Promise<{ page: WikiPage; cache: LoadedCache }> {
+  const cache = await loadCache();
+  const page = findPage(cache.pages, pageRef);
+  if (!page) throw new Error(`No ${CONFIG.displayName} page matched '${pageRef}'. Try ${CONFIG.extensionId}wiki_search first.`);
+  return { page, cache };
+}
+
+async function executeRead(params: { page: string; maxChars?: number }) {
+  const { page } = await loadPage(params.page);
+  const limited = limitText(page.text, params.maxChars ?? 20000);
+  const payload = { title: page.title, path: page.path, citation: `${page.path} — ${page.title}`, truncated: limited.truncated, text: limited.text };
+  return { content: [{ type: "text" as const, text: jsonText(payload) }], details: payload };
+}
+
+async function executeSections(params: { page: string }) {
+  const { page } = await loadPage(params.page);
+  const payload = { title: page.title, path: page.path, sections: page.sections.map((section) => ({ title: section.title, level: section.level, anchor: section.anchor })) };
+  return { content: [{ type: "text" as const, text: jsonText(payload) }], details: payload };
+}
+
+async function executeExtract(params: { page: string; section?: string; query?: string; maxChars?: number }) {
+  const { page } = await loadPage(params.page);
+  let sections = page.sections;
+  if (params.section) {
+    const needle = normalizeQuery(params.section);
+    sections = sections.filter((section) => normalizeQuery(section.title).includes(needle));
+  }
+  if (params.query) {
+    const tokens = expandQuery(params.query);
+    sections = sections.map((section) => {
+      const haystack = normalizeQuery(`${section.title} ${section.text}`);
+      return { section, score: tokens.reduce((sum, token) => sum + (haystack.includes(token) ? 1 : 0), 0) };
+    }).filter((item) => item.score > 0).sort((a, b) => b.score - a.score).map((item) => item.section);
+  }
+  if (!params.section && !params.query) sections = sections.slice(0, 5);
+  const joined = sections.map((section) => `${"#".repeat(Math.min(section.level, 6))} ${section.title}\n\n${section.text}`).join("\n\n");
+  const limited = limitText(joined || page.text, params.maxChars ?? 12000);
+  const payload = { title: page.title, path: page.path, citation: `${page.path} — ${sections.map((s) => s.title).join(", ") || page.title}`, matchedSections: sections.map((s) => ({ title: s.title, level: s.level, anchor: s.anchor })), truncated: limited.truncated, text: limited.text };
+  return { content: [{ type: "text" as const, text: jsonText(payload) }], details: payload };
+}
+
+async function executeRelated(params: { page: string; limit?: number }) {
+  const { page } = await loadPage(params.page);
+  const limit = Math.max(1, Math.min(params.limit ?? 10, 50));
+  const payload = { title: page.title, path: page.path, links: page.links.slice(0, limit) };
+  return { content: [{ type: "text" as const, text: jsonText(payload) }], details: payload };
+}
+
+const searchParams = Type.Object({ query: Type.String({ description: `Search query, e.g. '${CONFIG.topicName} config'` }), limit: Type.Optional(Type.Number({ minimum: 1, maximum: 50 })), includeSnippets: Type.Optional(Type.Boolean()) });
+const readParams = Type.Object({ page: Type.String({ description: "Page title, slug, or absolute local path" }), maxChars: Type.Optional(Type.Number({ minimum: 1000, maximum: 100000 })) });
+const sectionsParams = Type.Object({ page: Type.String({ description: "Page title, slug, or absolute local path" }) });
+const extractParams = Type.Object({ page: Type.String({ description: "Page title, slug, or absolute local path" }), section: Type.Optional(Type.String()), query: Type.Optional(Type.String()), maxChars: Type.Optional(Type.Number({ minimum: 1000, maximum: 100000 })) });
+const relatedParams = Type.Object({ page: Type.String({ description: "Page title, slug, or absolute local path" }), limit: Type.Optional(Type.Number({ minimum: 1, maximum: 50 })) });
+
+export default function localWikiExtension(pi: ExtensionAPI) {
+  pi.on?.("before_agent_start", async (event, ctx) => {
+    const skillLoaded = event.systemPromptOptions.skills?.some((skill) => skill.name === CONFIG.skillName) ?? false;
+    if (!skillLoaded && !CONFIG.promptDetection.test(event.prompt ?? "")) return;
+
+    if (!await corpusAvailable()) {
+      const warning = `${MISSING_DOCS_MESSAGE} Aborting ${CONFIG.displayName}-local lookup until setup is complete.`;
+      ctx.ui.notify(warning, "warning");
+      ctx.abort();
+      return {
+        message: { customType: `${CONFIG.extensionId}-wiki-local-missing-docs`, content: warning, display: true },
+        systemPrompt: `${event.systemPrompt}\n\n${CONFIG.displayName} local documentation setup required: ${warning} Do not continue with ${CONFIG.topicName} troubleshooting until the user runs ${CONFIG.setupCommand}.`,
+      };
+    }
+
+    return {
+      systemPrompt: `${event.systemPrompt}\n\n${CONFIG.displayName} local documentation routing: This prompt appears related to ${CONFIG.topicName}. Use ${CONFIG.extensionId}wiki_search before web sources, then ${CONFIG.extensionId}wiki_extract for focused sections with local path citations. Prefer read-only diagnostics and ask before destructive changes.`,
+    };
+  });
+
+  pi.registerCommand(`${CONFIG.extensionId}wiki-status`, {
+    description: `Show local ${CONFIG.displayName} docs path, page count, and cache freshness`,
+    handler: async (_args, ctx) => {
+      const result = await executeStatus();
+      ctx.ui.notify(result.content[0].text, "info");
+    },
+  });
+
+  pi.registerCommand(`${CONFIG.extensionId}wiki-local-setup`, {
+    description: `Clone/update or report setup instructions for local ${CONFIG.displayName} docs`,
+    handler: async (_args, ctx) => {
+      const result = await executeSetup();
+      ctx.ui.notify(result.message, result.ok ? "info" : "warning");
+    },
+  });
+
+  pi.registerTool({
+    name: `${CONFIG.extensionId}wiki_search`,
+    label: `${CONFIG.displayName} Search`,
+    description: `Search local ${CONFIG.displayName} documentation pages from ${CONFIG.docsPath}.`,
+    promptSnippet: `Search local ${CONFIG.displayName} pages before using web sources for ${CONFIG.topicName} questions`,
+    promptGuidelines: [`Use ${CONFIG.extensionId}wiki_search first for ${CONFIG.topicName} questions before consulting web sources.`, `Use ${CONFIG.extensionId}wiki_extract after search to retrieve focused sections with citations.`],
+    parameters: searchParams,
+    async execute(_toolCallId, params) { return executeSearch(params); },
+  });
+
+  pi.registerTool({ name: `${CONFIG.extensionId}wiki_read`, label: `${CONFIG.displayName} Read`, description: `Read a local ${CONFIG.displayName} page as clean text with a local path citation.`, promptSnippet: `Read local ${CONFIG.displayName} page text by title, slug, or absolute local path`, promptGuidelines: [`Use ${CONFIG.extensionId}wiki_read only when broad page context is needed; prefer ${CONFIG.extensionId}wiki_extract for focused answers.`], parameters: readParams, async execute(_toolCallId, params) { return executeRead(params); } });
+  pi.registerTool({ name: `${CONFIG.extensionId}wiki_sections`, label: `${CONFIG.displayName} Sections`, description: `List headings/sections for a local ${CONFIG.displayName} page.`, promptSnippet: `List headings from a local ${CONFIG.displayName} page`, promptGuidelines: [`Use ${CONFIG.extensionId}wiki_sections to choose exact local sections before extraction.`], parameters: sectionsParams, async execute(_toolCallId, params) { return executeSections(params); } });
+  pi.registerTool({ name: `${CONFIG.extensionId}wiki_extract`, label: `${CONFIG.displayName} Extract`, description: `Extract a named or query-relevant section from a local ${CONFIG.displayName} page.`, promptSnippet: `Extract focused local ${CONFIG.displayName} sections by heading or query`, promptGuidelines: [`Use ${CONFIG.extensionId}wiki_extract to cite exact local sections in final answers.`], parameters: extractParams, async execute(_toolCallId, params) { return executeExtract(params); } });
+  pi.registerTool({ name: `${CONFIG.extensionId}wiki_related`, label: `${CONFIG.displayName} Related`, description: `Return local ${CONFIG.displayName} pages linked from a given local page.`, promptSnippet: `Find locally linked ${CONFIG.displayName} pages related to a page`, promptGuidelines: [`Use ${CONFIG.extensionId}wiki_related when an issue spans connected ${CONFIG.topicName} topics.`], parameters: relatedParams, async execute(_toolCallId, params) { return executeRelated(params); } });
+}

@@ -174,6 +174,14 @@ Update npm-installed Pi extensions.
 - `/extensions-update` with interactive multi-select
 - `/extensions-update all` to directly update all available updates
 
+### `@firstpick/pi-extension-wiki-tools`
+Scaffold and maintain local wiki/documentation extension packages from templates.
+
+- `/wiki-create`, `/wiki-update`, `/wiki-validate`, and `/wiki-templates` user commands
+- `create_wiki`, `update_wiki`, `validate_wiki`, and `list_wiki_templates` agent tools
+- bundled `wiki-tools` skill for using `templates/local-wiki-extension`
+- safe defaults: create refuses existing targets; update defaults to dry-run
+
 ### `@firstpick/pi-utils`
 Shared helpers used by multiple Pi extensions.
 
