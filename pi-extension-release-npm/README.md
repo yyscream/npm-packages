@@ -39,14 +39,16 @@ It then verifies the token with `npm whoami`.
 
 This extension is intended for a package workspace, not a single arbitrary npm package. Run `/release-npm` from the workspace root.
 
-The workspace root must contain the release helper scripts used by the command:
+For local development workspaces, release helper scripts live under `dev/scripts`:
 
 ```text
 npm-packages/
-  release-workflow.sh
-  bump-package-versions.sh
-  check-publish-readiness.sh
-  publish-packages.sh
+  dev/
+    scripts/
+      release-workflow.sh
+      bump-package-versions.sh
+      check-publish-readiness.sh
+      publish-packages.sh
 
   pi-extension-example/
     package.json
@@ -91,12 +93,12 @@ Readiness checks require or verify:
 - `keywords` containing `pi-package` is recommended for discoverability
 - `LICENSE` is recommended
 
-`/release-npm` runs `./release-workflow.sh --plan --all` first, then after confirmation publishes only the package directories detected in that plan with `./release-workflow.sh --publish --target <dir>`.
+`/release-npm` runs `./dev/scripts/release-workflow.sh --plan --all` first, then after confirmation publishes only the package directories detected in that plan with `./dev/scripts/release-workflow.sh --publish --target <dir>`.
 
 ## Commands
 
 - `/release-npm-setup` — prompts for an npm token with Pi native input, saves it using `npm config set //registry.npmjs.org/:_authToken <token>`, then verifies with `npm whoami`.
-- `/release-npm` — runs `./release-workflow.sh --plan --all`, shows the planned version/publish summary plus exact package targets, prompts for confirmation, then runs `./release-workflow.sh --publish --target <dir>` only for those detected targets. It does not install packages after publishing.
+- `/release-npm` — runs `./dev/scripts/release-workflow.sh --plan --all`, shows the planned version/publish summary plus exact package targets, prompts for confirmation, then runs `./dev/scripts/release-workflow.sh --publish --target <dir>` only for those detected targets. It does not install packages after publishing.
 - `/release-toggle` — toggles active release output between compact and expanded mode.
 - `/release-abort` — aborts the active release subprocess.
 - `/release-npm-logs` — select a saved release run and display it above the editor; press `Esc`/`q` or run `/release-npm-logs close` to close it.
@@ -128,8 +130,8 @@ Blocked:
 Publish eligible packages now?  No / Yes
 
 Release workflow
-  Applying required version bumps: ./bump-package-versions.sh --target all --apply
-  Running: ./publish-packages.sh --target all --publisher npm --access public --apply --strict-auth
+  Applying required version bumps: ./dev/scripts/bump-package-versions.sh --target all --apply
+  Running: ./dev/scripts/publish-packages.sh --target all --publisher npm --access public --apply --strict-auth
 
 Publish summary:
   - published total: 3

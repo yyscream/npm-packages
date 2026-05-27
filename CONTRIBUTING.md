@@ -7,8 +7,8 @@ This repository is a monorepo of publishable npm packages (currently Pi extensio
 ## Repository layout
 
 - `pi-extension-*/` – individual publishable packages
-- `check-publish-readiness.sh` – pre-publish checks
-- `publish-packages.sh` – plan/apply publishing with npm→bun fallback
+- `dev/scripts/check-publish-readiness.sh` – pre-publish checks
+- `dev/scripts/publish-packages.sh` – plan/apply publishing with npm→bun fallback
 
 ## Development workflow
 
@@ -22,13 +22,13 @@ This repository is a monorepo of publishable npm packages (currently Pi extensio
 From repo root:
 
 ```bash
-./check-publish-readiness.sh --all --check-alt-client
+./dev/scripts/check-publish-readiness.sh --all --check-alt-client
 ```
 
 If you changed publishing behavior, also run:
 
 ```bash
-./publish-packages.sh --all
+./dev/scripts/publish-packages.sh --all
 ```
 
 (Plan mode only; do **not** publish from CI/PR unless explicitly intended.)
@@ -48,13 +48,13 @@ For each changed package:
 Plan first:
 
 ```bash
-./publish-packages.sh --all
+./dev/scripts/publish-packages.sh --all
 ```
 
 Publish:
 
 ```bash
-./publish-packages.sh --all --apply
+./dev/scripts/publish-packages.sh --all --apply
 ```
 
 The publish script will:

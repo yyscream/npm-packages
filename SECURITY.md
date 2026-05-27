@@ -38,7 +38,7 @@ Please report vulnerabilities **privately**.
 
 In scope:
 - Code in `pi-extension-*` packages
-- Release scripts (`check-publish-readiness.sh`, `publish-packages.sh`)
+- Release scripts (`dev/scripts/check-publish-readiness.sh`, `dev/scripts/publish-packages.sh`)
 
 Out of scope:
 - Third-party services (npm registry, Brave API infrastructure, etc.)

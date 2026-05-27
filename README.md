@@ -193,12 +193,12 @@ Reusable scaffold for local documentation/wiki extensions analogous to the ArchW
 
 ## Utility scripts
 
-- `install-pi-add.sh` – discovers local `pi-extension-*`, `pi-skill-*`, and `pi-package-*` packages and installs selected/all via `pi install npm:<package>` (supports interactive mode, `--all`, `--dry-run`, `--force`)
-- `check-publish-readiness.sh` – validates package metadata, extension entries, dry-run publish, registry/version status, and local-vs-npm packed contents
-- `publish-packages.sh` – plans/applies publish actions dynamically for all package folders
-- `bump-package-versions.sh` – checks npm published versions first and enforces the next release version for changed packages (`+0.0.1`, rolling `*.9` to next minor `.0`; bumps up or reduces down only when needed)
-- `release-workflow.sh` – orchestrates release checks: `--check` reports required bumps, `--plan` includes bump planning, and `--publish` applies required bumps before publishing
-- `sync-pi-package-symlinks.sh` – ensures local development symlinks for Pi extensions (`~/.pi/agent/extensions/*.ts`) and packaged skills (`~/.pi/agent/skills/<skill-name>`) point to canonical resources in `npm-packages`; renames non-symlink conflicts to `.hardcoded.<timestamp>.bak`
+- `dev/scripts/install-pi-add.sh` – discovers local `pi-extension-*`, `pi-skill-*`, and `pi-package-*` packages and installs selected/all via `pi install npm:<package>` (supports interactive mode, `--all`, `--dry-run`, `--force`)
+- `dev/scripts/check-publish-readiness.sh` – validates package metadata, extension entries, dry-run publish, registry/version status, and local-vs-npm packed contents
+- `dev/scripts/publish-packages.sh` – plans/applies publish actions dynamically for all package folders
+- `dev/scripts/bump-package-versions.sh` – checks npm published versions first and enforces the next release version for changed packages (`+0.0.1`, rolling `*.9` to next minor `.0`; bumps up or reduces down only when needed)
+- `dev/scripts/release-workflow.sh` – orchestrates release checks: `--check` reports required bumps, `--plan` includes bump planning, and `--publish` applies required bumps before publishing
+- `dev/scripts/sync-pi-package-symlinks.sh` – ensures local development symlinks for Pi extensions (`~/.pi/agent/extensions/*.ts`) and packaged skills (`~/.pi/agent/skills/<skill-name>`) point to canonical resources in `npm-packages`; renames non-symlink conflicts to `.hardcoded.<timestamp>.bak`
 
 ## Publish model
 

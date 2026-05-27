@@ -32,8 +32,9 @@ function shellQuote(value: string): string {
 }
 
 function releaseScriptCommand(cwd: string, scriptName: string, args: string[] = []): string {
-  const localScript = join(cwd, scriptName);
-  const scriptPath = existsSync(localScript) ? localScript : join(EXTENSION_DIR, scriptName);
+  const localScripts = [join(cwd, "dev", "scripts", scriptName), join(cwd, scriptName)];
+  const localScript = localScripts.find((candidate) => existsSync(candidate));
+  const scriptPath = localScript ?? join(EXTENSION_DIR, scriptName);
   const quotedArgs = args.map(shellQuote).join(" ");
   return `PI_NPM_PACKAGES_ROOT=${shellQuote(cwd)} ${shellQuote(scriptPath)}${quotedArgs ? ` ${quotedArgs}` : ""}`;
 }
