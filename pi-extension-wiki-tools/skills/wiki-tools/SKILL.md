@@ -30,13 +30,14 @@ If any category is below **90/100**, keep tuning or explicitly document why conf
    - source format: `markdown`, `asciidoc`, or `html`
    - indexed file extensions
    - include/partial/generated-page behavior
-   - broad domain terms that may need downweighting
+   - broad corpus/domain terms that may need downweighting or stopwording
    - domain query expansions and aliases
 3. Use `create_wiki` or `/wiki-create` for new local wiki packages. Prefer `/wiki-create` for interactive creation because it previews inferred values, confirms creation, validates, and can queue an agent tuning/review pass.
 4. Tune generated package files before declaring success:
-   - `index.ts`: `CONFIG.format`, `CONFIG.fileExtensions`, prompt detection, query expansions, parser assumptions, cache/schema behavior.
-   - `skills/*/SKILL.md`: precise source priority, search/sections/extract workflow, diagnostics, safety warnings, token discipline.
-   - `README.md` and `references/*`: corpus profile, limitations, evaluation summary.
+   - `index.ts`: `CONFIG.format`, `CONFIG.fileExtensions`, prompt detection, query expansions, stopwords/downweights, parser assumptions, cache/schema behavior.
+   - For every created wiki, derive `CONFIG.searchStopwords` and `CONFIG.termWeights` from that wiki's own corpus/profile and simulation results. Keep generic language stopwords minimal, downweight only broad domain terms that demonstrably over-rank noisy pages, and do not reuse another wiki's terms without evidence.
+   - `skills/*/SKILL.md`: precise source priority, compact search, search/sections/extract workflow, diagnostics, safety warnings, token discipline.
+   - `README.md` and `references/*`: corpus profile, limitations, smoke-test findings, evaluation summary.
 5. Use `validate_wiki` or `/wiki-validate` after creation or manual edits.
 6. Run practical package checks when feasible:
    ```bash
@@ -44,19 +45,20 @@ If any category is below **90/100**, keep tuning or explicitly document why conf
    npm pack --dry-run
    bun build index.ts --target=node --outfile=/tmp/<pkg>-index-check.js
    ```
-7. Evaluate with at least five realistic simulations across difficulty levels:
+7. Run the generated smoke-test command/tool when docs are available to check title, heading, and link fidelity.
+8. Evaluate with at least five realistic simulations across difficulty levels:
    - novice setup question
    - beginner configuration question
    - intermediate troubleshooting/API question
    - advanced system/architecture question
    - expert edge case or developer workflow
-8. For each simulation, record top search results, selected page, section list size, extract size, matched sections, omitted/truncated state, and accuracy/effectiveness/token-output scores.
-9. Prefer this answer workflow for generated wiki skills:
+9. For each simulation, record top search results, selected page, section list size, extract size, matched sections, omitted/truncated state, and accuracy/effectiveness/token-output scores.
+10. Prefer this answer workflow for generated wiki skills:
    ```txt
    search -> sections -> exact section extract -> final answer with local citation
    ```
    Query extraction is useful for exploration but can over-select sections on large pages.
-10. Use `update_wiki` or `/wiki-update` only when the user wants to refresh scaffolded files from the template. Avoid overwriting customized files unless explicitly requested or the dry-run shows safe changes.
+11. Use `update_wiki` or `/wiki-update` only when the user wants to refresh scaffolded files from the template. Avoid overwriting customized files unless explicitly requested or the dry-run shows safe changes.
 
 ## User commands
 
@@ -65,7 +67,7 @@ If any category is below **90/100**, keep tuning or explicitly document why conf
 - `/wiki-update <repo-url-or-topic> --target-dir DIR [--overwrite] [--apply]`
 - `/wiki-validate <target-dir>`
 
-The create/update commands also accept a JSON object after the command. If the first argument is a repository URL, infer `repoUrl`, `topicName`, `extensionId`, package names, docs path, tool prefix, setup command, and any known corpus-specific tuning from the URL unless the user overrides them. Generic repository basenames like `documentation`, `docs`, `doc`, `wiki`, and `website` should not become the topic; use the repository owner or known project identity instead.
+The create/update commands also accept a JSON object after the command. If the first argument is a repository URL, infer `repoUrl`, `topicName`, `extensionId`, package names, docs path, tool prefix, setup command, and only broadly safe corpus-format hints from the URL unless the user overrides them. Search stopwords/downweights should be tuned during the agent review from observed corpus behavior, not hard-coded into the general scaffold. Generic repository basenames like `documentation`, `docs`, `doc`, `wiki`, and `website` should not become the topic; use the repository owner or known project identity instead.
 
 `/wiki-create` is intentionally interactive in UI mode. Use `--yes --no-agent-review` only for old non-interactive scaffold-only behavior.
 
@@ -80,6 +82,7 @@ For a new topic named `Example`:
 - setup command: `/example-wiki-local-setup`
 - tool prefix: `example_wiki_*`
 - parser format: `markdown` by default; use `asciidoc` for `.adoc` corpora and `html` for rendered/static HTML corpora
+- search tuning: query expansions plus corpus-derived stopwords/downweights for broad terms
 
 ## Evaluation report expectations
 

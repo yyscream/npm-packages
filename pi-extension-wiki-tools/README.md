@@ -28,7 +28,7 @@ Commands also accept a JSON object, for example:
   - `<cwd>/templates`
   - this package's bundled `templates/`
   - the monorepo sibling `../templates`
-- `create_wiki` — creates a new `pi-extension-<topic>-wiki-local` package from `templates/local-wiki-extension`; use `docFormat` for non-Markdown corpora.
+- `create_wiki` — creates a new `pi-extension-<topic>-wiki-local` package from `templates/local-wiki-extension`; use `docFormat` for non-Markdown corpora. Tune `searchStopWordsCode` / `termWeightsCode` during the per-wiki review from observed corpus search behavior.
 - `update_wiki` — previews or applies template refreshes for an existing wiki package. Defaults to dry-run.
 - `validate_wiki` — checks required package files, Pi metadata, bundled skill files, and unreplaced placeholders.
 
@@ -53,7 +53,7 @@ pi-extension-example-wiki-local/
 └── skills/example-local/SKILL.md
 ```
 
-Generated tool names use the `<extensionId>_wiki_*` convention, for example `example_wiki_search` and `example_wiki_extract`. Each generated package includes a wiki-specific setup command using `/<extensionId>-wiki-local-setup`, for example `/example-wiki-local-setup`, which shallow-clones or updates the configured repository into the local docs path. Parser formats currently supported by the template are `markdown`, `asciidoc`, and `html`.
+Generated tool names use the `<extensionId>_wiki_*` convention, for example `example_wiki_search`, `example_wiki_extract`, and `example_wiki_smoke_test`. Each generated package includes wiki-specific setup/status/smoke-test commands, including `/<extensionId>-wiki-local-setup`, which shallow-clones or updates the configured repository into the local docs path. Parser formats currently supported by the template are `markdown`, `asciidoc`, and `html`.
 
 ## Safety
 
@@ -61,4 +61,4 @@ Generated tool names use the `<extensionId>_wiki_*` convention, for example `exa
 
 ## Evaluation expectations
 
-Before considering a generated wiki package complete, test accuracy (relevant top search results, correct titles/headings, source-faithful extracts), effectiveness (setup/status, missing-docs failure, prompt routing, diagnostics), and token output (bounded search/extract/read defaults with truncation or omitted-section reporting).
+Before considering a generated wiki package complete, test accuracy (relevant top search results, correct titles/headings, source-faithful extracts, smoke-test findings), effectiveness (setup/status/smoke-test behavior, missing-docs failure, prompt routing, diagnostics), and token output (compact search, bounded extract/read defaults, truncation or omitted-section reporting). Tune query expansions plus corpus-derived stopwords/downweights when broad terms over-select results.

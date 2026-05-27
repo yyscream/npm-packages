@@ -31,17 +31,19 @@ If setup requires external downloads, package installation, or destructive chang
 
 ## Required workflow
 
-1. Start with `{{extensionId}}_wiki_search({ query, limit: 5 })` for {{topicName}} issues.
+1. Start with compact `{{extensionId}}_wiki_search({ query, limit: 5 })` for {{topicName}} issues.
 2. Use `{{extensionId}}_wiki_sections({ page, maxSections })` when the right page is found but the relevant heading is unclear.
 3. Prefer exact section extraction for final evidence:
    - `{{extensionId}}_wiki_extract({ page, section, maxChars: 4000-8000, maxSections: 3-6 })`
 4. Use query extraction for exploration only, then switch to exact headings when available.
-5. Use `{{extensionId}}_wiki_read` only when broad page context is needed or no relevant heading can be identified.
-6. Use `{{extensionId}}_wiki_related` when the issue spans linked topics.
-7. Run read-only local diagnostics when system/project evidence is relevant.
-8. Compare documentation guidance with observed local state.
-9. Cite local paths and section names in final answers.
-10. Ask before destructive or user-facing changes.
+5. If query extraction over-selects broad sections, retry with `requireAllTerms: true` or `minTokenMatches`.
+6. Use `{{extensionId}}_wiki_read` only when broad page context is needed or no relevant heading can be identified.
+7. Use `{{extensionId}}_wiki_related` when the issue spans linked topics.
+8. Use `{{extensionId}}_wiki_smoke_test` when validating parser, heading, or link fidelity.
+9. Run read-only local diagnostics when system/project evidence is relevant.
+10. Compare documentation guidance with observed local state.
+11. Cite local paths and section names in final answers.
+12. Ask before destructive or user-facing changes.
 
 ## Source priority
 
@@ -52,12 +54,13 @@ If setup requires external downloads, package installation, or destructive chang
 
 ## Tool usage
 
-- `{{extensionId}}_wiki_search({ query, limit, includeSnippets })`: find candidate pages. Keep `limit` at 5 unless exploring broadly.
+- `{{extensionId}}_wiki_search({ query, limit, includeSnippets, includeDetails })`: find candidate pages. Output is compact by default (`title`, `path`, `score`); request snippets/details only when needed.
 - `{{extensionId}}_wiki_sections({ page, maxSections })`: inspect headings before extracting from large pages.
 - `{{extensionId}}_wiki_extract({ page, section, maxChars, maxSections })`: retrieve focused exact sections; best for final answers.
-- `{{extensionId}}_wiki_extract({ page, query, maxChars, maxSections })`: retrieve query-relevant sections; best for exploration.
+- `{{extensionId}}_wiki_extract({ page, query, maxChars, maxSections, minTokenMatches, requireAllTerms })`: retrieve query-relevant sections; best for exploration, with stricter filters for broad queries.
 - `{{extensionId}}_wiki_read({ page, maxChars })`: retrieve broad page text; use sparingly.
 - `{{extensionId}}_wiki_related({ page, limit })`: discover linked local pages.
+- `{{extensionId}}_wiki_smoke_test({ sampleSize })`: validate title/heading/link parser fidelity while tuning the package.
 
 ## Diagnostics policy
 
@@ -72,11 +75,12 @@ Prefer read-only commands first. Useful {{topicName}} diagnostics include:
 ## Token/output discipline
 
 - Keep search limits small (`limit: 5-10`) unless exploring broadly.
+- Keep search compact by default; set `includeSnippets` or `includeDetails` only when they improve selection confidence.
 - Prefer `search -> sections -> exact section extract` for final answers.
-- Use query extraction only to discover likely sections on large pages.
+- Use query extraction only to discover likely sections on large pages; use `requireAllTerms` or `minTokenMatches` when broad terms over-select.
 - Use `maxChars` around 4000-8000 and `maxSections` around 3-6 for focused answers.
 - Use `read` only when the relevant section cannot be identified.
-- If a tool reports `omittedSectionCount` or `truncated: true`, mention it when it affects confidence.
+- If a tool reports `omittedSectionCount`, `omittedLinkCount`, `queryFilter`, or `truncated: true`, mention it when it affects confidence.
 
 ## Citation format
 

@@ -52,12 +52,14 @@ For each wiki, add:
 - examples of good search queries in the skill
 - page/section hints for high-frequency support scenarios
 
-Raspberry Pi examples:
+Illustrative examples from the Raspberry Pi evaluation, not reusable defaults:
 
 - `ssh` -> remote access, headless, raspi-config
 - `camera` -> rpicam, libcamera, Picamera2, camera_auto_detect
 - `config` -> config.txt, dtoverlay, dtparam
 - `pico` -> RP2040, RP2350, Pico SDK, MicroPython
+
+For each new wiki, derive aliases, stopwords, and downweights from that wiki's corpus and realistic simulations instead of copying these examples.
 
 ### 5. Bound token output by default
 
@@ -105,14 +107,22 @@ If any category is below 90, continue tuning or document why confidence remains 
 
 ## Skill/tooling improvements to consider next
 
-These are reusable improvements for future local wiki packages:
+These are reusable improvements for future local wiki packages.
 
-- Add `minTokenMatches` or `requireAllTerms` to query extraction.
-- Add corpus-specific stopwords/downweights for broad terms.
-- Add a compact search mode that returns title/path/score by default and snippets on request.
-- Add a simulation/evaluation helper command that creates a standard Markdown report.
-- Add link-resolution tests for relative links, anchors, includes, and generated-page structures.
-- Add parser-specific smoke tests for Markdown, AsciiDoc, and HTML templates.
+Implemented in the generalized template:
+
+- `minTokenMatches` and `requireAllTerms` for query extraction.
+- Corpus-specific stopwords/downweights for broad terms via `CONFIG.searchStopwords` and `CONFIG.termWeights`.
+- Compact search output that returns title/path/score by default and snippets/details on request.
+- A generated `references/evaluation.md` scaffold for standard Markdown evaluation reports.
+- Link-resolution and parser smoke tests via the generated smoke-test command/tool.
+- Parser-specific AsciiDoc smoke handling for code comments and delimited blocks.
+
+Still useful future improvements:
+
+- Add an interactive simulation/evaluation helper command that runs standard prompt simulations end-to-end.
+- Expand link-resolution tests for anchors, generated-page structures, and corpus-specific include conventions.
+- Add dedicated parser fixture tests for Markdown, AsciiDoc, and HTML templates.
 
 ## Recommended generated-package artifacts
 

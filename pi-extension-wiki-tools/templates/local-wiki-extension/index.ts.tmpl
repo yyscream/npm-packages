@@ -1,3 +1,4 @@
+import * as fsSync from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -64,11 +65,17 @@ const CONFIG = {
   fileExtensions: /{{fileExtensionsRegex}}/i,
   format: "{{docFormat}}" as DocFormat,
   cacheDir: path.join(os.homedir(), ".cache", "pi", "{{extensionId}}-wiki-local"),
-  schemaVersion: 2,
+  schemaVersion: 3,
   promptDetection: /{{promptDetectionRegex}}/i,
   queryExpansions: {
     {{queryExpansionsCode}}
   } as Record<string, string[]>,
+  searchStopwords: new Set<string>([
+    {{searchStopWordsCode}}
+  ]),
+  termWeights: {
+    {{termWeightsCode}}
+  } as Record<string, number>,
 };
 
 const PAGES_CACHE = path.join(CONFIG.cacheDir, "pages.json");
@@ -226,8 +233,21 @@ function asciidocToText(asciidoc: string): string {
     .replace(/(?:kbd|btn|menu):\[([^\]]+)\]/g, "$1"));
 }
 
+function asciidocBlockDelimiter(line: string): string | undefined {
+  const trimmed = line.trim();
+  return /^(?:----|\.\.\.\.|====|____|\+{4}|`{3,}|-{4,}|\*{4}|\/{4})$/.test(trimmed) ? trimmed : undefined;
+}
+
 function asciidocTitle(asciidoc: string, filePath: string): string {
+  let activeDelimiter: string | undefined;
   for (const line of asciidoc.split(/\n/)) {
+    const delimiter = asciidocBlockDelimiter(line);
+    if (delimiter) {
+      if (!activeDelimiter) activeDelimiter = delimiter;
+      else if (activeDelimiter === delimiter) activeDelimiter = undefined;
+      continue;
+    }
+    if (activeDelimiter || /^\s*\/\//.test(line)) continue;
     const match = line.match(/^(={1,6})\s+(.+)$/);
     if (match) return stripAsciidocDecorators(match[2]);
   }
@@ -237,8 +257,16 @@ function asciidocTitle(asciidoc: string, filePath: string): string {
 function asciidocSections(asciidoc: string, fallbackTitle: string): WikiSection[] {
   const sections: WikiSection[] = [];
   let current: WikiSection | undefined;
+  let activeDelimiter: string | undefined;
   for (const line of asciidoc.split(/\n/)) {
-    const match = line.match(/^(={1,6})\s+(.+)$/);
+    const delimiter = asciidocBlockDelimiter(line);
+    if (delimiter) {
+      if (!activeDelimiter) activeDelimiter = delimiter;
+      else if (activeDelimiter === delimiter) activeDelimiter = undefined;
+      if (current) current.text += `${line}\n`;
+      continue;
+    }
+    const match = !activeDelimiter && !/^\s*\/\//.test(line) ? line.match(/^(={1,6})\s+(.+)$/) : undefined;
     if (match) {
       if (current) current.text = asciidocToText(current.text);
       const title = stripAsciidocDecorators(match[2]);
@@ -253,18 +281,34 @@ function asciidocSections(asciidoc: string, fallbackTitle: string): WikiSection[
   return sections;
 }
 
+function isWithinDocsPath(filePath: string): boolean {
+  const relative = path.relative(CONFIG.docsPath, filePath);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
 function resolveLocalPath(currentFile: string, href: string): string | undefined {
   if (/^(https?:|mailto:|#)/i.test(href)) return undefined;
-  const cleanHref = href.split("#")[0].split("?")[0];
+  const cleanHref = decodeEntities(href.split("#")[0].split("?")[0].trim());
   if (!cleanHref) return undefined;
   const candidates = path.extname(cleanHref)
     ? [cleanHref]
     : CONFIG.format === "html"
-      ? [`${cleanHref}.html`, `${cleanHref}.htm`]
-      : [`${cleanHref}.md`, `${cleanHref}.mdx`, `${cleanHref}.adoc`, `${cleanHref}.asciidoc`, `${cleanHref}.asc`, path.join(cleanHref, "index.md"), path.join(cleanHref, "index.adoc")];
+      ? [`${cleanHref}.html`, `${cleanHref}.htm`, path.join(cleanHref, "index.html"), path.join(cleanHref, "index.htm")]
+      : [
+        `${cleanHref}.md`,
+        `${cleanHref}.mdx`,
+        `${cleanHref}.adoc`,
+        `${cleanHref}.asciidoc`,
+        `${cleanHref}.asc`,
+        path.join(cleanHref, "README.md"),
+        path.join(cleanHref, "index.md"),
+        path.join(cleanHref, "index.mdx"),
+        path.join(cleanHref, "index.adoc"),
+        path.join(cleanHref, "index.asciidoc"),
+      ];
   for (const candidate of candidates) {
     const resolved = path.normalize(path.resolve(path.dirname(currentFile), candidate));
-    if (resolved.startsWith(CONFIG.docsPath)) return resolved;
+    if (isWithinDocsPath(resolved) && fsSync.existsSync(resolved)) return resolved;
   }
   return undefined;
 }
@@ -401,12 +445,45 @@ function normalizeQuery(input: string): string {
   return input.toLowerCase().replace(/[^a-z0-9_./+-]+/g, " ").trim();
 }
 
-function expandQuery(query: string): string[] {
-  const normalized = normalizeQuery(query);
-  const tokens = normalized.split(/\s+/).filter(Boolean);
-  const expanded = new Set(tokens);
-  for (const token of tokens) for (const extra of CONFIG.queryExpansions[token] ?? []) expanded.add(normalizeQuery(extra));
-  return [...expanded].filter(Boolean);
+interface ExpandedQuery {
+  terms: string[];
+  tokenGroups: string[][];
+  ignoredStopwords: string[];
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function queryTerms(input: string): string[] {
+  return normalizeQuery(input).split(/\s+/).filter(Boolean);
+}
+
+function expandQuery(query: string): ExpandedQuery {
+  const rawTerms = queryTerms(query);
+  const ignoredStopwords = rawTerms.filter((term) => CONFIG.searchStopwords.has(term));
+  const filteredTerms = rawTerms.filter((term) => !CONFIG.searchStopwords.has(term));
+  const seedTerms = filteredTerms.length > 0 ? filteredTerms : rawTerms;
+  const tokenGroups = seedTerms.map((term) => uniqueStrings([
+    term,
+    ...(CONFIG.queryExpansions[term] ?? []).map((extra) => normalizeQuery(extra)),
+  ]));
+  return { terms: uniqueStrings(tokenGroups.flat()), tokenGroups, ignoredStopwords };
+}
+
+function termWeight(term: string): number {
+  const firstTerm = term.split(/\s+/, 1)[0];
+  const weight = CONFIG.termWeights[term] ?? CONFIG.termWeights[firstTerm] ?? 1;
+  return Number.isFinite(weight) && weight > 0 ? weight : 1;
+}
+
+function weighted(value: number, term: string): number {
+  return value * termWeight(term);
+}
+
+function matchedQueryGroupCount(input: string, tokenGroups: string[][]): number {
+  const normalized = normalizeQuery(input);
+  return tokenGroups.filter((group) => group.some((term) => normalized.includes(term))).length;
 }
 
 function makeSnippet(text: string, tokens: string[], max = 260): string | undefined {
@@ -418,7 +495,7 @@ function makeSnippet(text: string, tokens: string[], max = 260): string | undefi
   return `${start > 0 ? "…" : ""}${snippet}${start + max < text.length ? "…" : ""}`;
 }
 
-function scorePage(page: WikiPage, tokens: string[]): SearchResult | undefined {
+function scorePage(page: WikiPage, expanded: ExpandedQuery): SearchResult | undefined {
   const title = normalizeQuery(page.title);
   const slug = normalizeQuery(page.slug);
   const headings = normalizeQuery(page.headings.join(" "));
@@ -426,27 +503,28 @@ function scorePage(page: WikiPage, tokens: string[]): SearchResult | undefined {
   let score = 0;
   const matchedFields = new Set<string>();
   const scoreExplanation: string[] = [];
-  for (const token of tokens) {
-    if (title.includes(token)) { score += 20; matchedFields.add("title"); scoreExplanation.push(`title matched '${token}'`); }
-    if (slug.includes(token)) { score += 10; matchedFields.add("slug"); }
-    if (headings.includes(token)) { score += 8; matchedFields.add("headings"); }
-    const textMatches = text.split(token).length - 1;
-    if (textMatches > 0) { score += Math.min(12, textMatches); matchedFields.add("text"); }
+  for (const term of expanded.terms) {
+    const weightSuffix = termWeight(term) === 1 ? "" : ` (weight ${termWeight(term)})`;
+    if (title.includes(term)) { score += weighted(20, term); matchedFields.add("title"); scoreExplanation.push(`title matched '${term}'${weightSuffix}`); }
+    if (slug.includes(term)) { score += weighted(10, term); matchedFields.add("slug"); }
+    if (headings.includes(term)) { score += weighted(8, term); matchedFields.add("headings"); }
+    const textMatches = text.split(term).length - 1;
+    if (textMatches > 0) { score += weighted(Math.min(12, textMatches), term); matchedFields.add("text"); }
   }
   if (score <= 0) return undefined;
-  return { title: page.title, path: page.path, score, matchedFields: [...matchedFields], scoreExplanation, snippet: makeSnippet(page.text, tokens) };
+  return { title: page.title, path: page.path, score: Math.round(score * 100) / 100, matchedFields: [...matchedFields], scoreExplanation, snippet: makeSnippet(page.text, expanded.terms) };
 }
 
-function scoreSection(section: WikiSection, tokens: string[]): number {
+function scoreSection(section: WikiSection, expanded: ExpandedQuery): number {
   const title = normalizeQuery(section.title);
   const text = normalizeQuery(section.text);
   let score = 0;
-  for (const token of tokens) {
-    if (title.includes(token)) score += 6;
-    const textMatches = text.split(token).length - 1;
-    if (textMatches > 0) score += Math.min(4, textMatches);
+  for (const term of expanded.terms) {
+    if (title.includes(term)) score += weighted(6, term);
+    const textMatches = text.split(term).length - 1;
+    if (textMatches > 0) score += weighted(Math.min(4, textMatches), term);
   }
-  return score;
+  return Math.round(score * 100) / 100;
 }
 
 function findPage(pages: WikiPage[], pageRef: string): WikiPage | undefined {
@@ -503,12 +581,23 @@ async function executeSetup(progress?: SetupProgress): Promise<{ ok: boolean; me
   return { ok: available, message: available ? `Docs path exists and contains ${stats.pageCount} documentation files, but is not a Git checkout: ${CONFIG.docsPath}` : `Docs path exists but is not a Git checkout and no documentation files were found: ${CONFIG.docsPath}` };
 }
 
-async function executeSearch(params: { query: string; limit?: number; includeSnippets?: boolean }) {
+async function executeSearch(params: { query: string; limit?: number; includeSnippets?: boolean; includeDetails?: boolean }) {
   const { pages } = await loadCache();
-  const tokens = expandQuery(params.query);
+  const expanded = expandQuery(params.query);
   const limit = Math.max(1, Math.min(params.limit ?? 10, 50));
-  const results = pages.map((page) => scorePage(page, tokens)).filter((x): x is SearchResult => Boolean(x)).sort((a, b) => b.score - a.score).slice(0, limit);
-  const payload = { query: params.query, expandedTokens: tokens, results: params.includeSnippets === false ? results.map(({ snippet, ...rest }) => rest) : results };
+  const results = pages.map((page) => scorePage(page, expanded)).filter((x): x is SearchResult => Boolean(x)).sort((a, b) => b.score - a.score).slice(0, limit);
+  const includeDetails = params.includeDetails === true;
+  const includeSnippets = params.includeSnippets === true;
+  const compactResults = results.map((result) => {
+    const compact: Record<string, unknown> = { title: result.title, path: result.path, score: result.score };
+    if (includeDetails) {
+      compact.matchedFields = result.matchedFields;
+      compact.scoreExplanation = result.scoreExplanation;
+    }
+    if (includeSnippets && result.snippet) compact.snippet = result.snippet;
+    return compact;
+  });
+  const payload = { query: params.query, expandedTokens: expanded.terms, ignoredStopwords: expanded.ignoredStopwords, compact: !includeDetails && !includeSnippets, results: compactResults };
   return { content: [{ type: "text" as const, text: jsonText(payload) }], details: payload };
 }
 
@@ -534,19 +623,28 @@ async function executeSections(params: { page: string; maxSections?: number }) {
   return { content: [{ type: "text" as const, text: jsonText(payload) }], details: payload };
 }
 
-async function executeExtract(params: { page: string; section?: string; query?: string; maxChars?: number; maxSections?: number }) {
+async function executeExtract(params: { page: string; section?: string; query?: string; maxChars?: number; maxSections?: number; minTokenMatches?: number; requireAllTerms?: boolean }) {
   const { page } = await loadPage(params.page);
   const maxSections = Math.max(1, Math.min(params.maxSections ?? (params.query ? 6 : 8), 25));
   let sections = page.sections;
+  let queryFilter: { expandedTokens: string[]; ignoredStopwords: string[]; minTokenMatches: number; requireAllTerms: boolean } | undefined;
   if (params.section) {
     const needle = normalizeQuery(params.section);
     sections = sections.filter((section) => normalizeQuery(section.title).includes(needle));
   }
   if (params.query) {
-    const tokens = expandQuery(params.query);
+    const expanded = expandQuery(params.query);
+    const minTokenMatches = params.requireAllTerms === true
+      ? expanded.tokenGroups.length
+      : Math.max(1, Math.min(params.minTokenMatches ?? 1, expanded.tokenGroups.length));
+    queryFilter = { expandedTokens: expanded.terms, ignoredStopwords: expanded.ignoredStopwords, minTokenMatches, requireAllTerms: params.requireAllTerms === true };
     sections = sections
-      .map((section) => ({ section, score: scoreSection(section, tokens) }))
-      .filter((item) => item.score > 0)
+      .map((section) => ({
+        section,
+        score: scoreSection(section, expanded),
+        matchedTermGroups: matchedQueryGroupCount(`${section.title}\n${section.text}`, expanded.tokenGroups),
+      }))
+      .filter((item) => item.score > 0 && item.matchedTermGroups >= minTokenMatches)
       .sort((a, b) => b.score - a.score)
       .map((item) => item.section);
   }
@@ -556,22 +654,61 @@ async function executeExtract(params: { page: string; section?: string; query?: 
   const joined = sections.map((section) => `${"#".repeat(Math.min(section.level, 6))} ${section.title}\n\n${section.text}`).join("\n\n");
   const limited = limitText(joined || page.text, params.maxChars ?? 12000);
   const sectionNames = sections.map((s) => s.title);
-  const payload = { title: page.title, path: page.path, citation: `${page.path} — ${sectionNames.join(", ") || page.title}`, omittedSectionCount, matchedSections: sections.map((s) => ({ title: s.title, level: s.level, anchor: s.anchor })), truncated: limited.truncated, text: limited.text };
+  const payload = { title: page.title, path: page.path, citation: `${page.path} — ${sectionNames.join(", ") || page.title}`, queryFilter, omittedSectionCount, matchedSections: sections.map((s) => ({ title: s.title, level: s.level, anchor: s.anchor })), truncated: limited.truncated, text: limited.text };
   return { content: [{ type: "text" as const, text: jsonText(payload) }], details: payload };
 }
 
 async function executeRelated(params: { page: string; limit?: number }) {
   const { page } = await loadPage(params.page);
   const limit = Math.max(1, Math.min(params.limit ?? 10, 50));
-  const payload = { title: page.title, path: page.path, links: page.links.slice(0, limit) };
+  const payload = { title: page.title, path: page.path, omittedLinkCount: Math.max(0, page.links.length - limit), links: page.links.slice(0, limit) };
   return { content: [{ type: "text" as const, text: jsonText(payload) }], details: payload };
 }
 
-const searchParams = Type.Object({ query: Type.String({ description: `Search query, e.g. '${CONFIG.topicName} config'` }), limit: Type.Optional(Type.Number({ minimum: 1, maximum: 50 })), includeSnippets: Type.Optional(Type.Boolean()) });
+async function executeSmokeTest(params: { sampleSize?: number }) {
+  const cache = await loadCache();
+  const sampleSize = Math.max(1, Math.min(params.sampleSize ?? 10, 50));
+  const samplePages = cache.pages.slice(0, sampleSize);
+  const pagesWithoutTitles = samplePages.filter((page) => !page.title.trim());
+  const pagesWithoutText = samplePages.filter((page) => !page.text.trim());
+  const pagesWithoutSections = samplePages.filter((page) => page.sections.length === 0);
+  const allSuspiciousHeadings = cache.pages.flatMap((page) => page.sections
+    .filter((section) => /^(?:\/\/|#include\b|const\s|let\s|var\s|function\s|class\s|if\s*\(|for\s*\(|while\s*\(|<[^>]+>)/i.test(section.title))
+    .map((section) => ({ path: page.path, title: page.title, heading: section.title })));
+  const brokenLinks = samplePages.flatMap((page) => page.links
+    .filter((link) => !fsSync.existsSync(link.path))
+    .map((link) => ({ from: page.path, title: link.title, target: link.path })));
+  const checks = [
+    { name: "pages indexed", ok: cache.pages.length > 0, detail: `${cache.pages.length} page(s)` },
+    { name: "sample titles present", ok: pagesWithoutTitles.length === 0, detail: pagesWithoutTitles.map((page) => page.path).join(", ") || "ok" },
+    { name: "sample text present", ok: pagesWithoutText.length === 0, detail: pagesWithoutText.map((page) => page.path).join(", ") || "ok" },
+    { name: "sample sections present", ok: pagesWithoutSections.length === 0, detail: pagesWithoutSections.map((page) => page.path).join(", ") || "ok" },
+    { name: "sample links resolve", ok: brokenLinks.length === 0, detail: brokenLinks.length === 0 ? "ok" : `${brokenLinks.length} broken link(s) in sample` },
+    { name: "heading parser smoke", ok: allSuspiciousHeadings.length === 0, detail: allSuspiciousHeadings.length === 0 ? "ok" : `${allSuspiciousHeadings.length} suspicious heading(s)` },
+  ];
+  const payload = {
+    displayName: CONFIG.displayName,
+    docsPath: CONFIG.docsPath,
+    format: CONFIG.format,
+    pageCount: cache.metadata.pageCount,
+    sampleSize: samplePages.length,
+    ok: checks.every((check) => check.ok),
+    checks,
+    samplePages: samplePages.map((page) => ({ title: page.title, path: page.path, headingCount: page.headings.length, linkCount: page.links.length })),
+    suspiciousHeadings: allSuspiciousHeadings.slice(0, 20),
+    omittedSuspiciousHeadingCount: Math.max(0, allSuspiciousHeadings.length - 20),
+    brokenLinks: brokenLinks.slice(0, 20),
+    omittedBrokenLinkCount: Math.max(0, brokenLinks.length - 20),
+  };
+  return { content: [{ type: "text" as const, text: jsonText(payload) }], details: payload };
+}
+
+const searchParams = Type.Object({ query: Type.String({ description: `Search query, e.g. '${CONFIG.topicName} config'` }), limit: Type.Optional(Type.Number({ minimum: 1, maximum: 50 })), includeSnippets: Type.Optional(Type.Boolean({ description: "Include snippets. Defaults to false for compact output." })), includeDetails: Type.Optional(Type.Boolean({ description: "Include matched fields and score explanations. Defaults to false for compact output." })) });
 const readParams = Type.Object({ page: Type.String({ description: "Page title, slug, or absolute local path" }), maxChars: Type.Optional(Type.Number({ minimum: 1000, maximum: 100000 })) });
 const sectionsParams = Type.Object({ page: Type.String({ description: "Page title, slug, or absolute local path" }), maxSections: Type.Optional(Type.Number({ minimum: 1, maximum: 300 })) });
-const extractParams = Type.Object({ page: Type.String({ description: "Page title, slug, or absolute local path" }), section: Type.Optional(Type.String()), query: Type.Optional(Type.String()), maxChars: Type.Optional(Type.Number({ minimum: 1000, maximum: 100000 })), maxSections: Type.Optional(Type.Number({ minimum: 1, maximum: 25 })) });
+const extractParams = Type.Object({ page: Type.String({ description: "Page title, slug, or absolute local path" }), section: Type.Optional(Type.String()), query: Type.Optional(Type.String()), maxChars: Type.Optional(Type.Number({ minimum: 1000, maximum: 100000 })), maxSections: Type.Optional(Type.Number({ minimum: 1, maximum: 25 })), minTokenMatches: Type.Optional(Type.Number({ minimum: 1, maximum: 50, description: "Minimum original query terms or expansion groups that must match during query extraction." })), requireAllTerms: Type.Optional(Type.Boolean({ description: "Require every original query term or expansion group to match during query extraction." })) });
 const relatedParams = Type.Object({ page: Type.String({ description: "Page title, slug, or absolute local path" }), limit: Type.Optional(Type.Number({ minimum: 1, maximum: 50 })) });
+const smokeTestParams = Type.Object({ sampleSize: Type.Optional(Type.Number({ minimum: 1, maximum: 50, description: "Number of indexed pages to sample for parser/link checks." })) });
 
 export default function localWikiExtension(pi: ExtensionAPI) {
   pi.on?.("before_agent_start", async (event, ctx) => {
@@ -615,18 +752,28 @@ export default function localWikiExtension(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand(`${CONFIG.extensionId}_wiki-smoke-test`, {
+    description: `Run parser and link smoke tests for local ${CONFIG.displayName} docs`,
+    handler: async (args, ctx) => {
+      const sampleSize = Number.parseInt(args.trim(), 10);
+      const result = await executeSmokeTest({ sampleSize: Number.isFinite(sampleSize) ? sampleSize : undefined });
+      ctx.ui.notify(result.content[0].text, result.details.ok ? "info" : "warning");
+    },
+  });
+
   pi.registerTool({
     name: `${CONFIG.extensionId}_wiki_search`,
     label: `${CONFIG.displayName} Search`,
-    description: `Search local ${CONFIG.displayName} documentation pages from ${CONFIG.docsPath}.`,
+    description: `Search local ${CONFIG.displayName} documentation pages from ${CONFIG.docsPath}. Compact by default; set includeSnippets/includeDetails only when needed.`,
     promptSnippet: `Search local ${CONFIG.displayName} pages before using web sources for ${CONFIG.topicName} questions`,
-    promptGuidelines: [`Use ${CONFIG.extensionId}_wiki_search first for ${CONFIG.topicName} questions before consulting web sources.`, `Use ${CONFIG.extensionId}_wiki_extract after search to retrieve focused sections with citations.`],
+    promptGuidelines: [`Use ${CONFIG.extensionId}_wiki_search first for ${CONFIG.topicName} questions before consulting web sources.`, `Use ${CONFIG.extensionId}_wiki_extract after search to retrieve focused sections with citations.`, `Keep ${CONFIG.extensionId}_wiki_search compact unless snippets or score details are needed.`],
     parameters: searchParams,
     async execute(_toolCallId, params) { return executeSearch(params); },
   });
 
   pi.registerTool({ name: `${CONFIG.extensionId}_wiki_read`, label: `${CONFIG.displayName} Read`, description: `Read a local ${CONFIG.displayName} page as clean text with a local path citation.`, promptSnippet: `Read local ${CONFIG.displayName} page text by title, slug, or absolute local path`, promptGuidelines: [`Use ${CONFIG.extensionId}_wiki_read only when broad page context is needed; prefer ${CONFIG.extensionId}_wiki_extract for focused answers.`], parameters: readParams, async execute(_toolCallId, params) { return executeRead(params); } });
   pi.registerTool({ name: `${CONFIG.extensionId}_wiki_sections`, label: `${CONFIG.displayName} Sections`, description: `List headings/sections for a local ${CONFIG.displayName} page.`, promptSnippet: `List headings from a local ${CONFIG.displayName} page`, promptGuidelines: [`Use ${CONFIG.extensionId}_wiki_sections to choose exact local sections before extraction.`], parameters: sectionsParams, async execute(_toolCallId, params) { return executeSections(params); } });
-  pi.registerTool({ name: `${CONFIG.extensionId}_wiki_extract`, label: `${CONFIG.displayName} Extract`, description: `Extract a named or query-relevant section from a local ${CONFIG.displayName} page.`, promptSnippet: `Extract focused local ${CONFIG.displayName} sections by heading or query`, promptGuidelines: [`Use ${CONFIG.extensionId}_wiki_extract to cite exact local sections in final answers.`], parameters: extractParams, async execute(_toolCallId, params) { return executeExtract(params); } });
+  pi.registerTool({ name: `${CONFIG.extensionId}_wiki_extract`, label: `${CONFIG.displayName} Extract`, description: `Extract a named or query-relevant section from a local ${CONFIG.displayName} page. Supports minTokenMatches/requireAllTerms for stricter query extracts.`, promptSnippet: `Extract focused local ${CONFIG.displayName} sections by heading or query`, promptGuidelines: [`Use ${CONFIG.extensionId}_wiki_extract to cite exact local sections in final answers.`, `Use requireAllTerms or minTokenMatches on ${CONFIG.extensionId}_wiki_extract when broad query terms over-select sections.`], parameters: extractParams, async execute(_toolCallId, params) { return executeExtract(params); } });
   pi.registerTool({ name: `${CONFIG.extensionId}_wiki_related`, label: `${CONFIG.displayName} Related`, description: `Return local ${CONFIG.displayName} pages linked from a given local page.`, promptSnippet: `Find locally linked ${CONFIG.displayName} pages related to a page`, promptGuidelines: [`Use ${CONFIG.extensionId}_wiki_related when an issue spans connected ${CONFIG.topicName} topics.`], parameters: relatedParams, async execute(_toolCallId, params) { return executeRelated(params); } });
+  pi.registerTool({ name: `${CONFIG.extensionId}_wiki_smoke_test`, label: `${CONFIG.displayName} Smoke Test`, description: `Run parser and link-resolution smoke tests for local ${CONFIG.displayName} docs.`, promptSnippet: `Smoke-test local ${CONFIG.displayName} parser title, heading, and link fidelity`, promptGuidelines: [`Use ${CONFIG.extensionId}_wiki_smoke_test when validating a generated ${CONFIG.topicName} local wiki package.`], parameters: smokeTestParams, async execute(_toolCallId, params) { return executeSmokeTest(params); } });
 }

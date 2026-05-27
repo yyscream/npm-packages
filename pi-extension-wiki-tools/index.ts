@@ -22,6 +22,8 @@ type WikiSpec = {
   template?: string;
   docFormat?: string;
   queryExpansionsCode?: string;
+  searchStopWordsCode?: string;
+  termWeightsCode?: string;
   diagnosticsExamples?: string;
   mutationWarnings?: string;
 };
@@ -146,6 +148,10 @@ function normalizeSpec(input: WikiSpec, cwd: string) {
   const queryExpansionsCode = input.queryExpansionsCode || inferred.queryExpansionsCode || `// Add domain language here during creation/review.
     config: ["settings", "configuration", "options"],
     install: ["setup", "getting started", "requirements"],`;
+  const searchStopWordsCode = input.searchStopWordsCode || inferred.searchStopWordsCode || `// Add corpus-specific broad words here during creation/review.
+    "the", "and", "or", "a", "an", "to", "of", "in", "on", "for", "with", "using", "use", "how",`;
+  const termWeightsCode = input.termWeightsCode || inferred.termWeightsCode || `// Add corpus-specific broad-term weights here during creation/review, e.g.:
+    // config: 0.6,`;
   const diagnosticsExamples = input.diagnosticsExamples || inferred.diagnosticsExamples || `pwd
 find . -maxdepth 3 -type f | sort | head -100
 rg -n "configuration|install|setup|troubleshoot" . 2>/dev/null | head -50`;
@@ -165,12 +171,14 @@ rg -n "configuration|install|setup|troubleshoot" . 2>/dev/null | head -50`;
     promptDetectionRegex,
     setupCommand,
     queryExpansionsCode,
+    searchStopWordsCode,
+    termWeightsCode,
     diagnosticsExamples,
     mutationWarnings,
     year: String(new Date().getFullYear()),
     author: "Firstpick",
   };
-  return { extensionId, displayName, topicName: topicName!, skillName, packageName, docsPath, setupCommand, fileExtensionsRegex, docFormat, promptDetectionRegex, repoUrl, template, targetDir, placeholders, queryExpansionsCode, diagnosticsExamples, mutationWarnings };
+  return { extensionId, displayName, topicName: topicName!, skillName, packageName, docsPath, setupCommand, fileExtensionsRegex, docFormat, promptDetectionRegex, repoUrl, template, targetDir, placeholders, queryExpansionsCode, searchStopWordsCode, termWeightsCode, diagnosticsExamples, mutationWarnings };
 }
 
 function renderTemplate(text: string, values: Record<string, string>): string {
@@ -339,6 +347,8 @@ const wikiSpecSchema = {
   template: Type.Optional(Type.String({ description: "Template directory name or absolute path" })),
   docFormat: Type.Optional(Type.String({ description: "Parser format for generated docs: markdown, asciidoc, or html" })),
   queryExpansionsCode: Type.Optional(Type.String({ description: "TypeScript object entries inserted into CONFIG.queryExpansions" })),
+  searchStopWordsCode: Type.Optional(Type.String({ description: "TypeScript string array entries inserted into CONFIG.searchStopwords" })),
+  termWeightsCode: Type.Optional(Type.String({ description: "TypeScript object entries inserted into CONFIG.termWeights for broad-term downweighting" })),
   diagnosticsExamples: Type.Optional(Type.String({ description: "Topic-specific read-only diagnostic commands inserted into the generated skill" })),
   mutationWarnings: Type.Optional(Type.String({ description: "Topic-specific mutation warning text inserted into the generated skill" })),
 };
@@ -356,6 +366,8 @@ const FLAG_MAP: Record<string, keyof WikiSpec> = {
   "setup-command": "setupCommand",
   "doc-format": "docFormat",
   "query-expansions-code": "queryExpansionsCode",
+  "search-stop-words-code": "searchStopWordsCode",
+  "term-weights-code": "termWeightsCode",
   "diagnostics-examples": "diagnosticsExamples",
   "mutation-warnings": "mutationWarnings",
   template: "template",
@@ -441,7 +453,7 @@ async function completeInteractiveSpec(spec: WikiCommandSpec, ctx: any): Promise
 }
 
 function makeAgentReviewPrompt(result: any, validation: any): string {
-  return `Audit and finish the local wiki package created by /wiki-create.\n\nTarget: ${result.targetDir}\nPackage: ${result.packageName}\nSkill: ${result.skillName}\nExtension id: ${result.extensionId}\n\nCreation result:\n\`\`\`json\n${JSON.stringify(result, null, 2)}\n\`\`\`\n\nInitial validation:\n\`\`\`json\n${JSON.stringify(validation, null, 2)}\n\`\`\`\n\nActively inspect and finish the package, not just report success. Do the following:\n- Verify structure, package metadata, registered commands/tools, and template placeholders.\n- Tailor README.md, skills/*/SKILL.md, CONFIG.promptDetection, CONFIG.queryExpansions, file extensions, doc format, diagnostics, and safety language to the specific documentation corpus.\n- Check the upstream repo shape when repoUrl is configured; use official/current source evidence before changing corpus assumptions.\n- Evaluate accuracy, effectiveness, and token output using representative status/search/sections/extract/read/related calls; keep outputs bounded with maxChars/maxSections defaults.\n- Run validation and practical package checks such as validate_wiki, npm install --package-lock-only --ignore-scripts, npm pack --dry-run, and a lightweight registration/build check when practical.\n- Do not clone very large repos or perform destructive changes without asking.\n- Save concise findings and any remaining caveats.\n\nThis follow-up exists because /wiki-create intentionally scaffolds first, then asks the agent to critically tune and verify the result.`;
+  return `Audit and finish the local wiki package created by /wiki-create.\n\nTarget: ${result.targetDir}\nPackage: ${result.packageName}\nSkill: ${result.skillName}\nExtension id: ${result.extensionId}\n\nCreation result:\n\`\`\`json\n${JSON.stringify(result, null, 2)}\n\`\`\`\n\nInitial validation:\n\`\`\`json\n${JSON.stringify(validation, null, 2)}\n\`\`\`\n\nActively inspect and finish the package, not just report success. Do the following:\n- Verify structure, package metadata, registered commands/tools, and template placeholders.\n- Tailor README.md, references/evaluation.md, skills/*/SKILL.md, CONFIG.promptDetection, CONFIG.queryExpansions, CONFIG.searchStopwords, CONFIG.termWeights, file extensions, doc format, diagnostics, and safety language to the specific documentation corpus. Derive stopwords/downweights from this wiki's own corpus and realistic searches; do not cargo-cult values from another wiki.\n- Check the upstream repo shape when repoUrl is configured; use official/current source evidence before changing corpus assumptions.\n- Evaluate accuracy, effectiveness, and token output using representative status/search/sections/extract/read/related/smoke-test calls; keep outputs bounded with compact search, maxChars, and maxSections defaults.\n- Run validation and practical package checks such as validate_wiki, the generated smoke-test command/tool, npm install --package-lock-only --ignore-scripts, npm pack --dry-run, and a lightweight registration/build check when practical.\n- Do not clone very large repos or perform destructive changes without asking.\n- Save concise findings and any remaining caveats.\n\nThis follow-up exists because /wiki-create intentionally scaffolds first, then asks the agent to critically tune and verify the result.`;
 }
 
 export default function wikiToolsExtension(pi: ExtensionAPI) {
