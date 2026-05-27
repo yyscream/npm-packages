@@ -1,0 +1,5 @@
+# Enforce LF line endings across the repository
+* text=auto eol=lf
+
+# Shell scripts must always be LF
+*.sh text eol=lf
