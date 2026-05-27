@@ -1,73 +1,76 @@
-# Local Wiki Pi Extension Template
+# {{displayName}} Local Wiki Extension
 
-Template for creating local documentation/wiki retrieval packages analogous to the existing ArchWiki and Hyprland Wiki extensions.
+Pi extension package that provides local-first search and retrieval tools for {{displayName}}.
 
-It provides the same agent-facing shape:
+## What it registers
 
-- setup/status commands
-- local search/read/sections/extract/related tools
-- packaged skill that tells the agent when and how to use the local docs first
-- cache-backed indexing with local path citations
+- Command: `/{{extensionId}}_wiki-status`
+- Command: `{{setupCommand}}`
+- Tools: `{{extensionId}}_wiki_search`, `{{extensionId}}_wiki_read`, `{{extensionId}}_wiki_sections`, `{{extensionId}}_wiki_extract`, `{{extensionId}}_wiki_related`
+- Skill: `{{skillName}}`
 
-## Files
+## Corpus
+
+Default local documentation path:
 
 ```txt
-local-wiki-extension/
-├── package.json.tmpl
-├── index.ts.tmpl
-├── LICENSE.tmpl
-├── skills/__skill-name__/SKILL.md.tmpl
-└── references/scaffold-checklist.md
+{{docsPath}}
 ```
 
-## How to create a new wiki package
+Configured upstream repository:
 
-1. Copy this template directory to a package directory:
+```txt
+{{repoUrl}}
+```
 
-   ```bash
-   cp -a templates/local-wiki-extension pi-extension-<topic>-wiki-local
-   cd pi-extension-<topic>-wiki-local
-   ```
+If no repository is configured, populate the docs path manually before using the retrieval tools.
 
-2. Replace placeholders in all `*.tmpl` files and rename them:
+The indexer reads files matching:
 
-   | Placeholder | Example |
-   |---|---|
-   | `{{packageName}}` | `@firstpick/pi-extension-example-wiki-local` |
-   | `{{extensionId}}` | `example` (tools become `examplewiki_search`) |
-   | `{{displayName}}` | `Example Wiki` |
-   | `{{topicName}}` | `Example` |
-   | `{{skillName}}` | `example-local` |
-   | `{{docsPath}}` | `$HOME/.examplewiki` |
-   | `{{repoUrl}}` | `https://github.com/example/example-wiki.git` or empty |
-   | `{{fileExtensionsRegex}}` | `\.mdx?$` or `\.html?$` |
-   | `{{promptDetectionRegex}}` | `\b(example|examplectl)\b` |
-   | `{{setupCommand}}` | `/examplewiki-local-setup` |
+```txt
+{{fileExtensionsRegex}}
+```
 
-   Then rename:
+Parser format:
 
-   ```bash
-   mv package.json.tmpl package.json
-   mv index.ts.tmpl index.ts
-   mv LICENSE.tmpl LICENSE
-   mv skills/__skill-name__ "skills/<skillName>"
-   mv "skills/<skillName>/SKILL.md.tmpl" "skills/<skillName>/SKILL.md"
-   ```
+```txt
+{{docFormat}}
+```
 
-3. Customize the `CONFIG` object in `index.ts`. Treat it as the canonical source for paths, commands, labels, query expansions, and setup behavior.
+## Setup
 
-4. Customize `skills/<skillName>/SKILL.md` with domain-specific routing, diagnostics, safety rules, and citation expectations.
+Run inside Pi:
 
-5. Validate locally:
+```txt
+{{setupCommand}}
+```
 
-   ```bash
-   npm install --package-lock-only
-   pi --skill ./skills/<skillName> --extension ./index.ts
-   ```
+The setup command reports progress while checking the docs path, cloning/updating the repository, and counting indexed files.
 
-## Design notes
+Then verify:
 
-- Prefer local docs first; web sources are fallback only when local docs are missing, stale, or insufficient.
-- Tools should fail loudly if the local corpus is missing instead of silently falling back.
-- Keep citations local-path-first: `<path> — <section>`.
-- Keep mutation behind explicit commands (`/<extensionId>-local-setup`) and keep retrieval tools read-only.
+```txt
+/{{extensionId}}_wiki-status
+```
+
+## Development checks
+
+```bash
+npm install --package-lock-only --ignore-scripts
+npm pack --dry-run
+bun build index.ts --target=node --outfile=/tmp/{{extensionId}}-wiki-local-index-check.js
+```
+
+## Notes
+
+- Retrieval tools are read-only.
+- Missing local docs fail loudly instead of silently falling back to web sources.
+- Query extracts are section-limited by default and report omitted sections to keep token output bounded.
+- Final answers should cite local documentation paths as `<path> — <section>`.
+- Keep corpus-specific tuning in `index.ts` and `skills/{{skillName}}/SKILL.md`.
+
+## Evaluation checklist
+
+- Accuracy: test representative search queries and verify top results, titles, headings, and extracted sections against source files.
+- Effectiveness: test setup/status, missing-docs behavior, prompt detection, and domain diagnostics.
+- Token output: record approximate output sizes for search/extract/read; adjust `maxChars`, `maxSections`, query expansions, or result metadata if output is routinely too verbose.

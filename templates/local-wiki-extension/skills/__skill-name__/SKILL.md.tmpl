@@ -1,11 +1,17 @@
 ---
 name: {{skillName}}
-description: Use automatically for {{topicName}} documentation, troubleshooting, configuration, commands, APIs, and ecosystem questions. Prefer local {{displayName}} evidence via {{extensionId}}wiki tools before web sources.
+description: Use automatically for {{topicName}} documentation, troubleshooting, configuration, commands, APIs, and ecosystem questions. Prefer local {{displayName}} evidence via {{extensionId}}_wiki tools before web sources.
 ---
 
 # {{displayName}} Local Wiki
 
-Use the local {{displayName}} documentation corpus before web sources.
+Use the local {{displayName}} documentation corpus before web sources. Optimize for source-backed answers with bounded tool output.
+
+## Confidence target
+
+Aim for **90-95/100 confidence** by combining local documentation evidence, exact section citations, read-only local evidence when relevant, and explicit caveats when docs/output are incomplete.
+
+If confidence is below 90/100, improve it by searching a second wording, listing sections, extracting exact sections, checking related pages, or asking for missing environment details.
 
 ## Setup requirement
 
@@ -25,50 +31,52 @@ If setup requires external downloads, package installation, or destructive chang
 
 ## Required workflow
 
-1. Start with `{{extensionId}}wiki_search` for {{topicName}} issues.
-2. Use `{{extensionId}}wiki_sections` when the right page is found but the relevant heading is unclear.
-3. Use `{{extensionId}}wiki_extract` for focused local citations.
-4. Use `{{extensionId}}wiki_read` only when broad page context is needed.
-5. Use `{{extensionId}}wiki_related` when the issue spans linked topics.
-6. Run read-only local diagnostics when system/project evidence is relevant.
-7. Compare documentation guidance with observed local state.
-8. Cite local paths and section names in final answers.
-9. Ask before destructive or user-facing changes.
+1. Start with `{{extensionId}}_wiki_search({ query, limit: 5 })` for {{topicName}} issues.
+2. Use `{{extensionId}}_wiki_sections({ page, maxSections })` when the right page is found but the relevant heading is unclear.
+3. Prefer exact section extraction for final evidence:
+   - `{{extensionId}}_wiki_extract({ page, section, maxChars: 4000-8000, maxSections: 3-6 })`
+4. Use query extraction for exploration only, then switch to exact headings when available.
+5. Use `{{extensionId}}_wiki_read` only when broad page context is needed or no relevant heading can be identified.
+6. Use `{{extensionId}}_wiki_related` when the issue spans linked topics.
+7. Run read-only local diagnostics when system/project evidence is relevant.
+8. Compare documentation guidance with observed local state.
+9. Cite local paths and section names in final answers.
+10. Ask before destructive or user-facing changes.
 
 ## Source priority
 
-1. Local {{displayName}} corpus via `{{extensionId}}wiki_*` tools.
+1. Local {{displayName}} corpus via `{{extensionId}}_wiki_*` tools.
 2. Local project/system evidence relevant to the user's current environment.
 3. Official online {{displayName}} documentation only when local docs are missing, stale, or insufficient.
 4. Other sources only when necessary and clearly labeled.
 
 ## Tool usage
 
-- `{{extensionId}}wiki_search({ query })`: find candidate pages.
-- `{{extensionId}}wiki_sections({ page })`: inspect available headings.
-- `{{extensionId}}wiki_extract({ page, section })`: retrieve a focused section.
-- `{{extensionId}}wiki_extract({ page, query })`: retrieve query-relevant sections.
-- `{{extensionId}}wiki_read({ page })`: retrieve clean readable page text.
-- `{{extensionId}}wiki_related({ page })`: discover linked local pages.
+- `{{extensionId}}_wiki_search({ query, limit, includeSnippets })`: find candidate pages. Keep `limit` at 5 unless exploring broadly.
+- `{{extensionId}}_wiki_sections({ page, maxSections })`: inspect headings before extracting from large pages.
+- `{{extensionId}}_wiki_extract({ page, section, maxChars, maxSections })`: retrieve focused exact sections; best for final answers.
+- `{{extensionId}}_wiki_extract({ page, query, maxChars, maxSections })`: retrieve query-relevant sections; best for exploration.
+- `{{extensionId}}_wiki_read({ page, maxChars })`: retrieve broad page text; use sparingly.
+- `{{extensionId}}_wiki_related({ page, limit })`: discover linked local pages.
 
 ## Diagnostics policy
 
-Prefer read-only commands first. Add domain-specific examples here, for example:
+Prefer read-only commands first. Useful {{topicName}} diagnostics include:
 
 ```bash
-# examples only; customize or remove
-<command> --version
-<command> status
-rg "<keyword>" <config-dir>
+{{diagnosticsExamples}}
 ```
 
-Avoid mutation without explicit approval:
+{{mutationWarnings}}
 
-```bash
-rm -rf
-<package-manager> remove
-<command> --reset
-```
+## Token/output discipline
+
+- Keep search limits small (`limit: 5-10`) unless exploring broadly.
+- Prefer `search -> sections -> exact section extract` for final answers.
+- Use query extraction only to discover likely sections on large pages.
+- Use `maxChars` around 4000-8000 and `maxSections` around 3-6 for focused answers.
+- Use `read` only when the relevant section cannot be identified.
+- If a tool reports `omittedSectionCount` or `truncated: true`, mention it when it affects confidence.
 
 ## Citation format
 

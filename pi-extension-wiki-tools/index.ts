@@ -20,6 +20,17 @@ type WikiSpec = {
   promptDetectionRegex?: string;
   setupCommand?: string;
   template?: string;
+  docFormat?: string;
+  queryExpansionsCode?: string;
+  diagnosticsExamples?: string;
+  mutationWarnings?: string;
+};
+
+type WikiCommandSpec = WikiSpec & {
+  dryRun?: boolean;
+  overwrite?: boolean;
+  yes?: boolean;
+  agentReview?: boolean;
 };
 
 type PlanEntry = {
@@ -42,6 +53,17 @@ function titleCaseFromSlug(slug: string): string {
   return slug.split("-").filter(Boolean).map((part) => part[0]?.toUpperCase() + part.slice(1)).join(" ");
 }
 
+function humanizeOwner(owner: string): string {
+  const normalized = slugify(owner);
+  const known: Record<string, string> = {
+    raspberrypi: "Raspberry Pi",
+    nixos: "NixOS",
+    hyprwm: "Hyprland",
+    archlinux: "Arch Linux",
+  };
+  return known[normalized] ?? titleCaseFromSlug(normalized);
+}
+
 function resolveTarget(targetDir: string | undefined, cwd: string, extensionId: string): string {
   const raw = targetDir || `pi-extension-${extensionId}-wiki-local`;
   return path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(cwd, raw);
@@ -51,27 +73,83 @@ function looksLikeUrl(input: string): boolean {
   return /^(?:https?:\/\/|git@|ssh:\/\/)/i.test(input);
 }
 
-function inferTopicFromRepoUrl(repoUrl: string): string {
-  const withoutFragment = repoUrl.split("#", 1)[0].replace(/[?#].*$/, "").replace(/\/$/, "");
-  const lastPathPart = withoutFragment.includes(":") && !withoutFragment.includes("//") ? withoutFragment.split(":").pop() ?? withoutFragment : withoutFragment.split("/").pop() ?? withoutFragment;
-  const clean = lastPathPart.replace(/\.git$/i, "").replace(/[-_](wiki|docs|documentation)$/i, "").replace(/^(wiki|docs|documentation)[-_]/i, "");
-  return titleCaseFromSlug(slugify(clean || lastPathPart));
+type RepoParts = { owner?: string; repo: string };
+
+function repoPartsFromUrl(repoUrl: string): RepoParts | undefined {
+  const withoutQuery = repoUrl.split("#", 1)[0].replace(/[?#].*$/, "").replace(/\/+$/, "");
+  const sshMatch = withoutQuery.match(/^git@[^:]+:([^/]+)\/(.+)$/i);
+  if (sshMatch) return { owner: sshMatch[1], repo: sshMatch[2].replace(/\.git$/i, "") };
+  try {
+    const parsed = new URL(withoutQuery);
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    if (parts.length >= 2) return { owner: parts[0], repo: parts[1].replace(/\.git$/i, "") };
+    if (parts.length === 1) return { repo: parts[0].replace(/\.git$/i, "") };
+  } catch {
+    const parts = withoutQuery.split(/[/:]/).filter(Boolean);
+    if (parts.length >= 2) return { owner: parts.at(-2), repo: parts.at(-1)!.replace(/\.git$/i, "") };
+  }
+  return undefined;
+}
+
+function inferSpecFromRepoUrl(repoUrl: string): Partial<WikiSpec> {
+  const parts = repoPartsFromUrl(repoUrl);
+  if (!parts) return {};
+  const genericRepos = new Set(["documentation", "docs", "doc", "wiki", "website"]);
+  const rawRepoSlug = slugify(parts.repo.replace(/[-_](wiki|docs|documentation)$/i, "").replace(/^(wiki|docs|documentation)[-_]/i, ""));
+  const ownerSlug = parts.owner ? slugify(parts.owner) : undefined;
+  const topicBase = genericRepos.has(rawRepoSlug) && ownerSlug ? ownerSlug : rawRepoSlug;
+  const topicName = topicBase === ownerSlug && parts.owner ? humanizeOwner(parts.owner) : titleCaseFromSlug(topicBase);
+  const extensionId = topicBase;
+
+  const inferred: Partial<WikiSpec> = { topicName, extensionId };
+  if (ownerSlug === "raspberrypi") {
+    inferred.topicName = "Raspberry Pi";
+    inferred.displayName = "Raspberry Pi Documentation";
+    inferred.extensionId = "raspberrypi";
+    inferred.fileExtensionsRegex = "\\.(adoc|asciidoc|asc|mdx?)$";
+    inferred.docFormat = "asciidoc";
+    inferred.promptDetectionRegex = "\\b(raspberry\\s*pi|raspberrypi|raspi|raspi-config|rpi|pico|pico\\s*w|pico-sdk|rp2040|rp2350|picamera2|rpicam|libcamera|dtoverlay|dtparam)\\b|\\bconfig\\.txt\\b";
+    inferred.queryExpansionsCode = `camera: ["rpicam", "libcamera", "picamera2", "camera module", "camera_auto_detect"],
+    config: ["configuration", "config.txt", "dtparam", "dtoverlay"],
+    display: ["screen", "hdmi", "kms", "dtoverlay", "display_auto_detect"],
+    gpio: ["pinout", "pinctrl", "raspi-gpio", "dtparam"],
+    install: ["setup", "getting started", "requirements", "imager"],
+    network: ["wifi", "wireless", "networkmanager", "nmcli"],
+    os: ["raspberry pi os", "bookworm", "apt"],
+    pico: ["rp2040", "rp2350", "pico sdk", "micropython"],
+    ssh: ["remote access", "headless", "raspi-config"],`;
+    inferred.diagnosticsExamples = `uname -a
+cat /proc/device-tree/model 2>/dev/null || true
+cat /etc/os-release
+command -v raspi-config && raspi-config nonint get_config_var arm_64bit /boot/firmware/config.txt
+rg -n "^(dtoverlay|dtparam|camera_auto_detect|display_auto_detect|arm_64bit)" /boot/config.txt /boot/firmware/config.txt 2>/dev/null`;
+    inferred.mutationWarnings = "Avoid mutation without explicit approval, especially package removal, bootloader changes, config rewrites, firmware flashing, partition edits, or recursive deletes.";
+  }
+  return inferred;
 }
 
 function normalizeSpec(input: WikiSpec, cwd: string) {
   const repoUrlFromTopic = input.topicName && looksLikeUrl(input.topicName) ? input.topicName : undefined;
   const repoUrl = input.repoUrl || repoUrlFromTopic || "";
-  const inferredTopic = repoUrl ? inferTopicFromRepoUrl(repoUrl) : undefined;
-  const topicName = repoUrlFromTopic ? (inferredTopic ?? input.topicName) : (input.topicName || inferredTopic);
-  if (!topicName && !input.extensionId) throw new Error("Missing topicName. Provide a topic name or repository URL.");
-  const extensionId = slugify(input.extensionId || topicName!);
-  const displayName = input.displayName || `${titleCaseFromSlug(extensionId)} Wiki`;
+  const inferred = repoUrl ? inferSpecFromRepoUrl(repoUrl) : {};
+  const topicName = repoUrlFromTopic ? (inferred.topicName || input.displayName) : (input.topicName || inferred.topicName);
+  if (!topicName && !input.extensionId && !inferred.extensionId) throw new Error("Missing topicName. Provide a topic name or repository URL.");
+  const extensionId = slugify(input.extensionId || inferred.extensionId || topicName!);
+  const displayName = input.displayName || inferred.displayName || `${titleCaseFromSlug(extensionId)} Wiki`;
   const skillName = input.skillName || `${extensionId}-local`;
   const packageName = input.packageName || `@firstpick/pi-extension-${extensionId}-wiki-local`;
-  const docsPath = input.docsPath || `$HOME/.${extensionId}wiki`;
-  const setupCommand = input.setupCommand || `/${extensionId}wiki-local-setup`;
-  const fileExtensionsRegex = input.fileExtensionsRegex || "\\.mdx?$";
-  const promptDetectionRegex = input.promptDetectionRegex || `\\b(${extensionId}|${topicName!.replace(/\s+/g, "\\s+")})\\b`;
+  const docsPath = input.docsPath || `~/.${extensionId}wiki`;
+  const setupCommand = input.setupCommand || `/${extensionId}-wiki-local-setup`;
+  const fileExtensionsRegex = input.fileExtensionsRegex || inferred.fileExtensionsRegex || "\\.mdx?$";
+  const docFormat = input.docFormat || inferred.docFormat || "markdown";
+  const promptDetectionRegex = input.promptDetectionRegex || inferred.promptDetectionRegex || `\\b(${extensionId}|${topicName!.replace(/\s+/g, "\\s+")})\\b`;
+  const queryExpansionsCode = input.queryExpansionsCode || inferred.queryExpansionsCode || `// Add domain language here during creation/review.
+    config: ["settings", "configuration", "options"],
+    install: ["setup", "getting started", "requirements"],`;
+  const diagnosticsExamples = input.diagnosticsExamples || inferred.diagnosticsExamples || `pwd
+find . -maxdepth 3 -type f | sort | head -100
+rg -n "configuration|install|setup|troubleshoot" . 2>/dev/null | head -50`;
+  const mutationWarnings = input.mutationWarnings || inferred.mutationWarnings || "Avoid mutation without explicit approval, especially destructive deletes, package removal, resets, flashing, partition edits, or configuration rewrites.";
   const template = input.template || DEFAULT_TEMPLATE;
   const targetDir = resolveTarget(input.targetDir, cwd, extensionId);
   const placeholders: Record<string, string> = {
@@ -83,12 +161,16 @@ function normalizeSpec(input: WikiSpec, cwd: string) {
     docsPath,
     repoUrl,
     fileExtensionsRegex,
+    docFormat,
     promptDetectionRegex,
     setupCommand,
+    queryExpansionsCode,
+    diagnosticsExamples,
+    mutationWarnings,
     year: String(new Date().getFullYear()),
     author: "Firstpick",
   };
-  return { extensionId, displayName, topicName: topicName!, skillName, packageName, docsPath, setupCommand, fileExtensionsRegex, promptDetectionRegex, repoUrl, template, targetDir, placeholders };
+  return { extensionId, displayName, topicName: topicName!, skillName, packageName, docsPath, setupCommand, fileExtensionsRegex, docFormat, promptDetectionRegex, repoUrl, template, targetDir, placeholders, queryExpansionsCode, diagnosticsExamples, mutationWarnings };
 }
 
 function renderTemplate(text: string, values: Record<string, string>): string {
@@ -211,7 +293,7 @@ async function validatePackage(targetDir: string, cwd: string) {
   checks.push({ name: "index.ts", ok: await exists(indexPath), detail: indexPath });
   if (await exists(indexPath)) {
     const indexText = await fs.readFile(indexPath, "utf8");
-    checks.push({ name: "setup command", ok: indexText.includes("wiki-local-setup") && indexText.includes("executeSetup"), detail: "index.ts registers an idempotent local docs setup command" });
+    checks.push({ name: "setup command", ok: indexText.includes("-wiki-local-setup") && indexText.includes("executeSetup"), detail: "index.ts registers an idempotent local docs setup command" });
   }
 
   let packageJson: any;
@@ -245,16 +327,20 @@ async function validatePackage(targetDir: string, cwd: string) {
 const wikiSpecSchema = {
   topicName: Type.Optional(Type.String({ description: "Topic name, e.g. 'Example' or 'NixOS'. Optional when repoUrl is provided." })),
   displayName: Type.Optional(Type.String({ description: "Human display name, e.g. 'Example Wiki'" })),
-  extensionId: Type.Optional(Type.String({ description: "Short lowercase tool prefix base; tools become <extensionId>wiki_*" })),
+  extensionId: Type.Optional(Type.String({ description: "Short lowercase tool prefix base; tools become <extensionId>_wiki_*" })),
   skillName: Type.Optional(Type.String({ description: "Generated skill name, e.g. 'example-local'" })),
   packageName: Type.Optional(Type.String({ description: "npm package name" })),
   targetDir: Type.Optional(Type.String({ description: "Output package directory; relative paths resolve from cwd" })),
-  docsPath: Type.Optional(Type.String({ description: "Canonical local docs path, e.g. '$HOME/.examplewiki'" })),
+  docsPath: Type.Optional(Type.String({ description: "Canonical local docs path, e.g. '~/.examplewiki'" })),
   repoUrl: Type.Optional(Type.String({ description: "Git repo URL for setup command; empty means manual docs path" })),
   fileExtensionsRegex: Type.Optional(Type.String({ description: "Regex body for doc files, e.g. '\\.mdx?$' or '\\.html?$'" })),
   promptDetectionRegex: Type.Optional(Type.String({ description: "Regex body used for automatic prompt routing" })),
   setupCommand: Type.Optional(Type.String({ description: "Slash command shown when docs are missing" })),
   template: Type.Optional(Type.String({ description: "Template directory name or absolute path" })),
+  docFormat: Type.Optional(Type.String({ description: "Parser format for generated docs: markdown, asciidoc, or html" })),
+  queryExpansionsCode: Type.Optional(Type.String({ description: "TypeScript object entries inserted into CONFIG.queryExpansions" })),
+  diagnosticsExamples: Type.Optional(Type.String({ description: "Topic-specific read-only diagnostic commands inserted into the generated skill" })),
+  mutationWarnings: Type.Optional(Type.String({ description: "Topic-specific mutation warning text inserted into the generated skill" })),
 };
 
 const FLAG_MAP: Record<string, keyof WikiSpec> = {
@@ -268,6 +354,10 @@ const FLAG_MAP: Record<string, keyof WikiSpec> = {
   "file-extensions-regex": "fileExtensionsRegex",
   "prompt-detection-regex": "promptDetectionRegex",
   "setup-command": "setupCommand",
+  "doc-format": "docFormat",
+  "query-expansions-code": "queryExpansionsCode",
+  "diagnostics-examples": "diagnosticsExamples",
+  "mutation-warnings": "mutationWarnings",
   template: "template",
 };
 
@@ -278,13 +368,13 @@ function tokenizeArgs(args: string): string[] {
   return tokens;
 }
 
-function parseWikiCommandArgs(args: string, defaults: Partial<WikiSpec & { dryRun?: boolean; overwrite?: boolean }> = {}) {
+function parseWikiCommandArgs(args: string, defaults: Partial<WikiCommandSpec> = {}) {
   const trimmed = args.trim();
-  if (!trimmed) throw new Error("Missing repository URL or topic. Usage: /wiki-create <repo-url-or-topic> [--repo-url URL] [--target-dir DIR] [--dry-run] [--overwrite]");
-  if (trimmed.startsWith("{")) return { ...defaults, ...JSON.parse(trimmed) } as WikiSpec & { dryRun?: boolean; overwrite?: boolean };
+  if (!trimmed) return { ...defaults } as WikiCommandSpec;
+  if (trimmed.startsWith("{")) return { ...defaults, ...JSON.parse(trimmed) } as WikiCommandSpec;
 
   const tokens = tokenizeArgs(trimmed);
-  const spec: Partial<WikiSpec & { dryRun?: boolean; overwrite?: boolean }> = { ...defaults };
+  const spec: Partial<WikiCommandSpec> = { ...defaults };
   const topicParts: string[] = [];
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
@@ -295,6 +385,9 @@ function parseWikiCommandArgs(args: string, defaults: Partial<WikiSpec & { dryRu
     const [rawName, inlineValue] = token.slice(2).split("=", 2);
     if (rawName === "dry-run") { spec.dryRun = true; continue; }
     if (rawName === "apply") { spec.dryRun = false; continue; }
+    if (rawName === "yes" || rawName === "non-interactive") { spec.yes = true; continue; }
+    if (rawName === "agent-review") { spec.agentReview = true; continue; }
+    if (rawName === "no-agent-review") { spec.agentReview = false; continue; }
     if (rawName === "overwrite") { spec.overwrite = true; continue; }
     const key = FLAG_MAP[rawName];
     if (!key) throw new Error(`Unknown option --${rawName}`);
@@ -305,11 +398,50 @@ function parseWikiCommandArgs(args: string, defaults: Partial<WikiSpec & { dryRu
   if (!spec.topicName && topicParts.length > 0) spec.topicName = topicParts.join(" ");
   if (spec.topicName && looksLikeUrl(spec.topicName) && !spec.repoUrl) spec.repoUrl = spec.topicName;
   if (!spec.topicName && !spec.repoUrl) throw new Error("Missing topicName or repoUrl. Provide a topic, repository URL, or JSON with repoUrl.");
-  return spec as WikiSpec & { dryRun?: boolean; overwrite?: boolean };
+  return spec as WikiCommandSpec;
 }
 
 function formatCommandResult(payload: unknown): string {
   return JSON.stringify(payload, null, 2);
+}
+
+async function completeInteractiveSpec(spec: WikiCommandSpec, ctx: any): Promise<WikiCommandSpec | undefined> {
+  if (!ctx.hasUI) return spec;
+  const next: WikiCommandSpec = { ...spec };
+  if (!next.topicName && !next.repoUrl) {
+    const value = await ctx.ui.input("Wiki source", "Repository URL or topic name");
+    if (!value?.trim()) return undefined;
+    if (looksLikeUrl(value.trim())) next.repoUrl = value.trim();
+    next.topicName = value.trim();
+  }
+  const normalized = normalizeSpec(next, ctx.cwd);
+  const summary = [
+    `Package: ${normalized.packageName}`,
+    `Target: ${normalized.targetDir}`,
+    `Skill: ${normalized.skillName}`,
+    `Tools: ${normalized.extensionId}_wiki_*`,
+    `Docs: ${normalized.docsPath}`,
+    `Repo: ${normalized.repoUrl || "manual/preinstalled corpus"}`,
+    `Files: ${normalized.fileExtensionsRegex}`,
+    `Format: ${normalized.docFormat}`,
+    `Prompt regex: ${normalized.promptDetectionRegex}`,
+  ].join("\n");
+
+  const choice = await ctx.ui.select(`Create local wiki package?\n\n${summary}`, [
+    "Create + queue agent review",
+    "Dry-run only",
+    "Create without agent review",
+    "Cancel",
+  ]);
+  if (!choice || choice === "Cancel") return undefined;
+  if (choice === "Dry-run only") next.dryRun = true;
+  if (choice === "Create + queue agent review") next.agentReview = true;
+  if (choice === "Create without agent review") next.agentReview = false;
+  return next;
+}
+
+function makeAgentReviewPrompt(result: any, validation: any): string {
+  return `Audit and finish the local wiki package created by /wiki-create.\n\nTarget: ${result.targetDir}\nPackage: ${result.packageName}\nSkill: ${result.skillName}\nExtension id: ${result.extensionId}\n\nCreation result:\n\`\`\`json\n${JSON.stringify(result, null, 2)}\n\`\`\`\n\nInitial validation:\n\`\`\`json\n${JSON.stringify(validation, null, 2)}\n\`\`\`\n\nActively inspect and finish the package, not just report success. Do the following:\n- Verify structure, package metadata, registered commands/tools, and template placeholders.\n- Tailor README.md, skills/*/SKILL.md, CONFIG.promptDetection, CONFIG.queryExpansions, file extensions, doc format, diagnostics, and safety language to the specific documentation corpus.\n- Check the upstream repo shape when repoUrl is configured; use official/current source evidence before changing corpus assumptions.\n- Evaluate accuracy, effectiveness, and token output using representative status/search/sections/extract/read/related calls; keep outputs bounded with maxChars/maxSections defaults.\n- Run validation and practical package checks such as validate_wiki, npm install --package-lock-only --ignore-scripts, npm pack --dry-run, and a lightweight registration/build check when practical.\n- Do not clone very large repos or perform destructive changes without asking.\n- Save concise findings and any remaining caveats.\n\nThis follow-up exists because /wiki-create intentionally scaffolds first, then asks the agent to critically tune and verify the result.`;
 }
 
 export default function wikiToolsExtension(pi: ExtensionAPI) {
@@ -324,11 +456,25 @@ export default function wikiToolsExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("wiki-create", {
-    description: "Create a local wiki extension package from a repo URL. Usage: /wiki-create <repo-url-or-topic> [--repo-url URL] [--target-dir DIR] [--dry-run] [--overwrite]",
+    description: "Interactively create a local wiki extension package, then queue an agent review/tuning pass. Usage: /wiki-create <repo-url-or-topic> [--repo-url URL] [--target-dir DIR] [--doc-format markdown|asciidoc|html] [--dry-run] [--overwrite] [--yes] [--no-agent-review]",
     handler: async (args, ctx) => {
       try {
-        const result = await scaffoldWiki(parseWikiCommandArgs(args), ctx.cwd, "create");
-        ctx.ui.notify(formatCommandResult(result), "info");
+        const parsed = parseWikiCommandArgs(args);
+        const spec = parsed.yes ? parsed : await completeInteractiveSpec(parsed, ctx);
+        if (!spec) {
+          ctx.ui.notify("wiki-create cancelled", "info");
+          return;
+        }
+        const result = await scaffoldWiki(spec, ctx.cwd, "create");
+        const validation = result.dryRun ? undefined : await validatePackage(result.targetDir, ctx.cwd);
+        ctx.ui.notify(formatCommandResult({ ...result, validation }), validation?.ok === false ? "warning" : "info");
+
+        const shouldReview = !result.dryRun && spec.agentReview !== false && (spec.agentReview === true || !spec.yes);
+        if (shouldReview) {
+          const prompt = makeAgentReviewPrompt(result, validation);
+          if ((ctx as any).isIdle?.() === false) pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+          else pi.sendUserMessage(prompt);
+        }
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
       }

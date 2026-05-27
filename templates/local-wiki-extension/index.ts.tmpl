@@ -5,7 +5,7 @@ import { execFile } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-type DocFormat = "markdown" | "html";
+type DocFormat = "markdown" | "asciidoc" | "html";
 
 interface WikiPage {
   title: string;
@@ -58,18 +58,16 @@ const CONFIG = {
   displayName: "{{displayName}}",
   topicName: "{{topicName}}",
   skillName: "{{skillName}}",
-  docsPath: "{{docsPath}}".replace(/^~(?=\/|$)/, os.homedir()),
+  docsPath: "{{docsPath}}".replace(/^~(?=\/|$)/, os.homedir()).replace(/^\$HOME(?=\/|$)/, os.homedir()),
   repoUrl: "{{repoUrl}}", // empty string for preinstalled docs
   setupCommand: "{{setupCommand}}",
   fileExtensions: /{{fileExtensionsRegex}}/i,
-  format: "markdown" as DocFormat, // change to "html" for HTML corpora
+  format: "{{docFormat}}" as DocFormat,
   cacheDir: path.join(os.homedir(), ".cache", "pi", "{{extensionId}}-wiki-local"),
-  schemaVersion: 1,
+  schemaVersion: 2,
   promptDetection: /{{promptDetectionRegex}}/i,
   queryExpansions: {
-    // Add domain language here. Example:
-    // config: ["settings", "configuration", "options"],
-    // install: ["setup", "getting started", "requirements"],
+    {{queryExpansionsCode}}
   } as Record<string, string[]>,
 };
 
@@ -156,21 +154,50 @@ function anchorFromHeading(raw: string): string {
   return raw.toLowerCase().replace(/`/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 }
 
+function docFormatForPath(filePath: string): DocFormat {
+  if (CONFIG.format === "html" || /\.html?$/i.test(filePath)) return "html";
+  if (CONFIG.format === "asciidoc" || /\.(adoc|asciidoc|asc)$/i.test(filePath)) return "asciidoc";
+  return "markdown";
+}
+
 function stripMarkdownDecorators(input: string): string {
   return input.replace(/^#+\s*/, "").replace(/[*_`~]/g, "").replace(/\[([^\]]+)\]\([^\)]+\)/g, "$1").trim();
 }
 
+function stripAsciidocDecorators(input: string): string {
+  return input
+    .replace(/^={1,6}\s+/, "")
+    .replace(/^\[\[[^\]]+\]\]\s*/, "")
+    .replace(/xref:([^\[]+)\[([^\]]*)\]/g, (_m, target: string, label: string) => label || titleFromPath(target))
+    .replace(/https?:[^\[]+\[([^\]]+)\]/g, "$1")
+    .replace(/(?:kbd|btn|menu):\[([^\]]+)\]/g, "$1")
+    .replace(/[*_`]/g, "")
+    .trim();
+}
+
+function firstMarkdownHeading(markdown: string): string | undefined {
+  let inFence = false;
+  for (const line of markdown.split(/\n/)) {
+    if (/^\s*(```|~~~)/.test(line)) inFence = !inFence;
+    if (inFence) continue;
+    const match = line.match(/^#\s+(.+)$/);
+    if (match) return match[1].trim();
+  }
+  return undefined;
+}
+
 function markdownTitle(markdown: string, filePath: string): string {
-  const firstHeading = markdown.match(/^#\s+(.+)$/m)?.[1]?.trim();
-  return stripMarkdownDecorators(firstHeading || titleFromPath(filePath));
+  return stripMarkdownDecorators(firstMarkdownHeading(markdown) || titleFromPath(filePath));
 }
 
 function markdownSections(markdown: string, fallbackTitle: string): WikiSection[] {
   const lines = markdown.split(/\n/);
   const sections: WikiSection[] = [];
   let current: WikiSection | undefined;
+  let inFence = false;
   for (const line of lines) {
-    const match = line.match(/^(#{1,6})\s+(.+)$/);
+    if (/^\s*(```|~~~)/.test(line)) inFence = !inFence;
+    const match = !inFence ? line.match(/^(#{1,6})\s+(.+)$/) : undefined;
     if (match) {
       if (current) current.text = current.text.trim();
       const title = stripMarkdownDecorators(match[2]);
@@ -185,13 +212,61 @@ function markdownSections(markdown: string, fallbackTitle: string): WikiSection[
   return sections;
 }
 
+function asciidocToText(asciidoc: string): string {
+  return normalizeWhitespace(asciidoc
+    .replace(/^\s*:[^:\n]+:.*$/gm, "")
+    .replace(/^\s*\/\/.*$/gm, "")
+    .replace(/^\[\[[^\]]+\]\]\s*$/gm, "")
+    .replace(/^\[(?:source|console|bash|python|json|ini|subs|NOTE|TIP|IMPORTANT|WARNING|CAUTION)[^\]]*\]\s*$/gim, "")
+    .replace(/^(?:----|====|\+{4}|`{3})\s*$/gm, "")
+    .replace(/^image::[^\[]+\[[^\]]*\]\s*$/gm, "")
+    .replace(/include::([^\[]+)\[[^\]]*\]/g, "")
+    .replace(/xref:([^\[]+)\[([^\]]*)\]/g, (_m, target: string, label: string) => label || titleFromPath(target))
+    .replace(/https?:[^\[]+\[([^\]]+)\]/g, "$1")
+    .replace(/(?:kbd|btn|menu):\[([^\]]+)\]/g, "$1"));
+}
+
+function asciidocTitle(asciidoc: string, filePath: string): string {
+  for (const line of asciidoc.split(/\n/)) {
+    const match = line.match(/^(={1,6})\s+(.+)$/);
+    if (match) return stripAsciidocDecorators(match[2]);
+  }
+  return titleFromPath(filePath);
+}
+
+function asciidocSections(asciidoc: string, fallbackTitle: string): WikiSection[] {
+  const sections: WikiSection[] = [];
+  let current: WikiSection | undefined;
+  for (const line of asciidoc.split(/\n/)) {
+    const match = line.match(/^(={1,6})\s+(.+)$/);
+    if (match) {
+      if (current) current.text = asciidocToText(current.text);
+      const title = stripAsciidocDecorators(match[2]);
+      current = { title, level: match[1].length, anchor: anchorFromHeading(title), text: "" };
+      sections.push(current);
+      continue;
+    }
+    if (current) current.text += `${line}\n`;
+  }
+  if (!current) sections.push({ title: fallbackTitle, level: 1, anchor: anchorFromHeading(fallbackTitle), text: asciidocToText(asciidoc) });
+  else current.text = asciidocToText(current.text);
+  return sections;
+}
+
 function resolveLocalPath(currentFile: string, href: string): string | undefined {
   if (/^(https?:|mailto:|#)/i.test(href)) return undefined;
   const cleanHref = href.split("#")[0].split("?")[0];
   if (!cleanHref) return undefined;
-  const withExt = path.extname(cleanHref) ? cleanHref : `${cleanHref}${CONFIG.format === "html" ? ".html" : ".md"}`;
-  const resolved = path.normalize(path.resolve(path.dirname(currentFile), withExt));
-  return resolved.startsWith(CONFIG.docsPath) ? resolved : undefined;
+  const candidates = path.extname(cleanHref)
+    ? [cleanHref]
+    : CONFIG.format === "html"
+      ? [`${cleanHref}.html`, `${cleanHref}.htm`]
+      : [`${cleanHref}.md`, `${cleanHref}.mdx`, `${cleanHref}.adoc`, `${cleanHref}.asciidoc`, `${cleanHref}.asc`, path.join(cleanHref, "index.md"), path.join(cleanHref, "index.adoc")];
+  for (const candidate of candidates) {
+    const resolved = path.normalize(path.resolve(path.dirname(currentFile), candidate));
+    if (resolved.startsWith(CONFIG.docsPath)) return resolved;
+  }
+  return undefined;
 }
 
 function markdownLinks(markdown: string, currentFile: string): WikiLink[] {
@@ -203,6 +278,37 @@ function markdownLinks(markdown: string, currentFile: string): WikiLink[] {
     links.set(resolved, { title: stripMarkdownDecorators(match[1]) || titleFromPath(resolved), path: resolved });
   }
   return [...links.values()];
+}
+
+function asciidocLinks(asciidoc: string, currentFile: string): WikiLink[] {
+  const links = new Map<string, WikiLink>();
+  const add = (href: string, label: string) => {
+    const resolved = resolveLocalPath(currentFile, href.trim());
+    if (!resolved) return;
+    links.set(resolved, { title: stripAsciidocDecorators(label) || titleFromPath(resolved), path: resolved });
+  };
+  for (const match of asciidoc.matchAll(/xref:([^\[]+)\[([^\]]*)\]/g)) add(match[1], match[2]);
+  for (const match of asciidoc.matchAll(/^include::([^\[]+)\[([^\]]*)\]/gm)) add(match[1], match[2]);
+  return [...links.values()];
+}
+
+async function expandAsciidocIncludes(raw: string, currentFile: string, depth = 0, seen = new Set<string>()): Promise<string> {
+  if (depth >= 4) return raw;
+  const includeRe = /^include::([^\[]+)\[[^\]]*\]\s*$/gm;
+  const replacements = await Promise.all([...raw.matchAll(includeRe)].map(async (match) => {
+    const resolved = resolveLocalPath(currentFile, match[1].trim());
+    if (!resolved || seen.has(resolved)) return { from: match[0], to: "" };
+    try {
+      seen.add(resolved);
+      const included = await fs.readFile(resolved, "utf8");
+      return { from: match[0], to: await expandAsciidocIncludes(included, resolved, depth + 1, seen) };
+    } catch {
+      return { from: match[0], to: "" };
+    }
+  }));
+  let expanded = raw;
+  for (const { from, to } of replacements) expanded = expanded.replace(from, to);
+  return expanded;
 }
 
 function htmlToText(html: string): string {
@@ -232,11 +338,18 @@ function htmlLinks(html: string, currentFile: string): WikiLink[] {
 }
 
 function parsePage(raw: string, filePath: string, mtimeMs: number): WikiPage {
-  if (CONFIG.format === "html") {
+  const format = docFormatForPath(filePath);
+  if (format === "html") {
     const title = htmlTitle(raw, filePath);
     const text = htmlToText(raw);
     const sections = markdownSections(text, title);
     return { title, slug: path.relative(CONFIG.docsPath, filePath).replace(CONFIG.fileExtensions, ""), path: filePath, headings: sections.map((s) => s.title), sections, links: htmlLinks(raw, filePath), text, mtimeMs };
+  }
+  if (format === "asciidoc") {
+    const title = asciidocTitle(raw, filePath);
+    const text = asciidocToText(raw);
+    const sections = asciidocSections(raw, title);
+    return { title, slug: path.relative(CONFIG.docsPath, filePath).replace(CONFIG.fileExtensions, ""), path: filePath, headings: sections.map((s) => s.title), sections, links: asciidocLinks(raw, filePath), text, mtimeMs };
   }
   const title = markdownTitle(raw, filePath);
   const text = normalizeWhitespace(raw);
@@ -258,7 +371,9 @@ async function buildCache(): Promise<LoadedCache> {
   for (const file of files) {
     const stat = await fs.stat(file);
     newestMtimeMs = Math.max(newestMtimeMs, stat.mtimeMs);
-    pages.push(parsePage(await fs.readFile(file, "utf8"), file, stat.mtimeMs));
+    const raw = await fs.readFile(file, "utf8");
+    const expanded = docFormatForPath(file) === "asciidoc" ? await expandAsciidocIncludes(raw, file) : raw;
+    pages.push(parsePage(expanded, file, stat.mtimeMs));
   }
   const metadata: CacheMetadata = { schemaVersion: CONFIG.schemaVersion, docsPath: CONFIG.docsPath, generatedAt: new Date().toISOString(), pageCount: pages.length, newestMtimeMs, gitRevision: await gitRevision() };
   await fs.writeFile(PAGES_CACHE, JSON.stringify(pages, null, 2));
@@ -322,6 +437,18 @@ function scorePage(page: WikiPage, tokens: string[]): SearchResult | undefined {
   return { title: page.title, path: page.path, score, matchedFields: [...matchedFields], scoreExplanation, snippet: makeSnippet(page.text, tokens) };
 }
 
+function scoreSection(section: WikiSection, tokens: string[]): number {
+  const title = normalizeQuery(section.title);
+  const text = normalizeQuery(section.text);
+  let score = 0;
+  for (const token of tokens) {
+    if (title.includes(token)) score += 6;
+    const textMatches = text.split(token).length - 1;
+    if (textMatches > 0) score += Math.min(4, textMatches);
+  }
+  return score;
+}
+
 function findPage(pages: WikiPage[], pageRef: string): WikiPage | undefined {
   const normalized = normalizeQuery(pageRef);
   return pages.find((page) => page.path === pageRef)
@@ -343,21 +470,37 @@ async function executeStatus() {
   return { content: [{ type: "text" as const, text: jsonText(payload) }], details: payload };
 }
 
-async function executeSetup(): Promise<{ ok: boolean; message: string }> {
+type SetupProgress = (message: string, level?: "info" | "warning") => void;
+
+async function executeSetup(progress?: SetupProgress): Promise<{ ok: boolean; message: string }> {
+  progress?.(`Checking local ${CONFIG.displayName} docs at ${CONFIG.docsPath}...`);
   if (!CONFIG.repoUrl) {
+    progress?.(`No repository URL is configured; expecting a manually populated docs path.`, "warning");
     return { ok: false, message: `No repoUrl configured. Populate ${CONFIG.docsPath} with local docs, then retry the wiki tools.` };
   }
   if (!await exists(CONFIG.docsPath)) {
     const parent = path.dirname(CONFIG.docsPath);
+    progress?.(`Creating parent directory ${parent} if needed...`);
     await fs.mkdir(parent, { recursive: true });
-    const clone = await runCommand("git", ["clone", CONFIG.repoUrl, CONFIG.docsPath], parent);
-    return { ok: clone.ok, message: clone.ok ? `Cloned ${CONFIG.displayName} docs to ${CONFIG.docsPath}.` : `Clone failed: ${clone.stderr || clone.error}` };
+    progress?.(`Cloning ${CONFIG.displayName} docs from ${CONFIG.repoUrl} into ${CONFIG.docsPath}. This can take a while for large documentation repositories...`);
+    const clone = await runCommand("git", ["clone", "--depth=1", CONFIG.repoUrl, CONFIG.docsPath], parent);
+    if (!clone.ok) return { ok: false, message: `Clone failed: ${clone.stderr || clone.error}` };
+    progress?.(`Clone finished. Counting indexed documentation files...`);
+    const stats = await corpusStats();
+    return { ok: true, message: `Cloned ${CONFIG.displayName} docs to ${CONFIG.docsPath}. Found ${stats.pageCount} documentation files.` };
   }
   if (await exists(path.join(CONFIG.docsPath, ".git"))) {
+    progress?.(`Existing Git checkout found at ${CONFIG.docsPath}. Running git pull --ff-only...`);
     const pull = await runCommand("git", ["pull", "--ff-only"], CONFIG.docsPath);
-    return { ok: pull.ok, message: pull.ok ? `Updated ${CONFIG.displayName} docs at ${CONFIG.docsPath}.` : `Update failed: ${pull.stderr || pull.error}` };
+    if (!pull.ok) return { ok: false, message: `Update failed: ${pull.stderr || pull.error}` };
+    progress?.(`Update finished. Counting indexed documentation files...`);
+    const stats = await corpusStats();
+    return { ok: true, message: `Updated ${CONFIG.displayName} docs at ${CONFIG.docsPath}. Found ${stats.pageCount} documentation files.` };
   }
-  return { ok: await corpusAvailable(), message: `Docs path exists but is not a Git checkout: ${CONFIG.docsPath}` };
+  progress?.(`Docs path exists but is not a Git checkout. Checking whether it contains readable documentation files...`, "warning");
+  const available = await corpusAvailable();
+  const stats = available ? await corpusStats() : { pageCount: 0 };
+  return { ok: available, message: available ? `Docs path exists and contains ${stats.pageCount} documentation files, but is not a Git checkout: ${CONFIG.docsPath}` : `Docs path exists but is not a Git checkout and no documentation files were found: ${CONFIG.docsPath}` };
 }
 
 async function executeSearch(params: { query: string; limit?: number; includeSnippets?: boolean }) {
@@ -372,7 +515,7 @@ async function executeSearch(params: { query: string; limit?: number; includeSni
 async function loadPage(pageRef: string): Promise<{ page: WikiPage; cache: LoadedCache }> {
   const cache = await loadCache();
   const page = findPage(cache.pages, pageRef);
-  if (!page) throw new Error(`No ${CONFIG.displayName} page matched '${pageRef}'. Try ${CONFIG.extensionId}wiki_search first.`);
+  if (!page) throw new Error(`No ${CONFIG.displayName} page matched '${pageRef}'. Try ${CONFIG.extensionId}_wiki_search first.`);
   return { page, cache };
 }
 
@@ -383,14 +526,17 @@ async function executeRead(params: { page: string; maxChars?: number }) {
   return { content: [{ type: "text" as const, text: jsonText(payload) }], details: payload };
 }
 
-async function executeSections(params: { page: string }) {
+async function executeSections(params: { page: string; maxSections?: number }) {
   const { page } = await loadPage(params.page);
-  const payload = { title: page.title, path: page.path, sections: page.sections.map((section) => ({ title: section.title, level: section.level, anchor: section.anchor })) };
+  const limit = Math.max(1, Math.min(params.maxSections ?? 80, 300));
+  const sections = page.sections.slice(0, limit);
+  const payload = { title: page.title, path: page.path, omittedSectionCount: Math.max(0, page.sections.length - sections.length), sections: sections.map((section) => ({ title: section.title, level: section.level, anchor: section.anchor })) };
   return { content: [{ type: "text" as const, text: jsonText(payload) }], details: payload };
 }
 
-async function executeExtract(params: { page: string; section?: string; query?: string; maxChars?: number }) {
+async function executeExtract(params: { page: string; section?: string; query?: string; maxChars?: number; maxSections?: number }) {
   const { page } = await loadPage(params.page);
+  const maxSections = Math.max(1, Math.min(params.maxSections ?? (params.query ? 6 : 8), 25));
   let sections = page.sections;
   if (params.section) {
     const needle = normalizeQuery(params.section);
@@ -398,15 +544,19 @@ async function executeExtract(params: { page: string; section?: string; query?: 
   }
   if (params.query) {
     const tokens = expandQuery(params.query);
-    sections = sections.map((section) => {
-      const haystack = normalizeQuery(`${section.title} ${section.text}`);
-      return { section, score: tokens.reduce((sum, token) => sum + (haystack.includes(token) ? 1 : 0), 0) };
-    }).filter((item) => item.score > 0).sort((a, b) => b.score - a.score).map((item) => item.section);
+    sections = sections
+      .map((section) => ({ section, score: scoreSection(section, tokens) }))
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .map((item) => item.section);
   }
   if (!params.section && !params.query) sections = sections.slice(0, 5);
+  const omittedSectionCount = Math.max(0, sections.length - maxSections);
+  sections = sections.slice(0, maxSections);
   const joined = sections.map((section) => `${"#".repeat(Math.min(section.level, 6))} ${section.title}\n\n${section.text}`).join("\n\n");
   const limited = limitText(joined || page.text, params.maxChars ?? 12000);
-  const payload = { title: page.title, path: page.path, citation: `${page.path} — ${sections.map((s) => s.title).join(", ") || page.title}`, matchedSections: sections.map((s) => ({ title: s.title, level: s.level, anchor: s.anchor })), truncated: limited.truncated, text: limited.text };
+  const sectionNames = sections.map((s) => s.title);
+  const payload = { title: page.title, path: page.path, citation: `${page.path} — ${sectionNames.join(", ") || page.title}`, omittedSectionCount, matchedSections: sections.map((s) => ({ title: s.title, level: s.level, anchor: s.anchor })), truncated: limited.truncated, text: limited.text };
   return { content: [{ type: "text" as const, text: jsonText(payload) }], details: payload };
 }
 
@@ -419,8 +569,8 @@ async function executeRelated(params: { page: string; limit?: number }) {
 
 const searchParams = Type.Object({ query: Type.String({ description: `Search query, e.g. '${CONFIG.topicName} config'` }), limit: Type.Optional(Type.Number({ minimum: 1, maximum: 50 })), includeSnippets: Type.Optional(Type.Boolean()) });
 const readParams = Type.Object({ page: Type.String({ description: "Page title, slug, or absolute local path" }), maxChars: Type.Optional(Type.Number({ minimum: 1000, maximum: 100000 })) });
-const sectionsParams = Type.Object({ page: Type.String({ description: "Page title, slug, or absolute local path" }) });
-const extractParams = Type.Object({ page: Type.String({ description: "Page title, slug, or absolute local path" }), section: Type.Optional(Type.String()), query: Type.Optional(Type.String()), maxChars: Type.Optional(Type.Number({ minimum: 1000, maximum: 100000 })) });
+const sectionsParams = Type.Object({ page: Type.String({ description: "Page title, slug, or absolute local path" }), maxSections: Type.Optional(Type.Number({ minimum: 1, maximum: 300 })) });
+const extractParams = Type.Object({ page: Type.String({ description: "Page title, slug, or absolute local path" }), section: Type.Optional(Type.String()), query: Type.Optional(Type.String()), maxChars: Type.Optional(Type.Number({ minimum: 1000, maximum: 100000 })), maxSections: Type.Optional(Type.Number({ minimum: 1, maximum: 25 })) });
 const relatedParams = Type.Object({ page: Type.String({ description: "Page title, slug, or absolute local path" }), limit: Type.Optional(Type.Number({ minimum: 1, maximum: 50 })) });
 
 export default function localWikiExtension(pi: ExtensionAPI) {
@@ -439,11 +589,11 @@ export default function localWikiExtension(pi: ExtensionAPI) {
     }
 
     return {
-      systemPrompt: `${event.systemPrompt}\n\n${CONFIG.displayName} local documentation routing: This prompt appears related to ${CONFIG.topicName}. Use ${CONFIG.extensionId}wiki_search before web sources, then ${CONFIG.extensionId}wiki_extract for focused sections with local path citations. Prefer read-only diagnostics and ask before destructive changes.`,
+      systemPrompt: `${event.systemPrompt}\n\n${CONFIG.displayName} local documentation routing: This prompt appears related to ${CONFIG.topicName}. Use ${CONFIG.extensionId}_wiki_search before web sources, then ${CONFIG.extensionId}_wiki_extract for focused sections with local path citations. Prefer read-only diagnostics and ask before destructive changes.`,
     };
   });
 
-  pi.registerCommand(`${CONFIG.extensionId}wiki-status`, {
+  pi.registerCommand(`${CONFIG.extensionId}_wiki-status`, {
     description: `Show local ${CONFIG.displayName} docs path, page count, and cache freshness`,
     handler: async (_args, ctx) => {
       const result = await executeStatus();
@@ -451,26 +601,32 @@ export default function localWikiExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerCommand(`${CONFIG.extensionId}wiki-local-setup`, {
+  pi.registerCommand(`${CONFIG.extensionId}-wiki-local-setup`, {
     description: `Clone/update or report setup instructions for local ${CONFIG.displayName} docs`,
     handler: async (_args, ctx) => {
-      const result = await executeSetup();
-      ctx.ui.notify(result.message, result.ok ? "info" : "warning");
+      ctx.ui.setStatus?.(`${CONFIG.extensionId}-wiki-setup`, `Setting up ${CONFIG.displayName} docs...`);
+      const progress: SetupProgress = (message, level = "info") => ctx.ui.notify(message, level);
+      try {
+        const result = await executeSetup(progress);
+        ctx.ui.notify(result.message, result.ok ? "info" : "warning");
+      } finally {
+        ctx.ui.setStatus?.(`${CONFIG.extensionId}-wiki-setup`, "");
+      }
     },
   });
 
   pi.registerTool({
-    name: `${CONFIG.extensionId}wiki_search`,
+    name: `${CONFIG.extensionId}_wiki_search`,
     label: `${CONFIG.displayName} Search`,
     description: `Search local ${CONFIG.displayName} documentation pages from ${CONFIG.docsPath}.`,
     promptSnippet: `Search local ${CONFIG.displayName} pages before using web sources for ${CONFIG.topicName} questions`,
-    promptGuidelines: [`Use ${CONFIG.extensionId}wiki_search first for ${CONFIG.topicName} questions before consulting web sources.`, `Use ${CONFIG.extensionId}wiki_extract after search to retrieve focused sections with citations.`],
+    promptGuidelines: [`Use ${CONFIG.extensionId}_wiki_search first for ${CONFIG.topicName} questions before consulting web sources.`, `Use ${CONFIG.extensionId}_wiki_extract after search to retrieve focused sections with citations.`],
     parameters: searchParams,
     async execute(_toolCallId, params) { return executeSearch(params); },
   });
 
-  pi.registerTool({ name: `${CONFIG.extensionId}wiki_read`, label: `${CONFIG.displayName} Read`, description: `Read a local ${CONFIG.displayName} page as clean text with a local path citation.`, promptSnippet: `Read local ${CONFIG.displayName} page text by title, slug, or absolute local path`, promptGuidelines: [`Use ${CONFIG.extensionId}wiki_read only when broad page context is needed; prefer ${CONFIG.extensionId}wiki_extract for focused answers.`], parameters: readParams, async execute(_toolCallId, params) { return executeRead(params); } });
-  pi.registerTool({ name: `${CONFIG.extensionId}wiki_sections`, label: `${CONFIG.displayName} Sections`, description: `List headings/sections for a local ${CONFIG.displayName} page.`, promptSnippet: `List headings from a local ${CONFIG.displayName} page`, promptGuidelines: [`Use ${CONFIG.extensionId}wiki_sections to choose exact local sections before extraction.`], parameters: sectionsParams, async execute(_toolCallId, params) { return executeSections(params); } });
-  pi.registerTool({ name: `${CONFIG.extensionId}wiki_extract`, label: `${CONFIG.displayName} Extract`, description: `Extract a named or query-relevant section from a local ${CONFIG.displayName} page.`, promptSnippet: `Extract focused local ${CONFIG.displayName} sections by heading or query`, promptGuidelines: [`Use ${CONFIG.extensionId}wiki_extract to cite exact local sections in final answers.`], parameters: extractParams, async execute(_toolCallId, params) { return executeExtract(params); } });
-  pi.registerTool({ name: `${CONFIG.extensionId}wiki_related`, label: `${CONFIG.displayName} Related`, description: `Return local ${CONFIG.displayName} pages linked from a given local page.`, promptSnippet: `Find locally linked ${CONFIG.displayName} pages related to a page`, promptGuidelines: [`Use ${CONFIG.extensionId}wiki_related when an issue spans connected ${CONFIG.topicName} topics.`], parameters: relatedParams, async execute(_toolCallId, params) { return executeRelated(params); } });
+  pi.registerTool({ name: `${CONFIG.extensionId}_wiki_read`, label: `${CONFIG.displayName} Read`, description: `Read a local ${CONFIG.displayName} page as clean text with a local path citation.`, promptSnippet: `Read local ${CONFIG.displayName} page text by title, slug, or absolute local path`, promptGuidelines: [`Use ${CONFIG.extensionId}_wiki_read only when broad page context is needed; prefer ${CONFIG.extensionId}_wiki_extract for focused answers.`], parameters: readParams, async execute(_toolCallId, params) { return executeRead(params); } });
+  pi.registerTool({ name: `${CONFIG.extensionId}_wiki_sections`, label: `${CONFIG.displayName} Sections`, description: `List headings/sections for a local ${CONFIG.displayName} page.`, promptSnippet: `List headings from a local ${CONFIG.displayName} page`, promptGuidelines: [`Use ${CONFIG.extensionId}_wiki_sections to choose exact local sections before extraction.`], parameters: sectionsParams, async execute(_toolCallId, params) { return executeSections(params); } });
+  pi.registerTool({ name: `${CONFIG.extensionId}_wiki_extract`, label: `${CONFIG.displayName} Extract`, description: `Extract a named or query-relevant section from a local ${CONFIG.displayName} page.`, promptSnippet: `Extract focused local ${CONFIG.displayName} sections by heading or query`, promptGuidelines: [`Use ${CONFIG.extensionId}_wiki_extract to cite exact local sections in final answers.`], parameters: extractParams, async execute(_toolCallId, params) { return executeExtract(params); } });
+  pi.registerTool({ name: `${CONFIG.extensionId}_wiki_related`, label: `${CONFIG.displayName} Related`, description: `Return local ${CONFIG.displayName} pages linked from a given local page.`, promptSnippet: `Find locally linked ${CONFIG.displayName} pages related to a page`, promptGuidelines: [`Use ${CONFIG.extensionId}_wiki_related when an issue spans connected ${CONFIG.topicName} topics.`], parameters: relatedParams, async execute(_toolCallId, params) { return executeRelated(params); } });
 }
