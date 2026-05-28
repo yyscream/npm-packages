@@ -2,7 +2,8 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSy
 import { homedir, hostname } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
+import type { Readable } from "node:stream";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 const STATUS_KEY = "release-aur";
@@ -16,6 +17,8 @@ const LOG_RENDER_LIMIT = 240;
 const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_RESOURCE_DIR = join(EXTENSION_DIR, "node_modules", "@firstpick", "pi-extension-release-aur");
 const LOG_DIR = join(homedir(), ".pi", "agent", "release-aur-logs");
+const CONFIG_DIR = join(homedir(), ".pi", "agent", "release-aur");
+const CONFIG_PATH = join(CONFIG_DIR, "config.json");
 const AUR_HOST = "aur.archlinux.org";
 const AUR_USER = "aur";
 const DEFAULT_AUR_KEY = join(homedir(), ".ssh", "aur");
@@ -23,15 +26,17 @@ const MANAGED_AUR_CONFIG_BEGIN = "# >>> pi release-aur setup: aur.archlinux.org"
 const MANAGED_AUR_CONFIG_END = "# <<< pi release-aur setup: aur.archlinux.org";
 
 type RunResult = { ok: boolean; output: string; aborted: boolean };
-type AbortableChild = ChildProcessWithoutNullStreams & { abortReleaseStep?: () => void };
+type AbortableChild = ChildProcessByStdio<null, Readable, Readable> & { abortReleaseStep?: () => void };
 type ReleaseRunLog = { id: string; startedAt: string; cwd: string; chunks: string[]; saved: boolean };
 type LogEntry = { file: string; title: string; mtimeMs: number };
+type ReleaseAurConfig = { aurReposDir?: string };
 type Action = "plan" | "publish" | "create" | "logs" | "abort" | "toggle" | "help";
 type ParsedArgs = { action: Action; target?: string; pkgbase?: string; flags: string[]; noAgentReview: boolean; pushAfterCreate: boolean };
 
 type ActiveRun = { abort: () => void; toggleOutput: () => void };
 let activeRun: ActiveRun | undefined;
 let activeLogViewerCleanup: (() => void) | undefined;
+let setupWidgetGeneration = 0;
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
@@ -84,6 +89,46 @@ function listLogs(): LogEntry[] {
       return { file: path, title: file.replace(/\.log$/, ""), mtimeMs: stat.mtimeMs };
     })
     .sort((a, b) => b.mtimeMs - a.mtimeMs);
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function readReleaseAurConfig(): ReleaseAurConfig {
+  if (!existsSync(CONFIG_PATH)) return {};
+  try {
+    const parsed = JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as Partial<ReleaseAurConfig>;
+    return typeof parsed.aurReposDir === "string" && parsed.aurReposDir.trim()
+      ? { aurReposDir: parsed.aurReposDir }
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeReleaseAurConfig(config: ReleaseAurConfig): void {
+  mkdirSync(CONFIG_DIR, { recursive: true });
+  writeFileSync(CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+}
+
+function configuredAurReposDir(): string | undefined {
+  return readReleaseAurConfig().aurReposDir;
+}
+
+function releaseRoot(cwd: string): { root: string; source: "configured" | "cwd"; warning?: string } {
+  const configured = configuredAurReposDir();
+  if (!configured) return { root: cwd, source: "cwd" };
+  if (isDirectory(configured)) return { root: configured, source: "configured" };
+  return {
+    root: cwd,
+    source: "cwd",
+    warning: `Configured AUR repos directory is not usable: ${configured}. Falling back to current directory. Run /release-aur-setup dir to update it.`,
+  };
 }
 
 function extensionResourcePath(...parts: string[]): string {
@@ -161,6 +206,10 @@ function tokenize(input: string): string[] {
   return tokens;
 }
 
+function withDefaultReleaseUpdate(flags: string[]): string[] {
+  return ["--update-release", ...flags];
+}
+
 function parseArgs(raw: string): ParsedArgs {
   const tokens = tokenize(raw.trim());
   const actions = new Set<Action>(["plan", "publish", "create", "logs", "abort", "toggle", "help"]);
@@ -226,13 +275,13 @@ function discoverTargets(cwd: string): string[] {
   }
 }
 
-async function resolveTarget(ctx: ExtensionCommandContext, parsed: ParsedArgs): Promise<string> {
+async function resolveTarget(ctx: ExtensionCommandContext, parsed: ParsedArgs, rootDir: string): Promise<string> {
   if (parsed.target) return parsed.target;
-  const targets = discoverTargets(ctx.cwd);
+  const targets = discoverTargets(rootDir);
   if (targets.length === 0) return "auto";
   if (targets.length === 1) return targets[0];
   if (!ctx.hasUI) return "all";
-  const choice = await ctx.ui.select("Select AUR package target", [...targets, "all", "Cancel"]);
+  const choice = await ctx.ui.select(`Select AUR package target in ${userPath(rootDir)}`, [...targets, "all", "Cancel"]);
   if (!choice || choice === "Cancel") return "__cancelled__";
   return choice;
 }
@@ -372,10 +421,11 @@ async function refreshChecksums(pkgDir: string, runLog: ReleaseRunLog): Promise<
 async function promptMissingPkgbuild(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
+  rootDir: string,
   pkgbase: string,
   runLog: ReleaseRunLog,
 ): Promise<"continue" | "stop"> {
-  const pkgDir = resolve(ctx.cwd, pkgbase);
+  const pkgDir = resolve(rootDir, pkgbase);
   if (!ctx.hasUI) {
     ctx.ui.notify(`AUR repo for ${pkgbase} has no PKGBUILD. Add one, then rerun /release-aur create ${pkgbase}.`, "warning");
     return "stop";
@@ -415,7 +465,7 @@ async function promptMissingPkgbuild(
     mkdirSync(pkgDir, { recursive: true });
     copyFileSync(sourcePath, join(pkgDir, "PKGBUILD"));
     appendLog(runLog, `\n--- copied PKGBUILD from ${sourcePath} ---\n`);
-    ctx.ui.notify(`Copied PKGBUILD from ${sourcePath}.`, "success");
+    ctx.ui.notify(`Copied PKGBUILD from ${sourcePath}.`, "info");
     return "continue";
   }
 
@@ -455,7 +505,7 @@ async function promptMissingPkgbuild(
       binaryName,
     }), "utf8");
     appendLog(runLog, `\n--- wrote ${kind} GitHub template PKGBUILD for ${repo.url} ---\n`);
-    ctx.ui.notify(`Wrote ${kind} template PKGBUILD for ${repo.url}. Running updpkgsums if available...`, "success");
+    ctx.ui.notify(`Wrote ${kind} template PKGBUILD for ${repo.url}. Running updpkgsums if available...`, "info");
     await refreshChecksums(pkgDir, runLog);
     return "continue";
   }
@@ -565,6 +615,78 @@ function readTextIfExists(path: string): string {
   return existsSync(path) ? readFileSync(path, "utf8") : "";
 }
 
+function aurReposDirectoryStatusLines(cwd: string): string[] {
+  const configured = configuredAurReposDir();
+  if (!configured) {
+    return [
+      `AUR repos directory: not configured (set with /release-aur-setup dir)`,
+      `release root fallback: ${userPath(cwd)}`,
+    ];
+  }
+
+  const ok = isDirectory(configured);
+  const targets = ok ? discoverTargets(configured) : [];
+  const lines = [
+    `AUR repos directory: ${ok ? "present" : "missing/invalid"} (${userPath(configured)})`,
+    `AUR package repos found: ${targets.length}`,
+  ];
+  if (targets.length > 0) {
+    lines.push(...targets.slice(0, 20).map((target) => `  - ${target}`));
+    if (targets.length > 20) lines.push(`  - ... ${targets.length - 20} more`);
+  }
+  return lines;
+}
+
+async function runAurReposDirSetup(ctx: ExtensionCommandContext, rawPath?: string): Promise<void> {
+  let input = rawPath?.trim();
+  if (!input) {
+    if (!ctx.hasUI) {
+      ctx.ui.notify("Usage: /release-aur-setup dir <path-to-aur-repos>", "warning");
+      return;
+    }
+    const current = configuredAurReposDir();
+    input = await ctx.ui.input("AUR repos directory", current ? userPath(current) : "~/aur-packages");
+  }
+
+  if (!input?.trim()) {
+    ctx.ui.notify("AUR repos directory setup cancelled.", "info");
+    return;
+  }
+
+  const dir = resolveUserPath(input, ctx.cwd);
+  if (existsSync(dir) && !isDirectory(dir)) {
+    ctx.ui.notify(`AUR repos path exists but is not a directory: ${dir}`, "error");
+    return;
+  }
+
+  if (!existsSync(dir)) {
+    if (!ctx.hasUI) {
+      ctx.ui.notify(`AUR repos directory does not exist: ${dir}`, "error");
+      return;
+    }
+    const create = await ctx.ui.confirm("Create AUR repos directory?", dir);
+    if (!create) {
+      ctx.ui.notify("AUR repos directory setup cancelled.", "info");
+      return;
+    }
+    mkdirSync(dir, { recursive: true });
+  }
+
+  writeReleaseAurConfig({ ...readReleaseAurConfig(), aurReposDir: dir });
+  const targets = discoverTargets(dir);
+  const widgetGeneration = showSetupWidget(ctx, "AUR repos directory", [
+    `Configured: ${userPath(dir)}`,
+    `Config file: ${userPath(CONFIG_PATH)}`,
+    `Package repos found: ${targets.length}`,
+    ...targets.slice(0, 20).map((target) => `  - ${target}`),
+    ...(targets.length > 20 ? [`  - ... ${targets.length - 20} more`] : []),
+    "",
+    "Bare /release-aur now uses this directory to list package repos and prompt for a target.",
+  ]);
+  ctx.ui.notify(`AUR repos directory saved: ${userPath(dir)} (${targets.length} package repo${targets.length === 1 ? "" : "s"} found).`, "info");
+  clearSetupWidget(ctx, widgetGeneration, 8000);
+}
+
 function aurSshStatusLines(): string[] {
   const sshDir = join(homedir(), ".ssh");
   const configPath = join(sshDir, "config");
@@ -580,9 +702,25 @@ function aurSshStatusLines(): string[] {
   ];
 }
 
-function showSetupWidget(ctx: ExtensionCommandContext, title: string, lines: string[]): void {
+function showSetupWidget(ctx: ExtensionCommandContext, title: string, lines: string[]): number {
+  setupWidgetGeneration += 1;
+  if (ctx.hasUI) {
+    ctx.ui.setWidget(SETUP_WIDGET_KEY, [title, "", ...lines], { placement: "aboveEditor" });
+  }
+  return setupWidgetGeneration;
+}
+
+function clearSetupWidget(ctx: ExtensionCommandContext, generation?: number, delayMs = 0): void {
   if (!ctx.hasUI) return;
-  ctx.ui.setWidget(SETUP_WIDGET_KEY, [title, "", ...lines], { placement: "aboveEditor" });
+  const clear = () => {
+    if (generation !== undefined && generation !== setupWidgetGeneration) return;
+    ctx.ui.setWidget(SETUP_WIDGET_KEY, undefined);
+  };
+  if (delayMs > 0) {
+    setTimeout(clear, delayMs);
+  } else {
+    clear();
+  }
 }
 
 async function runSetupCommand(
@@ -608,12 +746,14 @@ function setupHelpText(): string {
   return [
     "Usage:",
     "  /release-aur-setup",
+    "  /release-aur-setup dir [path-to-aur-repos]",
     "  /release-aur-setup ssh",
     "  /release-aur-setup status",
     "  /release-aur-setup abort",
     "  /release-aur-setup help",
     "",
-    "The setup command starts with AUR SSH publishing access. It creates ~/.ssh if needed, can create a dedicated ~/.ssh/aur key, configures Host aur.archlinux.org, shows the public key to add to your AUR profile, and tests SSH auth.",
+    "The setup command can save your AUR repos directory. Bare /release-aur then uses that directory to list repos and prompt for the release target.",
+    "AUR SSH setup creates ~/.ssh if needed, can create a dedicated ~/.ssh/aur key, configures Host aur.archlinux.org, shows the public key to add to your AUR profile, and tests SSH auth.",
   ].join("\n");
 }
 
@@ -648,7 +788,7 @@ async function maybeCopyPublicKeyToClipboard(ctx: ExtensionCommandContext, runLo
     "; else echo 'No supported clipboard tool found (wl-copy, xclip, xsel, pbcopy).'; exit 127; fi",
   ].join(" ");
   const result = await runSetupCommand(ctx, runLog, "copy-public-key", command);
-  ctx.ui.notify(result.ok ? "AUR public key copied to clipboard." : "Could not copy public key; read/copy it from the displayed path instead.", result.ok ? "success" : "warning");
+  ctx.ui.notify(result.ok ? "AUR public key copied to clipboard." : "Could not copy public key; read/copy it from the displayed path instead.", result.ok ? "info" : "warning");
 }
 
 async function runAurSshSetup(ctx: ExtensionCommandContext): Promise<void> {
@@ -703,7 +843,7 @@ async function runAurSshSetup(ctx: ExtensionCommandContext): Promise<void> {
         if (isAurSshSuccess(existingTest)) {
           const logPath = saveRunLog(runLog, "setup-existing-ssh-ok", extractSummary(existingTest.output));
           ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("success", "AUR setup:OK"));
-          ctx.ui.notify(`Existing AUR SSH setup works. No key/config changes needed.${logPath ? ` Log: ${logPath}` : ""}`, "success");
+          ctx.ui.notify(`Existing AUR SSH setup works. No key/config changes needed.${logPath ? ` Log: ${logPath}` : ""}`, "info");
           return;
         }
 
@@ -865,7 +1005,7 @@ async function runAurSshSetup(ctx: ExtensionCommandContext): Promise<void> {
     const logPath = saveRunLog(runLog, isAurSshSuccess(test) ? "setup-ssh-ok" : "setup-ssh-failed", extractSummary(test.output));
     if (isAurSshSuccess(test)) {
       ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("success", "AUR setup:OK"));
-      ctx.ui.notify(`AUR SSH setup completed. You can now use /release-aur create or /release-aur publish.${logPath ? ` Log: ${logPath}` : ""}`, "success");
+      ctx.ui.notify(`AUR SSH setup completed. You can now use /release-aur create or /release-aur publish.${logPath ? ` Log: ${logPath}` : ""}`, "info");
     } else {
       const hint = aurSshFailureHint(stripAnsi(test.output));
       ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("error", "AUR setup:Failed"));
@@ -889,7 +1029,7 @@ async function runAurSetupStatus(ctx: ExtensionCommandContext): Promise<void> {
   }
 
   const runLog = createRunLog(ctx.cwd);
-  const lines = aurSshStatusLines();
+  const lines = [...aurReposDirectoryStatusLines(ctx.cwd), "", ...aurSshStatusLines()];
   appendLog(runLog, "release-aur setup status\n\n--- local status ---\n");
   appendLog(runLog, `${lines.join("\n")}\n`);
   showSetupWidget(ctx, "release-aur setup status", [...lines, "", "AUR SSH connection: checking..."]);
@@ -907,21 +1047,21 @@ async function runAurSetupStatus(ctx: ExtensionCommandContext): Promise<void> {
   const logPath = saveRunLog(runLog, ok ? "status-ssh-ok" : "status-ssh-failed", summary);
 
   if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg(ok ? "success" : "error", ok ? "AUR setup:OK" : "AUR setup:Failed"));
-  ctx.ui.notify(`${finalLines.join("\n")}${logPath ? `\nLog: ${logPath}` : ""}`, ok ? "success" : "error");
+  ctx.ui.notify(`${finalLines.join("\n")}${logPath ? `\nLog: ${logPath}` : ""}`, ok ? "info" : "error");
 }
 
 function helpText(): string {
   return [
     "Usage:",
-    "  /release-aur [plan] [target|all] [--chroot] [--repro] [--no-agent-review]",
-    "  /release-aur publish [target|all] [--chroot] [--repro]",
-    "  /release-aur create <pkgbase> [--push] [--chroot] [--repro] [--no-agent-review]",
+    "  /release-aur [plan] [target|all] [--chroot] [--repro] [--no-update-release] [--no-agent-review]",
+    "  /release-aur publish [target|all] [--chroot] [--repro] [--no-update-release]",
+    "  /release-aur create <pkgbase> [--push] [--chroot] [--repro] [--no-update-release] [--no-agent-review]",
     "  /release-aur logs",
     "  /release-aur abort",
     "  /release-aur toggle",
-    "  /release-aur-setup [ssh|status|abort|help]",
+    "  /release-aur-setup [dir|ssh|status|abort|help]",
     "",
-    "Default action is plan. Plan runs checks in a temporary copy and queues an agent GO/NO-GO review. Use /release-aur-setup for AUR SSH publishing prerequisites. Create converges empty/non-git/already-git package dirs into an AUR repo, then plans by default. Create --push continues through publish after explicit confirmation. Publish re-runs checks, regenerates .SRCINFO, commits, and pushes only after explicit confirmation.",
+    "Default action is plan. If /release-aur-setup dir configured an AUR repos directory, plan/publish/create use that root for target discovery; otherwise they use the current directory. Before checks, release commands check supported GitHub latest releases; when newer, they bump pkgver, reset pkgrel=1, run updpkgsums, and regenerate .SRCINFO. Use --no-update-release to skip that step. Plan then runs checks in a temporary copy and queues an agent GO/NO-GO review. Use /release-aur-setup for AUR repos directory and SSH publishing prerequisites. Create converges empty/non-git/already-git package dirs into an AUR repo, then plans by default. Create --push continues through publish after explicit confirmation. Publish re-runs checks, regenerates .SRCINFO, commits, and pushes only after explicit confirmation.",
   ].join("\n");
 }
 
@@ -981,14 +1121,18 @@ export default function releaseAurExtension(pi: ExtensionAPI) {
   pi.registerCommand("release-aur-setup", {
     description: "Set up AUR publishing prerequisites, starting with SSH access",
     getArgumentCompletions: (prefix) => {
-      const items = ["ssh", "status", "abort", "help"];
+      const items = ["dir", "directory", "root", "ssh", "status", "abort", "help"];
       const filtered = items.filter((item) => item.startsWith(prefix));
       return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
     },
     handler: async (args, ctx) => {
-      const [action] = tokenize(args?.trim() ?? "");
+      const [action, ...rest] = tokenize(args?.trim() ?? "");
       if (action === "help") {
         ctx.ui.notify(setupHelpText(), "info");
+        return;
+      }
+      if (action === "dir" || action === "directory" || action === "root") {
+        await runAurReposDirSetup(ctx, rest.join(" "));
         return;
       }
       if (action === "status") {
@@ -1017,12 +1161,15 @@ export default function releaseAurExtension(pi: ExtensionAPI) {
         return;
       }
       const choice = await ctx.ui.select("release-aur setup", [
+        "AUR repos directory",
         "AUR SSH connection",
         "AUR SSH status",
         "Help",
         "Cancel",
       ]);
-      if (choice === "AUR SSH connection") {
+      if (choice === "AUR repos directory") {
+        await runAurReposDirSetup(ctx);
+      } else if (choice === "AUR SSH connection") {
         await runAurSshSetup(ctx);
       } else if (choice === "AUR SSH status") {
         await runAurSetupStatus(ctx);
@@ -1036,8 +1183,9 @@ export default function releaseAurExtension(pi: ExtensionAPI) {
     description: "Plan, review, create, and publish AUR packages safely",
     getArgumentCompletions: (prefix) => {
       const commands = ["plan", "publish", "create", "logs", "abort", "toggle", "help"];
-      const targets = discoverTargets(process.cwd());
-      const items = [...commands, ...targets, "all", "--chroot", "--repro", "--no-agent-review", "--push"];
+      const root = releaseRoot(process.cwd()).root;
+      const targets = discoverTargets(root);
+      const items = [...commands, ...targets, "all", "--chroot", "--repro", "--update-release", "--no-update-release", "--no-agent-review", "--push"];
       const filtered = items.filter((item) => item.startsWith(prefix));
       return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
     },
@@ -1074,6 +1222,9 @@ export default function releaseAurExtension(pi: ExtensionAPI) {
         return;
       }
 
+      const rootInfo = releaseRoot(ctx.cwd);
+      if (rootInfo.warning) ctx.ui.notify(rootInfo.warning, "warning");
+
       if (parsed.action === "create") {
         if (!parsed.pkgbase) {
           ctx.ui.notify("Usage: /release-aur create <pkgbase> [--push] [--chroot] [--repro]", "warning");
@@ -1088,7 +1239,7 @@ export default function releaseAurExtension(pi: ExtensionAPI) {
             "Create/converge AUR package repository?",
             [
               `Target: ${parsed.pkgbase}`,
-              `Root: ${ctx.cwd}`,
+              `Root: ${rootInfo.root}${rootInfo.source === "configured" ? " (from /release-aur-setup dir)" : ""}`,
               "",
               "This converges the target directory into an AUR git repo:",
               "- empty/missing directory: clone AUR repo",
@@ -1105,19 +1256,19 @@ export default function releaseAurExtension(pi: ExtensionAPI) {
             return;
           }
         }
-        await runCreateFlow(pi, ctx, parsed.pkgbase, parsed.flags, parsed.pushAfterCreate, !parsed.noAgentReview);
+        await runCreateFlow(pi, ctx, rootInfo.root, parsed.pkgbase, parsed.flags, parsed.pushAfterCreate, !parsed.noAgentReview);
         return;
       }
 
-      const target = await resolveTarget(ctx, parsed);
+      const target = await resolveTarget(ctx, parsed, rootInfo.root);
       if (target === "__cancelled__") {
         ctx.ui.notify("release-aur cancelled.", "info");
         return;
       }
 
-      const commonArgs = ["--target", target, ...parsed.flags];
+      const commonArgs = ["--target", target, ...withDefaultReleaseUpdate(parsed.flags)];
       if (parsed.action === "plan") {
-        await runWorkflow(pi, ctx, ["--plan", ...commonArgs], "plan", target, !parsed.noAgentReview);
+        await runWorkflow(pi, ctx, rootInfo.root, ["--plan", ...commonArgs], "plan", target, !parsed.noAgentReview);
         return;
       }
 
@@ -1126,7 +1277,7 @@ export default function releaseAurExtension(pi: ExtensionAPI) {
           ctx.ui.notify("/release-aur publish is blocked without interactive UI confirmation.", "error");
           return;
         }
-        await runWorkflow(pi, ctx, ["--plan", ...commonArgs], "publish-preflight", target, false, async (plan) => {
+        await runWorkflow(pi, ctx, rootInfo.root, ["--plan", ...commonArgs], "publish-preflight", target, false, async (plan) => {
           if (!plan.ok) return false;
           const summary = extractSummary(plan.output);
           const choice = await ctx.ui.select([
@@ -1150,12 +1301,13 @@ export default function releaseAurExtension(pi: ExtensionAPI) {
 async function runCreateFlow(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
+  rootDir: string,
   pkgbase: string,
   flags: string[],
   pushAfterCreate: boolean,
   queueReview: boolean,
 ): Promise<void> {
-  const runLog = createRunLog(ctx.cwd);
+  const runLog = createRunLog(rootDir);
   void (async () => {
     let liveBuffer = "";
     let expanded = false;
@@ -1230,9 +1382,9 @@ async function runCreateFlow(
     const runPhase = async (nextPhase: string, args: string[]): Promise<RunResult> => {
       phase = nextPhase;
       startUi(nextPhase === "publish" ? "AUR:Publishing" : "AUR:Running");
-      const command = scriptCommand(ctx.cwd, args);
+      const command = scriptCommand(rootDir, args);
       append(`\n$ ${command}\n`);
-      const result = await runScriptLive(ctx.cwd, command, append, (child) => { currentChild = child; });
+      const result = await runScriptLive(rootDir, command, append, (child) => { currentChild = child; });
       currentChild = undefined;
       return result;
     };
@@ -1259,7 +1411,7 @@ async function runCreateFlow(
     if (/no PKGBUILD yet/.test(create.output)) {
       closeUi();
       if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("warning", "AUR:Needs-PKGBUILD"));
-      const missingDecision = await promptMissingPkgbuild(pi, ctx, pkgbase, runLog);
+      const missingDecision = await promptMissingPkgbuild(pi, ctx, rootDir, pkgbase, runLog);
       if (missingDecision !== "continue") {
         const logPath = saveRunLog(runLog, "completed-create-needs-pkgbuild", "AUR repo created/converged; PKGBUILD still needs to be added.");
         ctx.ui.notify(`AUR repo setup stopped until PKGBUILD exists.${logPath ? `\nLog: ${logPath}` : ""}`, "info");
@@ -1285,7 +1437,7 @@ async function runCreateFlow(
       }
     }
 
-    const plan = await runPhase("plan", ["--plan", "--target", pkgbase, ...flags]);
+    const plan = await runPhase("plan", ["--plan", "--target", pkgbase, ...withDefaultReleaseUpdate(flags)]);
     if (plan.aborted) {
       const logPath = saveRunLog(runLog, "aborted-create-plan");
       closeUi();
@@ -1307,8 +1459,8 @@ async function runCreateFlow(
       const logPath = saveRunLog(runLog, "completed-create-plan", summary);
       closeUi();
       if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("success", "AUR:OK"));
-      ctx.ui.notify(`${summary}\nrelease-aur create+plan completed.${logPath ? `\nLog: ${logPath}` : ""}`, "success");
-      if (queueReview) queueAgentReview(pi, ctx.cwd, pkgbase, plan.output);
+      ctx.ui.notify(`${summary}\nrelease-aur create+plan completed.${logPath ? `\nLog: ${logPath}` : ""}`, "info");
+      if (queueReview) queueAgentReview(pi, rootDir, pkgbase, plan.output);
       return;
     }
 
@@ -1329,7 +1481,7 @@ async function runCreateFlow(
     }
 
     liveBuffer = "";
-    const publish = await runPhase("publish", ["--publish", "--target", pkgbase, ...flags]);
+    const publish = await runPhase("publish", ["--publish", "--target", pkgbase, ...withDefaultReleaseUpdate(flags)]);
     if (publish.aborted) {
       const logPath = saveRunLog(runLog, "aborted-create-publish");
       closeUi();
@@ -1350,7 +1502,7 @@ async function runCreateFlow(
     const logPath = saveRunLog(runLog, "completed-create-publish", finalSummary);
     closeUi();
     if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("success", "AUR:OK"));
-    ctx.ui.notify(`${finalSummary}\nrelease-aur create --push completed.${logPath ? `\nLog: ${logPath}` : ""}`, "success");
+    ctx.ui.notify(`${finalSummary}\nrelease-aur create --push completed.${logPath ? `\nLog: ${logPath}` : ""}`, "info");
   })().catch((error: unknown) => {
     activeRun = undefined;
     if (ctx.hasUI) {
@@ -1367,6 +1519,7 @@ async function runCreateFlow(
 async function runWorkflow(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
+  rootDir: string,
   initialArgs: string[],
   phaseLabel: string,
   targetLabel: string,
@@ -1374,7 +1527,7 @@ async function runWorkflow(
   beforeSecondPhase?: (result: RunResult) => Promise<boolean>,
   secondArgs?: string[],
 ): Promise<void> {
-  const runLog = createRunLog(ctx.cwd);
+  const runLog = createRunLog(rootDir);
   void (async () => {
     let liveBuffer = "";
     let expanded = false;
@@ -1446,9 +1599,9 @@ async function runWorkflow(
       });
     }
 
-    const firstCommand = scriptCommand(ctx.cwd, initialArgs);
+    const firstCommand = scriptCommand(rootDir, initialArgs);
     append(`$ ${firstCommand}\n`);
-    const first = await runScriptLive(ctx.cwd, firstCommand, append, (child) => { currentChild = child; });
+    const first = await runScriptLive(rootDir, firstCommand, append, (child) => { currentChild = child; });
     currentChild = undefined;
 
     if (first.aborted) {
@@ -1485,9 +1638,9 @@ async function runWorkflow(
         ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", "AUR:Publishing"));
         render();
       }
-      const secondCommand = scriptCommand(ctx.cwd, secondArgs);
+      const secondCommand = scriptCommand(rootDir, secondArgs);
       append(`$ ${secondCommand}\n`);
-      const second = await runScriptLive(ctx.cwd, secondCommand, append, (child) => { currentChild = child; });
+      const second = await runScriptLive(rootDir, secondCommand, append, (child) => { currentChild = child; });
       currentChild = undefined;
 
       if (second.aborted) {
@@ -1510,7 +1663,7 @@ async function runWorkflow(
       const logPath = saveRunLog(runLog, "completed-publish", finalSummary);
       closeUi();
       if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("success", "AUR:OK"));
-      ctx.ui.notify(`${finalSummary}\nrelease-aur publish completed.${logPath ? `\nLog: ${logPath}` : ""}`, "success");
+      ctx.ui.notify(`${finalSummary}\nrelease-aur publish completed.${logPath ? `\nLog: ${logPath}` : ""}`, "info");
       return;
     }
 
@@ -1518,8 +1671,8 @@ async function runWorkflow(
     const logPath = saveRunLog(runLog, `completed-${phaseLabel}`, summary);
     closeUi();
     if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("success", "AUR:OK"));
-    ctx.ui.notify(`${summary}\nrelease-aur ${phaseLabel} completed.${logPath ? `\nLog: ${logPath}` : ""}`, "success");
-    if (queueReview) queueAgentReview(pi, ctx.cwd, targetLabel, first.output);
+    ctx.ui.notify(`${summary}\nrelease-aur ${phaseLabel} completed.${logPath ? `\nLog: ${logPath}` : ""}`, "info");
+    if (queueReview) queueAgentReview(pi, rootDir, targetLabel, first.output);
   })().catch((error: unknown) => {
     activeRun = undefined;
     if (ctx.hasUI) {

@@ -9,6 +9,7 @@ RUN_CHROOT=0
 RUN_REPRO=0
 STRICT_NAMCAP=1
 KEEP_WORK=0
+UPDATE_RELEASE=0
 
 RESULT_LINES=()
 TMP_DIRS=()
@@ -21,7 +22,7 @@ Usage:
   aur-release-workflow.sh --create --pkgbase <name>
 
 Modes:
-  --plan       Run deterministic AUR preflight checks in a temporary copy. No repo writes.
+  --plan       Run deterministic AUR preflight checks in a temporary copy. With --update-release, may update PKGBUILD/.SRCINFO first.
   --publish    Re-run checks, regenerate .SRCINFO, commit, and push to AUR master.
   --create     Converge a target directory into an AUR package repository.
                Handles missing/empty dirs, existing git repos, and non-git dirs with PKGBUILD.
@@ -32,6 +33,8 @@ Options:
   --pkgbase <name>         AUR pkgbase for --create.
   --chroot                 Also run pkgctl build in the temporary copy when pkgctl is available.
   --repro                  Also run makerepropkg on built package(s) when available.
+  --update-release         For supported GitHub release packages, bump pkgver to latest release, reset pkgrel=1, run updpkgsums, and regenerate .SRCINFO before checks.
+  --no-update-release      Disable release update check when the caller enables it by default.
   --keep-work              Keep temporary work directories for debugging.
   --no-strict-namcap       Do not fail on namcap E: findings.
   -h, --help               Show help.
@@ -76,6 +79,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --repro)
       RUN_REPRO=1
+      shift
+      ;;
+    --update-release)
+      UPDATE_RELEASE=1
+      shift
+      ;;
+    --no-update-release)
+      UPDATE_RELEASE=0
       shift
       ;;
     --keep-work)
@@ -161,7 +172,7 @@ resolve_targets() {
   fi
 
   if [[ "$target" == "all" ]]; then
-    find "$ROOT_DIR" -mindepth 1 -maxdepth 1 -type f -name PKGBUILD -printf '%h\n' | sort
+    find "$ROOT_DIR" -mindepth 2 -maxdepth 2 -type f -name PKGBUILD -printf '%h\n' | sort
     return 0
   fi
 
@@ -246,6 +257,183 @@ package_version_label() {
   else
     printf '%s-%s' "${pkgver:-unknown}" "${pkgrel:-unknown}"
   fi
+}
+
+pkgbuild_value() {
+  local pkgbuild="$1"
+  local key="$2"
+  awk -F= -v key="$key" '
+    $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      value=$0
+      sub(/^[^=]*=/, "", value)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      gsub(/^['\''"]|['\''"]$/, "", value)
+      print value
+      exit
+    }
+  ' "$pkgbuild"
+}
+
+github_repo_from_pkgbuild() {
+  local pkgbuild="$1"
+  local match repo
+  match="$(grep -Eio 'github\.com[:/][A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+' "$pkgbuild" | head -n 1 || true)"
+  [[ -z "$match" ]] && return 1
+  repo="${match#github.com/}"
+  repo="${repo#github.com:}"
+  repo="${repo%.git}"
+  [[ "$repo" == */* ]] || return 1
+  printf '%s\n' "$repo"
+}
+
+normalize_release_tag() {
+  local tag="$1"
+  tag="${tag#refs/tags/}"
+  tag="${tag#v}"
+  tag="${tag#V}"
+  tag="${tag//-/_}"
+  printf '%s\n' "$tag"
+}
+
+latest_github_release_tag() {
+  local repo="$1"
+  local api tag
+  if command -v curl >/dev/null 2>&1; then
+    api="https://api.github.com/repos/${repo}/releases/latest"
+    tag="$(curl -fsSL -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "$api" 2>/dev/null | sed -nE 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -n 1 || true)"
+    if [[ -n "$tag" ]]; then
+      printf '%s\n' "$tag"
+      return 0
+    fi
+  fi
+
+  if command -v git >/dev/null 2>&1; then
+    tag="$(git ls-remote --tags --refs "https://github.com/${repo}.git" 2>/dev/null | awk -F/ '{print $NF}' | sort -V | tail -n 1 || true)"
+    if [[ -n "$tag" ]]; then
+      printf '%s\n' "$tag"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+set_pkgbuild_version_and_rel() {
+  local pkgbuild="$1"
+  local version="$2"
+  local tmp
+  tmp="$(mktemp)"
+  awk -v version="$version" '
+    BEGIN { pkgver_done=0; pkgrel_done=0 }
+    /^[[:space:]]*pkgver[[:space:]]*=/ && pkgver_done == 0 { print "pkgver=" version; pkgver_done=1; next }
+    /^[[:space:]]*pkgrel[[:space:]]*=/ && pkgrel_done == 0 { print "pkgrel=1"; pkgrel_done=1; next }
+    { print }
+    END {
+      if (pkgver_done == 0) exit 2
+      if (pkgrel_done == 0) exit 3
+    }
+  ' "$pkgbuild" > "$tmp"
+  local status=$?
+  if [[ $status -ne 0 ]]; then
+    rm -f -- "$tmp"
+    return $status
+  fi
+  mv -- "$tmp" "$pkgbuild"
+}
+
+update_release_if_needed() {
+  local pkg_dir="$1"
+  local display pkgbuild repo current tag latest cmp
+  display="$(basename "$pkg_dir")"
+  pkgbuild="$pkg_dir/PKGBUILD"
+
+  echo "$(info '==>') Upstream release check $display"
+  if [[ ! -f "$pkgbuild" ]]; then
+    echo "  - [$(warn)] PKGBUILD missing; skipping release update check"
+    return 0
+  fi
+
+  repo="$(github_repo_from_pkgbuild "$pkgbuild" || true)"
+  if [[ -z "$repo" ]]; then
+    echo "  - [$(warn)] no github.com repository URL detected; skipping release update check"
+    return 0
+  fi
+  echo "  - GitHub repo: $repo"
+
+  current="$(pkgbuild_value "$pkgbuild" pkgver)"
+  if [[ -z "$current" ]]; then
+    echo "  - [$(fail)] could not read pkgver from PKGBUILD"
+    return 1
+  fi
+  echo "  - current pkgver: $current"
+
+  tag="$(latest_github_release_tag "$repo" || true)"
+  if [[ -z "$tag" ]]; then
+    echo "  - [$(warn)] could not determine latest GitHub release; skipping release update check"
+    return 0
+  fi
+  latest="$(normalize_release_tag "$tag")"
+  echo "  - latest release: $tag -> pkgver $latest"
+
+  if ! command -v vercmp >/dev/null 2>&1; then
+    echo "  - [$(fail)] vercmp not installed; cannot compare versions safely"
+    return 1
+  fi
+
+  cmp="$(vercmp "$latest" "$current")"
+  if [[ "$cmp" -le 0 ]]; then
+    echo "  - [$(ok)] pkgver is current or newer; no bump needed"
+    return 0
+  fi
+
+  if ! command -v updpkgsums >/dev/null 2>&1; then
+    echo "  - [$(fail)] updpkgsums not installed; cannot update checksum arrays"
+    return 1
+  fi
+
+  local backup_pkgbuild backup_srcinfo had_srcinfo
+  backup_pkgbuild="$(mktemp)"
+  backup_srcinfo="$(mktemp)"
+  had_srcinfo=0
+  cp -- "$pkgbuild" "$backup_pkgbuild"
+  if [[ -f "$pkg_dir/.SRCINFO" ]]; then
+    cp -- "$pkg_dir/.SRCINFO" "$backup_srcinfo"
+    had_srcinfo=1
+  fi
+  restore_update_backup() {
+    cp -- "$backup_pkgbuild" "$pkgbuild"
+    if [[ $had_srcinfo -eq 1 ]]; then
+      cp -- "$backup_srcinfo" "$pkg_dir/.SRCINFO"
+    else
+      rm -f -- "$pkg_dir/.SRCINFO"
+    fi
+    rm -f -- "$backup_pkgbuild" "$backup_srcinfo"
+  }
+
+  if ! set_pkgbuild_version_and_rel "$pkgbuild" "$latest"; then
+    echo "  - [$(fail)] could not update pkgver/pkgrel in PKGBUILD"
+    restore_update_backup
+    return 1
+  fi
+  echo "  - [$(ok)] bumped pkgver $current -> $latest and reset pkgrel=1"
+
+  echo "+ updpkgsums"
+  if ! (cd "$pkg_dir" && updpkgsums); then
+    echo "  - [$(fail)] updpkgsums failed after pkgver bump; restored PKGBUILD/.SRCINFO"
+    restore_update_backup
+    return 1
+  fi
+  echo "  - [$(ok)] updated checksum arrays"
+
+  echo "+ makepkg --printsrcinfo > .SRCINFO"
+  if ! (cd "$pkg_dir" && makepkg --printsrcinfo > .SRCINFO); then
+    echo "  - [$(fail)] failed to regenerate .SRCINFO after pkgver bump; restored PKGBUILD/.SRCINFO"
+    restore_update_backup
+    return 1
+  fi
+  echo "  - [$(ok)] regenerated .SRCINFO"
+  rm -f -- "$backup_pkgbuild" "$backup_srcinfo"
+  return 0
 }
 
 LAST_PKGBASE=""
@@ -833,11 +1021,18 @@ main() {
   echo "root=$ROOT_DIR"
   echo "target=$TARGET"
   echo "targets=${#targets[@]}"
-  echo "chroot=$RUN_CHROOT repro=$RUN_REPRO strict_namcap=$STRICT_NAMCAP"
+  echo "chroot=$RUN_CHROOT repro=$RUN_REPRO strict_namcap=$STRICT_NAMCAP update_release=$UPDATE_RELEASE"
   echo
 
   local failures=0
   local target_dir
+  if [[ $UPDATE_RELEASE -eq 1 ]]; then
+    for target_dir in "${targets[@]}"; do
+      update_release_if_needed "$target_dir" || failures=$((failures + 1))
+    done
+    echo
+  fi
+
   if [[ "$MODE" == "plan" ]]; then
     for target_dir in "${targets[@]}"; do
       check_one "$target_dir" || failures=$((failures + 1))

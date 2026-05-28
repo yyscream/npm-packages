@@ -14,14 +14,15 @@ Primary triggers:
 Subcommands:
 
 ```text
-/release-aur [plan] [target|all] [--chroot] [--repro] [--no-agent-review]
-/release-aur publish [target|all] [--chroot] [--repro]
-/release-aur create <pkgbase> [--push] [--chroot] [--repro] [--no-agent-review]
+/release-aur [plan] [target|all] [--chroot] [--repro] [--no-update-release] [--no-agent-review]
+/release-aur publish [target|all] [--chroot] [--repro] [--no-update-release]
+/release-aur create <pkgbase> [--push] [--chroot] [--repro] [--no-update-release] [--no-agent-review]
 /release-aur logs
 /release-aur abort
 /release-aur toggle
 
 /release-aur-setup
+/release-aur-setup dir [path-to-aur-repos]
 /release-aur-setup ssh
 /release-aur-setup status
 /release-aur-setup abort
@@ -30,7 +31,16 @@ Subcommands:
 
 Default `/release-aur` action is `plan`.
 
-`/release-aur-setup` opens a native Pi setup menu. The first workflow is AUR SSH publishing access:
+By default, release commands check supported GitHub latest releases before preflight. If a newer release exists, the workflow updates `pkgver`, resets `pkgrel=1`, runs `updpkgsums`, and regenerates `.SRCINFO`. Pass `--no-update-release` to skip this update step.
+
+`/release-aur-setup` opens a native Pi setup menu. It can save the directory where you keep AUR package repos:
+
+- `/release-aur-setup dir` prompts for the AUR repos directory;
+- `/release-aur-setup dir ~/aur-packages` saves it directly;
+- the path is stored in `~/.pi/agent/release-aur/config.json`;
+- bare `/release-aur` then uses that directory to list repos and prompt for the release target.
+
+The setup menu also includes AUR SSH publishing access:
 
 - checks required local tools: `ssh`, `ssh-keygen`, `git`;
 - `/release-aur-setup status` checks local SSH files/config and also runs the AUR SSH connection test;
@@ -48,7 +58,10 @@ For fully automated key creation, the setup can create an empty-passphrase key o
 
 `/release-aur plan`:
 
-- runs in a temporary copy of the package directory;
+- checks supported GitHub latest releases before preflight and, when newer, updates `PKGBUILD`/`.SRCINFO` in the package repo;
+- resets `pkgrel=1` when `pkgver` is bumped;
+- updates checksum arrays with `updpkgsums` after a version bump;
+- runs build checks in a temporary copy of the package directory;
 - verifies `makepkg --printsrcinfo` and compares it to committed `.SRCINFO`;
 - runs `makepkg --verifysource`;
 - runs a full `makepkg --clean --cleanbuild --force --noconfirm` build without `--syncdeps`;
@@ -62,7 +75,7 @@ For fully automated key creation, the setup can create an empty-passphrase key o
 
 `/release-aur publish`:
 
-- re-runs preflight checks first;
+- re-runs latest-release update checks and preflight checks first;
 - requires interactive user confirmation;
 - regenerates `.SRCINFO` using `makepkg --printsrcinfo > .SRCINFO`;
 - stages `PKGBUILD`, `.SRCINFO`, tracked changes, and safe helper-file patterns only;
@@ -118,7 +131,7 @@ package-a/
   .SRCINFO
 ```
 
-When multiple package directories are found, `/release-aur` prompts for a target or `all`.
+When multiple package directories are found, `/release-aur` prompts for a target or `all`. If `/release-aur-setup dir` has configured an AUR repos directory, target discovery uses that directory from any current working directory; otherwise it uses the current directory.
 
 ## Recommended local tools
 
@@ -148,6 +161,7 @@ This workflow follows these ArchWiki rules/guidance:
 - AUR uploads should be reviewed carefully before submission.
 - New AUR package repositories are initialized by cloning `ssh://aur@aur.archlinux.org/<pkgbase>.git`.
 - `.SRCINFO` must be regenerated when `PKGBUILD` metadata changes.
+- When upstream `pkgver` is bumped, `pkgrel` resets to `1` and checksum arrays must match the new sources.
 - At least `PKGBUILD` and `.SRCINFO` must be committed and pushed.
 - AUR accepts pushes to `master`.
 - Package testing should include `makepkg`, package content inspection, dependency review, and `namcap` sanity checks.

@@ -24,7 +24,9 @@ Use this skill for AUR package creation, updates, release readiness reviews, pub
    - no `namcap E:` findings unless the user explicitly accepts a justified exception.
    - no build artifacts, secrets, or unrelated files are staged or likely to be auto-staged.
    - dependencies are direct and explicit, not merely transitive.
-   - `pkgver` matches upstream and `pkgrel` is used for Arch package rebuilds.
+   - latest-release update check ran or was explicitly skipped with justification.
+   - `pkgver` matches upstream and `pkgrel` is reset to `1` when upstream `pkgver` is bumped.
+   - checksum arrays were refreshed with `updpkgsums` after a version bump.
    - VCS packages are not committed for a mere upstream `pkgver` bump.
 4. Return `GO` only when publish is appropriate. Include the exact command:
    ```text
@@ -35,13 +37,16 @@ Use this skill for AUR package creation, updates, release readiness reviews, pub
 
 ## Setup flow
 
-Use `/release-aur-setup` when the user needs AUR publishing prerequisites prepared. The first setup workflow is AUR SSH access:
+Use `/release-aur-setup` when the user needs AUR release workflow prerequisites prepared. The setup workflows are:
 
 ```text
+/release-aur-setup dir [path-to-aur-repos]
 /release-aur-setup ssh
 ```
 
-The extension should use native Pi UI, follow ArchWiki AUR authentication guidance, check `~/.ssh/config` first for an existing `Host aur.archlinux.org` block, directly test that existing connection before creating keys or editing config, make `/release-aur-setup status` run both local file/config checks and the AUR SSH connection test, create/configure only under `~/.ssh` after confirmation when setup is still needed, prefer a dedicated `~/.ssh/aur` key, show/copy the public key for the user to add in AUR `My Account`, and test SSH auth only after the user confirms the public key was added. Do not claim remote AUR auth is complete until the SSH test succeeds.
+The extension should use native Pi UI to prompt for the directory where the user stores AUR package repos. Persist it in `~/.pi/agent/release-aur/config.json`; bare `/release-aur` should use it to list repos and prompt where the release should run. If no directory is configured, current-directory discovery is the fallback.
+
+For SSH access, the extension should use native Pi UI, follow ArchWiki AUR authentication guidance, check `~/.ssh/config` first for an existing `Host aur.archlinux.org` block, directly test that existing connection before creating keys or editing config, make `/release-aur-setup status` run both local file/config checks and the AUR SSH connection test, create/configure only under `~/.ssh` after confirmation when setup is still needed, prefer a dedicated `~/.ssh/aur` key, show/copy the public key for the user to add in AUR `My Account`, and test SSH auth only after the user confirms the public key was added. Do not claim remote AUR auth is complete until the SSH test succeeds.
 
 ## Create flow
 
@@ -86,6 +91,7 @@ Verdict: GO / NO-GO
 Confidence: NN/100
 
 Checks:
+- latest release update check: PASS/WARN/FAIL/SKIPPED
 - makepkg --printsrcinfo: PASS/FAIL
 - .SRCINFO sync: PASS/WARN/FAIL
 - makepkg --verifysource: PASS/FAIL
