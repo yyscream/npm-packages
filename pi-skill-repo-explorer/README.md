@@ -5,8 +5,9 @@ A Pi skill for use before modifying unfamiliar codebases, answering where/how so
 ## What it does
 
 - Adds the `repo-explorer` skill to Pi's skill library.
-- Guides agents to invoke the skill before modifying unfamiliar codebases, answering where/how something is implemented, tracing dependencies, mapping repo structure, or planning changes. Explores a repository and returns a strict JSON handoff with key files, symbols, risks, and evidence.
-- Bundles `skills/repo-explorer/SKILL.md` plus any supporting references, scripts, tests, fixtures, or assets used by the skill.
+- Adds the `repo_explorer_explore` tool for cached, validated, compact repository exploration.
+- Guides agents to invoke the skill/tool before modifying unfamiliar codebases, answering where/how something is implemented, tracing dependencies, mapping repo structure, or planning changes.
+- Bundles `skills/repo-explorer/SKILL.md`, `extensions/repo-explorer.ts`, and supporting scripts/tests.
 
 ## Install
 
@@ -52,7 +53,7 @@ None.
 
 ## Tools
 
-None.
+- `repo_explorer_explore`: build/refresh a local repo index, extract a goal-focused handoff, validate it, and return compact model-visible results. Defaults to `budget: "compact"` and no evidence snippets.
 
 ## Example view
 

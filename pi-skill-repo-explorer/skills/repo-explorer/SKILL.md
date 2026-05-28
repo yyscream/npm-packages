@@ -26,7 +26,11 @@ The caller provides a request (natural language or structured). Extract:
 
 If the request is natural language, infer these fields before proceeding.
 
-### Step 2: Check/Build Index
+### Step 2: Prefer Native Tool When Available
+
+If the `repo_explorer_explore` tool is available, call it first with `budget: "compact"`. It wraps index refresh/build, extraction, validation, and compact output in one tool call.
+
+Use the script workflow below only when the native tool is unavailable or you need to debug the helper scripts directly.
 
 ```bash
 # Check if persistent index exists and is fresh

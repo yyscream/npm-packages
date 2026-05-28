@@ -45,6 +45,16 @@ def _build_index(repo: Path, output: Path) -> dict:
 
 
 class RepoExplorerTests(unittest.TestCase):
+    def test_package_registers_native_tool_extension(self):
+        package_json = json.loads((SKILL_DIR.parents[1] / "package.json").read_text(encoding="utf-8"))
+        extension_path = SKILL_DIR.parents[1] / "extensions" / "repo-explorer.ts"
+
+        self.assertIn("./extensions", package_json["pi"]["extensions"])
+        self.assertIn("extensions", package_json["files"])
+        self.assertTrue(extension_path.exists())
+        source = extension_path.read_text(encoding="utf-8")
+        self.assertIn('name: "repo_explorer_explore"', source)
+
     def test_validator_rejects_missing_required_contract_fields(self):
         handoff_missing_index_info_and_errors = {
             "schema_version": "1.0",
