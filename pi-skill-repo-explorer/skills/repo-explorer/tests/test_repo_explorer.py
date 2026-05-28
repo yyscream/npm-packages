@@ -102,6 +102,68 @@ class RepoExplorerTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertTrue(payload["valid"], payload)
 
+    def test_validator_rejects_invalid_timestamp_paths_lines_and_confidence(self):
+        invalid_handoff = {
+            "schema_version": "1.0",
+            "explorer": "pathfinder",
+            "timestamp": "not-a-timestamp",
+            "request": {"goal": "x", "target_paths": ["/tmp/repo"], "depth": "standard"},
+            "index_info": {"index_path": "/tmp/index.json", "index_age_seconds": 0, "files_indexed": 1},
+            "task_understanding": "x",
+            "key_files": [
+                {
+                    "path": "/definitely/missing/repo_explorer_file.py",
+                    "role": "source",
+                    "language": "python",
+                    "lines": "12",
+                    "relevance": "low",
+                    "confidence": "certain",
+                    "confidence_reason": "bad enum",
+                }
+            ],
+            "relevant_symbols": [
+                {
+                    "name": "x",
+                    "kind": "function",
+                    "file": "/definitely/missing/repo_explorer_file.py",
+                    "line_start": 2,
+                    "line_end": 1,
+                    "why": "test",
+                    "confidence": "high",
+                    "confidence_reason": "test",
+                }
+            ],
+            "dependency_map": [],
+            "risks_and_unknowns": [],
+            "next_actions_for_caller": [],
+            "evidence": [
+                {
+                    "file": "/definitely/missing/repo_explorer_file.py",
+                    "line_start": 10,
+                    "line_end": 10,
+                    "snippet": "one\ntwo",
+                    "context": "bad line range",
+                    "confidence": "medium",
+                    "confidence_reason": "test",
+                }
+            ],
+            "errors": [],
+        }
+
+        result = _run([VALIDATE_HANDOFF, "--input", "-"], input_text=json.dumps(invalid_handoff), check=False)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["valid"])
+        errors = payload["errors"]
+        self.assertTrue(any("timestamp is not valid ISO-8601" in e for e in errors), errors)
+        self.assertTrue(any("key_files[0].path path does not exist" in e for e in errors), errors)
+        self.assertIn("key_files[0].lines must be a non-negative integer", errors)
+        self.assertIn("key_files[0].relevance has invalid value: low", errors)
+        self.assertIn("key_files[0].confidence has invalid value: certain", errors)
+        self.assertTrue(any("relevant_symbols[0].file path does not exist" in e for e in errors), errors)
+        self.assertIn("relevant_symbols[0] has line_end before line_start", errors)
+        self.assertTrue(any("evidence[0] snippet line count exceeds declared line range" in e for e in errors), errors)
+
     def test_index_includes_ci_and_safe_dotfiles_and_marks_env_sensitive(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "fixture"
@@ -205,10 +267,83 @@ class RepoExplorerTests(unittest.TestCase):
             self.assertNotIn("LICENSE", key_paths)
             dependency_targets = {d["target"] for d in handoff["dependency_map"]}
 
+            auth_file = next(f for f in handoff["key_files"] if Path(f["path"]).name == "auth.ts")
+            login_symbol = next(s for s in handoff["relevant_symbols"] if s["name"] == "loginUser")
+
             self.assertIn("loginUser", symbol_names)
             self.assertIn("src/session.ts", dependency_targets)
             self.assertNotIn("fs", dependency_targets)
+            self.assertIn(auth_file["confidence"], {"high", "medium", "low"})
+            self.assertTrue(auth_file["confidence_reason"])
+            self.assertIn(login_symbol["confidence"], {"high", "medium", "low"})
+            self.assertTrue(login_symbol["confidence_reason"])
             self.assertLessEqual(len(handoff["evidence"]), 5)
+            self.assertTrue(all("confidence" in item for item in handoff["evidence"]))
+
+    def test_extraction_redacts_secret_snippets_and_records_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "fixture"
+            (repo / "src").mkdir(parents=True)
+            (repo / "src" / "auth.ts").write_text(
+                "export const authSecret = () => {\n"
+                "  const token = 'sk-12345678901234567890';\n"
+                "  return token;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            index_path = repo / "index.json"
+            _build_index(repo, index_path)
+            result = _run([
+                EXTRACT_HANDOFF,
+                "--index",
+                index_path,
+                "--goal",
+                "find auth secret handling",
+                "--depth",
+                "standard",
+                "--target-paths",
+                repo,
+            ])
+            handoff = json.loads(result.stdout)
+            snippets = "\n".join(item["snippet"] for item in handoff["evidence"])
+            error_codes = {item["code"] for item in handoff["errors"]}
+
+            self.assertIn("[REDACTED]", snippets)
+            self.assertNotIn("sk-12345678901234567890", snippets)
+            self.assertIn("redacted_secret", error_codes)
+            validation = _run([VALIDATE_HANDOFF, "--input", "-"], input_text=json.dumps(handoff))
+            self.assertTrue(json.loads(validation.stdout)["valid"])
+
+    def test_extraction_reports_symbol_budget_trimming(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "fixture"
+            (repo / "src").mkdir(parents=True)
+            (repo / "src" / "auth.ts").write_text(
+                "\n".join(f"export function authThing{i}() {{ return {i}; }}" for i in range(35)),
+                encoding="utf-8",
+            )
+
+            index_path = repo / "index.json"
+            _build_index(repo, index_path)
+            result = _run([
+                EXTRACT_HANDOFF,
+                "--index",
+                index_path,
+                "--goal",
+                "find auth functions",
+                "--depth",
+                "standard",
+                "--target-paths",
+                repo,
+            ])
+            handoff = json.loads(result.stdout)
+            error_codes = {item["code"] for item in handoff["errors"]}
+
+            self.assertEqual(len(handoff["relevant_symbols"]), 30)
+            self.assertIn("budget_exceeded", error_codes)
+            validation = _run([VALIDATE_HANDOFF, "--input", "-"], input_text=json.dumps(handoff))
+            self.assertTrue(json.loads(validation.stdout)["valid"])
 
 
 if __name__ == "__main__":

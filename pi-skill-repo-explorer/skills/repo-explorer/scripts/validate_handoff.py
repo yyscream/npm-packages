@@ -4,7 +4,7 @@
 Checks structure, required fields, hard limits, and redaction rules.
 
 Usage:
-    echo '{"schema_version":"1.0",...}' | python3 validate_handoff.py --input /dev/stdin
+    echo '{"schema_version":"1.0",...}' | python3 validate_handoff.py --input -
     python3 validate_handoff.py --input handoff.json
 
 Exit codes:
@@ -16,6 +16,7 @@ import argparse
 import json
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 HARD_LIMITS = {
@@ -45,6 +46,7 @@ VALID_SYMBOL_KINDS = {"function", "class", "type", "constant", "module", "trait"
 VALID_DEPENDENCY_KINDS = {"import", "call", "config", "build"}
 VALID_SEVERITIES = {"high", "medium", "low"}
 VALID_PRIORITIES = {"high", "medium", "low"}
+VALID_CONFIDENCE = {"high", "medium", "low"}
 VALID_ERROR_CODES = {
     "insufficient_scope", "index_stale", "no_match", "redacted_secret", "budget_exceeded",
 }
@@ -61,6 +63,22 @@ SECRET_PATTERNS = [
 ]
 
 
+def is_int(value) -> bool:
+    return type(value) is int
+
+
+def is_number(value) -> bool:
+    return type(value) in (int, float)
+
+
+def validate_path_exists(value, label: str, errors: list[str]) -> None:
+    if not isinstance(value, str):
+        errors.append(f"{label} must be a string path")
+        return
+    if value and not Path(value).exists():
+        errors.append(f"{label} path does not exist: {value}")
+
+
 def validate_structure(data: dict) -> list[str]:
     errors = []
 
@@ -71,16 +89,32 @@ def validate_structure(data: dict) -> list[str]:
     if data.get("schema_version") != "1.0":
         errors.append(f"Unsupported schema_version: {data.get('schema_version')}")
 
+    if "timestamp" in data:
+        timestamp = data.get("timestamp")
+        if not isinstance(timestamp, str):
+            errors.append("timestamp must be an ISO-8601 string")
+        else:
+            try:
+                datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            except ValueError:
+                errors.append(f"timestamp is not valid ISO-8601: {timestamp}")
+
     request = data.get("request", {})
     if isinstance(request, dict):
         for field in REQUIRED_REQUEST:
             if field not in request:
                 errors.append(f"Missing required request field: {field}")
+        if "goal" in request and not isinstance(request["goal"], str):
+            errors.append("request.goal must be a string")
         depth = request.get("depth")
         if depth and depth not in VALID_DEPTHS:
             errors.append(f"Invalid depth value: {depth}")
         if "target_paths" in request and not isinstance(request["target_paths"], list):
             errors.append("request.target_paths must be a list")
+        elif isinstance(request.get("target_paths"), list):
+            for i, value in enumerate(request["target_paths"]):
+                if not isinstance(value, str):
+                    errors.append(f"request.target_paths[{i}] must be a string")
     else:
         errors.append("'request' must be an object")
 
@@ -90,7 +124,7 @@ def validate_structure(data: dict) -> list[str]:
             if field not in index_info:
                 errors.append(f"Missing required index_info field: {field}")
         for numeric in ("index_age_seconds", "files_indexed"):
-            if numeric in index_info and not isinstance(index_info[numeric], (int, float)):
+            if numeric in index_info and not is_number(index_info[numeric]):
                 errors.append(f"index_info.{numeric} must be numeric")
     elif "index_info" in data:
         errors.append("'index_info' must be an object")
@@ -112,12 +146,22 @@ def validate_limits(data: dict) -> list[str]:
 def validate_evidence_snippets(data: dict) -> list[str]:
     errors = []
     for i, item in enumerate(data.get("evidence", [])):
+        if not isinstance(item, dict):
+            continue
         snippet = item.get("snippet", "")
+        if not isinstance(snippet, str):
+            continue
         lines = snippet.count("\n") + 1
         if lines > MAX_EVIDENCE_SNIPPET_LINES:
             errors.append(
                 f"evidence[{i}] snippet has {lines} lines (max {MAX_EVIDENCE_SNIPPET_LINES})"
             )
+        if is_int(item.get("line_start")) and is_int(item.get("line_end")):
+            declared_lines = item["line_end"] - item["line_start"] + 1
+            if lines > declared_lines:
+                errors.append(
+                    f"evidence[{i}] snippet line count exceeds declared line range: {lines} lines for range {declared_lines}"
+                )
     return errors
 
 
@@ -152,6 +196,24 @@ def validate_field_types(data: dict) -> list[str]:
             return False
         return True
 
+    def require_string(item: dict, field: str, container: str, index: int):
+        if require(item, field, container, index) and not isinstance(item[field], str):
+            errors.append(f"{container}[{index}].{field} must be a string")
+
+    def require_confidence(item: dict, container: str, index: int):
+        require_string(item, "confidence", container, index)
+        require_string(item, "confidence_reason", container, index)
+        if "confidence" in item and item["confidence"] not in VALID_CONFIDENCE:
+            errors.append(f"{container}[{index}].confidence has invalid value: {item['confidence']}")
+
+    def require_line_range(item: dict, container: str, index: int):
+        for field in ("line_start", "line_end"):
+            if require(item, field, container, index) and (not is_int(item[field]) or item[field] < 1):
+                errors.append(f"{container}[{index}].{field} must be a positive integer")
+        if is_int(item.get("line_start")) and is_int(item.get("line_end")):
+            if item["line_end"] < item["line_start"]:
+                errors.append(f"{container}[{index}] has line_end before line_start")
+
     list_fields = (
         "key_files", "relevant_symbols", "dependency_map", "risks_and_unknowns",
         "next_actions_for_caller", "evidence", "errors",
@@ -164,69 +226,82 @@ def validate_field_types(data: dict) -> list[str]:
         if not isinstance(item, dict):
             errors.append("key_files items must be objects")
             continue
-        for req in ("path", "role", "language", "lines", "relevance"):
-            require(item, req, "key_files", i)
-        if item.get("relevance") and item["relevance"] not in VALID_RELEVANCE:
+        for req in ("path", "role", "language", "relevance"):
+            require_string(item, req, "key_files", i)
+        if "path" in item:
+            validate_path_exists(item["path"], f"key_files[{i}].path", errors)
+        if require(item, "lines", "key_files", i) and (not is_int(item["lines"]) or item["lines"] < 0):
+            errors.append(f"key_files[{i}].lines must be a non-negative integer")
+        if "relevance" in item and item["relevance"] not in VALID_RELEVANCE:
             errors.append(f"key_files[{i}].relevance has invalid value: {item['relevance']}")
-        if "lines" in item and not isinstance(item["lines"], int):
-            errors.append(f"key_files[{i}].lines must be an integer")
+        require_confidence(item, "key_files", i)
 
     for i, item in enumerate(data.get("relevant_symbols", [])):
         if not isinstance(item, dict):
             errors.append("relevant_symbols items must be objects")
             continue
-        for req in ("name", "kind", "file", "line_start", "line_end", "why"):
-            require(item, req, "relevant_symbols", i)
-        if item.get("kind") and item["kind"] not in VALID_SYMBOL_KINDS:
+        for req in ("name", "kind", "file", "why"):
+            require_string(item, req, "relevant_symbols", i)
+        if "file" in item:
+            validate_path_exists(item["file"], f"relevant_symbols[{i}].file", errors)
+        if "kind" in item and item["kind"] not in VALID_SYMBOL_KINDS:
             errors.append(f"relevant_symbols[{i}].kind has invalid value: {item['kind']}")
-        if isinstance(item.get("line_start"), int) and isinstance(item.get("line_end"), int):
-            if item["line_end"] < item["line_start"]:
-                errors.append(f"relevant_symbols[{i}] has line_end before line_start")
+        require_line_range(item, "relevant_symbols", i)
+        require_confidence(item, "relevant_symbols", i)
 
     for i, item in enumerate(data.get("dependency_map", [])):
         if not isinstance(item, dict):
             errors.append("dependency_map items must be objects")
             continue
         for req in ("source", "target", "kind"):
-            require(item, req, "dependency_map", i)
-        if item.get("kind") and item["kind"] not in VALID_DEPENDENCY_KINDS:
+            require_string(item, req, "dependency_map", i)
+        if "kind" in item and item["kind"] not in VALID_DEPENDENCY_KINDS:
             errors.append(f"dependency_map[{i}].kind has invalid value: {item['kind']}")
 
     for i, item in enumerate(data.get("risks_and_unknowns", [])):
         if not isinstance(item, dict):
             errors.append("risks_and_unknowns items must be objects")
             continue
-        for req in ("description", "severity", "affected_files"):
-            require(item, req, "risks_and_unknowns", i)
-        if item.get("severity") and item["severity"] not in VALID_SEVERITIES:
+        require_string(item, "description", "risks_and_unknowns", i)
+        require_string(item, "severity", "risks_and_unknowns", i)
+        if require(item, "affected_files", "risks_and_unknowns", i) and not isinstance(item["affected_files"], list):
+            errors.append(f"risks_and_unknowns[{i}].affected_files must be a list")
+        elif isinstance(item.get("affected_files"), list):
+            for j, value in enumerate(item["affected_files"]):
+                if not isinstance(value, str):
+                    errors.append(f"risks_and_unknowns[{i}].affected_files[{j}] must be a string")
+        if "severity" in item and item["severity"] not in VALID_SEVERITIES:
             errors.append(f"risks_and_unknowns[{i}].severity has invalid value: {item['severity']}")
 
     for i, item in enumerate(data.get("next_actions_for_caller", [])):
         if not isinstance(item, dict):
             errors.append("next_actions_for_caller items must be objects")
             continue
-        for req in ("action", "target_agent", "priority"):
-            require(item, req, "next_actions_for_caller", i)
-        if item.get("priority") and item["priority"] not in VALID_PRIORITIES:
+        require_string(item, "action", "next_actions_for_caller", i)
+        if require(item, "target_agent", "next_actions_for_caller", i) and item["target_agent"] is not None and not isinstance(item["target_agent"], str):
+            errors.append(f"next_actions_for_caller[{i}].target_agent must be a string or null")
+        require_string(item, "priority", "next_actions_for_caller", i)
+        if "priority" in item and item["priority"] not in VALID_PRIORITIES:
             errors.append(f"next_actions_for_caller[{i}].priority has invalid value: {item['priority']}")
 
     for i, item in enumerate(data.get("evidence", [])):
         if not isinstance(item, dict):
             errors.append("evidence items must be objects")
             continue
-        for req in ("file", "line_start", "line_end", "snippet", "context"):
-            require(item, req, "evidence", i)
-        if isinstance(item.get("line_start"), int) and isinstance(item.get("line_end"), int):
-            if item["line_end"] < item["line_start"]:
-                errors.append(f"evidence[{i}] has line_end before line_start")
+        for req in ("file", "snippet", "context"):
+            require_string(item, req, "evidence", i)
+        if "file" in item:
+            validate_path_exists(item["file"], f"evidence[{i}].file", errors)
+        require_line_range(item, "evidence", i)
+        require_confidence(item, "evidence", i)
 
     for i, item in enumerate(data.get("errors", [])):
         if not isinstance(item, dict):
             errors.append("errors items must be objects")
             continue
-        for req in ("code", "message"):
-            require(item, req, "errors", i)
-        if item.get("code") and item["code"] not in VALID_ERROR_CODES:
+        require_string(item, "code", "errors", i)
+        require_string(item, "message", "errors", i)
+        if "code" in item and item["code"] not in VALID_ERROR_CODES:
             errors.append(f"errors[{i}].code has invalid value: {item['code']}")
 
     return errors

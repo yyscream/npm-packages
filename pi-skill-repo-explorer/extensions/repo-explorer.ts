@@ -97,13 +97,15 @@ function formatHandoff(handoff: any, repoRoot: string, budget: Budget, includeEv
 
 	lines.push(`\nkey_files (${Math.min(keyFiles.length, limits.files)}/${keyFiles.length}):`);
 	for (const item of keyFiles.slice(0, limits.files)) {
-		lines.push(`- ${rel(repoRoot, item.path)} — ${item.role}, ${item.relevance}`);
+		const confidence = item.confidence ? `, confidence=${item.confidence}` : "";
+		lines.push(`- ${rel(repoRoot, item.path)} — ${item.role}, ${item.relevance}${confidence}`);
 	}
 
 	if (symbols.length > 0) {
 		lines.push(`\nsymbols (${Math.min(symbols.length, limits.symbols)}/${symbols.length}):`);
 		for (const item of symbols.slice(0, limits.symbols)) {
-			lines.push(`- ${item.name} (${item.kind}) @ ${rel(repoRoot, item.file)}:${item.line_start}-${item.line_end}`);
+			const confidence = item.confidence ? `, confidence=${item.confidence}` : "";
+			lines.push(`- ${item.name} (${item.kind}) @ ${rel(repoRoot, item.file)}:${item.line_start}-${item.line_end}${confidence}`);
 		}
 	}
 
@@ -125,7 +127,8 @@ function formatHandoff(handoff: any, repoRoot: string, budget: Budget, includeEv
 	if (limits.evidence > 0 && evidence.length > 0) {
 		lines.push(`\nevidence (${Math.min(evidence.length, limits.evidence)}/${evidence.length}):`);
 		for (const item of evidence.slice(0, limits.evidence)) {
-			lines.push(`- ${rel(repoRoot, item.file)}:${item.line_start}-${item.line_end} — ${item.context}`);
+			const confidence = item.confidence ? `, confidence=${item.confidence}` : "";
+			lines.push(`- ${rel(repoRoot, item.file)}:${item.line_start}-${item.line_end}${confidence} — ${item.context}`);
 			lines.push("```text");
 			lines.push(String(item.snippet ?? "").split(/\r?\n/).slice(0, 12).join("\n"));
 			lines.push("```");

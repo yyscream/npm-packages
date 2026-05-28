@@ -49,6 +49,14 @@ Using the index as a map, perform targeted reads and searches:
 3. Locate symbols, functions, and modules the caller needs
 4. Collect short evidence snippets (max 20 lines each)
 
+Depth semantics:
+
+| Depth | Budget and behavior |
+|---|---|
+| `shallow` | Structure-first scan, up to 10 key files, no evidence snippets, no dependency tracing. |
+| `standard` | Goal-focused scan, up to 25 key files, relevant symbols, internal dependency imports, up to 5 decisive snippets. |
+| `deep` | Lower relevance threshold, full dependency import reporting including externals, up to 10 decisive snippets. |
+
 Do NOT read entire files. Read only the sections relevant to the goal.
 
 ### Step 4: Assemble Handoff
@@ -120,7 +128,9 @@ Return exactly this structure. All fields are required unless marked optional.
       "role": "string — why this file matters (entry point, config, core module, test, etc.)",
       "language": "string — file language/type",
       "lines": "number — total lines in file",
-      "relevance": "high | medium"
+      "relevance": "high | medium",
+      "confidence": "high | medium | low",
+      "confidence_reason": "string — why this confidence level was assigned"
     }
   ],
   "relevant_symbols": [
@@ -130,7 +140,9 @@ Return exactly this structure. All fields are required unless marked optional.
       "file": "string — absolute path",
       "line_start": "number",
       "line_end": "number",
-      "why": "string — why this symbol matters for the goal"
+      "why": "string — why this symbol matters for the goal",
+      "confidence": "high | medium | low",
+      "confidence_reason": "string — why this confidence level was assigned"
     }
   ],
   "dependency_map": [
@@ -160,7 +172,9 @@ Return exactly this structure. All fields are required unless marked optional.
       "line_start": "number",
       "line_end": "number",
       "snippet": "string — relevant code (max 20 lines)",
-      "context": "string — why this snippet is included"
+      "context": "string — why this snippet is included",
+      "confidence": "high | medium | low",
+      "confidence_reason": "string — why this confidence level was assigned"
     }
   ],
   "errors": [

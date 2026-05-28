@@ -1,5 +1,34 @@
 # Repo Explorer Skill Improvement Plan
 
+## Continuation status — 2026-05-28
+
+### Done
+
+- Added the native `repo_explorer_explore` extension/tool with compact/normal/full model-visible budgets.
+- Routed `SKILL.md` through the extractor/validator helper flow and documented portable `--input -` validation.
+- Fixed index blind spots for `.github`, safe dotfiles, lockfiles, and sensitive `.env` metadata-only handling.
+- Normalized common symbol kinds/spans for Python and TS/JS, including async functions and arrow-function exports.
+- Improved file/symbol ranking enough that the original self-evaluation goal no longer elevates `LICENSE` or generic constants as top evidence.
+- Resolved internal imports for common Python/TS/JS/Rust/Go cases and suppresses external dependencies outside `deep` mode.
+- Added fixture-based regression tests for strict validation, dotfile coverage, symbol spans, dependency relevance, redaction, and budget trimming.
+
+### Added in this continuation
+
+- Added `confidence` and `confidence_reason` fields for key files, symbols, and evidence items.
+- Tightened validator checks for ISO-8601 timestamps, item field types, confidence enums, positive line ranges, item path existence, evidence snippet line ranges, and unredacted secrets.
+- Made `shallow` extraction match the documented structure-only behavior by skipping dependency tracing.
+- Fixed evidence `line_end` to describe the actual emitted snippet range.
+- Documented concrete `shallow`/`standard`/`deep` semantics in `SKILL.md`.
+
+### Still open
+
+- Add Tree-sitter or AST-backed parsing where available, with regex fallback.
+- Reduce path repetition in the raw handoff schema (`repo_root`, relative paths, or path IDs), not just in the native tool's compact formatter.
+- Add script-level `--budget` / `--max-output-chars` and top-level `omitted` accounting metadata.
+- Add call-graph extraction, not just import dependency mapping.
+- Make risk reporting more goal-specific instead of mostly test-coverage based.
+- Validate against a real TS/React repo and a real Python repo, not only fixtures and this package.
+
 ## Current assessment
 
 The current `repo-explorer` skill has a useful shape: it pushes agents toward bounded repository exploration, persistent indexing, evidence snippets, redaction, and a strict JSON handoff. That is directionally good for both accuracy and token control.

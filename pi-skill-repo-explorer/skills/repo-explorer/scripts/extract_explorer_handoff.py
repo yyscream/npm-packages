@@ -55,6 +55,7 @@ PRIORITY_ROLES = {
 }
 
 VALID_SYMBOL_KINDS = {"function", "class", "type", "constant", "module", "trait", "interface"}
+VALID_CONFIDENCE = {"high", "medium", "low"}
 
 KIND_NORMALIZATION = {
     "class_or_function": "function",
@@ -115,6 +116,24 @@ def expand_keywords(keywords: list[str]) -> set[str]:
 def normalize_symbol_kind(kind: str) -> str:
     normalized = KIND_NORMALIZATION.get(kind, kind)
     return normalized if normalized in VALID_SYMBOL_KINDS else "module"
+
+
+def confidence_label(score: float, *, high: float, medium: float) -> str:
+    if score >= high:
+        return "high"
+    if score >= medium:
+        return "medium"
+    return "low"
+
+
+def confidence_reason(confidence: str, score: float, has_goal_keywords: bool) -> str:
+    if not has_goal_keywords:
+        return f"{confidence} confidence from repository role/context because no specific goal keywords were extracted."
+    if confidence == "high":
+        return "High confidence: direct path, symbol, or content match to the exploration goal."
+    if confidence == "medium":
+        return "Medium confidence: lexical or contextual match to the exploration goal."
+    return "Low confidence: weak match included to preserve nearby repository context."
 
 
 def content_keyword_score(file_entry: dict, keywords: set[str]) -> float:
@@ -273,12 +292,15 @@ def build_handoff(index: dict, goal: str, depth: str, target_paths: list[str]) -
         if score < min_file_score:
             continue
         relevance = "high" if score >= 5.0 else "medium"
+        confidence = confidence_label(score, high=7.0, medium=3.0)
         key_files.append({
             "path": f["path"],
             "role": f.get("role", "source"),
             "language": f.get("language", "unknown"),
             "lines": f.get("lines", 0),
             "relevance": relevance,
+            "confidence": confidence,
+            "confidence_reason": confidence_reason(confidence, score, bool(keywords)),
         })
 
     if len(key_files) > HARD_LIMITS["key_files"]:
@@ -304,6 +326,7 @@ def build_handoff(index: dict, goal: str, depth: str, target_paths: list[str]) -
         kind = normalize_symbol_kind(sym.get("kind", ""))
         line_start = sym.get("line_start", sym.get("line", 0))
         line_end = sym.get("line_end", line_start)
+        confidence = confidence_label(score, high=6.0, medium=3.0)
         relevant_symbols.append({
             "name": sym["name"],
             "kind": kind,
@@ -311,6 +334,8 @@ def build_handoff(index: dict, goal: str, depth: str, target_paths: list[str]) -
             "line_start": line_start,
             "line_end": line_end,
             "why": f"Matches goal keywords; {kind} in {f.get('relative_path', '')}",
+            "confidence": confidence,
+            "confidence_reason": confidence_reason(confidence, score, bool(keywords)),
         })
         if len(relevant_symbols) >= HARD_LIMITS["relevant_symbols"]:
             errors.append({
@@ -328,18 +353,21 @@ def build_handoff(index: dict, goal: str, depth: str, target_paths: list[str]) -
         if score < 3.0:
             continue
         line_start = sym.get("line_start", sym.get("line", 1))
-        line_end = sym.get("line_end", line_start)
         snippet = extract_evidence_snippet(f["path"], line_start)
         if snippet:
             snippet, was_redacted = redact_secrets(snippet)
             if was_redacted:
                 had_redaction = True
+            confidence = confidence_label(score, high=6.0, medium=3.0)
+            snippet_line_end = min(line_start + snippet.count("\n"), f.get("lines", line_start))
             evidence.append({
                 "file": f["path"],
                 "line_start": line_start,
-                "line_end": min(line_start + snippet.count("\n"), line_end, f.get("lines", line_end)),
+                "line_end": snippet_line_end,
                 "snippet": snippet,
                 "context": f"Definition of {sym['name']} — relevant to: {goal}",
+                "confidence": confidence,
+                "confidence_reason": confidence_reason(confidence, score, bool(keywords)),
             })
             evidence_count += 1
             if evidence_count >= HARD_LIMITS["evidence"]:
@@ -355,7 +383,11 @@ def build_handoff(index: dict, goal: str, depth: str, target_paths: list[str]) -
     seen_deps = set()
     key_file_paths = {f["path"] for f in key_files}
     rel_paths = {normalize_rel_path(f.get("relative_path", "")) for f in files}
-    for f, _ in top_files[:HARD_LIMITS["dependency_map"]]:
+    if depth == "shallow":
+        top_files_for_dependencies = []
+    else:
+        top_files_for_dependencies = top_files[:HARD_LIMITS["dependency_map"]]
+    for f, _ in top_files_for_dependencies:
         if key_file_paths and f["path"] not in key_file_paths:
             continue
         if f.get("content_sensitive"):
