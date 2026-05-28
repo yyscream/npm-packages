@@ -1,0 +1,40 @@
+# Maintainer: TODO <you@example.com>
+pkgname=__PKGBASE__
+pkgver=__PKGVER__
+pkgrel=1
+pkgdesc=__PKGDESC_QUOTED__
+arch=('x86_64')
+url=__URL_QUOTED__
+license=(__LICENSE_QUOTED__)
+depends=('gcc-libs')
+makedepends=('cargo')
+_project=__REPO_NAME_QUOTED__
+_binary=__BINARY_NAME_QUOTED__
+_tag="v$pkgver"
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/$_tag.tar.gz")
+sha256sums=('SKIP') # release workflow tries updpkgsums; do not publish release tarballs with SKIP
+
+prepare() {
+  cd "$_project-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$_project-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
+}
+
+check() {
+  cd "$_project-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen --release
+}
+
+package() {
+  cd "$_project-$pkgver"
+  install -Dm755 "target/release/$_binary" "$pkgdir/usr/bin/$_binary"
+  [[ -f LICENSE ]] && install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

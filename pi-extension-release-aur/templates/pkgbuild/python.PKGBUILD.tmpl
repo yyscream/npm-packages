@@ -1,0 +1,25 @@
+# Maintainer: TODO <you@example.com>
+pkgname=__PKGBASE__
+pkgver=__PKGVER__
+pkgrel=1
+pkgdesc=__PKGDESC_QUOTED__
+arch=('any')
+url=__URL_QUOTED__
+license=(__LICENSE_QUOTED__)
+depends=('python')
+makedepends=('python-build' 'python-installer' 'python-wheel' 'python-setuptools')
+_project=__REPO_NAME_QUOTED__
+_tag="v$pkgver"
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/$_tag.tar.gz")
+sha256sums=('SKIP') # release workflow tries updpkgsums; do not publish release tarballs with SKIP
+
+build() {
+  cd "$_project-$pkgver"
+  python -m build --wheel --no-isolation
+}
+
+package() {
+  cd "$_project-$pkgver"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+  [[ -f LICENSE ]] && install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

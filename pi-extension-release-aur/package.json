@@ -1,0 +1,40 @@
+{
+  "name": "@firstpick/pi-extension-release-aur",
+  "version": "0.1.0",
+  "description": "Pi commands and skill for deterministic AUR setup, review, and release workflows.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "extension",
+    "skill",
+    "aur",
+    "archlinux",
+    "release"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  },
+  "files": [
+    "index.ts",
+    "aur-release-workflow.sh",
+    "skills",
+    "templates",
+    "README.md",
+    "LICENSE"
+  ]
+}

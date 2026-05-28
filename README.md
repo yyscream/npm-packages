@@ -162,6 +162,13 @@ Release orchestration command for this monorepo.
 
 - `/release-npm` runs release checks and optional publish flow
 
+### `@firstpick/pi-extension-release-aur`
+Reviewed AUR package setup and release workflow.
+
+- `/release-aur-setup` sets up AUR publishing prerequisites, starting with native Pi-guided SSH key/config/test flow
+- `/release-aur` plans, checks, queues agent review, and can create/publish AUR package repos after confirmation
+- preflight includes `.SRCINFO`, `makepkg`, `namcap`, optional clean-chroot/repro checks, and conservative git staging
+
 ### `@firstpick/pi-extension-todo-progress`
 Auto todo/progress tracking extension.
 
