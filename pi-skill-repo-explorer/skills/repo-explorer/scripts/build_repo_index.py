@@ -37,6 +37,23 @@ IGNORE_EXTENSIONS = {
     ".lock",
 }
 
+ALLOWED_DOT_DIRS = {
+    ".github", ".gitlab", ".circleci",
+}
+
+ALLOWED_DOTFILES = {
+    ".dockerignore", ".editorconfig", ".env", ".env.example",
+    ".env.sample", ".env.template", ".env.dist", ".gitattributes",
+    ".gitignore",
+}
+
+SAFE_ENV_SUFFIXES = (".example", ".sample", ".template", ".dist")
+
+IMPORTANT_LOCKFILES = {
+    "cargo.lock", "gemfile.lock", "package-lock.json", "pnpm-lock.yaml",
+    "poetry.lock", "yarn.lock",
+}
+
 LANGUAGE_MAP = {
     ".py": "python", ".pyi": "python",
     ".rs": "rust",
@@ -69,24 +86,39 @@ LANGUAGE_MAP = {
 
 SYMBOL_PATTERNS = {
     "python": [
-        (r"^(?:class|def)\s+(\w+)", "class_or_function"),
-        (r"^(\w+)\s*=\s*", "constant"),
+        (r"^class\s+(\w+)", "class"),
+        (r"^(?:async\s+)?def\s+(\w+)", "function"),
+        (r"^([A-Z_][A-Z0-9_]*)\s*=\s*", "constant"),
     ],
     "rust": [
-        (r"^pub\s+(?:fn|struct|enum|trait|type|const|mod)\s+(\w+)", "public_symbol"),
-        (r"^(?:fn|struct|enum|trait|type|const|mod)\s+(\w+)", "symbol"),
+        (r"^(?:pub\s+)?(?:async\s+)?fn\s+(\w+)", "function"),
+        (r"^(?:pub\s+)?struct\s+(\w+)", "class"),
+        (r"^(?:pub\s+)?(?:enum|type)\s+(\w+)", "type"),
+        (r"^(?:pub\s+)?trait\s+(\w+)", "trait"),
+        (r"^(?:pub\s+)?const\s+(\w+)", "constant"),
+        (r"^(?:pub\s+)?mod\s+(\w+)", "module"),
     ],
     "typescript": [
-        (r"^export\s+(?:function|class|interface|type|const|enum|let|var)\s+(\w+)", "export"),
-        (r"^(?:function|class|interface|type)\s+(\w+)", "symbol"),
+        (r"^(?:export\s+)?(?:default\s+)?class\s+(\w+)", "class"),
+        (r"^(?:export\s+)?interface\s+(\w+)", "interface"),
+        (r"^(?:export\s+)?type\s+(\w+)", "type"),
+        (r"^(?:export\s+)?enum\s+(\w+)", "type"),
+        (r"^(?:export\s+)?(?:async\s+)?function\s+(\w+)", "function"),
+        (r"^(?:export\s+)?const\s+(\w+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|\w+)\s*=>", "function"),
+        (r"^(?:export\s+)?(?:const|let|var)\s+(\w+)", "constant"),
     ],
     "javascript": [
-        (r"^export\s+(?:function|class|const|let|var|default)\s+(\w+)", "export"),
-        (r"^(?:function|class)\s+(\w+)", "symbol"),
+        (r"^(?:export\s+)?(?:default\s+)?class\s+(\w+)", "class"),
+        (r"^(?:export\s+)?(?:async\s+)?function\s+(\w+)", "function"),
+        (r"^(?:export\s+)?const\s+(\w+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|\w+)\s*=>", "function"),
+        (r"^(?:export\s+)?(?:const|let|var)\s+(\w+)", "constant"),
+        (r"^class\s+(\w+)", "class"),
+        (r"^function\s+(\w+)", "function"),
     ],
     "go": [
         (r"^func\s+(?:\([^)]+\)\s+)?(\w+)", "function"),
-        (r"^type\s+(\w+)\s+(?:struct|interface)", "type"),
+        (r"^type\s+(\w+)\s+struct", "class"),
+        (r"^type\s+(\w+)\s+interface", "interface"),
     ],
 }
 
@@ -110,6 +142,14 @@ def detect_language(path: Path) -> str:
         return "docker"
     if name_lower in ("makefile", "gnumakefile"):
         return "makefile"
+    if name_lower.startswith(".env"):
+        return "env"
+    if name_lower in (".gitignore", ".gitattributes"):
+        return "gitconfig"
+    if name_lower == ".editorconfig":
+        return "editorconfig"
+    if name_lower in IMPORTANT_LOCKFILES:
+        return "lockfile"
     if name_lower in ("cargo.toml", "pyproject.toml", "package.json", "go.mod"):
         return LANGUAGE_MAP.get(path.suffix.lower(), "config")
     return LANGUAGE_MAP.get(path.suffix.lower(), "unknown")
@@ -136,9 +176,10 @@ def extract_symbols(path: Path, language: str) -> list:
     except (OSError, PermissionError):
         return []
 
+    lines = content.splitlines()
     symbols = []
     compiled = [(re.compile(p), kind) for p, kind in patterns]
-    for line_num, line in enumerate(content.splitlines(), 1):
+    for line_num, line in enumerate(lines, 1):
         stripped = line.strip()
         for regex, kind in compiled:
             m = regex.match(stripped)
@@ -147,8 +188,14 @@ def extract_symbols(path: Path, language: str) -> list:
                     "name": m.group(1),
                     "kind": kind,
                     "line": line_num,
+                    "line_start": line_num,
                 })
                 break
+
+    for i, sym in enumerate(symbols):
+        next_line = symbols[i + 1]["line_start"] if i + 1 < len(symbols) else len(lines) + 1
+        sym["line_end"] = max(sym["line_start"], next_line - 1)
+
     return symbols
 
 
@@ -171,7 +218,7 @@ def classify_role(path: Path, rel_path: str) -> str:
         ".dockerignore",
     ) or name_lower.startswith("dockerfile."):
         return "container"
-    if name_lower in (".env", ".env.example", ".env.local"):
+    if name_lower.startswith(".env"):
         return "environment"
     if name_lower in (
         "tsconfig.json", ".eslintrc.json", ".prettierrc",
@@ -205,13 +252,31 @@ def classify_role(path: Path, rel_path: str) -> str:
 
 
 def should_skip_dir(dir_name: str) -> bool:
-    return dir_name in IGNORE_DIRS or dir_name.startswith(".")
+    if dir_name in IGNORE_DIRS:
+        return True
+    if dir_name.startswith(".") and dir_name not in ALLOWED_DOT_DIRS:
+        return True
+    return False
 
 
 def should_skip_file(path: Path) -> bool:
+    name_lower = path.name.lower()
+    if name_lower in IMPORTANT_LOCKFILES or name_lower in ALLOWED_DOTFILES:
+        return False
+    if name_lower.startswith(".env"):
+        return False
     if path.suffix.lower() in IGNORE_EXTENSIONS:
         return True
     if path.name.startswith(".") and path.suffix == "":
+        return True
+    return False
+
+
+def is_sensitive_file(path: Path) -> bool:
+    name_lower = path.name.lower()
+    if name_lower == ".env":
+        return True
+    if name_lower.startswith(".env.") and not name_lower.endswith(SAFE_ENV_SUFFIXES):
         return True
     return False
 
@@ -239,7 +304,8 @@ def scan_repo(repo_path: Path) -> dict:
             language = detect_language(fpath)
             lines = count_lines(fpath)
             role = classify_role(fpath, rel_path)
-            symbols = extract_symbols(fpath, language)
+            content_sensitive = is_sensitive_file(fpath)
+            symbols = [] if content_sensitive else extract_symbols(fpath, language)
 
             language_stats[language] = language_stats.get(language, 0) + 1
             role_stats[role] = role_stats.get(role, 0) + 1
@@ -251,9 +317,11 @@ def scan_repo(repo_path: Path) -> dict:
                 "lines": lines,
                 "size_bytes": stat.st_size,
                 "mtime": stat.st_mtime,
-                "hash": file_hash(fpath),
+                "hash": "" if content_sensitive else file_hash(fpath),
                 "role": role,
             }
+            if content_sensitive:
+                entry["content_sensitive"] = True
             if symbols:
                 entry["symbols"] = symbols
 

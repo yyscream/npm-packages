@@ -49,10 +49,21 @@ Do NOT read entire files. Read only the sections relevant to the goal.
 
 ### Step 4: Assemble Handoff
 
-Build the JSON handoff object conforming to the schema below. Run validation:
+Prefer the bundled extractor for a first-pass handoff, then manually refine only when the goal requires deeper tracing than the index can provide:
 
 ```bash
-python3 ./scripts/validate_handoff.py --input /dev/stdin
+python3 ./scripts/extract_explorer_handoff.py \
+  --index data/<repo-name>-index.json \
+  --goal "<goal>" \
+  --depth standard \
+  --target-paths "<target_path>" \
+  > /tmp/repo-explorer-handoff.json
+```
+
+Validate the final JSON. Use `--input -` for portable stdin, or pass a file path:
+
+```bash
+python3 ./scripts/validate_handoff.py --input /tmp/repo-explorer-handoff.json
 ```
 
 ### Step 5: Return

@@ -34,6 +34,7 @@ from build_repo_index import (
     file_hash,
     classify_role,
     extract_symbols,
+    is_sensitive_file,
 )
 
 
@@ -113,7 +114,8 @@ def refresh_index(repo_path: Path, existing_index: dict) -> dict:
                 language = detect_language(fpath)
                 lines = count_lines(fpath)
                 role = classify_role(fpath, rel_path)
-                symbols = extract_symbols(fpath, language)
+                content_sensitive = is_sensitive_file(fpath)
+                symbols = [] if content_sensitive else extract_symbols(fpath, language)
 
                 entry = {
                     "path": abs_path,
@@ -122,9 +124,11 @@ def refresh_index(repo_path: Path, existing_index: dict) -> dict:
                     "lines": lines,
                     "size_bytes": stat.st_size,
                     "mtime": stat.st_mtime,
-                    "hash": file_hash(fpath),
+                    "hash": "" if content_sensitive else file_hash(fpath),
                     "role": role,
                 }
+                if content_sensitive:
+                    entry["content_sensitive"] = True
                 if symbols:
                     entry["symbols"] = symbols
 

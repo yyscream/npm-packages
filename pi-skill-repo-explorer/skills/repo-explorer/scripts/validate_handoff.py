@@ -30,13 +30,24 @@ HARD_LIMITS = {
 MAX_EVIDENCE_SNIPPET_LINES = 20
 
 REQUIRED_TOP_LEVEL = [
-    "schema_version", "explorer", "timestamp", "request",
+    "schema_version", "explorer", "timestamp", "request", "index_info",
     "task_understanding", "key_files", "relevant_symbols",
     "dependency_map", "risks_and_unknowns",
-    "next_actions_for_caller", "evidence",
+    "next_actions_for_caller", "evidence", "errors",
 ]
 
 REQUIRED_REQUEST = ["goal", "target_paths", "depth"]
+REQUIRED_INDEX_INFO = ["index_path", "index_age_seconds", "files_indexed"]
+
+VALID_DEPTHS = {"shallow", "standard", "deep"}
+VALID_RELEVANCE = {"high", "medium"}
+VALID_SYMBOL_KINDS = {"function", "class", "type", "constant", "module", "trait", "interface"}
+VALID_DEPENDENCY_KINDS = {"import", "call", "config", "build"}
+VALID_SEVERITIES = {"high", "medium", "low"}
+VALID_PRIORITIES = {"high", "medium", "low"}
+VALID_ERROR_CODES = {
+    "insufficient_scope", "index_stale", "no_match", "redacted_secret", "budget_exceeded",
+}
 
 SECRET_PATTERNS = [
     re.compile(r"sk-[a-zA-Z0-9]{20,}"),
@@ -66,10 +77,23 @@ def validate_structure(data: dict) -> list[str]:
             if field not in request:
                 errors.append(f"Missing required request field: {field}")
         depth = request.get("depth")
-        if depth and depth not in ("shallow", "standard", "deep"):
+        if depth and depth not in VALID_DEPTHS:
             errors.append(f"Invalid depth value: {depth}")
+        if "target_paths" in request and not isinstance(request["target_paths"], list):
+            errors.append("request.target_paths must be a list")
     else:
         errors.append("'request' must be an object")
+
+    index_info = data.get("index_info", {})
+    if isinstance(index_info, dict):
+        for field in REQUIRED_INDEX_INFO:
+            if field not in index_info:
+                errors.append(f"Missing required index_info field: {field}")
+        for numeric in ("index_age_seconds", "files_indexed"):
+            if numeric in index_info and not isinstance(index_info[numeric], (int, float)):
+                errors.append(f"index_info.{numeric} must be numeric")
+    elif "index_info" in data:
+        errors.append("'index_info' must be an object")
 
     return errors
 
@@ -122,32 +146,88 @@ def scan_secrets(data: dict) -> list[str]:
 def validate_field_types(data: dict) -> list[str]:
     errors = []
 
-    for item in data.get("key_files", []):
+    def require(item: dict, field: str, container: str, index: int):
+        if field not in item:
+            errors.append(f"{container}[{index}] missing '{field}'")
+            return False
+        return True
+
+    list_fields = (
+        "key_files", "relevant_symbols", "dependency_map", "risks_and_unknowns",
+        "next_actions_for_caller", "evidence", "errors",
+    )
+    for field in list_fields:
+        if field in data and not isinstance(data[field], list):
+            errors.append(f"{field} must be a list")
+
+    for i, item in enumerate(data.get("key_files", [])):
         if not isinstance(item, dict):
             errors.append("key_files items must be objects")
-            break
-        for req in ("path", "role", "language"):
-            if req not in item:
-                errors.append(f"key_files item missing '{req}'")
-                break
+            continue
+        for req in ("path", "role", "language", "lines", "relevance"):
+            require(item, req, "key_files", i)
+        if item.get("relevance") and item["relevance"] not in VALID_RELEVANCE:
+            errors.append(f"key_files[{i}].relevance has invalid value: {item['relevance']}")
+        if "lines" in item and not isinstance(item["lines"], int):
+            errors.append(f"key_files[{i}].lines must be an integer")
 
-    for item in data.get("relevant_symbols", []):
+    for i, item in enumerate(data.get("relevant_symbols", [])):
         if not isinstance(item, dict):
             errors.append("relevant_symbols items must be objects")
-            break
-        for req in ("name", "kind", "file"):
-            if req not in item:
-                errors.append(f"relevant_symbols item missing '{req}'")
-                break
+            continue
+        for req in ("name", "kind", "file", "line_start", "line_end", "why"):
+            require(item, req, "relevant_symbols", i)
+        if item.get("kind") and item["kind"] not in VALID_SYMBOL_KINDS:
+            errors.append(f"relevant_symbols[{i}].kind has invalid value: {item['kind']}")
+        if isinstance(item.get("line_start"), int) and isinstance(item.get("line_end"), int):
+            if item["line_end"] < item["line_start"]:
+                errors.append(f"relevant_symbols[{i}] has line_end before line_start")
 
-    for item in data.get("evidence", []):
+    for i, item in enumerate(data.get("dependency_map", [])):
+        if not isinstance(item, dict):
+            errors.append("dependency_map items must be objects")
+            continue
+        for req in ("source", "target", "kind"):
+            require(item, req, "dependency_map", i)
+        if item.get("kind") and item["kind"] not in VALID_DEPENDENCY_KINDS:
+            errors.append(f"dependency_map[{i}].kind has invalid value: {item['kind']}")
+
+    for i, item in enumerate(data.get("risks_and_unknowns", [])):
+        if not isinstance(item, dict):
+            errors.append("risks_and_unknowns items must be objects")
+            continue
+        for req in ("description", "severity", "affected_files"):
+            require(item, req, "risks_and_unknowns", i)
+        if item.get("severity") and item["severity"] not in VALID_SEVERITIES:
+            errors.append(f"risks_and_unknowns[{i}].severity has invalid value: {item['severity']}")
+
+    for i, item in enumerate(data.get("next_actions_for_caller", [])):
+        if not isinstance(item, dict):
+            errors.append("next_actions_for_caller items must be objects")
+            continue
+        for req in ("action", "target_agent", "priority"):
+            require(item, req, "next_actions_for_caller", i)
+        if item.get("priority") and item["priority"] not in VALID_PRIORITIES:
+            errors.append(f"next_actions_for_caller[{i}].priority has invalid value: {item['priority']}")
+
+    for i, item in enumerate(data.get("evidence", [])):
         if not isinstance(item, dict):
             errors.append("evidence items must be objects")
-            break
-        for req in ("file", "snippet", "context"):
-            if req not in item:
-                errors.append(f"evidence item missing '{req}'")
-                break
+            continue
+        for req in ("file", "line_start", "line_end", "snippet", "context"):
+            require(item, req, "evidence", i)
+        if isinstance(item.get("line_start"), int) and isinstance(item.get("line_end"), int):
+            if item["line_end"] < item["line_start"]:
+                errors.append(f"evidence[{i}] has line_end before line_start")
+
+    for i, item in enumerate(data.get("errors", [])):
+        if not isinstance(item, dict):
+            errors.append("errors items must be objects")
+            continue
+        for req in ("code", "message"):
+            require(item, req, "errors", i)
+        if item.get("code") and item["code"] not in VALID_ERROR_CODES:
+            errors.append(f"errors[{i}].code has invalid value: {item['code']}")
 
     return errors
 
@@ -159,11 +239,11 @@ def main():
 
     input_path = Path(args.input)
     try:
-        if str(input_path) == "/dev/stdin":
+        if args.input == "-" or str(input_path) == "/dev/stdin":
             raw = sys.stdin.read()
         else:
             raw = input_path.read_text(encoding="utf-8")
-    except OSError as e:
+    except (OSError, UnicodeDecodeError) as e:
         print(json.dumps({"valid": False, "errors": [f"Cannot read input: {e}"]}))
         sys.exit(1)
 
@@ -184,6 +264,7 @@ def main():
     all_errors.extend(validate_field_types(data))
 
     secret_warnings = scan_secrets(data)
+    all_errors.extend(f"Unredacted secret pattern: {warning}" for warning in secret_warnings)
 
     result = {
         "valid": len(all_errors) == 0,

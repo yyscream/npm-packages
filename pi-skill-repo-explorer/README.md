@@ -40,7 +40,8 @@ When following the skill manually, run helper scripts from `skills/repo-explorer
 cd /path/to/installed/package/skills/repo-explorer
 python3 ./scripts/refresh_repo_index.py --repo /path/to/repo --data-dir data/
 python3 ./scripts/build_repo_index.py --repo /path/to/repo --output data/repo-index.json
-python3 ./scripts/validate_handoff.py --input /dev/stdin
+python3 ./scripts/extract_explorer_handoff.py --index data/repo-index.json --goal "find auth flow" --depth standard > /tmp/repo-explorer-handoff.json
+python3 ./scripts/validate_handoff.py --input /tmp/repo-explorer-handoff.json
 ```
 
 The target repository can be any readable local directory. The generated `data/` index directory is local scratch state and does not need to exist before first use.
