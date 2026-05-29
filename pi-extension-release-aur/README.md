@@ -23,6 +23,7 @@ Subcommands:
 
 /release-aur-setup
 /release-aur-setup dir [path-to-aur-repos]
+/release-aur-setup source [global <source>|package <pkgbase> <source>|clear <pkgbase>|status]
 /release-aur-setup ssh
 /release-aur-setup status
 /release-aur-setup abort
@@ -31,7 +32,7 @@ Subcommands:
 
 Default `/release-aur` action is `plan`.
 
-By default, release commands check supported GitHub latest releases before preflight. If a newer release exists, the workflow updates `pkgver`, resets `pkgrel=1`, runs `updpkgsums`, and regenerates `.SRCINFO`. Pass `--no-update-release` to skip this update step.
+By default, release commands check the configured upstream release source before preflight. `auto` preserves the original behavior by detecting a GitHub repository from `PKGBUILD`; setup can define a global source and per-package overrides. Supported source specs are `auto`, `github:owner/repo`, GitHub URLs, `git:<clone-url>`, or any git clone URL. If a newer release/tag exists, the workflow updates `pkgver`, resets `pkgrel=1`, runs `updpkgsums`, and regenerates `.SRCINFO`. Pass `--no-update-release` to skip this update step.
 
 `/release-aur-setup` opens a native Pi setup menu. It can save the directory where you keep AUR package repos:
 
@@ -40,10 +41,18 @@ By default, release commands check supported GitHub latest releases before prefl
 - the path is stored in `~/.pi/agent/release-aur/config.json`;
 - bare `/release-aur` then uses that directory to list repos and prompt for the release target.
 
+The setup menu also includes upstream release source configuration:
+
+- `/release-aur-setup source` opens a native Pi menu;
+- `/release-aur-setup source global auto` keeps GitHub autodetection from `PKGBUILD` globally;
+- `/release-aur-setup source global git:https://example.org/upstream/project.git` uses a custom git tag source globally;
+- `/release-aur-setup source package <pkgbase> <source>` stores a per-package override via the same config file;
+- `/release-aur-setup source clear <pkgbase>` removes the override so the package falls back to the global source.
+
 The setup menu also includes AUR SSH publishing access:
 
 - checks required local tools: `ssh`, `ssh-keygen`, `git`;
-- `/release-aur-setup status` checks local SSH files/config and also runs the AUR SSH connection test;
+- `/release-aur-setup status` shows the AUR repos directory, release source configuration, local SSH files/config, and also runs the AUR SSH connection test;
 - the setup flow checks `~/.ssh/config` first; if `Host aur.archlinux.org` already exists, it immediately tests the current SSH connection before creating keys or editing config;
 - creates `~/.ssh` with private permissions if needed;
 - can create a dedicated `~/.ssh/aur` Ed25519 key, or use an existing key path;
@@ -58,7 +67,7 @@ For fully automated key creation, the setup can create an empty-passphrase key o
 
 `/release-aur plan`:
 
-- checks supported GitHub latest releases before preflight and, when newer, updates `PKGBUILD`/`.SRCINFO` in the package repo;
+- checks configured upstream release sources before preflight and, when newer, updates `PKGBUILD`/`.SRCINFO` in the package repo;
 - resets `pkgrel=1` when `pkgver` is bumped;
 - updates checksum arrays with `updpkgsums` after a version bump;
 - runs build checks in a temporary copy of the package directory;
