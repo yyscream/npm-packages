@@ -12,8 +12,10 @@ Local memory capture and lookup helpers for Pi.
 
 ## Install
 
+This is vendored inside `@firstpick/pi-package-skill-lifecycle`; install the parent package:
+
 ```bash
-pi install npm:@firstpick/pi-extension-memory-helper
+pi install npm:@firstpick/pi-package-skill-lifecycle
 ```
 
 ## Configuration
@@ -22,7 +24,7 @@ pi install npm:@firstpick/pi-extension-memory-helper
   - Controls timestamps for `/remember`, `remember_note`, and per-skill memory.
   - Default: `UTC`.
 - `PI_CODING_AGENT_DIR`
-  - Controls the Pi agent directory through `@firstpick/pi-utils`.
+  - Controls the Pi agent directory.
   - Default: `~/.pi/agent`.
 
 ## Daily memory commands

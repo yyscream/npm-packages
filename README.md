@@ -4,6 +4,12 @@ This repository contains my public JavaScript/TypeScript packages published via 
 
 Right now it contains **Pi extension, skill, package, and theme bundle packages**.
 
+## Skill authoring standards
+
+- Follow the packaged portability guide in [`pi-package-skill-lifecycle/vendor/pi-skill-skill-creator/skills/skill-creator/references/SKILL-PORTABILITY.md`](pi-package-skill-lifecycle/vendor/pi-skill-skill-creator/skills/skill-creator/references/SKILL-PORTABILITY.md) when creating or updating reusable skills.
+- Keep portable skill workflows harness-neutral; isolate Pi-only tools, slash commands, and local settings under a `## Pi adapter` section.
+- Keep personal runtime memory outside package directories, e.g. `~/.pi/agent/memory/skills/<skill-name>.md` for Pi-local observations.
+
 ## Skill packages
 
 These package active Pi skills that are not already bundled in an existing `pi-extension-*` package. Each package uses `pi.skills: ["./skills"]` and includes its full skill directory, including bundled scripts/references/assets.
@@ -39,6 +45,13 @@ Extension-bundled skills kept as direct Pi config includes instead of duplicate 
 - `@firstpick/pi-skill-vulnerability-scanner` (`pi-skill-vulnerability-scanner`) — Use automatically when checking CVEs or known vulnerabilities in installed packages, dependencies, Docker images, OS packages, exposed services, or software versions. Produces severity-rated scan reports.
 
 ## Packages
+
+### `@firstpick/pi-package-skill-lifecycle`
+Bundles the skill lifecycle packages that are designed to work together.
+
+- Includes per-skill memory, skill-bank audit/management, skill evaluation, skill creation, and skill refinement-loop resources
+- Uses Pi package `dependencies` + `bundledDependencies` so npm publication can be self-contained
+- Does not include repository-level `tests/routing/`; those fixtures are development/evaluation data
 
 ### `@firstpick/pi-prompts-code-workflows`
 Adds reusable prompt templates for code review, bug fixing, issue analysis, and incident triage.
@@ -102,10 +115,11 @@ Runs Pi `!` / `!!` commands through fish shell.
 - Configurable shell path via env var
 
 ### `@firstpick/pi-extension-memory-helper`
-Adds lightweight memory commands and a memory tool.
+Adds lightweight daily and per-skill memory commands/tools.
 
 - `/remember` to append notes
 - `/memory-search` to search memory files
+- `/skill-memory-*` commands and `skill_memory_*` tools for local per-skill memory
 - `remember_note` tool for agent use
 
 ### `@firstpick/pi-extension-notes`
@@ -214,6 +228,7 @@ Reusable scaffold for local documentation/wiki extensions analogous to the ArchW
 - `dev/scripts/bump-package-versions.sh` – checks npm published versions first and enforces the next release version for changed packages (`+0.0.1`, rolling `*.9` to next minor `.0`; bumps up or reduces down only when needed)
 - `dev/scripts/release-workflow.sh` – orchestrates release checks: `--check` reports required bumps, `--plan` includes bump planning, and `--publish` applies required bumps before publishing
 - `dev/scripts/sync-pi-package-symlinks.sh` – ensures local development symlinks for Pi extensions (`~/.pi/agent/extensions/*.ts`) and packaged skills (`~/.pi/agent/skills/<skill-name>`) point to canonical resources in `npm-packages`; renames non-symlink conflicts to `.hardcoded.<timestamp>.bak`
+- `dev/scripts/validate-skill-routing-fixtures.mjs` – validates development-only `tests/routing/*.json`; schema-only by default, with optional `--settings` or `--skill-root` target coverage
 
 ## Publish model
 

@@ -1,0 +1,23 @@
+{
+  "skill": "tech-deep-dive",
+  "should_trigger": [
+    "Compare SQLite, PostgreSQL, and DuckDB for this desktop app use case",
+    "Choose a TypeScript charting library and score the options",
+    "Evaluate local embedding models for private on-device search"
+  ],
+  "should_not_trigger": [
+    "Find the auth flow in this unfamiliar repository",
+    "Troubleshoot Arch boot failure after mkinitcpio",
+    "Produce evidence-backed GitHub permalinks for a library internals question"
+  ],
+  "ambiguous": [
+    {
+      "prompt": "Research the best vector database for a privacy-focused agent with citations",
+      "candidate_skills": ["tech-deep-dive", "deep-research", "librarian"],
+      "decision": "Use tech-deep-dive when the outcome is a technology choice; use deep-research for claim fact-checking and librarian for source-code internals.",
+      "reason": "The prompt mixes technology selection, research rigor, and possible library investigation.",
+      "review_status": "reviewed-by-agent"
+    }
+  ],
+  "notes": "Technology choice, trade-off scoring, ecosystem health, and recommendation requests should route here."
+}

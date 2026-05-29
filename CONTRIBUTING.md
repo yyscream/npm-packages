@@ -40,6 +40,7 @@ For each changed package:
 - Keep `package.json` valid and minimal
 - Ensure `pi.extensions` entries resolve to real files/globs
 - Keep README accurate (commands, env vars, tools)
+- For reusable skills, follow [`pi-package-skill-lifecycle/vendor/pi-skill-skill-creator/skills/skill-creator/references/SKILL-PORTABILITY.md`](pi-package-skill-lifecycle/vendor/pi-skill-skill-creator/skills/skill-creator/references/SKILL-PORTABILITY.md)
 - Do not commit secrets/tokens
 - Bump version when preparing a release
 

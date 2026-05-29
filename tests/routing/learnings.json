@@ -1,0 +1,23 @@
+{
+  "skill": "learnings",
+  "should_trigger": [
+    "This DNS issue looks familiar; check previous LEARNINGS before fixing it",
+    "Save a short LEARNINGS note for the troubleshooting solution we just found",
+    "Run /ret-LEARNINGS for a repeated Pi startup problem"
+  ],
+  "should_not_trigger": [
+    "Create a standardized PATCH.md for these source code edits",
+    "Compare local embedding models for privacy-focused search",
+    "Troubleshoot Hyprland monitor scaling"
+  ],
+  "ambiguous": [
+    {
+      "prompt": "Pi startup broke again after a package symlink change",
+      "candidate_skills": ["learnings", "repo-explorer"],
+      "decision": "Use learnings first if the issue appears repeated; use repo-explorer later if source tracing is required.",
+      "reason": "The prompt combines repeated-issue recall with possible repository/source-code investigation.",
+      "review_status": "reviewed-by-agent"
+    }
+  ],
+  "notes": "This skill is specifically for durable troubleshooting memory and repeated issue retrieval."
+}

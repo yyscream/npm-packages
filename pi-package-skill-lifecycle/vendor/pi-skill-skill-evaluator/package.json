@@ -1,0 +1,46 @@
+{
+  "name": "@firstpick/pi-skill-skill-evaluator",
+  "version": "0.1.0",
+  "description": "Reusable Pi skill evaluation harness for validating skill structure, routing quality, safety boundaries, referenced scripts, and bundled tests.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "skill",
+    "agent-skill",
+    "evaluation",
+    "quality-gate",
+    "skill-evaluator"
+  ],
+  "pi": {
+    "skills": [
+      "./skills"
+    ],
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "bin": {
+    "skill_eval_run": "./bin/skill_eval_run",
+    "skill_eval_all": "./bin/skill_eval_all"
+  },
+  "scripts": {
+    "test": "python3 -m unittest discover -s skills/skill-evaluator/tests"
+  },
+  "files": [
+    "bin",
+    "extensions",
+    "skills/skill-evaluator/SKILL.md",
+    "skills/skill-evaluator/references",
+    "skills/skill-evaluator/scripts",
+    "skills/skill-evaluator/tests/*.py",
+    "README.md",
+    "LICENSE"
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "skill": "patch-md",
+  "should_trigger": [
+    "Create a PATCH.md that documents these code changes and verification steps",
+    "Apply the changes described in ./PATCH.md",
+    "Update PATCH.md so another agent can reproduce this fix"
+  ],
+  "should_not_trigger": [
+    "Audit an AUR PKGBUILD before publishing",
+    "Break down how database indexes work using questions",
+    "Search previous troubleshooting notes for a repeated bug"
+  ],
+  "ambiguous": [
+    {
+      "prompt": "A failed skill invocation needs an improvement package with PATCH.md and a memory note",
+      "candidate_skills": ["patch-md", "learnings"],
+      "decision": "Use patch-md for the reproducible patch artifact; use learnings only for the durable troubleshooting/memory note portion.",
+      "reason": "The requested artifact explicitly names PATCH.md but also references memory capture.",
+      "review_status": "reviewed-by-agent"
+    }
+  ],
+  "notes": "PATCH.md creation, updates, and application should route here even when another domain skill supplies context."
+}

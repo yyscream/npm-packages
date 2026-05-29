@@ -1,0 +1,23 @@
+{
+  "skill": "repo-explorer",
+  "should_trigger": [
+    "Find where authentication is implemented in this unknown repo",
+    "Trace dependencies for this feature before editing code",
+    "Map the repository structure and identify the entry points"
+  ],
+  "should_not_trigger": [
+    "Research how React Query implements cache invalidation upstream",
+    "Create a PATCH.md for a known change",
+    "Troubleshoot Arch pacman keyring errors"
+  ],
+  "ambiguous": [
+    {
+      "prompt": "Explain how this open-source library implements retries, with source citations",
+      "candidate_skills": ["repo-explorer", "librarian"],
+      "decision": "Use librarian for external open-source library internals with GitHub permalinks; use repo-explorer for local unfamiliar repositories before editing.",
+      "reason": "Both skills inspect code, but librarian's contract requires source-backed library answers and permalinks.",
+      "review_status": "reviewed-by-agent"
+    }
+  ],
+  "notes": "Local repository exploration before implementation should route here."
+}

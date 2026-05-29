@@ -18,6 +18,8 @@ DEP_LINKED=0
 DEP_RELINKED=0
 DEP_RENAMED=0
 DEP_SKIPPED=0
+STALE_CHECKED=0
+STALE_REMOVED=0
 ENSURE_RESULT=""
 
 usage() {
@@ -40,6 +42,9 @@ Ensures local npm-packages Pi resources are live-linked for development:
   ~/.pi/agent/prompts/<prompt>.md symlink to that package prompt file
 - every theme under pi-*/themes/*.json gets a
   ~/.pi/agent/themes/<theme>.json symlink to that package theme file
+- broken symlinks in those target directories, plus stale symlinks that point
+  back into this npm-packages tree but no longer match a current resource, are
+  removed
 - every workspace package gets a matching node_modules symlink by package name
   for local bare-import resolution
 
@@ -120,6 +125,7 @@ label_ok() { color "32;1" "OK   "; }
 label_link() { color "36;1" "LINK "; }
 label_fix() { color "33;1" "FIX  "; }
 label_move() { color "35;1" "MOVE "; }
+label_remove() { color "31;1" "RM   "; }
 label_skip() { color "90;1" "SKIP "; }
 label_dry_run() { color "34;1" "DRY-RUN:"; }
 label_summary() { color "1;4" "Summary:"; }
@@ -132,7 +138,7 @@ summary_value() {
   elif [[ "$value" != "0" ]]; then
     case "$key" in
       linked) code="36" ;;
-      relinked|renamed) code="33" ;;
+      relinked|renamed|removed) code="33" ;;
       skipped) code="90" ;;
     esac
   fi
@@ -149,6 +155,14 @@ format_summary_line() {
     "$(summary_value relinked "$relinked")" \
     "$(summary_value renamed "$renamed")" \
     "$(summary_value skipped "$skipped")"
+}
+
+format_cleanup_summary_line() {
+  local label="$1" checked="$2" removed="$3"
+  printf '%-11s checked=%s removed=%s' \
+    "$label" \
+    "$(summary_value total "$checked")" \
+    "$(summary_value removed "$removed")"
 }
 
 ts_now() {
@@ -217,9 +231,9 @@ ensure_symlink() {
 
   if [[ -L "$dest" ]]; then
     local dest_real source_real
-    dest_real="$(realpath_safe "$dest")"
-    source_real="$(realpath_safe "$source")"
-    if [[ "$dest_real" == "$source_real" ]]; then
+    dest_real="$(realpath_safe "$dest" || true)"
+    source_real="$(realpath_safe "$source" || true)"
+    if [[ -n "$dest_real" && -n "$source_real" && "$dest_real" == "$source_real" ]]; then
       printf '%s %s -> %s\n' "$(label_ok)" "$dest" "$source_real"
       ENSURE_RESULT="ok"
       return 0
@@ -241,6 +255,66 @@ ensure_symlink() {
   if [[ -z "$ENSURE_RESULT" ]]; then
     ENSURE_RESULT="linked"
   fi
+}
+
+expected_name_in_list() {
+  local needle="$1"
+  local haystack="$2"
+  local item
+
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    [[ "$item" == "$needle" ]] && return 0
+  done <<< "$haystack"
+
+  return 1
+}
+
+link_target_is_repo_managed() {
+  local target="$1"
+  [[ -n "$target" ]] || return 1
+  [[ "$target" == "$ROOT_DIR" || "$target" == "$ROOT_DIR/"* ]]
+}
+
+cleanup_stale_symlinks() {
+  local dir="$1"
+  local expected_names="$2"
+  local label="$3"
+
+  [[ -d "$dir" ]] || return 0
+
+  shopt -s nullglob
+  for link in "$dir"/*; do
+    [[ -L "$link" ]] || continue
+    STALE_CHECKED=$((STALE_CHECKED+1))
+
+    local name target reason
+    name="$(basename "$link")"
+    if expected_name_in_list "$name" "$expected_names"; then
+      continue
+    fi
+
+    target="$(readlink "$link" 2>/dev/null || true)"
+    local is_broken=0 is_repo_managed=0
+    [[ ! -e "$link" ]] && is_broken=1
+    link_target_is_repo_managed "$target" && is_repo_managed=1
+
+    if [[ $is_broken -ne 1 && $is_repo_managed -ne 1 ]]; then
+      continue
+    fi
+
+    reason="stale"
+    if [[ $is_broken -eq 1 && $is_repo_managed -eq 1 ]]; then
+      reason="broken/stale"
+    elif [[ $is_broken -eq 1 ]]; then
+      reason="broken"
+    fi
+
+    printf '%s %s (%s %s symlink target: %s)\n' "$(label_remove)" "$link" "$reason" "$label" "$target"
+    run_cmd rm -f "$link"
+    STALE_REMOVED=$((STALE_REMOVED+1))
+  done
+  shopt -u nullglob
 }
 
 get_pi_package_dir() {
@@ -366,6 +440,7 @@ ensure_shared_deps() {
 
 sync_extension_symlinks() {
   local count_total=0 count_ok=0 count_linked=0 count_relinked=0 count_renamed=0 count_skipped=0
+  local expected_names=""
 
   shopt -s nullglob
   for pkg_dir in "$ROOT_DIR"/pi-extension-* "$ROOT_DIR"/pi-package-*; do
@@ -377,11 +452,12 @@ sync_extension_symlinks() {
     ext_name="$(resource_name_from_dir "$pkg_name")"
     canonical="$pkg_dir/index.ts"
     [[ -f "$canonical" ]] || continue
+    expected_names+="${ext_name}.ts"$'\n'
 
     count_total=$((count_total+1))
     dest="$EXT_DIR/${ext_name}.ts"
 
-    canonical_real="$(realpath_safe "$canonical")"
+    canonical_real="$(realpath_safe "$canonical" || true)"
     if [[ -z "$canonical_real" ]]; then
       printf '%s %s -> cannot resolve canonical realpath: %s\n' "$(label_skip)" "$pkg_name" "$canonical"
       count_skipped=$((count_skipped+1))
@@ -389,7 +465,7 @@ sync_extension_symlinks() {
     fi
 
     if [[ -L "$dest" ]]; then
-      dest_real="$(realpath_safe "$dest")"
+      dest_real="$(realpath_safe "$dest" || true)"
       if [[ "$dest_real" == "$canonical_real" ]]; then
         printf '%s %s -> %s\n' "$(label_ok)" "$dest" "$canonical_real"
         count_ok=$((count_ok+1))
@@ -416,12 +492,14 @@ sync_extension_symlinks() {
     count_linked=$((count_linked+1))
   done
   shopt -u nullglob
+  cleanup_stale_symlinks "$EXT_DIR" "$expected_names" "extension"
 
   add_summary "$(format_summary_line "Extensions:" "$count_total" "$count_ok" "$count_linked" "$count_relinked" "$count_renamed" "$count_skipped")"
 }
 
 sync_skill_symlinks() {
   local count_total=0 count_ok=0 count_linked=0 count_relinked=0 count_renamed=0 count_skipped=0
+  local expected_names=""
 
   shopt -s nullglob
   for skill_file in "$ROOT_DIR"/pi-*/skills/*/SKILL.md; do
@@ -431,9 +509,10 @@ sync_skill_symlinks() {
     local skill_source skill_name dest source_real dest_real stamp backup
     skill_source="$(dirname "$skill_file")"
     skill_name="$(basename "$skill_source")"
+    expected_names+="$skill_name"$'\n'
     dest="$SKILL_DIR/$skill_name"
 
-    source_real="$(realpath_safe "$skill_source")"
+    source_real="$(realpath_safe "$skill_source" || true)"
     if [[ -z "$source_real" ]]; then
       printf '%s skill %s -> cannot resolve source realpath: %s\n' "$(label_skip)" "$skill_name" "$skill_source"
       count_skipped=$((count_skipped+1))
@@ -441,7 +520,7 @@ sync_skill_symlinks() {
     fi
 
     if [[ -L "$dest" ]]; then
-      dest_real="$(realpath_safe "$dest")"
+      dest_real="$(realpath_safe "$dest" || true)"
       if [[ "$dest_real" == "$source_real" ]]; then
         printf '%s %s -> %s\n' "$(label_ok)" "$dest" "$source_real"
         count_ok=$((count_ok+1))
@@ -468,12 +547,14 @@ sync_skill_symlinks() {
     count_linked=$((count_linked+1))
   done
   shopt -u nullglob
+  cleanup_stale_symlinks "$SKILL_DIR" "$expected_names" "skill"
 
   add_summary "$(format_summary_line "Skills:" "$count_total" "$count_ok" "$count_linked" "$count_relinked" "$count_renamed" "$count_skipped")"
 }
 
 sync_prompt_symlinks() {
   local count_total=0 count_ok=0 count_linked=0 count_relinked=0 count_renamed=0 count_skipped=0
+  local expected_names=""
 
   shopt -s nullglob
   for prompt_file in "$ROOT_DIR"/pi-*/prompts/*.md; do
@@ -482,9 +563,10 @@ sync_prompt_symlinks() {
 
     local prompt_name dest source_real dest_real stamp backup
     prompt_name="$(basename "$prompt_file")"
+    expected_names+="$prompt_name"$'\n'
     dest="$PROMPT_DIR/$prompt_name"
 
-    source_real="$(realpath_safe "$prompt_file")"
+    source_real="$(realpath_safe "$prompt_file" || true)"
     if [[ -z "$source_real" ]]; then
       printf '%s prompt %s -> cannot resolve source realpath: %s\n' "$(label_skip)" "$prompt_name" "$prompt_file"
       count_skipped=$((count_skipped+1))
@@ -492,7 +574,7 @@ sync_prompt_symlinks() {
     fi
 
     if [[ -L "$dest" ]]; then
-      dest_real="$(realpath_safe "$dest")"
+      dest_real="$(realpath_safe "$dest" || true)"
       if [[ "$dest_real" == "$source_real" ]]; then
         printf '%s %s -> %s\n' "$(label_ok)" "$dest" "$source_real"
         count_ok=$((count_ok+1))
@@ -519,12 +601,14 @@ sync_prompt_symlinks() {
     count_linked=$((count_linked+1))
   done
   shopt -u nullglob
+  cleanup_stale_symlinks "$PROMPT_DIR" "$expected_names" "prompt"
 
   add_summary "$(format_summary_line "Prompts:" "$count_total" "$count_ok" "$count_linked" "$count_relinked" "$count_renamed" "$count_skipped")"
 }
 
 sync_theme_symlinks() {
   local count_total=0 count_ok=0 count_linked=0 count_relinked=0 count_renamed=0 count_skipped=0
+  local expected_names=""
 
   shopt -s nullglob
   for theme_file in "$ROOT_DIR"/pi-*/themes/*.json; do
@@ -533,9 +617,10 @@ sync_theme_symlinks() {
 
     local theme_name dest source_real dest_real stamp backup
     theme_name="$(basename "$theme_file")"
+    expected_names+="$theme_name"$'\n'
     dest="$THEME_DIR/$theme_name"
 
-    source_real="$(realpath_safe "$theme_file")"
+    source_real="$(realpath_safe "$theme_file" || true)"
     if [[ -z "$source_real" ]]; then
       printf '%s theme %s -> cannot resolve source realpath: %s\n' "$(label_skip)" "$theme_name" "$theme_file"
       count_skipped=$((count_skipped+1))
@@ -543,7 +628,7 @@ sync_theme_symlinks() {
     fi
 
     if [[ -L "$dest" ]]; then
-      dest_real="$(realpath_safe "$dest")"
+      dest_real="$(realpath_safe "$dest" || true)"
       if [[ "$dest_real" == "$source_real" ]]; then
         printf '%s %s -> %s\n' "$(label_ok)" "$dest" "$source_real"
         count_ok=$((count_ok+1))
@@ -570,6 +655,7 @@ sync_theme_symlinks() {
     count_linked=$((count_linked+1))
   done
   shopt -u nullglob
+  cleanup_stale_symlinks "$THEME_DIR" "$expected_names" "theme"
 
   add_summary "$(format_summary_line "Themes:" "$count_total" "$count_ok" "$count_linked" "$count_relinked" "$count_renamed" "$count_skipped")"
 }
@@ -580,4 +666,5 @@ sync_prompt_symlinks
 sync_theme_symlinks
 ensure_shared_deps
 add_summary "$(format_summary_line "Node deps:" "$DEP_TOTAL" "$DEP_OK" "$DEP_LINKED" "$DEP_RELINKED" "$DEP_RENAMED" "$DEP_SKIPPED")"
+add_summary "$(format_cleanup_summary_line "Cleanup:" "$STALE_CHECKED" "$STALE_REMOVED")"
 print_summary

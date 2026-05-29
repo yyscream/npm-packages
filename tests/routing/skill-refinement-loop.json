@@ -1,0 +1,23 @@
+{
+  "skill": "skill-refinement-loop",
+  "should_trigger": [
+    "The repo-explorer skill failed to include citations; create a refinement plan",
+    "Turn this user correction about a skill into per-skill memory and a PATCH.md proposal",
+    "A skill test failed; produce a non-destructive improvement proposal with regression coverage"
+  ],
+  "should_not_trigger": [
+    "Create a brand new skill from these repeated workflow notes",
+    "Audit installed skills and find duplicate scopes",
+    "Evaluate this SKILL.md for frontmatter and test failures"
+  ],
+  "ambiguous": [
+    {
+      "prompt": "Use this skill feedback to improve the skill ecosystem",
+      "candidate_skills": ["skill-refinement-loop", "skill-bank-manager", "skill-evaluator"],
+      "decision": "Use skill-refinement-loop when the input is concrete runtime feedback or a failed invocation for one skill; use the bank manager for broad lifecycle inventory; use evaluator for validation checks.",
+      "reason": "Feedback can imply audit, validation, or refinement; the decisive cue is whether a specific existing skill needs a proposal from evidence.",
+      "review_status": "reviewed-by-agent"
+    }
+  ],
+  "notes": "Failure/correction-driven improvement proposals should route here."
+}

@@ -1,0 +1,40 @@
+{
+  "name": "@firstpick/pi-skill-skill-creator",
+  "version": "0.1.0",
+  "description": "Pi-native workflow and tools for drafting reusable Agent Skills from repeated successful work while keeping drafts disabled until reviewed.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "skill",
+    "agent-skill",
+    "extension",
+    "skill-creator"
+  ],
+  "pi": {
+    "skills": [
+      "./skills"
+    ],
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "scripts": {
+    "test": "python3 -m unittest discover -s skills/skill-creator/tests -p 'test_*.py'"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "files": [
+    "extensions",
+    "skills/skill-creator/SKILL.md",
+    "skills/skill-creator/references",
+    "skills/skill-creator/scripts",
+    "skills/skill-creator/examples",
+    "skills/skill-creator/tests/*.py",
+    "README.md",
+    "LICENSE"
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "skill": "skill-creator",
+  "should_trigger": [
+    "Create a reusable Agent Skill from this repeated successful workflow",
+    "Draft a Pi skill from these notes but do not enable it yet",
+    "Turn this PATCH.md workflow into a portable skill skeleton with tests"
+  ],
+  "should_not_trigger": [
+    "Audit all installed skills for duplicates and missing tests",
+    "Create a refinement plan for a skill that failed a user correction",
+    "Search per-skill memory for repo-explorer observations"
+  ],
+  "ambiguous": [
+    {
+      "prompt": "A skill failed; make a reusable improvement from that experience",
+      "candidate_skills": ["skill-creator", "skill-refinement-loop"],
+      "decision": "Use skill-refinement-loop when improving an existing skill from failure feedback; use skill-creator when drafting a new skill from a reusable successful trajectory.",
+      "reason": "Creation and refinement are adjacent lifecycle steps but produce different artifacts.",
+      "review_status": "reviewed-by-agent"
+    }
+  ],
+  "notes": "New disabled skill drafts from reusable workflows should route here."
+}

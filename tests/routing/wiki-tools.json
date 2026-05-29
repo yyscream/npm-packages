@@ -1,0 +1,23 @@
+{
+  "skill": "wiki-tools",
+  "should_trigger": [
+    "Create a Pi local wiki extension package from this documentation repo",
+    "Validate a generated local wiki package and tune search stopwords",
+    "Update a scaffolded wiki extension from the local-wiki template"
+  ],
+  "should_not_trigger": [
+    "Use local ArchWiki to troubleshoot pacman signatures",
+    "Research source code internals of an npm library",
+    "Write a PATCH.md for a code refactor"
+  ],
+  "ambiguous": [
+    {
+      "prompt": "Improve the Hyprland local wiki package search quality",
+      "candidate_skills": ["wiki-tools", "hyprland-local"],
+      "decision": "Use wiki-tools for package maintenance/tuning; use hyprland-local for answering Hyprland user questions from the wiki.",
+      "reason": "The prompt references Hyprland but asks to maintain the local wiki package itself.",
+      "review_status": "reviewed-by-agent"
+    }
+  ],
+  "notes": "Package scaffolding, validation, template refreshes, and wiki search tuning route here."
+}

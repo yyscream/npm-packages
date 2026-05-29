@@ -1,0 +1,23 @@
+{
+  "skill": "librarian",
+  "should_trigger": [
+    "How does TanStack Query implement staleTime? Give GitHub permalinks",
+    "Find the source lines in React that handle this warning",
+    "Why was this open-source library function changed? Check git history"
+  ],
+  "should_not_trigger": [
+    "Find auth code in this local proprietary repository",
+    "Choose a database for my app",
+    "Create a Pi local wiki extension package"
+  ],
+  "ambiguous": [
+    {
+      "prompt": "Trace a bug through a cloned open-source repo and show exact code references",
+      "candidate_skills": ["librarian", "repo-explorer"],
+      "decision": "Use librarian if the output must cite open-source code with permalinks; use repo-explorer if the task is local repo mapping before changes.",
+      "reason": "The prompt has both repository tracing and source-citation requirements.",
+      "review_status": "reviewed-by-agent"
+    }
+  ],
+  "notes": "Open-source library internals, source history, and GitHub permalink requirements should route here."
+}

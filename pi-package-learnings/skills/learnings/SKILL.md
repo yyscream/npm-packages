@@ -56,11 +56,11 @@ If `LEARNINGS-SUMMARY.md` is missing or stale, run:
 ~/.pi/agent/bin/learnings-summary
 ```
 
-or, from this package directory:
+or, from this skill directory, using paths relative to the skill root:
 
 ```bash
-./scripts/sync-learnings.py
-./scripts/summarize-learnings.py
+../../scripts/sync-learnings.py
+../../scripts/summarize-learnings.py
 ```
 
 ## Adding a learning
@@ -131,4 +131,4 @@ This package includes maintenance scripts in `scripts/`:
 - `summarize-learnings.py` — generates `LEARNINGS-SUMMARY.md` from `manifest.json`.
 - `run-sync-with-notification.sh` — runs both and writes `logs/latest.log`.
 
-When referenced from this skill, relative paths are resolved against the skill directory parent/package root as needed.
+When referenced from this skill, package-level helper scripts use explicit paths relative to this skill root, e.g. `../../scripts/sync-learnings.py`.

@@ -1,0 +1,23 @@
+{
+  "skill": "scientific-process",
+  "should_trigger": [
+    "Design GMP-style validation criteria for an agent skill",
+    "Create an ICH Q2 inspired evaluation suite for this workflow",
+    "Run system suitability tests before using this skill in production"
+  ],
+  "should_not_trigger": [
+    "Summarize an academic paper about transformers",
+    "Compare React state-management libraries for this project",
+    "Find source code references for how a library implements caching"
+  ],
+  "ambiguous": [
+    {
+      "prompt": "Evaluate whether this research agent output is production-ready",
+      "candidate_skills": ["scientific-process", "deep-research"],
+      "decision": "Use scientific-process when the request is about validation gates and production readiness; use deep-research when the request is to gather or fact-check evidence.",
+      "reason": "Both skills involve evidence quality, but only scientific-process defines validation lifecycle and SST gates.",
+      "review_status": "reviewed-by-agent"
+    }
+  ],
+  "notes": "Validation governance, SST, GMP, ICH Q2, and OOS language should route here."
+}

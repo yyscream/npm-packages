@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pi enabled skill routing fixture",
+  "type": "object",
+  "required": ["skill", "should_trigger", "should_not_trigger"],
+  "additionalProperties": true,
+  "properties": {
+    "skill": {
+      "type": "string",
+      "minLength": 1
+    },
+    "should_trigger": {
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "should_not_trigger": {
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "ambiguous": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["prompt", "candidate_skills", "decision", "reason", "review_status"],
+        "additionalProperties": true,
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "minLength": 1
+          },
+          "candidate_skills": {
+            "type": "array",
+            "minItems": 2,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "decision": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "review_status": {
+            "type": "string",
+            "pattern": "reviewed"
+          }
+        }
+      }
+    },
+    "notes": {
+      "type": "string"
+    }
+  }
+}

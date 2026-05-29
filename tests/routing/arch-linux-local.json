@@ -1,0 +1,23 @@
+{
+  "skill": "arch-linux-local",
+  "should_trigger": [
+    "My EndeavourOS pacman update fails with invalid or corrupted package signature",
+    "NetworkManager on Arch connects to Wi-Fi but DNS resolution is broken",
+    "After mkinitcpio update my Arch system drops to emergency shell during boot"
+  ],
+  "should_not_trigger": [
+    "Troubleshoot Hyprland window rules for floating dialogs",
+    "Compare PostgreSQL ORMs for a Django app",
+    "Find where auth middleware is implemented in this repository"
+  ],
+  "ambiguous": [
+    {
+      "prompt": "Hyprland on EndeavourOS has a black screen after an NVIDIA driver update",
+      "candidate_skills": ["arch-linux-local", "hyprland-local"],
+      "decision": "Start with arch-linux-local when the driver/package update is the dominant clue, then use hyprland-local if compositor configuration evidence becomes central.",
+      "reason": "The prompt crosses Arch packaging/GPU troubleshooting and Hyprland runtime behavior.",
+      "review_status": "reviewed-by-agent"
+    }
+  ],
+  "notes": "Arch/Linux operating-system failures should route here even when another enabled skill may be used later."
+}

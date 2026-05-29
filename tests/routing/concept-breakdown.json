@@ -1,0 +1,23 @@
+{
+  "skill": "concept-breakdown",
+  "should_trigger": [
+    "Help me understand binary search trees by asking guiding questions",
+    "Explain SQL joins in a Socratic way",
+    "I do not get recursion; ask me questions that build up the idea"
+  ],
+  "should_not_trigger": [
+    "Find the recursive function implementation in this codebase",
+    "Summarize this arXiv paper's methodology and limitations",
+    "Choose a TypeScript state management library for my app"
+  ],
+  "ambiguous": [
+    {
+      "prompt": "Explain why hash maps are faster than lists and include a mini quiz",
+      "candidate_skills": ["concept-breakdown", "tech-deep-dive"],
+      "decision": "Use concept-breakdown because the user asks to learn a CS concept, not to choose a technology.",
+      "reason": "The word 'faster' could suggest performance evaluation, but the requested teaching format dominates.",
+      "review_status": "reviewed-by-agent"
+    }
+  ],
+  "notes": "This fixture intentionally tests teaching intent rather than generic explanation intent alone."
+}

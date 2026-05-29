@@ -1,0 +1,23 @@
+{
+  "skill": "skill-evaluator",
+  "should_trigger": [
+    "Evaluate this SKILL.md before I enable the package",
+    "Run a skill quality gate for frontmatter, safety language, scripts, and tests",
+    "Check all skills under this package root for blocking validation failures"
+  ],
+  "should_not_trigger": [
+    "Inventory installed Pi skills and propose merge or prune candidates",
+    "Draft a new skill from a successful trajectory",
+    "Record this skill failure as a PATCH.md-style refinement proposal"
+  ],
+  "ambiguous": [
+    {
+      "prompt": "Check which skills are weak and need cleanup",
+      "candidate_skills": ["skill-evaluator", "skill-bank-manager"],
+      "decision": "Use skill-evaluator for contract validation of specific skill files; use skill-bank-manager for inventory and lifecycle cleanup planning across a skill bank.",
+      "reason": "Both report skill issues, but evaluator produces pass/warn/fail validation while bank manager produces lifecycle recommendations.",
+      "review_status": "reviewed-by-agent"
+    }
+  ],
+  "notes": "Structural quality gates and runnable skill tests should route here."
+}

@@ -1,0 +1,23 @@
+{
+  "skill": "release-aur",
+  "should_trigger": [
+    "Review this AUR PKGBUILD and decide if it is ready to publish",
+    "Run the /release-aur plan for my package repo",
+    "Create a new AUR package repository for this GitHub project"
+  ],
+  "should_not_trigger": [
+    "Publish an npm package from this monorepo",
+    "Troubleshoot NetworkManager DNS on Arch",
+    "Compare package manager libraries for a Rust project"
+  ],
+  "ambiguous": [
+    {
+      "prompt": "An AUR package build fails on Arch after a dependency update",
+      "candidate_skills": ["release-aur", "arch-linux-local"],
+      "decision": "Use release-aur if the target is PKGBUILD/release readiness; use arch-linux-local if the failure is a local system package manager issue.",
+      "reason": "AUR workflows sit on top of Arch packaging and can overlap with general Arch troubleshooting.",
+      "review_status": "reviewed-by-agent"
+    }
+  ],
+  "notes": "AUR package creation, review, and publishing decisions should route here before general Arch troubleshooting."
+}

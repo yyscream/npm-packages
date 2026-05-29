@@ -1,0 +1,23 @@
+{
+  "skill": "deep-research",
+  "should_trigger": [
+    "Do rigorous multi-source research on whether caffeine improves focus",
+    "Fact-check these claims with peer-reviewed evidence and decision traces",
+    "Run /deep-research on the safety of a new battery chemistry"
+  ],
+  "should_not_trigger": [
+    "Choose between React charting libraries for this app",
+    "Find exact source lines in an open-source library",
+    "Troubleshoot Hyprland screen sharing"
+  ],
+  "ambiguous": [
+    {
+      "prompt": "Compare database options and cite benchmarks from several sources",
+      "candidate_skills": ["deep-research", "tech-deep-dive"],
+      "decision": "Use tech-deep-dive when the goal is selecting a database; use deep-research when the goal is fact-checking claims from evidence.",
+      "reason": "Both skills may use multiple sources, but their final outputs differ: recommendation matrix versus evidence classification.",
+      "review_status": "reviewed-by-agent"
+    }
+  ],
+  "notes": "Use for rigorous evidence gathering and fact-checking, not ordinary product/library selection."
+}

@@ -1,0 +1,40 @@
+{
+  "name": "@firstpick/pi-skill-skill-refinement-loop",
+  "version": "0.1.0",
+  "description": "Skill refinement workflow and planning tool for turning Pi skill failures into PATCH.md proposals.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "skill",
+    "agent-skill",
+    "extension",
+    "skill-refinement"
+  ],
+  "pi": {
+    "skills": [
+      "./skills"
+    ],
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "scripts": {
+    "test:mock": "bun tests/mocktest.ts"
+  },
+  "dependencies": {
+    "@firstpick/pi-utils": "^0.1.7"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "files": [
+    "extensions",
+    "skills",
+    "tests",
+    "README.md",
+    "LICENSE"
+  ]
+}

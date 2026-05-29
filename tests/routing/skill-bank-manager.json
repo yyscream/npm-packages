@@ -1,0 +1,23 @@
+{
+  "skill": "skill-bank-manager",
+  "should_trigger": [
+    "Audit my installed Pi skills and report stale or duplicate skill scopes",
+    "Inventory enabled and installed skills and produce a read-only prune plan",
+    "Find overlapping skill descriptions before I publish the skill packages"
+  ],
+  "should_not_trigger": [
+    "Draft a new reusable skill from these troubleshooting notes",
+    "Evaluate one SKILL.md for frontmatter and safety issues",
+    "Append a local memory note for repo-explorer"
+  ],
+  "ambiguous": [
+    {
+      "prompt": "Run a quality gate over all enabled skills and tell me which ones need work",
+      "candidate_skills": ["skill-bank-manager", "skill-evaluator"],
+      "decision": "Use skill-evaluator for structural pass/warn/fail quality gates; use skill-bank-manager for inventory, overlap, lifecycle, and prune/merge planning.",
+      "reason": "Both inspect skills, but the bank manager focuses on lifecycle inventory while the evaluator focuses on contract validation.",
+      "review_status": "reviewed-by-agent"
+    }
+  ],
+  "notes": "Lifecycle inventory and plan-only skill-bank management should route here."
+}

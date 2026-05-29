@@ -1,0 +1,48 @@
+{
+  "name": "@firstpick/pi-package-skill-lifecycle",
+  "version": "0.1.0",
+  "description": "Self-contained Pi package for skill lifecycle management: memory, skill-bank audit, evaluation, creation, and refinement tools.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "skill",
+    "agent-skill",
+    "skill-lifecycle",
+    "skill-memory",
+    "skill-evaluation"
+  ],
+  "pi": {
+    "extensions": [
+      "vendor/pi-extension-memory-helper/index.ts",
+      "vendor/pi-skill-skill-bank-manager/index.ts",
+      "vendor/pi-skill-skill-evaluator/extensions",
+      "vendor/pi-skill-skill-creator/extensions",
+      "vendor/pi-skill-skill-refinement-loop/extensions"
+    ],
+    "skills": [
+      "vendor/pi-skill-skill-bank-manager/skills",
+      "vendor/pi-skill-skill-evaluator/skills",
+      "vendor/pi-skill-skill-creator/skills",
+      "vendor/pi-skill-skill-refinement-loop/skills"
+    ]
+  },
+  "bin": {
+    "skill_eval_run": "vendor/pi-skill-skill-evaluator/bin/skill_eval_run",
+    "skill_eval_all": "vendor/pi-skill-skill-evaluator/bin/skill_eval_all"
+  },
+  "dependencies": {
+    "@firstpick/pi-utils": "^0.1.7"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "files": [
+    "vendor",
+    "README.md",
+    "LICENSE"
+  ]
+}

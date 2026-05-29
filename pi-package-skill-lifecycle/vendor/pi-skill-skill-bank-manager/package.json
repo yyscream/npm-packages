@@ -1,0 +1,44 @@
+{
+  "name": "@firstpick/pi-skill-skill-bank-manager",
+  "version": "0.1.0",
+  "description": "Pi skill and extension tools for read-only auditing, inventorying, and lifecycle planning of the local skill bank.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "skill",
+    "extension",
+    "agent-skill",
+    "skill-bank",
+    "audit"
+  ],
+  "scripts": {
+    "test": "bun test",
+    "audit": "bun scripts/skillbank-audit.ts"
+  },
+  "bin": {
+    "skillbank-audit": "./scripts/skillbank-audit.ts"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "files": [
+    "index.ts",
+    "src",
+    "scripts",
+    "skills",
+    "tests",
+    "README.md",
+    "LICENSE"
+  ]
+}

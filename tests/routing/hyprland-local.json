@@ -1,0 +1,23 @@
+{
+  "skill": "hyprland-local",
+  "should_trigger": [
+    "Hyprland monitor DP-1 has the wrong scale and refresh rate",
+    "Write a Hyprland windowrule to float and center a dialog",
+    "hyprctl clients shows the wrong app class; fix the keybind or window rule"
+  ],
+  "should_not_trigger": [
+    "pacman cannot verify package signatures after a keyring update",
+    "Research current LLM benchmark results with multiple citations",
+    "Create routing fixtures for enabled Pi skills"
+  ],
+  "ambiguous": [
+    {
+      "prompt": "EndeavourOS Hyprland portal screen sharing stopped after a system update",
+      "candidate_skills": ["hyprland-local", "arch-linux-local"],
+      "decision": "Use hyprland-local first when the immediate subject is Hyprland portals or compositor behavior; add arch-linux-local for package/system evidence if needed.",
+      "reason": "The issue names both an Arch-based distro and a Hyprland ecosystem component.",
+      "review_status": "reviewed-by-agent"
+    }
+  ],
+  "notes": "Hyprland config, hyprctl, monitors, portals, and compositor behavior should route here."
+}
