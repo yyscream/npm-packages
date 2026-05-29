@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-extension-release-aur",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Pi commands and skill for deterministic AUR setup, review, and release workflows.",
   "license": "MIT",
   "keywords": [
