@@ -16,12 +16,16 @@ Use this skill when the issue is with a **Pi skill or skill routing/workflow**, 
 
 Do **not** use this for ordinary application bugs unless the bug is caused by a skill's instructions, scripts, routing, or validation behavior.
 
+## Lifecycle policy
+
+Before proposing production skill edits, enablement, pruning, publishing, or risky lifecycle changes, read the bundled package policy at `../../../../docs/SKILL-LIFECYCLE-POLICY.md` when available.
+
 ## Critical implementation notes
 
 The original MUSE task recommends Task 2 (per-skill memory tools) and Task 3 (skill evaluator) as dependencies. Those may not exist yet. This package deliberately handles that inconsistency with safe fallbacks:
 
 - Per-skill memory is appended directly to `~/.pi/agent/memory/skills/<skill>.md`.
-- `skill_eval_run` is treated as optional; include it in verification when available, otherwise use package tests/manual routing checks.
+- `skill_eval_run` is treated as optional; include it in verification when available, otherwise use package tests plus hand-inspected routing checks.
 - Production skill files are never edited by the tool. The tool writes a proposal file and memory only.
 
 ## Workflow
@@ -31,7 +35,7 @@ The original MUSE task recommends Task 2 (per-skill memory tools) and Task 3 (sk
 3. Call `skill_refinement_plan` with the skill name, failure, evidence, root-cause hypothesis if known, and a regression test proposal.
 4. Review the generated PATCH.md-style proposal.
 5. Add/update regression coverage if possible; if not possible, document why.
-6. Run the skill evaluator if installed; otherwise run the package's tests and manual routing/contract checks.
+6. Run the skill evaluator if installed; otherwise run the package's tests and inspect routing/contract behavior by hand.
 7. Apply source changes only after validation and user approval for risky edits.
 
 ## Tool usage
@@ -90,4 +94,4 @@ ls ~/.pi/agent/memory/skills
 skill_eval_run <skill-package>/skills/<skill>/SKILL.md
 ```
 
-If `skill_eval_run` is unavailable, run the package's own tests (for example `npm test`, `bun test`, or package-specific mock tests) and manually inspect the skill's routing/workflow language.
+If `skill_eval_run` is unavailable, run the package's own tests (for example `npm test`, `bun test`, or package-specific mock tests) and inspect the skill's routing/workflow language by hand.

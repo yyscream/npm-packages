@@ -17,6 +17,10 @@ Do **not** write drafts under `~/.pi/agent/skills/drafts/` by default. Pi recurs
 
 Only write under an auto-discovered skill root after explicit user approval and a review decision.
 
+## Lifecycle policy
+
+Before drafting, enabling, publishing, or moving skills, read the bundled package policy at `../../../../docs/SKILL-LIFECYCLE-POLICY.md` when available. Use `references/SKILL-PORTABILITY.md` for portable skill authoring rules.
+
 ## When to Use
 
 Use this skill when the user wants to create a new skill from:

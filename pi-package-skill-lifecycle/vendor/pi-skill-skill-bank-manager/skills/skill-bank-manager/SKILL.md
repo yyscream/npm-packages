@@ -9,6 +9,10 @@ metadata:
 
 Use this skill when the user asks to audit, inventory, improve, merge, prune, or evaluate the local Pi skill ecosystem.
 
+## Lifecycle policy
+
+For create/update/merge/prune/enable/publish decisions, read the bundled package policy at `../../../../docs/SKILL-LIFECYCLE-POLICY.md` when available. Do not rely on a separate workspace-local copy.
+
 ## Tools
 
 - `skillbank_audit` — read-only full audit; writes `/tmp/pi-skill-bank-audit.md` by default.
@@ -26,12 +30,11 @@ Use this skill when the user asks to audit, inventory, improve, merge, prune, or
 
 ## Verification
 
-For package development:
+For package development from this skill directory:
 
 ```bash
-cd <package-root>
-npm test
-bun scripts/skillbank-audit.ts /tmp/pi-skill-bank-audit.md
+(cd ../.. && npm test)
+bun ../../scripts/skillbank-audit.ts /tmp/pi-skill-bank-audit.md
 pi --version
 ```
 

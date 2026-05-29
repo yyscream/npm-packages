@@ -16,6 +16,10 @@ Good triggers include:
 - "Check whether this skill has valid frontmatter, safety language, scripts, and tests."
 - "Add or review routing fixtures for skills."
 
+## Lifecycle policy
+
+When evaluation informs skill enablement, publishing, pruning, or merge/update decisions, read the bundled package policy at `../../../../docs/SKILL-LIFECYCLE-POLICY.md` when available.
+
 ## Workflow
 
 1. Resolve the target skill path. For one skill, use a `SKILL.md` file or its parent directory.

@@ -49,7 +49,7 @@ Extension-bundled skills kept as direct Pi config includes instead of duplicate 
 ### `@firstpick/pi-package-skill-lifecycle`
 Bundles the skill lifecycle packages that are designed to work together.
 
-- Includes per-skill memory, skill-bank audit/management, skill evaluation, skill creation, and skill refinement-loop resources
+- Includes per-skill memory, skill-bank audit/management, skill evaluation, skill creation, skill refinement-loop resources, and the package-bundled skill lifecycle policy
 - Uses Pi package `dependencies` + `bundledDependencies` so npm publication can be self-contained
 - Does not include repository-level `tests/routing/`; those fixtures are development/evaluation data
 

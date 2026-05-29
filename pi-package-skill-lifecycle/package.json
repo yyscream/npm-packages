@@ -42,6 +42,7 @@
   },
   "files": [
     "vendor",
+    "docs",
     "README.md",
     "LICENSE"
   ]
