@@ -29,7 +29,11 @@ type RunResult = { ok: boolean; output: string; aborted: boolean };
 type AbortableChild = ChildProcessByStdio<null, Readable, Readable> & { abortReleaseStep?: () => void };
 type ReleaseRunLog = { id: string; startedAt: string; cwd: string; chunks: string[]; saved: boolean };
 type LogEntry = { file: string; title: string; mtimeMs: number };
-type ReleaseAurConfig = { aurReposDir?: string };
+type ReleaseAurConfig = {
+  aurReposDir?: string;
+  releaseSource?: string;
+  packageReleaseSources?: Record<string, string>;
+};
 type Action = "plan" | "publish" | "create" | "logs" | "abort" | "toggle" | "help";
 type ParsedArgs = { action: Action; target?: string; pkgbase?: string; flags: string[]; noAgentReview: boolean; pushAfterCreate: boolean };
 
@@ -99,13 +103,44 @@ function isDirectory(path: string): boolean {
   }
 }
 
+function normalizeConfigString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function normalizeReleaseSourceInput(value: unknown): string | undefined {
+  const trimmed = normalizeConfigString(value);
+  if (!trimmed || /[\r\n\t]/.test(trimmed)) return undefined;
+  return trimmed;
+}
+
+function normalizePackageKeyInput(value: unknown): string | undefined {
+  const trimmed = normalizeConfigString(value);
+  if (!trimmed || /\s/.test(trimmed)) return undefined;
+  return trimmed;
+}
+
+function normalizePackageSourceMap(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .map(([key, source]) => [normalizePackageKeyInput(key), normalizeReleaseSourceInput(source)] as const)
+    .filter((entry): entry is readonly [string, string] => Boolean(entry[0] && entry[1]));
+  return entries.length ? Object.fromEntries(entries) : undefined;
+}
+
 function readReleaseAurConfig(): ReleaseAurConfig {
   if (!existsSync(CONFIG_PATH)) return {};
   try {
     const parsed = JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as Partial<ReleaseAurConfig>;
-    return typeof parsed.aurReposDir === "string" && parsed.aurReposDir.trim()
-      ? { aurReposDir: parsed.aurReposDir }
-      : {};
+    const config: ReleaseAurConfig = {};
+    const aurReposDir = normalizeConfigString(parsed.aurReposDir);
+    const releaseSource = normalizeReleaseSourceInput(parsed.releaseSource);
+    const packageReleaseSources = normalizePackageSourceMap(parsed.packageReleaseSources);
+    if (aurReposDir) config.aurReposDir = aurReposDir;
+    if (releaseSource) config.releaseSource = releaseSource;
+    if (packageReleaseSources) config.packageReleaseSources = packageReleaseSources;
+    return config;
   } catch {
     return {};
   }
@@ -139,11 +174,20 @@ function extensionResourcePath(...parts: string[]): string {
   return candidates.find((candidate) => existsSync(candidate)) ?? candidates[candidates.length - 1];
 }
 
+function packageReleaseSourcesEnv(config: ReleaseAurConfig): string | undefined {
+  const entries = Object.entries(config.packageReleaseSources ?? {});
+  return entries.length ? entries.map(([pkgbase, source]) => `${pkgbase}\t${source}`).join("\n") : undefined;
+}
+
 function scriptCommand(cwd: string, args: string[]): string {
   const localCandidates = [join(cwd, "dev", "scripts", "aur-release-workflow.sh"), join(cwd, "aur-release-workflow.sh")];
   const scriptPath = localCandidates.find((candidate) => existsSync(candidate)) ?? extensionResourcePath("aur-release-workflow.sh");
+  const config = readReleaseAurConfig();
+  const packageSources = packageReleaseSourcesEnv(config);
   return [
     `PI_AUR_PACKAGES_ROOT=${shellQuote(cwd)}`,
+    `PI_AUR_RELEASE_SOURCE=${shellQuote(config.releaseSource ?? "auto")}`,
+    ...(packageSources ? [`PI_AUR_PACKAGE_RELEASE_SOURCES=${shellQuote(packageSources)}`] : []),
     "bash",
     shellQuote(scriptPath),
     ...args.map(shellQuote),
@@ -243,6 +287,10 @@ function parseArgs(raw: string): ParsedArgs {
     }
     if (token === "--target") {
       target = tokens[index++];
+      continue;
+    }
+    if (token === "--release-source" || token === "--package-release-source") {
+      flags.push(token, tokens[index++] ?? "");
       continue;
     }
     if (token.startsWith("--")) {
@@ -375,6 +423,15 @@ function parseGitHubRepo(input: string): { owner: string; repo: string; url: str
     if (!match) return undefined;
     return { owner: match[1], repo: match[2], url: `https://github.com/${match[1]}/${match[2]}` };
   }
+}
+
+function pkgbaseFromPkgbuild(pkgDir: string): string | undefined {
+  const pkgbuild = join(pkgDir, "PKGBUILD");
+  if (!existsSync(pkgbuild)) return undefined;
+  const content = readFileSync(pkgbuild, "utf8");
+  const match = content.match(/^\s*pkgbase\s*=\s*['"]?([^'"\s]+)['"]?/m)
+    ?? content.match(/^\s*pkgname\s*=\s*['"]?([^'"\s(]+)['"]?/m);
+  return match?.[1];
 }
 
 function defaultBinaryName(pkgbase: string): string {
@@ -637,6 +694,35 @@ function aurReposDirectoryStatusLines(cwd: string): string[] {
   return lines;
 }
 
+function releaseSourceHelpLines(): string[] {
+  return [
+    "Release source controls the latest-upstream-version check before plan/publish.",
+    "Use 'auto' to keep the original behavior: detect a github.com repo from PKGBUILD.",
+    "Use 'github:owner/repo' or 'https://github.com/owner/repo' for GitHub releases.",
+    "Use 'git:<clone-url>' or any git clone URL for custom upstreams; latest tag wins.",
+  ];
+}
+
+function releaseSourceStatusLines(): string[] {
+  const config = readReleaseAurConfig();
+  const packageSources = Object.entries(config.packageReleaseSources ?? {}).sort(([a], [b]) => a.localeCompare(b));
+  const lines = [
+    `Global release source: ${config.releaseSource ?? "auto (detect github.com from PKGBUILD)"}`,
+    `Per-package release sources: ${packageSources.length}`,
+  ];
+  if (packageSources.length > 0) {
+    lines.push(...packageSources.slice(0, 20).map(([pkgbase, source]) => `  - ${pkgbase}: ${source}`));
+    if (packageSources.length > 20) lines.push(`  - ... ${packageSources.length - 20} more`);
+  }
+  return lines;
+}
+
+function validateReleaseSourceForUi(input: string): string | undefined {
+  const source = normalizeReleaseSourceInput(input);
+  if (!source) return undefined;
+  return source;
+}
+
 async function runAurReposDirSetup(ctx: ExtensionCommandContext, rawPath?: string): Promise<void> {
   let input = rawPath?.trim();
   if (!input) {
@@ -685,6 +771,168 @@ async function runAurReposDirSetup(ctx: ExtensionCommandContext, rawPath?: strin
   ]);
   ctx.ui.notify(`AUR repos directory saved: ${userPath(dir)} (${targets.length} package repo${targets.length === 1 ? "" : "s"} found).`, "info");
   clearSetupWidget(ctx, widgetGeneration, 8000);
+}
+
+async function runGlobalReleaseSourceSetup(ctx: ExtensionCommandContext, rawSource?: string): Promise<void> {
+  let input = rawSource?.trim();
+  const current = readReleaseAurConfig().releaseSource ?? "auto";
+  if (!input) {
+    if (!ctx.hasUI) {
+      ctx.ui.notify("Usage: /release-aur-setup source global <auto|github:owner/repo|git:clone-url>", "warning");
+      return;
+    }
+    input = await ctx.ui.input("Global upstream release source", current);
+  }
+
+  if (!input?.trim()) {
+    ctx.ui.notify("Release source setup cancelled.", "info");
+    return;
+  }
+
+  const source = validateReleaseSourceForUi(input);
+  if (!source) {
+    ctx.ui.notify("Release source must be a single-line value without tabs. Examples: auto, github:owner/repo, git:https://example/repo.git", "error");
+    return;
+  }
+
+  writeReleaseAurConfig({ ...readReleaseAurConfig(), releaseSource: source });
+  const widgetGeneration = showSetupWidget(ctx, "Global release source", [
+    `Configured: ${source}`,
+    `Config file: ${userPath(CONFIG_PATH)}`,
+    "",
+    ...releaseSourceHelpLines(),
+  ]);
+  ctx.ui.notify(`Global release source saved: ${source}`, "info");
+  clearSetupWidget(ctx, widgetGeneration, 8000);
+}
+
+async function choosePackageForReleaseSource(ctx: ExtensionCommandContext): Promise<string | undefined> {
+  const root = releaseRoot(ctx.cwd).root;
+  const targets = discoverTargets(root);
+  const packageChoices = targets.map((target) => {
+    if (target === ".") return pkgbaseFromPkgbuild(root) ?? resolve(root).split(/[\\/]/).pop() ?? ".";
+    return pkgbaseFromPkgbuild(join(root, target)) ?? target;
+  });
+
+  if (!ctx.hasUI) return undefined;
+  const choice = await ctx.ui.select("Select AUR package for release source override", [
+    ...Array.from(new Set(packageChoices)),
+    "Enter package name manually",
+    "Cancel",
+  ]);
+  if (!choice || choice === "Cancel") return undefined;
+  if (choice !== "Enter package name manually") return choice;
+  const input = await ctx.ui.input("AUR package/pkgbase", "pkgbase");
+  return normalizePackageKeyInput(input);
+}
+
+async function runPackageReleaseSourceSetup(ctx: ExtensionCommandContext, rawPkgbase?: string, rawSource?: string): Promise<void> {
+  let pkgbase = normalizePackageKeyInput(rawPkgbase);
+  if (!pkgbase) {
+    pkgbase = await choosePackageForReleaseSource(ctx);
+  }
+  if (!pkgbase) {
+    ctx.ui.notify("Per-package release source setup cancelled.", "info");
+    return;
+  }
+
+  let input = rawSource?.trim();
+  const config = readReleaseAurConfig();
+  const current = config.packageReleaseSources?.[pkgbase] ?? config.releaseSource ?? "auto";
+  if (!input) {
+    if (!ctx.hasUI) {
+      ctx.ui.notify("Usage: /release-aur-setup source package <pkgbase> <auto|github:owner/repo|git:clone-url>", "warning");
+      return;
+    }
+    input = await ctx.ui.input(`Release source for ${pkgbase}`, current);
+  }
+
+  if (!input?.trim()) {
+    ctx.ui.notify("Per-package release source setup cancelled.", "info");
+    return;
+  }
+
+  const source = validateReleaseSourceForUi(input);
+  if (!source) {
+    ctx.ui.notify("Release source must be a single-line value without tabs. Examples: auto, github:owner/repo, git:https://example/repo.git", "error");
+    return;
+  }
+
+  const nextSources = { ...(config.packageReleaseSources ?? {}), [pkgbase]: source };
+  writeReleaseAurConfig({ ...config, packageReleaseSources: nextSources });
+  const widgetGeneration = showSetupWidget(ctx, `Release source for ${pkgbase}`, [
+    `Configured: ${source}`,
+    `Global default: ${config.releaseSource ?? "auto"}`,
+    `Config file: ${userPath(CONFIG_PATH)}`,
+  ]);
+  ctx.ui.notify(`Release source for ${pkgbase} saved: ${source}`, "info");
+  clearSetupWidget(ctx, widgetGeneration, 8000);
+}
+
+async function clearPackageReleaseSource(ctx: ExtensionCommandContext, rawPkgbase?: string): Promise<void> {
+  let pkgbase = normalizePackageKeyInput(rawPkgbase);
+  if (!pkgbase) pkgbase = await choosePackageForReleaseSource(ctx);
+  if (!pkgbase) {
+    ctx.ui.notify("Per-package release source clear cancelled.", "info");
+    return;
+  }
+
+  const config = readReleaseAurConfig();
+  const nextSources = { ...(config.packageReleaseSources ?? {}) };
+  delete nextSources[pkgbase];
+  const nextConfig: ReleaseAurConfig = { ...config };
+  if (Object.keys(nextSources).length) nextConfig.packageReleaseSources = nextSources;
+  else delete nextConfig.packageReleaseSources;
+  writeReleaseAurConfig(nextConfig);
+  const widgetGeneration = showSetupWidget(ctx, `Release source override cleared for ${pkgbase}`, [
+    `Now using global default: ${config.releaseSource ?? "auto"}`,
+    `Config file: ${userPath(CONFIG_PATH)}`,
+  ]);
+  ctx.ui.notify(`Release source override cleared for ${pkgbase}.`, "info");
+  clearSetupWidget(ctx, widgetGeneration, 8000);
+}
+
+async function runReleaseSourceSetup(ctx: ExtensionCommandContext, args: string[]): Promise<void> {
+  const [subcommand, ...rest] = args;
+  if (!subcommand) {
+    if (!ctx.hasUI) {
+      ctx.ui.notify(setupHelpText(), "info");
+      return;
+    }
+    const choice = await ctx.ui.select("release-aur upstream source setup", [
+      "Global default source",
+      "Per-package source override",
+      "Clear per-package source override",
+      "Show source status",
+      "Cancel",
+    ]);
+    if (choice === "Global default source") await runGlobalReleaseSourceSetup(ctx);
+    else if (choice === "Per-package source override") await runPackageReleaseSourceSetup(ctx);
+    else if (choice === "Clear per-package source override") await clearPackageReleaseSource(ctx);
+    else if (choice === "Show source status") showSetupWidget(ctx, "release-aur source status", releaseSourceStatusLines());
+    return;
+  }
+
+  if (subcommand === "global" || subcommand === "default") {
+    await runGlobalReleaseSourceSetup(ctx, rest.join(" "));
+    return;
+  }
+  if (subcommand === "package" || subcommand === "pkg" || subcommand === "pkgbase") {
+    const [pkgbase, ...sourceParts] = rest;
+    await runPackageReleaseSourceSetup(ctx, pkgbase, sourceParts.join(" "));
+    return;
+  }
+  if (subcommand === "clear" || subcommand === "unset" || subcommand === "remove") {
+    await clearPackageReleaseSource(ctx, rest.join(" "));
+    return;
+  }
+  if (subcommand === "status") {
+    showSetupWidget(ctx, "release-aur source status", releaseSourceStatusLines());
+    ctx.ui.notify(releaseSourceStatusLines().join("\n"), "info");
+    return;
+  }
+
+  await runGlobalReleaseSourceSetup(ctx, [subcommand, ...rest].join(" "));
 }
 
 function aurSshStatusLines(): string[] {
@@ -747,12 +995,14 @@ function setupHelpText(): string {
     "Usage:",
     "  /release-aur-setup",
     "  /release-aur-setup dir [path-to-aur-repos]",
+    "  /release-aur-setup source [global <source>|package <pkgbase> <source>|clear <pkgbase>|status]",
     "  /release-aur-setup ssh",
     "  /release-aur-setup status",
     "  /release-aur-setup abort",
     "  /release-aur-setup help",
     "",
     "The setup command can save your AUR repos directory. Bare /release-aur then uses that directory to list repos and prompt for the release target.",
+    "Release source setup controls latest-upstream-version checks globally and per package. Source examples: auto, github:owner/repo, https://github.com/owner/repo, git:https://example/repo.git.",
     "AUR SSH setup creates ~/.ssh if needed, can create a dedicated ~/.ssh/aur key, configures Host aur.archlinux.org, shows the public key to add to your AUR profile, and tests SSH auth.",
   ].join("\n");
 }
@@ -1029,7 +1279,7 @@ async function runAurSetupStatus(ctx: ExtensionCommandContext): Promise<void> {
   }
 
   const runLog = createRunLog(ctx.cwd);
-  const lines = [...aurReposDirectoryStatusLines(ctx.cwd), "", ...aurSshStatusLines()];
+  const lines = [...aurReposDirectoryStatusLines(ctx.cwd), "", ...releaseSourceStatusLines(), "", ...aurSshStatusLines()];
   appendLog(runLog, "release-aur setup status\n\n--- local status ---\n");
   appendLog(runLog, `${lines.join("\n")}\n`);
   showSetupWidget(ctx, "release-aur setup status", [...lines, "", "AUR SSH connection: checking..."]);
@@ -1059,9 +1309,9 @@ function helpText(): string {
     "  /release-aur logs",
     "  /release-aur abort",
     "  /release-aur toggle",
-    "  /release-aur-setup [dir|ssh|status|abort|help]",
+    "  /release-aur-setup [dir|source|ssh|status|abort|help]",
     "",
-    "Default action is plan. If /release-aur-setup dir configured an AUR repos directory, plan/publish/create use that root for target discovery; otherwise they use the current directory. Before checks, release commands check supported GitHub latest releases; when newer, they bump pkgver, reset pkgrel=1, run updpkgsums, and regenerate .SRCINFO. Use --no-update-release to skip that step. Plan then runs checks in a temporary copy and queues an agent GO/NO-GO review. Use /release-aur-setup for AUR repos directory and SSH publishing prerequisites. Create converges empty/non-git/already-git package dirs into an AUR repo, then plans by default. Create --push continues through publish after explicit confirmation. Publish re-runs checks, regenerates .SRCINFO, commits, and pushes only after explicit confirmation.",
+    "Default action is plan. If /release-aur-setup dir configured an AUR repos directory, plan/publish/create use that root for target discovery; otherwise they use the current directory. Before checks, release commands check configured upstream release sources; auto detects GitHub from PKGBUILD, while setup can define a global source and per-package overrides. When newer, they bump pkgver, reset pkgrel=1, run updpkgsums, and regenerate .SRCINFO. Use --no-update-release to skip that step. Plan then runs checks in a temporary copy and queues an agent GO/NO-GO review. Use /release-aur-setup for AUR repos directory, release source, and SSH publishing prerequisites. Create converges empty/non-git/already-git package dirs into an AUR repo, then plans by default. Create --push continues through publish after explicit confirmation. Publish re-runs checks, regenerates .SRCINFO, commits, and pushes only after explicit confirmation.",
   ].join("\n");
 }
 
@@ -1119,9 +1369,9 @@ async function showLogs(ctx: ExtensionCommandContext): Promise<void> {
 
 export default function releaseAurExtension(pi: ExtensionAPI) {
   pi.registerCommand("release-aur-setup", {
-    description: "Set up AUR publishing prerequisites, starting with SSH access",
+    description: "Set up AUR publishing prerequisites and upstream release sources",
     getArgumentCompletions: (prefix) => {
-      const items = ["dir", "directory", "root", "ssh", "status", "abort", "help"];
+      const items = ["dir", "directory", "root", "source", "global", "package", "clear", "ssh", "status", "abort", "help"];
       const filtered = items.filter((item) => item.startsWith(prefix));
       return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
     },
@@ -1133,6 +1383,14 @@ export default function releaseAurExtension(pi: ExtensionAPI) {
       }
       if (action === "dir" || action === "directory" || action === "root") {
         await runAurReposDirSetup(ctx, rest.join(" "));
+        return;
+      }
+      if (action === "source" || action === "upstream" || action === "release-source") {
+        await runReleaseSourceSetup(ctx, rest);
+        return;
+      }
+      if (action === "global" || action === "default" || action === "package" || action === "pkg" || action === "pkgbase" || action === "clear" || action === "unset" || action === "remove") {
+        await runReleaseSourceSetup(ctx, [action, ...rest]);
         return;
       }
       if (action === "status") {
@@ -1162,16 +1420,19 @@ export default function releaseAurExtension(pi: ExtensionAPI) {
       }
       const choice = await ctx.ui.select("release-aur setup", [
         "AUR repos directory",
+        "Upstream release source",
         "AUR SSH connection",
-        "AUR SSH status",
+        "AUR setup status",
         "Help",
         "Cancel",
       ]);
       if (choice === "AUR repos directory") {
         await runAurReposDirSetup(ctx);
+      } else if (choice === "Upstream release source") {
+        await runReleaseSourceSetup(ctx, []);
       } else if (choice === "AUR SSH connection") {
         await runAurSshSetup(ctx);
-      } else if (choice === "AUR SSH status") {
+      } else if (choice === "AUR setup status") {
         await runAurSetupStatus(ctx);
       } else if (choice === "Help") {
         ctx.ui.notify(setupHelpText(), "info");
@@ -1185,7 +1446,7 @@ export default function releaseAurExtension(pi: ExtensionAPI) {
       const commands = ["plan", "publish", "create", "logs", "abort", "toggle", "help"];
       const root = releaseRoot(process.cwd()).root;
       const targets = discoverTargets(root);
-      const items = [...commands, ...targets, "all", "--chroot", "--repro", "--update-release", "--no-update-release", "--no-agent-review", "--push"];
+      const items = [...commands, ...targets, "all", "--chroot", "--repro", "--update-release", "--no-update-release", "--release-source", "--package-release-source", "--no-agent-review", "--push"];
       const filtered = items.filter((item) => item.startsWith(prefix));
       return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
     },

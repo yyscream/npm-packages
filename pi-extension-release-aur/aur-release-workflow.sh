@@ -10,6 +10,8 @@ RUN_REPRO=0
 STRICT_NAMCAP=1
 KEEP_WORK=0
 UPDATE_RELEASE=0
+RELEASE_SOURCE="${PI_AUR_RELEASE_SOURCE:-auto}"
+PACKAGE_RELEASE_SOURCES="${PI_AUR_PACKAGE_RELEASE_SOURCES:-}"
 
 RESULT_LINES=()
 TMP_DIRS=()
@@ -33,8 +35,11 @@ Options:
   --pkgbase <name>         AUR pkgbase for --create.
   --chroot                 Also run pkgctl build in the temporary copy when pkgctl is available.
   --repro                  Also run makerepropkg on built package(s) when available.
-  --update-release         For supported GitHub release packages, bump pkgver to latest release, reset pkgrel=1, run updpkgsums, and regenerate .SRCINFO before checks.
+  --update-release         Bump pkgver from configured upstream release source, reset pkgrel=1, run updpkgsums, and regenerate .SRCINFO before checks.
   --no-update-release      Disable release update check when the caller enables it by default.
+  --release-source <src>   Upstream release source for all targets: auto, github:owner/repo, GitHub URL, git:<clone-url>, or git clone URL.
+  --package-release-source <pkg=src>
+                           Per-package source override. May be repeated; setup normally passes these via env.
   --keep-work              Keep temporary work directories for debugging.
   --no-strict-namcap       Do not fail on namcap E: findings.
   -h, --help               Show help.
@@ -88,6 +93,17 @@ while [[ $# -gt 0 ]]; do
     --no-update-release)
       UPDATE_RELEASE=0
       shift
+      ;;
+    --release-source)
+      RELEASE_SOURCE="${2:-}"
+      shift 2
+      ;;
+    --package-release-source)
+      if [[ -n "$PACKAGE_RELEASE_SOURCES" ]]; then
+        PACKAGE_RELEASE_SOURCES+=$'\n'
+      fi
+      PACKAGE_RELEASE_SOURCES+="${2:-}"
+      shift 2
       ;;
     --keep-work)
       KEEP_WORK=1
@@ -274,16 +290,53 @@ pkgbuild_value() {
   ' "$pkgbuild"
 }
 
-github_repo_from_pkgbuild() {
-  local pkgbuild="$1"
+github_repo_from_text() {
+  local text="$1"
   local match repo
-  match="$(grep -Eio 'github\.com[:/][A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+' "$pkgbuild" | head -n 1 || true)"
+  match="$(printf '%s\n' "$text" | grep -Eio 'github\.com[:/][A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+' | head -n 1 || true)"
   [[ -z "$match" ]] && return 1
   repo="${match#github.com/}"
   repo="${repo#github.com:}"
   repo="${repo%.git}"
   [[ "$repo" == */* ]] || return 1
   printf '%s\n' "$repo"
+}
+
+github_repo_from_pkgbuild() {
+  local pkgbuild="$1"
+  github_repo_from_text "$(cat "$pkgbuild")"
+}
+
+github_repo_from_source_spec() {
+  local source="$1"
+  local raw repo
+  raw="${source#github:}"
+  raw="${raw#//}"
+  raw="${raw%.git}"
+  raw="${raw%/}"
+  if [[ "$raw" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    printf '%s\n' "$raw"
+    return 0
+  fi
+  github_repo_from_text "$source"
+}
+
+git_url_from_source_spec() {
+  local source="$1"
+  case "$source" in
+    git+*)
+      printf '%s\n' "${source#git+}"
+      ;;
+    git:*)
+      printf '%s\n' "${source#git:}"
+      ;;
+    http://*|https://*|ssh://*|git@*|file://*)
+      printf '%s\n' "$source"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 normalize_release_tag() {
@@ -293,6 +346,20 @@ normalize_release_tag() {
   tag="${tag#V}"
   tag="${tag//-/_}"
   printf '%s\n' "$tag"
+}
+
+latest_git_release_tag() {
+  local url="$1"
+  local tag
+  if ! command -v git >/dev/null 2>&1; then
+    return 1
+  fi
+  tag="$(git ls-remote --tags --refs "$url" 2>/dev/null | awk -F/ '{print $NF}' | sort -V | tail -n 1 || true)"
+  if [[ -n "$tag" ]]; then
+    printf '%s\n' "$tag"
+    return 0
+  fi
+  return 1
 }
 
 latest_github_release_tag() {
@@ -307,15 +374,38 @@ latest_github_release_tag() {
     fi
   fi
 
-  if command -v git >/dev/null 2>&1; then
-    tag="$(git ls-remote --tags --refs "https://github.com/${repo}.git" 2>/dev/null | awk -F/ '{print $NF}' | sort -V | tail -n 1 || true)"
-    if [[ -n "$tag" ]]; then
-      printf '%s\n' "$tag"
+  latest_git_release_tag "https://github.com/${repo}.git"
+}
+
+release_source_for_package() {
+  local pkg_dir="$1"
+  local pkgbuild="$pkg_dir/PKGBUILD"
+  local display pkgbase line key value tab
+  display="$(basename "$pkg_dir")"
+  pkgbase="$(pkgbuild_value "$pkgbuild" pkgbase 2>/dev/null || true)"
+  if [[ -z "$pkgbase" ]]; then
+    pkgbase="$(pkgbuild_value "$pkgbuild" pkgname 2>/dev/null || true)"
+  fi
+  tab=$'\t'
+
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    if [[ "$line" == *"$tab"* ]]; then
+      key="${line%%"$tab"*}"
+      value="${line#*"$tab"}"
+    elif [[ "$line" == *=* ]]; then
+      key="${line%%=*}"
+      value="${line#*=}"
+    else
+      continue
+    fi
+    if [[ "$key" == "$display" || ( -n "$pkgbase" && "$key" == "$pkgbase" ) ]]; then
+      printf '%s\n' "$value"
       return 0
     fi
-  fi
+  done <<< "$PACKAGE_RELEASE_SOURCES"
 
-  return 1
+  printf '%s\n' "${RELEASE_SOURCE:-auto}"
 }
 
 set_pkgbuild_version_and_rel() {
@@ -343,7 +433,7 @@ set_pkgbuild_version_and_rel() {
 
 update_release_if_needed() {
   local pkg_dir="$1"
-  local display pkgbuild repo current tag latest cmp
+  local display pkgbuild source repo git_url source_label current tag latest cmp
   display="$(basename "$pkg_dir")"
   pkgbuild="$pkg_dir/PKGBUILD"
 
@@ -353,12 +443,36 @@ update_release_if_needed() {
     return 0
   fi
 
-  repo="$(github_repo_from_pkgbuild "$pkgbuild" || true)"
-  if [[ -z "$repo" ]]; then
-    echo "  - [$(warn)] no github.com repository URL detected; skipping release update check"
-    return 0
+  source="$(release_source_for_package "$pkg_dir")"
+  source="${source:-auto}"
+  echo "  - release source: $source"
+
+  if [[ "$source" == "auto" || "$source" == "github:auto" ]]; then
+    repo="$(github_repo_from_pkgbuild "$pkgbuild" || true)"
+    if [[ -z "$repo" ]]; then
+      echo "  - [$(warn)] release source is auto but no github.com repository URL was detected in PKGBUILD; skipping release update check"
+      return 0
+    fi
+    echo "  - GitHub repo: $repo"
+    tag="$(latest_github_release_tag "$repo" || true)"
+    source_label="latest GitHub release"
+  else
+    repo="$(github_repo_from_source_spec "$source" || true)"
+    if [[ -n "$repo" ]]; then
+      echo "  - GitHub repo: $repo (configured)"
+      tag="$(latest_github_release_tag "$repo" || true)"
+      source_label="latest GitHub release"
+    else
+      git_url="$(git_url_from_source_spec "$source" || true)"
+      if [[ -z "$git_url" ]]; then
+        echo "  - [$(warn)] unsupported release source '$source'; use auto, github:owner/repo, a GitHub URL, git:<clone-url>, or a git clone URL"
+        return 0
+      fi
+      echo "  - git tag source: $git_url"
+      tag="$(latest_git_release_tag "$git_url" || true)"
+      source_label="latest git tag"
+    fi
   fi
-  echo "  - GitHub repo: $repo"
 
   current="$(pkgbuild_value "$pkgbuild" pkgver)"
   if [[ -z "$current" ]]; then
@@ -367,13 +481,12 @@ update_release_if_needed() {
   fi
   echo "  - current pkgver: $current"
 
-  tag="$(latest_github_release_tag "$repo" || true)"
   if [[ -z "$tag" ]]; then
-    echo "  - [$(warn)] could not determine latest GitHub release; skipping release update check"
+    echo "  - [$(warn)] could not determine $source_label; skipping release update check"
     return 0
   fi
   latest="$(normalize_release_tag "$tag")"
-  echo "  - latest release: $tag -> pkgver $latest"
+  echo "  - $source_label: $tag -> pkgver $latest"
 
   if ! command -v vercmp >/dev/null 2>&1; then
     echo "  - [$(fail)] vercmp not installed; cannot compare versions safely"
@@ -1021,7 +1134,7 @@ main() {
   echo "root=$ROOT_DIR"
   echo "target=$TARGET"
   echo "targets=${#targets[@]}"
-  echo "chroot=$RUN_CHROOT repro=$RUN_REPRO strict_namcap=$STRICT_NAMCAP update_release=$UPDATE_RELEASE"
+  echo "chroot=$RUN_CHROOT repro=$RUN_REPRO strict_namcap=$STRICT_NAMCAP update_release=$UPDATE_RELEASE release_source=${RELEASE_SOURCE:-auto}"
   echo
 
   local failures=0
