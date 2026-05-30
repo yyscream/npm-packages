@@ -21,6 +21,15 @@ DEP_SKIPPED=0
 STALE_CHECKED=0
 STALE_REMOVED=0
 ENSURE_RESULT=""
+RESOURCE_CACHE=""
+
+cleanup_resource_cache() {
+  if [[ -n "${RESOURCE_CACHE:-}" ]]; then
+    rm -f "$RESOURCE_CACHE"
+  fi
+  return 0
+}
+trap cleanup_resource_cache EXIT
 
 usage() {
   cat <<'EOF'
@@ -29,19 +38,18 @@ Usage:
 
 Ensures local npm-packages Pi resources are live-linked for development:
 
-- every pi-extension-* package gets a matching
-  ~/.pi/agent/extensions/<name>.ts symlink to its canonical
-  npm-packages/pi-extension-<name>/index.ts file
-- every pi-package-* package with index.ts gets a matching
-  ~/.pi/agent/extensions/<name>.ts symlink, except shared utility packages
-- pi-utils is linked only as a node_modules dependency, not as a loadable
-  extension, because it is a shared utility package
-- every packaged skill under pi-*/skills/<skill-name>/SKILL.md gets a
-  ~/.pi/agent/skills/<skill-name> symlink to that package skill directory
-- every prompt template under pi-*/prompts/*.md gets a
-  ~/.pi/agent/prompts/<prompt>.md symlink to that package prompt file
-- every theme under pi-*/themes/*.json gets a
-  ~/.pi/agent/themes/<theme>.json symlink to that package theme file
+- discovers every top-level pi-* workspace package through Pi's package
+  resource resolver, including resources exposed by package.json pi manifests,
+  conventional resource directories, bundled dependencies, and vendored paths
+- every discovered extension gets a matching symlink under
+  ~/.pi/agent/extensions/; index.ts|js resources are linked as directories so
+  relative imports keep working, standalone files are linked as files
+- every discovered skill gets a matching
+  ~/.pi/agent/skills/<skill-name> symlink to that skill directory
+- every discovered prompt template gets a matching
+  ~/.pi/agent/prompts/<prompt>.md symlink
+- every discovered theme gets a matching
+  ~/.pi/agent/themes/<theme>.json symlink
 - broken symlinks in those target directories, plus stale symlinks that point
   back into this npm-packages tree but no longer match a current resource, are
   removed
@@ -367,6 +375,91 @@ resolve_from_pi() {
   ' "$pi_pkg_dir" "$name" 2>/dev/null || true
 }
 
+discover_pi_resources() {
+  local pi_pkg_dir agent_dir
+  pi_pkg_dir="$(get_pi_package_dir)"
+  [[ -n "$pi_pkg_dir" && -f "$pi_pkg_dir/package.json" ]] || {
+    echo "ERROR: could not resolve installed pi package directory." >&2
+    return 1
+  }
+  agent_dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+
+  node --input-type=module - "$ROOT_DIR" "$agent_dir" "$pi_pkg_dir" <<'NODE'
+import fs from "node:fs";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+
+const [rootDir, agentDir, piPackageDir] = process.argv.slice(2);
+const piIndex = path.join(piPackageDir, "dist", "index.js");
+const { DefaultPackageManager, SettingsManager } = await import(pathToFileURL(piIndex).href);
+
+const sources = fs.readdirSync(rootDir, { withFileTypes: true })
+  .filter((entry) => entry.isDirectory() && entry.name.startsWith("pi-"))
+  .map((entry) => path.join(rootDir, entry.name))
+  .filter((dir) => {
+    const packageJsonPath = path.join(dir, "package.json");
+    if (!fs.existsSync(packageJsonPath)) return false;
+    const pkg = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+    // pi-utils intentionally stays a shared dependency symlink only; it is not
+    // a loadable development extension despite being a Pi-aware package.
+    return pkg.name !== "@firstpick/pi-utils";
+  })
+  .sort();
+
+const settingsManager = SettingsManager.create(rootDir, agentDir);
+const packageManager = new DefaultPackageManager({ cwd: rootDir, agentDir, settingsManager });
+const resolved = await packageManager.resolveExtensionSources(sources, { temporary: true });
+
+for (const type of ["extensions", "skills", "prompts", "themes"]) {
+  for (const resource of resolved[type] ?? []) {
+    if (!resource.enabled) continue;
+    process.stdout.write(`${type}\t${resource.path}\0`);
+  }
+}
+NODE
+}
+
+ensure_resource_cache() {
+  if [[ -n "$RESOURCE_CACHE" && -f "$RESOURCE_CACHE" ]]; then
+    return 0
+  fi
+  RESOURCE_CACHE="$(mktemp)"
+  discover_pi_resources > "$RESOURCE_CACHE"
+}
+
+resource_paths() {
+  local wanted_type="$1"
+  local resource_type resource_path
+  ensure_resource_cache
+  while IFS=$'\t' read -r -d '' resource_type resource_path; do
+    [[ "$resource_type" == "$wanted_type" ]] || continue
+    printf '%s\0' "$resource_path"
+  done < "$RESOURCE_CACHE"
+}
+
+extension_link_name() {
+  local extension_path="$1"
+  local file_name parent_name
+  file_name="$(basename "$extension_path")"
+  if [[ "$file_name" == "index.ts" || "$file_name" == "index.js" ]]; then
+    parent_name="$(basename "$(dirname "$extension_path")")"
+    resource_name_from_dir "$parent_name"
+  else
+    printf '%s' "$file_name"
+  fi
+}
+
+extension_link_source() {
+  local extension_path="$1"
+  local file_name
+  file_name="$(basename "$extension_path")"
+  if [[ "$file_name" == "index.ts" || "$file_name" == "index.js" ]]; then
+    dirname "$extension_path"
+  else
+    printf '%s' "$extension_path"
+  fi
+}
+
 ensure_node_module_symlink() {
   local module_name="$1"
   local source_dir="$2"
@@ -442,56 +535,38 @@ sync_extension_symlinks() {
   local count_total=0 count_ok=0 count_linked=0 count_relinked=0 count_renamed=0 count_skipped=0
   local expected_names=""
 
-  shopt -s nullglob
-  for pkg_dir in "$ROOT_DIR"/pi-extension-* "$ROOT_DIR"/pi-package-*; do
-    [[ -d "$pkg_dir" ]] || continue
-    [[ -f "$pkg_dir/package.json" ]] || continue
-
-    local pkg_name ext_name canonical dest canonical_real dest_real stamp backup
-    pkg_name="$(basename "$pkg_dir")"
-    ext_name="$(resource_name_from_dir "$pkg_name")"
-    canonical="$pkg_dir/index.ts"
-    [[ -f "$canonical" ]] || continue
-    expected_names+="${ext_name}.ts"$'\n'
-
+  while IFS= read -r -d '' extension_file; do
+    [[ -f "$extension_file" ]] || continue
     count_total=$((count_total+1))
-    dest="$EXT_DIR/${ext_name}.ts"
 
-    canonical_real="$(realpath_safe "$canonical" || true)"
-    if [[ -z "$canonical_real" ]]; then
-      printf '%s %s -> cannot resolve canonical realpath: %s\n' "$(label_skip)" "$pkg_name" "$canonical"
+    local link_name link_source dest source_real
+    link_name="$(extension_link_name "$extension_file")"
+    link_source="$(extension_link_source "$extension_file")"
+    if expected_name_in_list "$link_name" "$expected_names"; then
+      printf '%s duplicate extension link name %s from %s\n' "$(label_skip)" "$link_name" "$extension_file"
+      count_skipped=$((count_skipped+1))
+      continue
+    fi
+    expected_names+="$link_name"$'\n'
+    dest="$EXT_DIR/$link_name"
+
+    source_real="$(realpath_safe "$link_source" || true)"
+    if [[ -z "$source_real" ]]; then
+      printf '%s extension %s -> cannot resolve source realpath\n' "$(label_skip)" "$link_source"
       count_skipped=$((count_skipped+1))
       continue
     fi
 
-    if [[ -L "$dest" ]]; then
-      dest_real="$(realpath_safe "$dest" || true)"
-      if [[ "$dest_real" == "$canonical_real" ]]; then
-        printf '%s %s -> %s\n' "$(label_ok)" "$dest" "$canonical_real"
-        count_ok=$((count_ok+1))
-        continue
-      fi
+    ensure_symlink "$link_source" "$dest" "extension"
+    case "$ENSURE_RESULT" in
+      ok) count_ok=$((count_ok+1)) ;;
+      linked) count_linked=$((count_linked+1)) ;;
+      relinked) count_relinked=$((count_relinked+1)) ;;
+      renamed) count_renamed=$((count_renamed+1)) ;;
+      *) count_skipped=$((count_skipped+1)) ;;
+    esac
+  done < <(resource_paths "extensions")
 
-      printf '%s %s (wrong symlink target)\n' "$(label_fix)" "$dest"
-      run_cmd rm -f "$dest"
-      run_cmd ln -s "$canonical" "$dest"
-      count_relinked=$((count_relinked+1))
-      continue
-    fi
-
-    if [[ -e "$dest" ]]; then
-      stamp="$(ts_now)"
-      backup="$(backup_path "$dest" "$stamp")"
-      printf '%s %s -> %s\n' "$(label_move)" "$dest" "$backup"
-      run_cmd mv "$dest" "$backup"
-      count_renamed=$((count_renamed+1))
-    fi
-
-    printf '%s %s -> %s\n' "$(label_link)" "$dest" "$canonical"
-    run_cmd ln -s "$canonical" "$dest"
-    count_linked=$((count_linked+1))
-  done
-  shopt -u nullglob
   cleanup_stale_symlinks "$EXT_DIR" "$expected_names" "extension"
 
   add_summary "$(format_summary_line "Extensions:" "$count_total" "$count_ok" "$count_linked" "$count_relinked" "$count_renamed" "$count_skipped")"
@@ -501,14 +576,18 @@ sync_skill_symlinks() {
   local count_total=0 count_ok=0 count_linked=0 count_relinked=0 count_renamed=0 count_skipped=0
   local expected_names=""
 
-  shopt -s nullglob
-  for skill_file in "$ROOT_DIR"/pi-*/skills/*/SKILL.md; do
+  while IFS= read -r -d '' skill_file; do
     [[ -f "$skill_file" ]] || continue
     count_total=$((count_total+1))
 
-    local skill_source skill_name dest source_real dest_real stamp backup
+    local skill_source skill_name dest source_real
     skill_source="$(dirname "$skill_file")"
     skill_name="$(basename "$skill_source")"
+    if expected_name_in_list "$skill_name" "$expected_names"; then
+      printf '%s duplicate skill link name %s from %s\n' "$(label_skip)" "$skill_name" "$skill_source"
+      count_skipped=$((count_skipped+1))
+      continue
+    fi
     expected_names+="$skill_name"$'\n'
     dest="$SKILL_DIR/$skill_name"
 
@@ -519,34 +598,16 @@ sync_skill_symlinks() {
       continue
     fi
 
-    if [[ -L "$dest" ]]; then
-      dest_real="$(realpath_safe "$dest" || true)"
-      if [[ "$dest_real" == "$source_real" ]]; then
-        printf '%s %s -> %s\n' "$(label_ok)" "$dest" "$source_real"
-        count_ok=$((count_ok+1))
-        continue
-      fi
+    ensure_symlink "$skill_source" "$dest" "skill"
+    case "$ENSURE_RESULT" in
+      ok) count_ok=$((count_ok+1)) ;;
+      linked) count_linked=$((count_linked+1)) ;;
+      relinked) count_relinked=$((count_relinked+1)) ;;
+      renamed) count_renamed=$((count_renamed+1)) ;;
+      *) count_skipped=$((count_skipped+1)) ;;
+    esac
+  done < <(resource_paths "skills")
 
-      printf '%s %s (wrong skill symlink target)\n' "$(label_fix)" "$dest"
-      run_cmd rm -f "$dest"
-      run_cmd ln -s "$skill_source" "$dest"
-      count_relinked=$((count_relinked+1))
-      continue
-    fi
-
-    if [[ -e "$dest" ]]; then
-      stamp="$(ts_now)"
-      backup="$(backup_path "$dest" "$stamp")"
-      printf '%s %s -> %s\n' "$(label_move)" "$dest" "$backup"
-      run_cmd mv "$dest" "$backup"
-      count_renamed=$((count_renamed+1))
-    fi
-
-    printf '%s %s -> %s\n' "$(label_link)" "$dest" "$skill_source"
-    run_cmd ln -s "$skill_source" "$dest"
-    count_linked=$((count_linked+1))
-  done
-  shopt -u nullglob
   cleanup_stale_symlinks "$SKILL_DIR" "$expected_names" "skill"
 
   add_summary "$(format_summary_line "Skills:" "$count_total" "$count_ok" "$count_linked" "$count_relinked" "$count_renamed" "$count_skipped")"
@@ -556,13 +617,17 @@ sync_prompt_symlinks() {
   local count_total=0 count_ok=0 count_linked=0 count_relinked=0 count_renamed=0 count_skipped=0
   local expected_names=""
 
-  shopt -s nullglob
-  for prompt_file in "$ROOT_DIR"/pi-*/prompts/*.md; do
+  while IFS= read -r -d '' prompt_file; do
     [[ -f "$prompt_file" ]] || continue
     count_total=$((count_total+1))
 
-    local prompt_name dest source_real dest_real stamp backup
+    local prompt_name dest source_real
     prompt_name="$(basename "$prompt_file")"
+    if expected_name_in_list "$prompt_name" "$expected_names"; then
+      printf '%s duplicate prompt link name %s from %s\n' "$(label_skip)" "$prompt_name" "$prompt_file"
+      count_skipped=$((count_skipped+1))
+      continue
+    fi
     expected_names+="$prompt_name"$'\n'
     dest="$PROMPT_DIR/$prompt_name"
 
@@ -573,34 +638,16 @@ sync_prompt_symlinks() {
       continue
     fi
 
-    if [[ -L "$dest" ]]; then
-      dest_real="$(realpath_safe "$dest" || true)"
-      if [[ "$dest_real" == "$source_real" ]]; then
-        printf '%s %s -> %s\n' "$(label_ok)" "$dest" "$source_real"
-        count_ok=$((count_ok+1))
-        continue
-      fi
+    ensure_symlink "$prompt_file" "$dest" "prompt"
+    case "$ENSURE_RESULT" in
+      ok) count_ok=$((count_ok+1)) ;;
+      linked) count_linked=$((count_linked+1)) ;;
+      relinked) count_relinked=$((count_relinked+1)) ;;
+      renamed) count_renamed=$((count_renamed+1)) ;;
+      *) count_skipped=$((count_skipped+1)) ;;
+    esac
+  done < <(resource_paths "prompts")
 
-      printf '%s %s (wrong prompt symlink target)\n' "$(label_fix)" "$dest"
-      run_cmd rm -f "$dest"
-      run_cmd ln -s "$prompt_file" "$dest"
-      count_relinked=$((count_relinked+1))
-      continue
-    fi
-
-    if [[ -e "$dest" ]]; then
-      stamp="$(ts_now)"
-      backup="$(backup_path "$dest" "$stamp")"
-      printf '%s %s -> %s\n' "$(label_move)" "$dest" "$backup"
-      run_cmd mv "$dest" "$backup"
-      count_renamed=$((count_renamed+1))
-    fi
-
-    printf '%s %s -> %s\n' "$(label_link)" "$dest" "$prompt_file"
-    run_cmd ln -s "$prompt_file" "$dest"
-    count_linked=$((count_linked+1))
-  done
-  shopt -u nullglob
   cleanup_stale_symlinks "$PROMPT_DIR" "$expected_names" "prompt"
 
   add_summary "$(format_summary_line "Prompts:" "$count_total" "$count_ok" "$count_linked" "$count_relinked" "$count_renamed" "$count_skipped")"
@@ -610,13 +657,17 @@ sync_theme_symlinks() {
   local count_total=0 count_ok=0 count_linked=0 count_relinked=0 count_renamed=0 count_skipped=0
   local expected_names=""
 
-  shopt -s nullglob
-  for theme_file in "$ROOT_DIR"/pi-*/themes/*.json; do
+  while IFS= read -r -d '' theme_file; do
     [[ -f "$theme_file" ]] || continue
     count_total=$((count_total+1))
 
-    local theme_name dest source_real dest_real stamp backup
+    local theme_name dest source_real
     theme_name="$(basename "$theme_file")"
+    if expected_name_in_list "$theme_name" "$expected_names"; then
+      printf '%s duplicate theme link name %s from %s\n' "$(label_skip)" "$theme_name" "$theme_file"
+      count_skipped=$((count_skipped+1))
+      continue
+    fi
     expected_names+="$theme_name"$'\n'
     dest="$THEME_DIR/$theme_name"
 
@@ -627,39 +678,22 @@ sync_theme_symlinks() {
       continue
     fi
 
-    if [[ -L "$dest" ]]; then
-      dest_real="$(realpath_safe "$dest" || true)"
-      if [[ "$dest_real" == "$source_real" ]]; then
-        printf '%s %s -> %s\n' "$(label_ok)" "$dest" "$source_real"
-        count_ok=$((count_ok+1))
-        continue
-      fi
+    ensure_symlink "$theme_file" "$dest" "theme"
+    case "$ENSURE_RESULT" in
+      ok) count_ok=$((count_ok+1)) ;;
+      linked) count_linked=$((count_linked+1)) ;;
+      relinked) count_relinked=$((count_relinked+1)) ;;
+      renamed) count_renamed=$((count_renamed+1)) ;;
+      *) count_skipped=$((count_skipped+1)) ;;
+    esac
+  done < <(resource_paths "themes")
 
-      printf '%s %s (wrong theme symlink target)\n' "$(label_fix)" "$dest"
-      run_cmd rm -f "$dest"
-      run_cmd ln -s "$theme_file" "$dest"
-      count_relinked=$((count_relinked+1))
-      continue
-    fi
-
-    if [[ -e "$dest" ]]; then
-      stamp="$(ts_now)"
-      backup="$(backup_path "$dest" "$stamp")"
-      printf '%s %s -> %s\n' "$(label_move)" "$dest" "$backup"
-      run_cmd mv "$dest" "$backup"
-      count_renamed=$((count_renamed+1))
-    fi
-
-    printf '%s %s -> %s\n' "$(label_link)" "$dest" "$theme_file"
-    run_cmd ln -s "$theme_file" "$dest"
-    count_linked=$((count_linked+1))
-  done
-  shopt -u nullglob
   cleanup_stale_symlinks "$THEME_DIR" "$expected_names" "theme"
 
   add_summary "$(format_summary_line "Themes:" "$count_total" "$count_ok" "$count_linked" "$count_relinked" "$count_renamed" "$count_skipped")"
 }
 
+ensure_resource_cache
 sync_extension_symlinks
 sync_skill_symlinks
 sync_prompt_symlinks

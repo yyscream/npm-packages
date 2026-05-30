@@ -227,7 +227,7 @@ Reusable scaffold for local documentation/wiki extensions analogous to the ArchW
 - `dev/scripts/publish-packages.sh` – plans/applies publish actions dynamically for all package folders
 - `dev/scripts/bump-package-versions.sh` – checks npm published versions first and enforces the next release version for changed packages (`+0.0.1`, rolling `*.9` to next minor `.0`; bumps up or reduces down only when needed)
 - `dev/scripts/release-workflow.sh` – orchestrates release checks: `--check` reports required bumps, `--plan` includes bump planning, and `--publish` applies required bumps before publishing
-- `dev/scripts/sync-pi-package-symlinks.sh` – ensures local development symlinks for Pi extensions (`~/.pi/agent/extensions/*.ts`) and packaged skills (`~/.pi/agent/skills/<skill-name>`) point to canonical resources in `npm-packages`; renames non-symlink conflicts to `.hardcoded.<timestamp>.bak`
+- `dev/scripts/sync-pi-package-symlinks.sh` – uses Pi's package resource resolver to symlink local development extensions, skills, prompts, and themes from top-level `pi-*` workspace packages into `~/.pi/agent/`; index-based extensions are linked as directories so relative imports keep working; renames non-symlink conflicts to `.hardcoded.<timestamp>.bak`
 - `dev/scripts/validate-skill-routing-fixtures.mjs` – validates development-only `tests/routing/*.json`; schema-only by default, with optional `--settings` or `--skill-root` target coverage
 
 ## Publish model

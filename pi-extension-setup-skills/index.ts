@@ -1,8 +1,8 @@
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { DynamicBorder, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
+import { DefaultPackageManager, DynamicBorder, getAgentDir, getSettingsListTheme, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Container, getKeybindings, Key, matchesKey, type SettingItem, SettingsList, Text } from "@earendil-works/pi-tui";
 
 type PackageEntry = string | { source?: string; skills?: string[]; extensions?: string[]; prompts?: string[]; [key: string]: unknown };
@@ -31,11 +31,31 @@ function writeJson(path: string, data: SettingsShape): void {
   writeFileSync(path, `${JSON.stringify(data, null, 2)}\n`);
 }
 
-function walkSkillFiles(root: string): string[] {
+function collectSkillFilesFromDir(root: string, includeRootMarkdown = true): string[] {
   if (!existsSync(root)) return [];
   const out: string[] = [];
-  const visit = (dir: string) => {
-    for (const entry of readdirSync(dir)) {
+
+  const visit = (dir: string, isRoot: boolean) => {
+    let entries: string[];
+    try {
+      entries = readdirSync(dir).sort();
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (entry !== "SKILL.md") continue;
+      const skillPath = join(dir, entry);
+      try {
+        if (statSync(skillPath).isFile()) out.push(skillPath);
+      } catch {
+        // ignore unreadable entries
+      }
+      return;
+    }
+
+    for (const entry of entries) {
+      if (entry.startsWith(".") || entry === "node_modules") continue;
       const path = join(dir, entry);
       let st;
       try {
@@ -43,11 +63,12 @@ function walkSkillFiles(root: string): string[] {
       } catch {
         continue;
       }
-      if (st.isDirectory()) visit(path);
-      else if (entry === "SKILL.md") out.push(path);
+      if (st.isDirectory()) visit(path, false);
+      else if (isRoot && includeRootMarkdown && st.isFile() && entry.endsWith(".md")) out.push(path);
     }
   };
-  visit(root);
+
+  visit(root, true);
   return out;
 }
 
@@ -65,40 +86,23 @@ function packageSource(entry: PackageEntry): string | undefined {
   return typeof entry === "string" ? entry : entry.source;
 }
 
-function stripNpmVersion(spec: string): string {
-  if (spec.startsWith("@")) {
-    const at = spec.lastIndexOf("@");
-    return at > 0 ? spec.slice(0, at) : spec;
-  }
-  const at = spec.lastIndexOf("@");
-  return at > 0 ? spec.slice(0, at) : spec;
+function resolvePackageInstallDir(source: string, packageManager: DefaultPackageManager): string | undefined {
+  return packageManager.getInstalledPath(source, "user");
 }
 
-function expandTilde(path: string): string {
-  if (path === "~") return homedir();
-  if (path.startsWith("~/")) return join(homedir(), path.slice(2));
-  return path;
+async function collectPackageSkillFiles(packageDir: string, packageManager: DefaultPackageManager): Promise<string[]> {
+  if (!existsSync(packageDir)) return [];
+  const resolved = await packageManager.resolveExtensionSources([packageDir], { temporary: true });
+  return resolved.skills.filter((resource) => resource.enabled).map((resource) => resource.path).sort();
 }
 
-function resolveConfiguredPath(path: string, baseDir: string): string {
-  const expanded = expandTilde(path);
-  return isAbsolute(expanded) ? resolve(expanded) : resolve(baseDir, expanded);
-}
-
-function resolvePackageInstallDir(source: string, settingsDir: string): string | undefined {
-  if (source.startsWith("npm:")) {
-    const name = stripNpmVersion(source.slice(4));
-    return join(getAgentDir(), "npm", "node_modules", ...name.split("/"));
-  }
-  if (source.startsWith("git:") || source.startsWith("http://") || source.startsWith("https://") || source.startsWith("ssh://")) {
-    return undefined;
-  }
-  return resolveConfiguredPath(source, settingsDir);
-}
-
-function discoverPackageSkills(packageDir: string, source: string, candidates: Map<string, SkillCandidate>): void {
-  if (!existsSync(packageDir)) return;
-  for (const skillPath of walkSkillFiles(join(packageDir, "skills"))) {
+async function discoverPackageSkills(
+  packageDir: string,
+  source: string,
+  candidates: Map<string, SkillCandidate>,
+  packageManager: DefaultPackageManager,
+): Promise<void> {
+  for (const skillPath of await collectPackageSkillFiles(packageDir, packageManager)) {
     const parsed = parseSkill(skillPath);
     if (!parsed) continue;
     candidates.set(parsed.name, {
@@ -113,7 +117,7 @@ function discoverPackageSkills(packageDir: string, source: string, candidates: M
 }
 
 function addLocalSkills(root: string, candidates: Map<string, SkillCandidate>): void {
-  for (const skillPath of walkSkillFiles(root)) {
+  for (const skillPath of collectSkillFilesFromDir(root)) {
     const parsed = parseSkill(skillPath);
     if (!parsed) continue;
     candidates.set(parsed.name, {
@@ -138,20 +142,22 @@ function discoverProjectSkillRoots(cwd: string): string[] {
   return roots;
 }
 
-function discoverCandidates(settings: SettingsShape, cwd: string): SkillCandidate[] {
+async function discoverCandidates(settings: SettingsShape, cwd: string): Promise<SkillCandidate[]> {
   const candidates = new Map<string, SkillCandidate>();
+  const agentDir = getAgentDir();
+  const settingsManager = SettingsManager.create(cwd, agentDir);
+  const packageManager = new DefaultPackageManager({ cwd, agentDir, settingsManager });
 
-  for (const root of [join(getAgentDir(), "skills"), join(homedir(), ".agents", "skills"), ...discoverProjectSkillRoots(cwd)]) {
+  for (const root of [join(agentDir, "skills"), join(homedir(), ".agents", "skills"), ...discoverProjectSkillRoots(cwd)]) {
     addLocalSkills(root, candidates);
   }
 
-  const settingsDir = dirname(getAgentSettingsPath());
   for (const entry of settings.packages ?? []) {
     const source = packageSource(entry);
     if (!source) continue;
-    const packageDir = resolvePackageInstallDir(source, settingsDir);
+    const packageDir = resolvePackageInstallDir(source, packageManager);
     if (!packageDir) continue;
-    discoverPackageSkills(packageDir, source, candidates);
+    await discoverPackageSkills(packageDir, source, candidates, packageManager);
   }
 
   return [...candidates.values()].sort((a, b) => {
@@ -316,7 +322,7 @@ export default function setupSkillsExtension(pi: ExtensionAPI): void {
         return;
       }
 
-      const candidates = discoverCandidates(settings, ctx.cwd);
+      const candidates = await discoverCandidates(settings, ctx.cwd);
       if (candidates.length === 0) {
         ctx.ui.notify("No skills found.", "warning");
         return;
