@@ -1,0 +1,32 @@
+{
+  "name": "@firstpick/pi-skill-shoo-auth",
+  "version": "0.1.0",
+  "description": "Use when evaluating, implementing, reviewing, or debugging Shoo auth (shoo.dev) Google sign-in in browser apps, including @shoojs/react, @shoojs/auth, hosted shoo.js, Convex custom JWT integration, PKCE callbacks, session checks, and server-side id_token verification.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "skill",
+    "agent-skill",
+    "shoo",
+    "auth",
+    "oauth",
+    "google-sign-in"
+  ],
+  "pi": {
+    "skills": [
+      "./skills"
+    ]
+  },
+  "scripts": {
+    "test": "python3 -m unittest discover -s skills/shoo-auth/tests -p 'test_*.py'"
+  },
+  "files": [
+    "skills/shoo-auth/SKILL.md",
+    "skills/shoo-auth/references",
+    "skills/shoo-auth/tests/*.py",
+    "README.md",
+    "LICENSE"
+  ]
+}
