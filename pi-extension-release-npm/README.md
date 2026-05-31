@@ -9,6 +9,7 @@ Release orchestration command for this npm-packages workspace.
 - Runs release preflight checks before asking to publish.
 - Shows a summary of planned version changes and publish actions in the confirmation prompt.
 - Publishes only after explicit confirmation.
+- During preflight, uses version planning to shortlist publish candidates and runs publish checks only for that shortlist.
 - After confirmation, publishes only package targets detected in the pre-confirmation publish plan instead of scanning all packages again.
 - After a successful publish, updates installed Pi extensions only for packages detected in that same pre-confirmation publish plan.
 - Streams live release output in an above-editor panel, separate from the conversation transcript.
@@ -93,7 +94,7 @@ Readiness checks require or verify:
 - `keywords` containing `pi-package` is recommended for discoverability
 - `LICENSE` is recommended
 
-`/release-npm` runs `./dev/scripts/release-workflow.sh --plan --all` first, then after confirmation publishes only the package directories detected in that plan with `./dev/scripts/release-workflow.sh --publish --target <dir>`.
+`/release-npm` runs `./dev/scripts/release-workflow.sh --plan --all` first. The plan step writes publish candidates from version planning to a temporary target list, applies planned version bumps in a temporary workspace, and runs publish checks only for those candidate directories. After confirmation it publishes only the package directories detected in that plan with `./dev/scripts/release-workflow.sh --publish --target <dir>`.
 
 ## Commands
 
@@ -130,8 +131,10 @@ Blocked:
 Publish eligible packages now?  No / Yes
 
 Release workflow
-  Applying required version bumps: ./dev/scripts/bump-package-versions.sh --target all --apply
-  Running: ./dev/scripts/publish-packages.sh --target all --publisher npm --access public --apply --strict-auth
+  Publish candidates from version planning:
+    - pi-extension-release-npm
+  Applying planned version bumps in temporary workspace for publish candidates: ./dev/scripts/bump-package-versions.sh --targets-file /tmp/.../publish-targets.txt --apply
+  Running publish plan for preselected targets against version-bumped temp workspace: ./dev/scripts/publish-packages.sh --targets-file /tmp/.../publish-targets.txt --publisher npm --access public --strict-auth
 
 Publish summary:
   - published total: 3

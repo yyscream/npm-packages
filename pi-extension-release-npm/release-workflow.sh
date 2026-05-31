@@ -113,9 +113,9 @@ if [[ "$ACCESS" != "public" && "$ACCESS" != "restricted" ]]; then
   exit 1
 fi
 
-CHECK_SCRIPT="$ROOT_DIR/check-publish-readiness.sh"
-BUMP_SCRIPT="$ROOT_DIR/bump-package-versions.sh"
-PUBLISH_SCRIPT="$ROOT_DIR/publish-packages.sh"
+CHECK_SCRIPT="$SCRIPT_DIR/check-publish-readiness.sh"
+BUMP_SCRIPT="$SCRIPT_DIR/bump-package-versions.sh"
+PUBLISH_SCRIPT="$SCRIPT_DIR/publish-packages.sh"
 
 if [[ ! -x "$CHECK_SCRIPT" ]]; then
   echo "ERROR: missing executable $CHECK_SCRIPT" >&2
@@ -151,17 +151,42 @@ case "$MODE" in
     ;;
 
   plan)
-    bump_cmd=("$BUMP_SCRIPT" --target "$TARGET")
+    tmp_root="$(mktemp -d)"
+    cleanup_plan_tmp() {
+      rm -rf "$tmp_root"
+    }
+    trap cleanup_plan_tmp EXIT
+
+    candidate_targets_file="$tmp_root/publish-targets.txt"
+    workspace_root="$tmp_root/workspace"
+    mkdir -p "$workspace_root"
+
+    bump_cmd=("$BUMP_SCRIPT" --target "$TARGET" --candidate-targets-file "$candidate_targets_file")
     echo "Planning required version bumps: ${bump_cmd[*]}"
     "${bump_cmd[@]}"
     echo
 
-    cmd=("$PUBLISH_SCRIPT" --target "$TARGET" --publisher "$PUBLISHER" --access "$ACCESS")
+    if [[ ! -s "$candidate_targets_file" ]]; then
+      echo "No publish candidates detected by version planning; skipping publish plan checks."
+      exit 0
+    fi
+
+    echo "Publish candidates from version planning:"
+    sed 's/^/  - /' "$candidate_targets_file"
+    echo
+
+    echo "Preparing temporary version-bumped workspace: $workspace_root"
+    cp -a "$ROOT_DIR/." "$workspace_root/"
+    echo "Applying planned version bumps in temporary workspace for publish candidates: $BUMP_SCRIPT --targets-file $candidate_targets_file --apply"
+    PI_NPM_PACKAGES_ROOT="$workspace_root" "$BUMP_SCRIPT" --targets-file "$candidate_targets_file" --apply
+    echo
+
+    cmd=("$PUBLISH_SCRIPT" --targets-file "$candidate_targets_file" --publisher "$PUBLISHER" --access "$ACCESS")
     if [[ $STRICT_AUTH -eq 1 ]]; then
       cmd+=(--strict-auth)
     fi
-    echo "Running: ${cmd[*]}"
-    exec "${cmd[@]}"
+    echo "Running publish plan for preselected targets against version-bumped temp workspace: ${cmd[*]}"
+    PI_NPM_PACKAGES_ROOT="$workspace_root" "${cmd[@]}"
     ;;
 
   publish)

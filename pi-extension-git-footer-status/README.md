@@ -8,7 +8,7 @@ Enhanced Pi footer with git health and model/token telemetry.
 
 - Shows compact runtime metrics in the footer:
   - input/output/cache tokens
-  - prompt-injection estimate (`PI: X tok`, compacted as `k` for thousands)
+  - export-backed initial prompt estimate (`PI: X tok`, same estimator as `/stats-pi`, compacted as `k` for thousands; falls back to live context data if Pi HTML export is unavailable)
   - live output token counter + token output speed (`tok/s`) measured from assistant streaming lifecycle events, with a session-history fallback
   - cost + context-window usage
   - current model and reasoning level

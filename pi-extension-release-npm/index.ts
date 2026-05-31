@@ -329,8 +329,8 @@ function formatPreflightSummary(output: string): string {
   const versionChanges = extractVersionChanges(output);
   const bumpSummaries = stripAnsi(output)
     .split(/\r?\n/)
-    .filter((line) => /^\s*- (would bump up|would reduce down|bumped up|reduced down|unchanged|first release \(no npm version\)|errors): /.test(line))
-    .slice(0, 5);
+    .filter((line) => /^\s*- (would bump up|would reduce down|bumped up|reduced down|unchanged|first release \(no npm version\)|publish candidates|errors): /.test(line))
+    .slice(0, 6);
   const publishPlan = splitPublishPlan(output);
 
   return [
@@ -602,6 +602,14 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
           : []),
       ].join("\n");
       appendReleaseLog(runLog, `\n--- preflight summary ---\n${preflightSummary}\n\n${targetSummary}\n`);
+      if (plannedTargetResolution.targets.length === 0) {
+        closeReleaseUi();
+        if (ctx.hasUI) ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg("success", "Release:NoTargets"));
+        const logPath = finishLog("no-targets", `${preflightSummary}\n\n${targetSummary}`);
+        ctx.ui.notify(`No publish targets were detected in the pre-confirmation plan; nothing to publish.${logPath ? ` Log: ${logPath}` : ""}`, "info");
+        return;
+      }
+
       const choice = await ctx.ui.select(`${preflightSummary}\n\n${targetSummary}\n\nPublish eligible packages now?`, ["Yes", "No"]);
       appendReleaseLog(runLog, `\n--- user confirmation ---\nchoice=${choice ?? "<none>"}\n`);
       if (choice !== "Yes") {

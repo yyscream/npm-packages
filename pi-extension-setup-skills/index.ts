@@ -268,7 +268,15 @@ async function selectSkills(
 
     const container = new Container();
     container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
-    container.addChild(new Text(theme.fg("accent", theme.bold("Skills")), 0, 0));
+    container.addChild(
+      new (class {
+        render() {
+          const activeCount = selected.filter(Boolean).length;
+          return [theme.fg("accent", theme.bold(`Skills (${activeCount}/${candidates.length} active)`))];
+        }
+        invalidate() {}
+      })(),
+    );
 
     const settingsList = new SettingsList(
       items,

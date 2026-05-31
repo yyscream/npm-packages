@@ -224,9 +224,9 @@ Reusable scaffold for local documentation/wiki extensions analogous to the ArchW
 
 - `dev/scripts/install-pi-add.sh` – discovers local `pi-extension-*`, `pi-skill-*`, and `pi-package-*` packages and installs selected/all via `pi install npm:<package>` (supports interactive mode, `--all`, `--dry-run`, `--force`)
 - `dev/scripts/check-publish-readiness.sh` – validates package metadata, extension entries, dry-run publish, registry/version status, and local-vs-npm packed contents
-- `dev/scripts/publish-packages.sh` – plans/applies publish actions dynamically for all package folders
-- `dev/scripts/bump-package-versions.sh` – checks npm published versions first and enforces the next release version for changed packages (`+0.0.1`, rolling `*.9` to next minor `.0`; bumps up or reduces down only when needed)
-- `dev/scripts/release-workflow.sh` – orchestrates release checks: `--check` reports required bumps, `--plan` includes bump planning, and `--publish` applies required bumps before publishing
+- `dev/scripts/publish-packages.sh` – plans/applies publish actions dynamically for all package folders or a `--targets-file` shortlist
+- `dev/scripts/bump-package-versions.sh` – checks npm published versions first and enforces the next release version for changed packages (`+0.0.1`, rolling `*.9` to next minor `.0`; bumps up or reduces down only when needed); can write publish candidates to a target list
+- `dev/scripts/release-workflow.sh` – orchestrates release checks: `--check` reports required bumps, `--plan` uses bump planning to shortlist packages before publish checks, and `--publish` applies required bumps before publishing
 - `dev/scripts/sync-pi-package-symlinks.sh` – uses Pi's package resource resolver to symlink local development extensions, skills, prompts, and themes from top-level `pi-*` workspace packages into `~/.pi/agent/`; index-based extensions are linked as directories so relative imports keep working; renames non-symlink conflicts to `.hardcoded.<timestamp>.bak`
 - `dev/scripts/validate-skill-routing-fixtures.mjs` – validates development-only `tests/routing/*.json`; schema-only by default, with optional `--settings` or `--skill-root` target coverage
 

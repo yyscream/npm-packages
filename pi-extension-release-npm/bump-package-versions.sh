@@ -4,6 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="${PI_NPM_PACKAGES_ROOT:-$SCRIPT_DIR}"
 TARGET="all"
+TARGETS_FILE=""
+CANDIDATE_TARGETS_FILE=""
 APPLY=0
 
 usage() {
@@ -13,10 +15,12 @@ Usage:
   ./bump-package-versions.sh [package-dir-name]
 
 Options:
-  --target <name|all>   Process one package dir or all (default: all)
-  --all                 Same as --target all
-  --apply               Write bumped versions to package.json (default: plan only)
-  -h, --help            Show help
+  --target <name|all>            Process one package dir or all (default: all)
+  --targets-file <path>          Process package dirs listed one per line
+  --candidate-targets-file <path> Write publish candidate dir names discovered during planning
+  --all                          Same as --target all
+  --apply                        Write bumped versions to package.json (default: plan only)
+  -h, --help                     Show help
 
 Rules:
   - Check currently published npm version first.
@@ -35,6 +39,14 @@ while [[ $# -gt 0 ]]; do
     --all)
       TARGET="all"
       shift
+      ;;
+    --targets-file)
+      TARGETS_FILE="${2:-}"
+      shift 2
+      ;;
+    --candidate-targets-file)
+      CANDIDATE_TARGETS_FILE="${2:-}"
+      shift 2
       ;;
     --apply)
       APPLY=1
@@ -60,6 +72,16 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ -n "$TARGETS_FILE" && "$TARGET" != "all" ]]; then
+  echo "ERROR: --targets-file cannot be combined with --target or a positional target" >&2
+  exit 1
+fi
+
+if [[ -n "$TARGETS_FILE" && ! -f "$TARGETS_FILE" ]]; then
+  echo "ERROR: targets file not found: $TARGETS_FILE" >&2
+  exit 1
+fi
+
 if ! command -v node >/dev/null 2>&1; then
   echo "ERROR: node is required but not found in PATH." >&2
   exit 1
@@ -70,14 +92,43 @@ if ! command -v npm >/dev/null 2>&1; then
   exit 1
 fi
 
+resolve_package_target() {
+  local target="$1"
+  local pkg_dir
+  if [[ "$target" = /* ]]; then
+    pkg_dir="$target"
+  else
+    pkg_dir="$ROOT_DIR/$target"
+  fi
+
+  if [[ -d "$pkg_dir" && -f "$pkg_dir/package.json" ]]; then
+    printf "%s\n" "$pkg_dir"
+    return 0
+  fi
+
+  echo "ERROR: package '$target' not found under $ROOT_DIR" >&2
+  return 1
+}
+
 gather_packages() {
+  if [[ -n "$TARGETS_FILE" ]]; then
+    local raw target pkg_dir
+    declare -A seen=()
+    while IFS= read -r raw || [[ -n "$raw" ]]; do
+      target="$(printf '%s' "$raw" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+      [[ -z "$target" || "$target" == \#* ]] && continue
+      pkg_dir="$(resolve_package_target "$target")" || exit 1
+      if [[ -z "${seen[$pkg_dir]+x}" ]]; then
+        seen[$pkg_dir]=1
+        printf "%s\n" "$pkg_dir"
+      fi
+    done < "$TARGETS_FILE"
+    return
+  fi
+
   if [[ "$TARGET" != "all" ]]; then
-    if [[ -d "$ROOT_DIR/$TARGET" && -f "$ROOT_DIR/$TARGET/package.json" ]]; then
-      printf "%s\n" "$ROOT_DIR/$TARGET"
-      return
-    fi
-    echo "ERROR: package '$TARGET' not found under $ROOT_DIR" >&2
-    exit 1
+    resolve_package_target "$TARGET" || exit 1
+    return
   fi
 
   find "$ROOT_DIR" -mindepth 1 -maxdepth 1 -type d \
@@ -266,6 +317,27 @@ if [[ ${#PACKAGE_DIRS[@]} -eq 0 ]]; then
   exit 1
 fi
 
+declare -A RECORDED_PUBLISH_CANDIDATES=()
+PUBLISH_CANDIDATES=0
+
+if [[ -n "$CANDIDATE_TARGETS_FILE" ]]; then
+  mkdir -p "$(dirname "$CANDIDATE_TARGETS_FILE")"
+  : > "$CANDIDATE_TARGETS_FILE"
+fi
+
+record_publish_candidate() {
+  local pkg_dir="$1"
+  local target
+  target="$(basename "$pkg_dir")"
+  if [[ -z "${RECORDED_PUBLISH_CANDIDATES[$target]+x}" ]]; then
+    RECORDED_PUBLISH_CANDIDATES[$target]=1
+    PUBLISH_CANDIDATES=$((PUBLISH_CANDIDATES+1))
+    if [[ -n "$CANDIDATE_TARGETS_FILE" ]]; then
+      printf "%s\n" "$target" >> "$CANDIDATE_TARGETS_FILE"
+    fi
+  fi
+}
+
 echo "Mode: $([[ $APPLY -eq 1 ]] && echo "apply" || echo "plan")"
 echo
 
@@ -303,6 +375,7 @@ for pkg_dir in "${PACKAGE_DIRS[@]}"; do
   if [[ -z "$npm_version" ]]; then
     echo "  - npm version: <not published>"
     echo "  - action: no bump (first release)"
+    record_publish_candidate "$pkg_dir"
     FIRST_RELEASE=$((FIRST_RELEASE+1))
     UNCHANGED=$((UNCHANGED+1))
     echo
@@ -337,6 +410,7 @@ for pkg_dir in "${PACKAGE_DIRS[@]}"; do
     continue
   fi
 
+  record_publish_candidate "$pkg_dir"
   echo "  - enforced target when changed: $target_version (patch +1, rolls patch 9 to next minor .0)"
 
   if [[ "$target_cmp" == "0" ]]; then
@@ -379,6 +453,10 @@ echo "  - $([[ $APPLY -eq 1 ]] && echo "bumped up" || echo "would bump up"): $UP
 echo "  - $([[ $APPLY -eq 1 ]] && echo "reduced down" || echo "would reduce down"): $UPDATED_DOWN"
 echo "  - unchanged: $UNCHANGED"
 echo "  - first release (no npm version): $FIRST_RELEASE"
+echo "  - publish candidates: $PUBLISH_CANDIDATES"
+if [[ -n "$CANDIDATE_TARGETS_FILE" ]]; then
+  echo "  - publish candidates file: $CANDIDATE_TARGETS_FILE"
+fi
 echo "  - errors: $ERRORS"
 
 if [[ $ERRORS -gt 0 ]]; then

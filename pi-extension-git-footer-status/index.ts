@@ -5,10 +5,10 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   collectInitialPromptCalibration,
-  estimateInitialPromptInput,
+  estimateInitialPromptForPiContext,
+  estimateInitialPromptFromPiExport,
   estimateTokensFromCharCount,
   formatTokens,
-  type InitialPromptToolInfo,
 } from "@firstpick/pi-utils";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
@@ -93,6 +93,11 @@ function isReasonableTokenSpeed(tokensPerSecond: number): boolean {
 
 type LiveTokenSample = {
   timestampMs: number;
+  tokens: number;
+};
+
+type PromptEstimateCache = {
+  key: string;
   tokens: number;
 };
 
@@ -361,6 +366,57 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
   let currentAssistantLiveTokenSpeed: number | null = null;
   let currentAssistantTokenSamples: LiveTokenSample[] = [];
   let latestMeasuredTokenSpeed: number | null = null;
+  let promptEstimateCache: PromptEstimateCache | null = null;
+  let promptEstimateRequestId = 0;
+  let requestFooterRender: (() => void) | null = null;
+
+  const getPromptCalibration = (ctx: ExtensionContext) => collectInitialPromptCalibration(ctx.sessionManager.getSessionDir());
+
+  const getFallbackPromptEstimate = (ctx: ExtensionContext) => {
+    const calibration = getPromptCalibration(ctx);
+    const estimate = estimateInitialPromptForPiContext(pi, ctx.getSystemPrompt(), calibration);
+    const key = [
+      estimate.uncalibratedTotal,
+      estimate.promptText,
+      estimate.toolSchemas,
+      estimate.framing,
+      estimate.toolCount,
+      estimate.calibrationMultiplier,
+      estimate.calibrationSamples,
+      estimate.low,
+      estimate.high,
+    ].join(":");
+    return { calibration, estimate, key };
+  };
+
+  const refreshPromptInjectionEstimate = async (ctx: ExtensionContext) => {
+    const requestId = ++promptEstimateRequestId;
+    const fallback = getFallbackPromptEstimate(ctx);
+    promptEstimateCache = { key: fallback.key, tokens: fallback.estimate.total };
+    requestFooterRender?.();
+
+    try {
+      const result = await estimateInitialPromptFromPiExport(pi, ctx, fallback.calibration);
+      const latestFallback = getFallbackPromptEstimate(ctx);
+      if (requestId !== promptEstimateRequestId || latestFallback.key !== fallback.key) return;
+      promptEstimateCache = { key: fallback.key, tokens: result.estimate.total };
+    } catch {
+      if (requestId !== promptEstimateRequestId) return;
+      const latestFallback = getFallbackPromptEstimate(ctx);
+      promptEstimateCache = { key: latestFallback.key, tokens: latestFallback.estimate.total };
+    } finally {
+      if (requestId === promptEstimateRequestId) requestFooterRender?.();
+    }
+  };
+
+  const getFooterPromptInjectionTokens = (ctx: ExtensionContext): number => {
+    const fallback = getFallbackPromptEstimate(ctx);
+    if (!promptEstimateCache || promptEstimateCache.key !== fallback.key) {
+      promptEstimateCache = { key: fallback.key, tokens: fallback.estimate.total };
+      void refreshPromptInjectionEstimate(ctx);
+    }
+    return promptEstimateCache.tokens;
+  };
 
   const recordAssistantSpeed = (message: AssistantMessage, endMs = Date.now()): boolean => {
     const outputTokens = message.usage?.output ?? 0;
@@ -419,11 +475,19 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
   };
 
   pi.on("session_start", async (_event, ctx) => {
+    promptEstimateCache = null;
+    void refreshPromptInjectionEstimate(ctx);
+
     ctx.ui.setFooter((tui, theme, footerData) => {
-      const unsub = footerData.onBranchChange(() => tui.requestRender());
+      const render = () => tui.requestRender();
+      requestFooterRender = render;
+      const unsub = footerData.onBranchChange(render);
 
       return {
-        dispose: unsub,
+        dispose() {
+          unsub();
+          if (requestFooterRender === render) requestFooterRender = null;
+        },
         invalidate() {},
         render(width: number): string[] {
           let totalInput = 0;
@@ -489,28 +553,7 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
             latestTokenSpeed = historicalTokenSpeed;
           }
 
-          let activeTools: string[] = [];
-          let allTools: InitialPromptToolInfo[] = [];
-          try {
-            activeTools = pi.getActiveTools();
-          } catch {
-            activeTools = [];
-          }
-          try {
-            allTools = pi.getAllTools().map((tool) => ({
-              name: tool.name,
-              description: tool.description,
-              parameters: tool.parameters,
-            }));
-          } catch {
-            allTools = [];
-          }
-          const promptInjectionTokens = estimateInitialPromptInput({
-            systemPrompt: ctx.getSystemPrompt(),
-            activeTools,
-            allTools,
-            calibration: collectInitialPromptCalibration(ctx.sessionManager.getSessionDir()),
-          }).total;
+          const currentPromptInjectionTokens = getFooterPromptInjectionTokens(ctx);
 
           const contextUsage = ctx.getContextUsage();
           const contextWindow = contextUsage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
@@ -548,7 +591,7 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
           const segments: string[] = [];
           if (ioItems.length > 0) segments.push(`${theme.fg("muted", "🪙")} ${ioItems.join(` ${itemSep} `)}`);
           if (cacheItems.length > 0) segments.push(`${theme.fg("muted", "💾")} ${cacheItems.join(` ${itemSep} `)}`);
-          segments.push(`PI: ${formatTokens(promptInjectionTokens)} tok`);
+          segments.push(`PI: ${formatTokens(currentPromptInjectionTokens)} tok`);
           if (latestTokenSpeed !== null) {
             const livePrefix = liveOutputTokens > 0 ? `${formatTokens(liveOutputTokens)} tok @ ` : "";
             segments.push(`⚡ ${livePrefix}${formatTokenSpeed(latestTokenSpeed)} tok/s`);
@@ -633,6 +676,10 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
     await refresh(ctx);
   });
 
+  pi.on("agent_start", async (_event, ctx) => {
+    void refreshPromptInjectionEstimate(ctx);
+  });
+
   pi.on("message_start", (event) => {
     if (event.message.role === "assistant") {
       currentAssistantStartMs = Date.now();
@@ -683,6 +730,7 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
       recordAssistantSpeed(event.message as AssistantMessage);
       resetLiveAssistantState();
     }
+    void refreshPromptInjectionEstimate(ctx);
     await refresh(ctx);
   });
 
@@ -694,6 +742,7 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
   pi.registerCommand("git-footer-refresh", {
     description: "Refresh git footer information",
     handler: async (_args, ctx) => {
+      await refreshPromptInjectionEstimate(ctx);
       await refresh(ctx);
       ctx.ui.notify("Git footer refreshed", "info");
     },

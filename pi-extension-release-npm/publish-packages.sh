@@ -4,6 +4,7 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="${PI_NPM_PACKAGES_ROOT:-$SCRIPT_DIR}"
 TARGET="all"
+TARGETS_FILE=""
 PUBLISHER="npm"    # auto|bun|npm
 ACCESS="public"
 APPLY=0
@@ -18,6 +19,7 @@ Usage:
 Options:
   --publisher <auto|bun|npm>   Publishing client (default: npm)
   --target <name|all>          Publish one package dir or all (default: all)
+  --targets-file <path>        Publish/check package dirs listed one per line
   --all                        Same as --target all
   --access <public|restricted> Publish access level (default: public)
   --apply                      Actually publish packages (default: plan only)
@@ -40,6 +42,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --target)
       TARGET="${2:-}"
+      shift 2
+      ;;
+    --targets-file)
+      TARGETS_FILE="${2:-}"
       shift 2
       ;;
     --all)
@@ -77,6 +83,16 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ -n "$TARGETS_FILE" && "$TARGET" != "all" ]]; then
+  echo "ERROR: --targets-file cannot be combined with --target or a positional target" >&2
+  exit 1
+fi
+
+if [[ -n "$TARGETS_FILE" && ! -f "$TARGETS_FILE" ]]; then
+  echo "ERROR: targets file not found: $TARGETS_FILE" >&2
+  exit 1
+fi
 
 if [[ "$PUBLISHER" != "auto" && "$PUBLISHER" != "bun" && "$PUBLISHER" != "npm" ]]; then
   echo "ERROR: --publisher must be auto, bun, or npm" >&2
@@ -265,14 +281,43 @@ registry_check() {
   return 1
 }
 
+resolve_package_target() {
+  local target="$1"
+  local pkg_dir
+  if [[ "$target" = /* ]]; then
+    pkg_dir="$target"
+  else
+    pkg_dir="$ROOT_DIR/$target"
+  fi
+
+  if [[ -d "$pkg_dir" && -f "$pkg_dir/package.json" ]]; then
+    printf "%s\n" "$pkg_dir"
+    return 0
+  fi
+
+  echo "ERROR: package '$target' not found under $ROOT_DIR" >&2
+  return 1
+}
+
 gather_packages() {
+  if [[ -n "$TARGETS_FILE" ]]; then
+    local raw target pkg_dir
+    declare -A seen=()
+    while IFS= read -r raw || [[ -n "$raw" ]]; do
+      target="$(printf '%s' "$raw" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+      [[ -z "$target" || "$target" == \#* ]] && continue
+      pkg_dir="$(resolve_package_target "$target")" || exit 1
+      if [[ -z "${seen[$pkg_dir]+x}" ]]; then
+        seen[$pkg_dir]=1
+        printf "%s\n" "$pkg_dir"
+      fi
+    done < "$TARGETS_FILE"
+    return
+  fi
+
   if [[ "$TARGET" != "all" ]]; then
-    if [[ -d "$ROOT_DIR/$TARGET" && -f "$ROOT_DIR/$TARGET/package.json" ]]; then
-      printf "%s\n" "$ROOT_DIR/$TARGET"
-      return
-    fi
-    echo "ERROR: package '$TARGET' not found under $ROOT_DIR" >&2
-    exit 1
+    resolve_package_target "$TARGET" || exit 1
+    return
   fi
 
   find "$ROOT_DIR" -mindepth 1 -maxdepth 1 -type d \

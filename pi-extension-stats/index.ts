@@ -6,6 +6,7 @@ import {
   appendInitialPromptCalibrationRecord,
   buildInitialPromptCalibrationRecord,
   collectInitialPromptCalibration,
+  estimateInitialPromptFromPiExport,
   estimateInitialPromptInput,
   estimatePromptInjectionTokens,
   estimateTokensFromCharCount,
@@ -195,12 +196,6 @@ function formatTokenCell(tokens: number): string {
   return tokens < 0 ? `-${formatTokens(Math.abs(tokens))}` : formatTokens(tokens);
 }
 
-function formatCalibrationSummary(estimate: InitialPromptInputEstimate): string {
-  if (estimate.calibrationSamples <= 0) return "uncalibrated";
-  const sampleLabel = estimate.calibrationSamples === 1 ? "sample" : "samples";
-  return `learned scale ×${estimate.calibrationMultiplier.toFixed(2)} from ${estimate.calibrationSamples} ${sampleLabel}`;
-}
-
 function distributeCalibratedTokens<T extends { tokens: number }>(sources: T[], calibratedTotal: number): T[] {
   const uncalibratedTotal = sources.reduce((sum, source) => sum + source.tokens, 0);
   if (uncalibratedTotal <= 0 || calibratedTotal <= 0) return sources.map((source) => ({ ...source, tokens: 0 }));
@@ -220,7 +215,12 @@ function distributeCalibratedTokens<T extends { tokens: number }>(sources: T[], 
   return sources.map((source, index) => ({ ...source, tokens: exact[index]?.tokens ?? 0 }));
 }
 
-function formatPromptInjectionLines(systemPrompt: string, options: BuildSystemPromptOptions | null, estimate: InitialPromptInputEstimate): string[] {
+function formatPromptInjectionLines(
+  systemPrompt: string,
+  options: BuildSystemPromptOptions | null,
+  estimate: InitialPromptInputEstimate,
+  metadata?: { source?: string; warning?: string },
+): string[] {
   const promptSources = buildPromptInjectionSources(systemPrompt, options)
     .map((source) => ({
       ...source,
@@ -247,9 +247,16 @@ function formatPromptInjectionLines(systemPrompt: string, options: BuildSystemPr
   });
   const range = estimate.low !== estimate.high ? ` · range ${formatTokens(estimate.low)}–${formatTokens(estimate.high)}` : "";
 
+  const metadataLines = [
+    metadata?.source ? `Source: ${metadata.source}` : null,
+    metadata?.warning ? `Note: ${metadata.warning}` : null,
+  ].filter((line): line is string => !!line);
+
+  const confidenceLabel = estimate.confidence === "measured-after-call" ? "measured" : `${estimate.confidence} estimate`;
+
   return [
-    `Prompt injection: PI: ~${formatTokens(estimate.total)} tok initial input (${estimate.confidence}${range})`,
-    `Unscaled basis: prompt text ${formatTokens(estimate.promptText)} + tool schemas ${formatTokens(estimate.toolSchemas)} + framing ${formatTokens(estimate.framing)} · displayed rows are proportionally scaled (${formatCalibrationSummary(estimate)})`,
+    `PI initial input: ~${formatTokens(estimate.total)} tok (${confidenceLabel}${range})`,
+    ...metadataLines,
     `┌${"─".repeat(labelWidth + 2)}┬${"─".repeat(tokenWidth + 2)}┬${"─".repeat(percentWidth + 6)}┐`,
     `│ ${"Source".padEnd(labelWidth)} │ ${"Tokens".padStart(tokenWidth)} │ ${"%".padStart(percentWidth + 4)} │`,
     separator,
@@ -258,6 +265,240 @@ function formatPromptInjectionLines(systemPrompt: string, options: BuildSystemPr
   ];
 }
 
+
+type PromptSkillDetail = {
+  name: string;
+  description?: string;
+  location?: string;
+};
+
+type ToolPromptEntry = {
+  name: string;
+  snippet: string;
+};
+
+type ContextFileDetail = {
+  path: string;
+  chars?: number;
+};
+
+function shortenText(text: string | undefined, maxLength = 90): string {
+  const normalized = (text ?? "").replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, maxLength - 1).trimEnd()}…`;
+}
+
+function formatCountedNames(names: string[], limit = 18): string {
+  if (names.length === 0) return "none";
+  const shown = names.slice(0, limit).join(", ");
+  const remaining = names.length - limit;
+  return remaining > 0 ? `${shown}, … +${remaining} more` : shown;
+}
+
+function xmlUnescape(value: string): string {
+  return value
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+function extractXmlTag(block: string, tag: string): string | undefined {
+  const escapedTag = tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = block.match(new RegExp(`<${escapedTag}>([\\s\\S]*?)<\\/${escapedTag}>`, "i"));
+  const value = match?.[1]?.trim();
+  return value ? xmlUnescape(value) : undefined;
+}
+
+function extractAvailableToolPromptEntries(systemPrompt: string): ToolPromptEntry[] {
+  const marker = "Available tools:\n";
+  const start = systemPrompt.indexOf(marker);
+  if (start < 0) return [];
+
+  const tail = systemPrompt.slice(start + marker.length);
+  const blockEnd = tail.search(/\n\n/);
+  const block = blockEnd >= 0 ? tail.slice(0, blockEnd) : tail;
+  const entries: ToolPromptEntry[] = [];
+  const seen = new Set<string>();
+
+  for (const line of block.split(/\r?\n/)) {
+    const match = line.match(/^-\s+([^:\s]+):\s*(.*)$/);
+    const name = match?.[1]?.trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    entries.push({ name, snippet: match?.[2]?.trim() ?? "" });
+  }
+
+  return entries;
+}
+
+function extractPromptSkills(systemPrompt: string, options: BuildSystemPromptOptions | null): PromptSkillDetail[] {
+  const blockMatch = systemPrompt.match(/<available_skills>([\s\S]*?)<\/available_skills>/i);
+  const block = blockMatch?.[1];
+  if (block) {
+    const skills: PromptSkillDetail[] = [];
+    for (const match of block.matchAll(/<skill>([\s\S]*?)<\/skill>/gi)) {
+      const skillBlock = match[1] ?? "";
+      const name = extractXmlTag(skillBlock, "name");
+      if (!name) continue;
+      skills.push({
+        name,
+        description: extractXmlTag(skillBlock, "description"),
+        location: extractXmlTag(skillBlock, "location"),
+      });
+    }
+    if (skills.length > 0) return skills;
+  }
+
+  return (options?.skills ?? [])
+    .filter((skill) => !skill.disableModelInvocation)
+    .map((skill) => ({ name: skill.name, description: skill.description, location: skill.filePath }));
+}
+
+function extractPromptContextFiles(systemPrompt: string, options: BuildSystemPromptOptions | null): ContextFileDetail[] {
+  if (options?.contextFiles && options.contextFiles.length > 0) {
+    return options.contextFiles.map((file) => ({ path: file.path, chars: file.content.length }));
+  }
+
+  const projectContextStart = systemPrompt.indexOf("\n\n# Project Context\n");
+  if (projectContextStart < 0) return [];
+
+  const skillsStart = systemPrompt.indexOf("\n<available_skills>", projectContextStart);
+  const dateStart = systemPrompt.indexOf("\nCurrent date:", projectContextStart);
+  const endCandidates = [skillsStart, dateStart].filter((index) => index > projectContextStart);
+  const projectContextEnd = endCandidates.length > 0 ? Math.min(...endCandidates) : systemPrompt.length;
+  const contextBlock = systemPrompt.slice(projectContextStart, projectContextEnd);
+  const contextFiles: ContextFileDetail[] = [];
+
+  for (const match of contextBlock.matchAll(/^## (.+)$/gm)) {
+    const contextPath = match[1]?.trim();
+    if (contextPath) contextFiles.push({ path: contextPath });
+  }
+
+  return contextFiles;
+}
+
+function extractPromptLineValue(systemPrompt: string, label: string): string | undefined {
+  const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = systemPrompt.match(new RegExp(`^${escapedLabel}:\\s*(.+)$`, "m"));
+  return match?.[1]?.trim();
+}
+
+function getToolParameterSummary(parameters: unknown): string {
+  const record = (parameters && typeof parameters === "object" ? parameters : {}) as Record<string, unknown>;
+  const properties = record.properties && typeof record.properties === "object" ? Object.keys(record.properties as Record<string, unknown>).length : 0;
+  const required = Array.isArray(record.required) ? record.required.length : 0;
+  if (properties <= 0) return "no params";
+  return `${properties} param${properties === 1 ? "" : "s"}${required > 0 ? `, ${required} required` : ""}`;
+}
+
+function estimateToolSchemaTokens(tool: InitialPromptToolInfo): number {
+  return estimatePromptInjectionTokens(
+    JSON.stringify({
+      name: tool.name,
+      description: tool.description ?? "",
+      parameters: tool.parameters ?? {},
+    }),
+  );
+}
+
+function pushDetailSection(lines: string[], title: string, body: string[]): void {
+  const cleanBody = body.filter((line) => line.trim().length > 0);
+  if (cleanBody.length === 0) return;
+
+  const ruleLength = 52;
+  const heading = `╭─ ${title} ${"─".repeat(Math.max(3, ruleLength - title.length))}`;
+  lines.push("", heading, ...cleanBody.map((line) => `│ ${line}`), `╰${"─".repeat(Math.max(3, heading.length - 1))}`);
+}
+
+function formatInitialPromptDetailedLines(
+  promptEstimate: Awaited<ReturnType<typeof estimateInitialPromptFromPiExport>>,
+  options: BuildSystemPromptOptions | null,
+): string[] {
+  const systemPrompt = promptEstimate.systemPrompt;
+  const estimate = promptEstimate.estimate;
+  const tools = promptEstimate.tools;
+  const toolPromptEntries = extractAvailableToolPromptEntries(systemPrompt);
+  const skills = extractPromptSkills(systemPrompt, options);
+  const contextFiles = extractPromptContextFiles(systemPrompt, options);
+  const currentDate = extractPromptLineValue(systemPrompt, "Current date");
+  const cwd = extractPromptLineValue(systemPrompt, "Current working directory");
+  const promptGuidelines = options?.promptGuidelines ?? [];
+  const sourceLabel = promptEstimate.source === "export-html" ? "export HTML" : "live context fallback";
+  const calibration = estimate.calibrationSamples > 0
+    ? `×${estimate.calibrationMultiplier.toFixed(2)} (${estimate.calibrationSamples} sample${estimate.calibrationSamples === 1 ? "" : "s"})`
+    : "none";
+  const detailLines = ["Initial prompt details", "━━━━━━━━━━━━━━━━━━━━━━"];
+
+  pushDetailSection(detailLines, "Snapshot", [
+    `• source: ${sourceLabel}`,
+    `• system prompt: ${systemPrompt.length.toLocaleString()} chars`,
+    `• active tool schemas: ${tools.length}`,
+    `• available-tool prompt entries: ${toolPromptEntries.length}`,
+    `• skills in prompt: ${skills.length}`,
+    `• context files: ${contextFiles.length}`,
+  ]);
+
+  pushDetailSection(detailLines, "Estimate components", [
+    `• prompt text: ~${formatTokens(estimate.promptText)} tok`,
+    `• tool schemas: ~${formatTokens(estimate.toolSchemas)} tok`,
+    `• provider/request framing: ~${formatTokens(estimate.framing)} tok`,
+    `• calibration: ${calibration}`,
+  ]);
+
+  const metadataParts = [currentDate ? `date: ${currentDate}` : null, cwd ? `cwd: ${cwd}` : null, promptGuidelines.length > 0 ? `extra guidelines: ${promptGuidelines.length}` : null].filter((part): part is string => !!part);
+  pushDetailSection(detailLines, "Prompt metadata", metadataParts.map((part) => `• ${part}`));
+
+  if (tools.length > 0) {
+    const toolSummaries = tools
+      .map((tool) => ({
+        ...tool,
+        tokens: estimateToolSchemaTokens(tool),
+        parametersSummary: getToolParameterSummary(tool.parameters),
+        description: shortenText(tool.description, 72),
+      }))
+      .sort((a, b) => b.tokens - a.tokens || a.name.localeCompare(b.name));
+    const shown = toolSummaries.slice(0, 12);
+    const remaining = toolSummaries.length - shown.length;
+    const toolLines = shown.map((tool, index) => {
+      const description = tool.description ? ` · ${tool.description}` : "";
+      return `${String(index + 1).padStart(2, "0")}. ${tool.name} — ~${formatTokens(tool.tokens)} tok · ${tool.parametersSummary}${description}`;
+    });
+    if (remaining > 0) toolLines.push(`… ${remaining} more active schema${remaining === 1 ? "" : "s"}: ${formatCountedNames(toolSummaries.slice(shown.length).map((tool) => tool.name), 16)}`);
+    pushDetailSection(detailLines, `Active tool schemas · top ${shown.length} by size`, toolLines);
+  }
+
+  pushDetailSection(
+    detailLines,
+    "Available-tools prompt entries",
+    toolPromptEntries.length > 0 ? [`• ${formatCountedNames(toolPromptEntries.map((tool) => tool.name), 24)}`] : [],
+  );
+
+  if (skills.length > 0) {
+    const shown = skills.slice(0, 10);
+    const remaining = skills.length - shown.length;
+    const skillLines = shown.map((skill) => {
+      const description = skill.description ? ` — ${shortenText(skill.description, 96)}` : "";
+      return `• ${skill.name}${description}`;
+    });
+    if (remaining > 0) skillLines.push(`… ${remaining} more skill${remaining === 1 ? "" : "s"}: ${formatCountedNames(skills.slice(shown.length).map((skill) => skill.name), 16)}`);
+    pushDetailSection(detailLines, `Skills in prompt · top ${shown.length}`, skillLines);
+  }
+
+  if (contextFiles.length > 0) {
+    const shown = contextFiles.slice(0, 8);
+    const remaining = contextFiles.length - shown.length;
+    const contextLines = shown.map((file) => {
+      const chars = typeof file.chars === "number" ? ` · ${file.chars.toLocaleString()} chars` : "";
+      return `• ${file.path}${chars}`;
+    });
+    if (remaining > 0) contextLines.push(`… ${remaining} more context file${remaining === 1 ? "" : "s"}`);
+    pushDetailSection(detailLines, `Context files · ${contextFiles.length}`, contextLines);
+  }
+
+  return detailLines;
+}
 
 function stringifyContextValue(value: unknown): string {
   if (value === undefined || value === null) return "";
@@ -372,6 +613,15 @@ function parseDaysArg(args: string): { mode: "range"; days: number } | { mode: "
   const n = Number.parseInt(trimmed, 10);
   if (!Number.isFinite(n) || n <= 0 || n > 3650) return null;
   return { mode: "range", days: n };
+}
+
+function parseStatsPiArg(args: string): { detailed: boolean } | null {
+  const tokens = args.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return { detailed: false };
+  if (tokens.length === 1 && ["detailed", "detail", "details", "--detailed"].includes(tokens[0] ?? "")) {
+    return { detailed: true };
+  }
+  return null;
 }
 
 function listSessionFiles(sessionDir: string): string[] {
@@ -890,11 +1140,24 @@ export default function statsExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("stats-pi", {
-    description: "Show estimated initial prompt input token breakdown.",
-    handler: async (_args, ctx) => {
-      const systemPrompt = ctx.getSystemPrompt();
-      const promptEstimate = estimateInitialPromptForContext(systemPrompt, getPromptCalibration(ctx));
-      ctx.ui.notify(formatPromptInjectionLines(systemPrompt, latestSystemPromptOptions, promptEstimate).join("\n"), "info");
+    description: "Show export-backed estimated initial prompt input token breakdown. Usage: /stats-pi [detailed]",
+    handler: async (args, ctx) => {
+      const parsed = parseStatsPiArg(args);
+      if (!parsed) {
+        ctx.ui.notify("Usage: /stats-pi [detailed]", "warning");
+        return;
+      }
+
+      const promptEstimate = await estimateInitialPromptFromPiExport(pi, ctx, getPromptCalibration(ctx));
+      const lines = formatPromptInjectionLines(promptEstimate.systemPrompt, latestSystemPromptOptions, promptEstimate.estimate, {
+        source: promptEstimate.source === "export-html" ? "temporary Pi /export HTML session data" : "live context fallback",
+        warning: promptEstimate.warning,
+      });
+      if (parsed.detailed) {
+        lines.push("", ...formatInitialPromptDetailedLines(promptEstimate, latestSystemPromptOptions));
+      }
+
+      ctx.ui.notify(lines.join("\n"), "info");
     },
   });
 
@@ -934,7 +1197,7 @@ export default function statsExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("stats", {
-    description: "Show token usage dashboard. Usage: /stats, /stats 30, /stats all. Details: /stats-tokens, /stats-pi, /stats-last, /stats-most-expense, /stats-model-compare, /stats-cost-trend, /stats-cache",
+    description: "Show token usage dashboard. Usage: /stats, /stats 30, /stats all. Details: /stats-tokens, /stats-pi [detailed], /stats-last, /stats-most-expense, /stats-model-compare, /stats-cost-trend, /stats-cache",
     handler: async (args, ctx) => {
       const trimmedArgs = args.trim().toLowerCase();
       if (trimmedArgs === "tokens") {
@@ -953,7 +1216,7 @@ export default function statsExtension(pi: ExtensionAPI) {
       const sessionLines = formatExpensiveSessionLines(data.records, data.dayKeys).slice(0, 7);
       const commandLines = [
         "Detailed commands:",
-        "/stats-last · /stats-most-expense · /stats-model-compare · /stats-pi · /stats-cost-trend · /stats-cache · /stats-tokens",
+        "/stats-last · /stats-most-expense · /stats-model-compare · /stats-pi detailed · /stats-cost-trend · /stats-cache · /stats-tokens",
       ];
 
       ctx.ui.notify(
