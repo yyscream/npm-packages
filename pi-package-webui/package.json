@@ -1,0 +1,37 @@
+{
+  "name": "@firstpick/pi-package-webui",
+  "version": "0.1.0",
+  "description": "Pi Web UI companion package with a local browser UI CLI and /start-webui command.",
+  "license": "MIT",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "coding-agent",
+    "webui",
+    "rpc",
+    "extension"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "bin": {
+    "pi-webui": "./bin/pi-webui.mjs"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "^0.78.0"
+  },
+  "files": [
+    "index.ts",
+    "bin",
+    "public",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}

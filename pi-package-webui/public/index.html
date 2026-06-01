@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pi Web UI</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <button id="sidePanelExpandButton" class="side-panel-expand-button" type="button" aria-controls="sidePanel" aria-expanded="false" aria-label="Expand side panel" title="Expand side panel">
+      <span class="side-panel-button-icon" aria-hidden="true">
+        <span></span><span></span><span></span>
+      </span>
+      <span class="side-panel-button-chevron" aria-hidden="true">‹</span>
+    </button>
+
+    <main class="layout">
+      <section class="chat-panel">
+        <div id="widgetArea" class="widget-area"></div>
+        <div id="chat" class="chat" aria-live="polite"></div>
+        <div id="statusBar" class="statusbar" aria-live="polite"></div>
+        <section id="gitWorkflowPanel" class="git-workflow-panel" aria-live="polite" hidden>
+          <div class="git-workflow-header">
+            <div>
+              <span class="git-workflow-kicker">Git workflow</span>
+              <strong id="gitWorkflowTitle">Ready</strong>
+              <p id="gitWorkflowHint" class="muted">Stage changes, generate a commit message, commit, and push.</p>
+            </div>
+            <button id="gitWorkflowCancelButton" type="button">Cancel</button>
+          </div>
+          <div id="gitWorkflowSteps" class="git-workflow-steps"></div>
+          <pre id="gitWorkflowOutput" class="git-workflow-output"></pre>
+          <div id="gitWorkflowActions" class="git-workflow-actions"></div>
+        </section>
+        <form id="composer" class="composer">
+          <textarea id="promptInput" rows="4" placeholder="Ask Pi…"></textarea>
+          <div id="commandSuggest" class="command-suggest" role="listbox" aria-label="Command suggestions" hidden></div>
+          <div class="composer-row">
+            <label>
+              Busy prompt behavior
+              <select id="busyBehavior">
+                <option value="followUp">follow-up</option>
+                <option value="steer">steer</option>
+              </select>
+            </label>
+            <div class="spacer"></div>
+            <button id="newSessionButton" class="composer-new-button" type="button">New</button>
+            <button id="compactButton" class="composer-compact-button" type="button" title="Compact the current Pi session context">Compact</button>
+            <button
+              id="gitWorkflowButton"
+              class="composer-git-button"
+              type="button"
+              title="Guided Git workflow: git add ., /git-staged-msg, preview messages, commit short/long, git push. Cancel is available at each step."
+              aria-label="Start guided Git workflow: git add dot, run git-staged-msg, preview messages, commit short or long, then git push. Cancel is available at each step."
+              data-tooltip="Guided Git workflow:&#10;1. Run git add .&#10;2. Run /git-staged-msg&#10;3. Preview short + long messages&#10;4. Commit with short or long message&#10;5. Run git push&#10;Cancel is available at each step."
+            >Git workflow</button>
+            <button id="steerButton" type="button">Steer</button>
+            <button id="followUpButton" type="button">Follow-up</button>
+            <button type="submit" class="primary">Send</button>
+          </div>
+        </form>
+      </section>
+
+      <aside id="sidePanel" class="side-panel">
+        <div class="side-panel-header">
+          <div>
+            <span class="side-panel-kicker">Pi Web UI</span>
+            <strong>Control Deck</strong>
+            <p id="sessionLine" class="side-panel-session-line muted">Connecting…</p>
+          </div>
+          <button id="toggleSidePanelButton" class="side-panel-toggle-button" type="button" aria-controls="sidePanel" aria-expanded="true" aria-label="Collapse side panel" title="Collapse side panel">
+            <span class="side-panel-button-icon" aria-hidden="true">
+              <span></span><span></span><span></span>
+            </span>
+            <span class="side-panel-button-chevron" aria-hidden="true">›</span>
+          </button>
+        </div>
+        <div class="side-panel-body">
+          <h2>Controls</h2>
+          <div class="side-panel-controls">
+            <div class="control-field">
+              <label for="modelSelect">Model</label>
+              <select id="modelSelect" title="Model"></select>
+              <button id="setModelButton" type="button">Set model</button>
+            </div>
+            <div class="control-field">
+              <label for="thinkingSelect">Thinking</label>
+              <select id="thinkingSelect" title="Thinking level">
+                <option value="off">off</option>
+                <option value="minimal">minimal</option>
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+                <option value="xhigh">xhigh</option>
+              </select>
+              <button id="setThinkingButton" type="button">Set thinking</button>
+            </div>
+            <button id="abortButton" type="button" class="danger">Abort</button>
+          </div>
+          <h2>Session</h2>
+          <dl id="stateDetails" class="details"></dl>
+          <h2>Queue</h2>
+          <div id="queueBox" class="queue-box muted">No queued messages.</div>
+          <h2>Commands</h2>
+          <div id="commandsBox" class="commands-box muted">Loading…</div>
+          <h2>Events</h2>
+          <div id="eventLog" class="event-log"></div>
+        </div>
+      </aside>
+    </main>
+
+    <dialog id="extensionDialog" class="extension-dialog">
+      <form id="dialogForm" method="dialog">
+        <h2 id="dialogTitle">Pi request</h2>
+        <p id="dialogMessage" class="muted"></p>
+        <div id="dialogBody"></div>
+        <menu id="dialogActions"></menu>
+      </form>
+    </dialog>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
