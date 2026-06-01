@@ -1113,6 +1113,40 @@ function renderStatus() {
   renderFooter();
 }
 
+function stripAnsi(text) {
+  return String(text || "").replace(/(?:\x1B|\u241B)(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "");
+}
+
+function normalizeDialogText(text) {
+  return stripAnsi(text).replace(/\r\n?/g, "\n");
+}
+
+function normalizeDialogPrompt(request) {
+  const rawTitle = normalizeDialogText(request.title || "Pi request");
+  const rawMessage = normalizeDialogText(request.message || request.placeholder || "");
+
+  if (rawTitle.includes("\n")) {
+    const lines = rawTitle.split("\n");
+    const titleIndex = lines.findIndex((line) => line.trim());
+    if (titleIndex !== -1) {
+      const titleBody = lines.slice(titleIndex + 1).join("\n").replace(/^\n+/, "").trimEnd();
+      return {
+        title: lines[titleIndex].trim(),
+        message: [titleBody, rawMessage.trimEnd()].filter(Boolean).join("\n\n"),
+      };
+    }
+  }
+
+  return {
+    title: rawTitle.trim() || "Pi request",
+    message: rawMessage.trimEnd(),
+  };
+}
+
+function isGuardrailDialogPrompt(prompt) {
+  return /(?:dangerous|high-risk|protected).*(?:command|file)|safety rule|execute anyway\?/i.test(`${prompt.title}\n${prompt.message}`);
+}
+
 function parseTodoProgressWidget(lines) {
   const cleanLines = lines.map(stripAnsi).map((line) => line.trim()).filter(Boolean);
   const headerIndex = cleanLines.findIndex((line) => /^Todo\s+\d+\/\d+\s+done/i.test(line));
@@ -2143,8 +2177,12 @@ function showNextDialog() {
   activeDialog = dialogQueue.shift();
   const request = activeDialog;
 
-  elements.dialogTitle.textContent = request.title || "Pi request";
-  elements.dialogMessage.textContent = request.message || request.placeholder || "";
+  const prompt = normalizeDialogPrompt(request);
+  const isGuardrailDialog = isGuardrailDialogPrompt(prompt);
+  elements.dialog.classList.toggle("guardrail-dialog", isGuardrailDialog);
+  elements.dialogTitle.textContent = prompt.title;
+  elements.dialogMessage.textContent = prompt.message;
+  elements.dialogMessage.hidden = !prompt.message;
   elements.dialogBody.replaceChildren();
   elements.dialogActions.replaceChildren();
 
@@ -2153,9 +2191,12 @@ function showNextDialog() {
   if (request.method === "select") {
     const options = make("div", "dialog-options");
     for (const option of request.options || []) {
-      const button = make("button", undefined, String(option));
+      const optionLabel = String(option);
+      const button = make("button", undefined, optionLabel);
       button.type = "button";
-      button.addEventListener("click", () => sendDialogResponse({ type: "extension_ui_response", id: request.id, value: String(option), tabId: request.tabId }));
+      if (isGuardrailDialog && /^Block$/i.test(optionLabel)) button.classList.add("guardrail-safe-action");
+      if (isGuardrailDialog && /^Allow/i.test(optionLabel)) button.classList.add("guardrail-allow-action");
+      button.addEventListener("click", () => sendDialogResponse({ type: "extension_ui_response", id: request.id, value: optionLabel, tabId: request.tabId }));
       options.append(button);
     }
     elements.dialogBody.append(options);

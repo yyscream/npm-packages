@@ -1525,6 +1525,37 @@ summary { cursor: pointer; color: var(--warning); }
   box-shadow: 0 2rem 5rem var(--shadow), 0 0 2rem var(--glow-mauve);
 }
 .extension-dialog::backdrop { background: rgba(17, 17, 27, 0.78); backdrop-filter: blur(4px); }
+#dialogMessage {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+.extension-dialog.guardrail-dialog {
+  border-color: rgba(249, 226, 175, 0.62);
+  box-shadow: 0 2rem 5rem var(--shadow), 0 0 2rem rgba(249, 226, 175, 0.24);
+}
+.extension-dialog.guardrail-dialog #dialogTitle {
+  color: var(--ctp-yellow);
+  text-shadow: 0 0 1rem rgba(249, 226, 175, 0.22);
+}
+.extension-dialog.guardrail-dialog #dialogMessage {
+  margin: 0.6rem 0 0;
+  padding: 0.78rem 0.85rem;
+  border: 1px solid rgba(249, 226, 175, 0.24);
+  border-radius: 0.78rem;
+  background: rgba(17, 17, 27, 0.62);
+  color: var(--ctp-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.88rem;
+}
+.extension-dialog.guardrail-dialog .dialog-options button.guardrail-safe-action {
+  border-color: rgba(166, 227, 161, 0.58);
+  box-shadow: 0 0 1rem rgba(166, 227, 161, 0.18);
+}
+.extension-dialog.guardrail-dialog .dialog-options button.guardrail-allow-action {
+  border-color: rgba(249, 226, 175, 0.46);
+  color: var(--ctp-yellow);
+}
 .extension-dialog menu {
   display: flex;
   justify-content: flex-end;

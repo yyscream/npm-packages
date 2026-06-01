@@ -73,6 +73,8 @@ assert.match(css, /(?:^|\n)\s*\.side-panel-backdrop\s*\{[\s\S]*?position:\s*fixe
 assert.match(css, /(?:^|\n)\s*\.side-panel\s*\{[\s\S]*?position:\s*fixed/, "mobile side panel should be an overlay drawer instead of stacked content");
 assert.match(css, /\.extension-dialog[\s\S]*?max-height:\s*calc\(var\(--visual-viewport-height/, "dialogs should fit the visual viewport on mobile");
 assert.match(css, /\.extension-dialog[\s\S]*?inset:\s*auto 0 0 0/, "mobile dialogs should behave like bottom sheets");
+assert.match(css, /#dialogMessage \{[\s\S]*?white-space:\s*pre-wrap/, "extension dialog messages should preserve multiline prompts");
+assert.match(css, /\.extension-dialog\.guardrail-dialog[\s\S]*?border-color:\s*rgba\(249, 226, 175/, "guardrail dialogs should have warning-specific styling");
 
 assert.match(app, /const MOBILE_VIEW_QUERY = "\(max-width: 720px\), \(max-device-width: 720px\), \(pointer: coarse\) and \(hover: none\)"/, "mobile detection should include phones that report desktop-like layout widths");
 assert.match(app, /window\.visualViewport/, "app should listen to VisualViewport for keyboard/viewport updates");
@@ -81,6 +83,10 @@ assert.match(app, /elements\.promptInput\.addEventListener\("focus", \(\) => \{\
 assert.match(app, /navigator\.serviceWorker\.register\("\/service-worker\.js"\)/, "PWA service worker should be registered by the app");
 assert.match(app, /function isChatNearBottom\(/, "chat should detect whether the user is reading above the bottom");
 assert.match(app, /function stripAnsi\(text\)/, "widget rendering should strip ANSI color escapes before display");
+assert.match(app, /\(\?:\\x1B\|\\u241B\)/, "ANSI stripping should handle literal escape characters and visible escape glyphs");
+assert.match(app, /function normalizeDialogPrompt\(request\)/, "extension dialogs should split multiline prompts into title and body");
+assert.match(app, /elements\.dialog\.classList\.toggle\("guardrail-dialog", isGuardrailDialog\)/, "guardrail extension dialogs should get dedicated styling");
+assert.match(app, /guardrail-safe-action/, "guardrail dialogs should distinguish safe and allow actions");
 assert.match(app, /function parseTodoProgressWidget\(lines\)/, "todo-progress widgets should be parsed from extension widget lines");
 assert.match(app, /key === "todo-progress" \? renderTodoProgressWidget\(key, lines\) : null/, "todo-progress should use the specialized widget renderer");
 assert.match(app, /let transientMessages = \[\]/, "frontend should keep transient Web UI/extension output messages");
