@@ -567,9 +567,31 @@ function formatDate(value) {
   return Number.isNaN(date.getTime()) ? "" : date.toLocaleString();
 }
 
+function stripAnsi(text) {
+  return String(text ?? "").replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "");
+}
+
+function cleanStatusText(value) {
+  return stripAnsi(value).replace(/\s+/g, " ").trim();
+}
+
 function modelLabel(model) {
   if (!model) return "none";
   return `${model.provider}/${model.id}`;
+}
+
+function shortSessionLabel(state) {
+  const label = cleanStatusText(state?.sessionName || state?.sessionId || "session");
+  return /^[0-9a-f]{8}-[0-9a-f-]{18,}$/i.test(label) ? label.slice(0, 8) : label;
+}
+
+function formatStatusEntry(key, value) {
+  const cleanKey = cleanStatusText(key);
+  const cleanValue = cleanStatusText(value);
+  if (!cleanValue) return "";
+  if (cleanKey === "plan-mode") return `Plan: ${cleanValue}`;
+  if (cleanKey === "extension") return cleanValue;
+  return `${cleanKey}: ${cleanValue}`;
 }
 
 function shortModelLabel(model) {
@@ -1062,9 +1084,12 @@ function renderStatus() {
   const running = state?.isStreaming ? "running" : "idle";
   const compacting = state?.isCompacting ? " · compacting" : "";
   const queue = state?.pendingMessageCount ? ` · queued ${state.pendingMessageCount}` : "";
-  const extra = [...statusEntries.entries()].map(([key, value]) => `${key}: ${value}`).join(" · ");
+  const extra = [...statusEntries.entries()].map(([key, value]) => formatStatusEntry(key, value)).filter(Boolean).join(" · ");
+  const statusText = state?.isStreaming ? "Running" : "Idle";
+  const compactingText = state?.isCompacting ? " · Compacting" : "";
+  const queueText = state?.pendingMessageCount ? ` · Queue: ${state.pendingMessageCount}` : "";
 
-  elements.sessionLine.textContent = `${running}${compacting}${queue}${extra ? ` · ${extra}` : ""} · ${modelLabel(state?.model)} · ${state?.sessionName || state?.sessionId || "session"}`;
+  elements.sessionLine.textContent = `Status: ${statusText}${compactingText}${queueText}${extra ? ` · ${extra}` : ""} · Model: ${modelLabel(state?.model)} · Session: ${shortSessionLabel(state)}`;
 
   elements.stateDetails.replaceChildren();
   const details = {
