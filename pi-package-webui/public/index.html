@@ -2,9 +2,16 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
     <title>Pi Web UI</title>
+    <meta name="theme-color" content="#11111b" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Pi Web" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -18,12 +25,14 @@
     <main class="layout">
       <section class="chat-panel">
         <header class="terminal-tabs-shell">
+          <button id="terminalTabsToggleButton" class="terminal-tabs-toggle-button" type="button" aria-controls="tabBar" aria-expanded="false">Tabs</button>
           <div id="tabBar" class="terminal-tabs" role="tablist" aria-label="Pi terminal tabs">
             <button id="newTabButton" class="terminal-new-tab-button" type="button" title="Start a separate isolated Pi terminal">+ Tab</button>
           </div>
         </header>
         <div id="widgetArea" class="widget-area"></div>
         <div id="chat" class="chat" aria-live="polite"></div>
+        <button id="jumpToLatestButton" class="jump-to-latest-button" type="button" hidden>Latest ↓</button>
         <div id="statusBar" class="statusbar" aria-live="polite"></div>
         <section id="gitWorkflowPanel" class="git-workflow-panel" aria-live="polite" hidden>
           <div class="git-workflow-header">
@@ -39,34 +48,50 @@
           <div id="gitWorkflowActions" class="git-workflow-actions"></div>
         </section>
         <form id="composer" class="composer">
-          <textarea id="promptInput" rows="4" placeholder="Ask Pi…"></textarea>
+          <textarea id="promptInput" rows="1" enterkeyhint="enter" placeholder="Ask Pi…"></textarea>
           <div id="commandSuggest" class="command-suggest" role="listbox" aria-label="Command suggestions" hidden></div>
           <div class="composer-row">
-            <label>
-              Busy prompt behavior
-              <select id="busyBehavior">
-                <option value="followUp">follow-up</option>
-                <option value="steer">steer</option>
-              </select>
-            </label>
+            <button id="composerActionsButton" class="composer-actions-button" type="button" aria-controls="composerActionsPanel" aria-expanded="false">Actions</button>
+            <div id="composerActionsPanel" class="composer-actions-panel" aria-label="Composer actions">
+              <label>
+                Busy prompt behavior
+                <select id="busyBehavior">
+                  <option value="followUp">follow-up</option>
+                  <option value="steer">steer</option>
+                </select>
+              </label>
+              <button id="newSessionButton" class="composer-new-button" type="button">New</button>
+              <button id="compactButton" class="composer-compact-button" type="button" title="Compact the current Pi session context">Compact</button>
+              <button
+                id="gitWorkflowButton"
+                class="composer-git-button"
+                type="button"
+                title="Guided Git workflow: git add ., /git-staged-msg, preview messages, commit short/long, git push. Cancel is available at each step."
+                aria-label="Start guided Git workflow: git add dot, run git-staged-msg, preview messages, commit short or long, then git push. Cancel is available at each step."
+                data-tooltip="Guided Git workflow:&#10;1. Run git add .&#10;2. Run /git-staged-msg&#10;3. Preview short + long messages&#10;4. Commit with short or long message&#10;5. Run git push&#10;Cancel is available at each step."
+              >Git workflow</button>
+            </div>
             <div class="spacer"></div>
-            <button id="newSessionButton" class="composer-new-button" type="button">New</button>
-            <button id="compactButton" class="composer-compact-button" type="button" title="Compact the current Pi session context">Compact</button>
             <button
-              id="gitWorkflowButton"
-              class="composer-git-button"
+              id="steerButton"
               type="button"
-              title="Guided Git workflow: git add ., /git-staged-msg, preview messages, commit short/long, git push. Cancel is available at each step."
-              aria-label="Start guided Git workflow: git add dot, run git-staged-msg, preview messages, commit short or long, then git push. Cancel is available at each step."
-              data-tooltip="Guided Git workflow:&#10;1. Run git add .&#10;2. Run /git-staged-msg&#10;3. Preview short + long messages&#10;4. Commit with short or long message&#10;5. Run git push&#10;Cancel is available at each step."
-            >Git workflow</button>
-            <button id="steerButton" type="button">Steer</button>
-            <button id="followUpButton" type="button">Follow-up</button>
-            <button type="submit" class="primary">Send</button>
+              title="Type your message first, then tap Steer to guide the active Pi run without sending a normal prompt. Use it for corrections or direction changes while Pi is working."
+              aria-label="Steer: type your message first, then tap this button to guide the active Pi run."
+              data-tooltip="Steer usage:&#10;1. Type your steering message in the textarea.&#10;2. Tap Steer to guide the active Pi run.&#10;Use for corrections or direction changes while Pi is working."
+            >Steer</button>
+            <button
+              id="followUpButton"
+              type="button"
+              title="Type your message first, then tap Follow-up to send it as a follow-up instead of a normal prompt. Use it to add extra context or the next request."
+              aria-label="Follow-up: type your message first, then tap this button to send it as a follow-up."
+              data-tooltip="Follow-up usage:&#10;1. Type your message in the textarea.&#10;2. Tap Follow-up to send it as a follow-up.&#10;Use for extra context or the next request."
+            >Follow-up</button>
+            <button id="sendButton" type="submit" class="primary">Send</button>
           </div>
         </form>
       </section>
 
+      <button id="sidePanelBackdrop" class="side-panel-backdrop" type="button" aria-label="Close side panel" hidden></button>
       <aside id="sidePanel" class="side-panel">
         <div class="side-panel-header">
           <div>

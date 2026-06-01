@@ -3,12 +3,18 @@ const $ = (selector) => document.querySelector(selector);
 const elements = {
   sessionLine: $("#sessionLine"),
   tabBar: $("#tabBar"),
+  terminalTabsToggleButton: $("#terminalTabsToggleButton"),
   newTabButton: $("#newTabButton"),
   statusBar: $("#statusBar"),
   widgetArea: $("#widgetArea"),
   chat: $("#chat"),
+  jumpToLatestButton: $("#jumpToLatestButton"),
   composer: $("#composer"),
+  composerRow: $(".composer-row"),
+  composerActionsButton: $("#composerActionsButton"),
+  composerActionsPanel: $("#composerActionsPanel"),
   promptInput: $("#promptInput"),
+  sendButton: $("#sendButton"),
   commandSuggest: $("#commandSuggest"),
   busyBehavior: $("#busyBehavior"),
   steerButton: $("#steerButton"),
@@ -32,6 +38,7 @@ const elements = {
   openNetworkButton: $("#openNetworkButton"),
   toggleSidePanelButton: $("#toggleSidePanelButton"),
   sidePanelExpandButton: $("#sidePanelExpandButton"),
+  sidePanelBackdrop: $("#sidePanelBackdrop"),
   sidePanel: $("#sidePanel"),
   stateDetails: $("#stateDetails"),
   queueBox: $("#queueBox"),
@@ -68,6 +75,10 @@ let refreshFooterTimer = null;
 let eventSource = null;
 let activeDialog = null;
 let pathPickerState = null;
+let pathFastPicks = [];
+let pathFastPicksReady = false;
+let pathFastPicksLoadPromise = null;
+let mobileTabsExpanded = false;
 let availableCommands = [];
 let commandSuggestions = [];
 let commandSuggestIndex = 0;
@@ -75,6 +86,15 @@ let latestStats = null;
 let latestWorkspace = null;
 let latestNetwork = null;
 let latestMessages = [];
+let transientMessages = [];
+let availableModels = [];
+let footerScopedModels = [];
+let footerScopedModelPatterns = [];
+let footerScopedModelSource = "none";
+let autoFollowChat = true;
+let mobileFooterExpanded = false;
+let footerModelPickerOpen = false;
+let maxVisualViewportHeight = 0;
 let currentRunStartedAt = null;
 let currentRunStreamChars = 0;
 let latestTokPerSecond = null;
@@ -82,7 +102,9 @@ const dialogQueue = [];
 const SIDE_PANEL_STORAGE_KEY = "pi-webui-side-panel-collapsed";
 const TAB_STORAGE_KEY = "pi-webui-active-tab";
 const PATH_FAST_PICKS_STORAGE_KEY = "pi-webui-path-fast-picks";
-const MOBILE_VIEW_QUERY = "(max-width: 720px)";
+const MOBILE_VIEW_QUERY = "(max-width: 720px), (max-device-width: 720px), (pointer: coarse) and (hover: none)";
+const CHAT_BOTTOM_THRESHOLD_PX = 96;
+const mobileViewMedia = window.matchMedia?.(MOBILE_VIEW_QUERY) || null;
 const statusEntries = new Map();
 const widgets = new Map();
 const gitWorkflow = {
@@ -118,12 +140,101 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function setSidePanelCollapsed(collapsed) {
+function isMobileView() {
+  return mobileViewMedia?.matches || false;
+}
+
+function readStoredSidePanelCollapsed() {
+  try {
+    const stored = localStorage.getItem(SIDE_PANEL_STORAGE_KEY);
+    return stored === null ? null : stored === "1";
+  } catch {
+    return null;
+  }
+}
+
+function setComposerActionsOpen(open) {
+  const shouldOpen = open && isMobileView();
+  document.body.classList.toggle("composer-actions-open", shouldOpen);
+  elements.composerActionsButton.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
+}
+
+function isRunActive() {
+  return !!currentState?.isStreaming;
+}
+
+function resizePromptInput() {
+  const input = elements.promptInput;
+  input.style.height = "auto";
+  const maxHeight = Number.parseFloat(getComputedStyle(input).maxHeight);
+  const nextHeight = Number.isFinite(maxHeight) ? Math.min(input.scrollHeight, maxHeight) : input.scrollHeight;
+  input.style.height = `${Math.ceil(nextHeight)}px`;
+  input.style.overflowY = Number.isFinite(maxHeight) && input.scrollHeight > maxHeight + 1 ? "auto" : "hidden";
+}
+
+function updateComposerModeButtons() {
+  const runActive = isRunActive();
+  const target = runActive ? elements.composerRow : elements.composerActionsPanel;
+  const before = runActive ? elements.sendButton : null;
+  for (const button of [elements.steerButton, elements.followUpButton]) {
+    if (button.parentElement !== target) target.insertBefore(button, before);
+  }
+  document.body.classList.toggle("pi-run-active", runActive);
+}
+
+function updateFooterModelPickerPosition() {
+  if (!footerModelPickerOpen || !isMobileView()) {
+    document.documentElement.style.removeProperty("--footer-model-picker-bottom");
+    return;
+  }
+  const viewportHeight = window.innerHeight || window.visualViewport?.height || document.documentElement.clientHeight;
+  const statusTop = elements.statusBar.getBoundingClientRect().top;
+  const bottom = Math.max(8, Math.round(viewportHeight - statusTop + 6));
+  document.documentElement.style.setProperty("--footer-model-picker-bottom", `${bottom}px`);
+}
+
+function setMobileFooterExpanded(expanded) {
+  mobileFooterExpanded = expanded && isMobileView();
+  if (mobileFooterExpanded && footerModelPickerOpen) {
+    footerModelPickerOpen = false;
+    document.body.classList.remove("footer-model-picker-open");
+    elements.statusBar.querySelector(".footer-model-picker")?.remove();
+  }
+  document.body.classList.toggle("footer-details-expanded", mobileFooterExpanded);
+  const button = elements.statusBar.querySelector(".footer-details-toggle");
+  if (button) {
+    button.textContent = mobileFooterExpanded ? "Less" : "Details";
+    button.setAttribute("aria-expanded", mobileFooterExpanded ? "true" : "false");
+  }
+  updateFooterModelPickerPosition();
+}
+
+function setMobileTabsExpanded(expanded) {
+  mobileTabsExpanded = expanded && isMobileView();
+  document.body.classList.toggle("mobile-tabs-expanded", mobileTabsExpanded);
+  elements.terminalTabsToggleButton.setAttribute("aria-expanded", mobileTabsExpanded ? "true" : "false");
+}
+
+function syncMobileSidePanelState(collapsed) {
+  const showBackdrop = !collapsed && isMobileView();
+  elements.sidePanelBackdrop.hidden = !showBackdrop;
+  if (showBackdrop) elements.sidePanel.setAttribute("aria-modal", "true");
+  else elements.sidePanel.removeAttribute("aria-modal");
+}
+
+function setSidePanelCollapsed(collapsed, { persist = true, focusPanel = false } = {}) {
   document.body.classList.toggle("side-panel-collapsed", collapsed);
   elements.toggleSidePanelButton.setAttribute("aria-expanded", collapsed ? "false" : "true");
   elements.toggleSidePanelButton.setAttribute("title", collapsed ? "Expand side panel" : "Collapse side panel");
   elements.toggleSidePanelButton.setAttribute("aria-label", collapsed ? "Expand side panel" : "Collapse side panel");
   elements.sidePanelExpandButton.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  syncMobileSidePanelState(collapsed);
+
+  if (!collapsed && focusPanel && isMobileView()) {
+    requestAnimationFrame(() => elements.toggleSidePanelButton.focus());
+  }
+
+  if (!persist || isMobileView()) return;
   try {
     localStorage.setItem(SIDE_PANEL_STORAGE_KEY, collapsed ? "1" : "0");
   } catch {
@@ -132,16 +243,72 @@ function setSidePanelCollapsed(collapsed) {
 }
 
 function restoreSidePanelState() {
-  try {
-    const stored = localStorage.getItem(SIDE_PANEL_STORAGE_KEY);
-    if (stored === null) {
-      setSidePanelCollapsed(window.matchMedia?.(MOBILE_VIEW_QUERY).matches || false);
+  if (isMobileView()) {
+    setSidePanelCollapsed(true, { persist: false });
+    return;
+  }
+  const stored = readStoredSidePanelCollapsed();
+  setSidePanelCollapsed(stored ?? false, { persist: stored !== null });
+}
+
+function bindMobileViewChanges() {
+  if (!mobileViewMedia) return;
+  const syncForViewport = (event) => {
+    setComposerActionsOpen(false);
+    setMobileFooterExpanded(false);
+    setMobileTabsExpanded(false);
+    if (event.matches) {
+      setSidePanelCollapsed(true, { persist: false });
       return;
     }
-    setSidePanelCollapsed(stored === "1");
-  } catch {
-    setSidePanelCollapsed(window.matchMedia?.(MOBILE_VIEW_QUERY).matches || false);
+    const stored = readStoredSidePanelCollapsed();
+    setSidePanelCollapsed(stored ?? false, { persist: false });
+  };
+  if (typeof mobileViewMedia.addEventListener === "function") mobileViewMedia.addEventListener("change", syncForViewport);
+  else mobileViewMedia.addListener?.(syncForViewport);
+}
+
+function updateVisualViewportVars() {
+  const viewport = window.visualViewport;
+  const viewportHeight = viewport?.height || window.innerHeight || document.documentElement.clientHeight;
+  const offsetTop = viewport?.offsetTop || 0;
+  const layoutHeight = window.innerHeight || viewportHeight;
+  if (viewportHeight > maxVisualViewportHeight) maxVisualViewportHeight = viewportHeight;
+  const keyboardInset = viewport ? Math.max(0, Math.round(layoutHeight - viewportHeight - offsetTop)) : 0;
+  const promptFocused = document.activeElement === elements.promptInput;
+  const keyboardOpen = isMobileView() && promptFocused && (keyboardInset > 80 || maxVisualViewportHeight - viewportHeight > 120);
+  document.documentElement.style.setProperty("--visual-viewport-height", `${Math.round(viewportHeight)}px`);
+  document.documentElement.style.setProperty("--visual-viewport-offset-top", `${Math.round(offsetTop)}px`);
+  document.documentElement.style.setProperty("--keyboard-inset-bottom", `${keyboardInset}px`);
+  document.body.classList.toggle("mobile-keyboard-open", keyboardOpen);
+  if (keyboardOpen) {
+    setComposerActionsOpen(false);
+    setMobileTabsExpanded(false);
+    setMobileFooterExpanded(false);
+    setFooterModelPickerOpen(false);
+    syncMobileChatToBottomForInput();
   }
+  updateFooterModelPickerPosition();
+}
+
+function installViewportHandlers() {
+  updateVisualViewportVars();
+  const update = () => updateVisualViewportVars();
+  window.visualViewport?.addEventListener("resize", update, { passive: true });
+  window.visualViewport?.addEventListener("scroll", update, { passive: true });
+  window.addEventListener("resize", update, { passive: true });
+  window.addEventListener("orientationchange", () => setTimeout(update, 80));
+}
+
+function registerPwaServiceWorker() {
+  if (!("serviceWorker" in navigator)) return;
+  if (!window.isSecureContext) {
+    addEvent("PWA install needs HTTPS or localhost for service-worker support on most mobile browsers.", "warn");
+    return;
+  }
+  navigator.serviceWorker.register("/service-worker.js").catch((error) => {
+    addEvent(`PWA service worker registration failed: ${error.message}`, "warn");
+  });
 }
 
 function scopedApiPath(path, tabId = activeTabId) {
@@ -195,6 +362,7 @@ function saveActiveDraft() {
 
 function restoreActiveDraft() {
   elements.promptInput.value = activeTabId ? tabDrafts.get(activeTabId) || "" : "";
+  resizePromptInput();
   renderCommandSuggestions();
 }
 
@@ -235,6 +403,7 @@ function resetActiveTabUi() {
   latestTokPerSecond = null;
   statusEntries.clear();
   widgets.clear();
+  transientMessages = [];
   availableCommands = [];
   commandSuggestions = [];
   commandSuggestIndex = 0;
@@ -264,6 +433,9 @@ function resetActiveTabUi() {
 }
 
 function renderTabs() {
+  const active = activeTab();
+  elements.terminalTabsToggleButton.textContent = active ? `${active.title}${tabs.length > 1 ? ` · ${tabs.length}` : ""}` : "Tabs";
+  elements.terminalTabsToggleButton.title = active ? `Show terminal tabs · active: ${active.title}` : "Show terminal tabs";
   elements.tabBar.replaceChildren();
   for (const tab of tabs) {
     const isActive = tab.id === activeTabId;
@@ -295,6 +467,7 @@ function renderTabs() {
     elements.tabBar.append(wrapper);
   }
   elements.tabBar.append(elements.newTabButton);
+  setMobileTabsExpanded(mobileTabsExpanded);
   updateDocumentTitle();
 }
 
@@ -312,6 +485,8 @@ async function refreshTabs({ selectStored = false } = {}) {
 
 async function switchTab(tabId) {
   if (!tabId || tabId === activeTabId || !tabs.some((tab) => tab.id === tabId)) return;
+  setMobileTabsExpanded(false);
+  footerModelPickerOpen = false;
   saveActiveDraft();
   activeTabId = tabId;
   rememberActiveTab();
@@ -323,6 +498,7 @@ async function switchTab(tabId) {
 }
 
 async function createTerminalTab() {
+  setMobileTabsExpanded(false);
   elements.newTabButton.disabled = true;
   try {
     const response = await api("/api/tabs", { method: "POST", body: { cwd: activeTab()?.cwd }, scoped: false });
@@ -489,6 +665,67 @@ function footerMeta(label, value, className = "", options = {}) {
   return node;
 }
 
+function setFooterModelPickerOpen(open) {
+  footerModelPickerOpen = !!open;
+  if (footerModelPickerOpen && isMobileView()) {
+    mobileFooterExpanded = false;
+    document.body.classList.remove("footer-details-expanded");
+    setComposerActionsOpen(false);
+    setMobileTabsExpanded(false);
+  }
+  document.body.classList.toggle("footer-model-picker-open", footerModelPickerOpen);
+  renderFooter();
+  updateFooterModelPickerPosition();
+}
+
+async function applyFooterModel(model) {
+  if (!model?.provider || !model?.id) return;
+  try {
+    footerModelPickerOpen = false;
+    await api("/api/model", { method: "POST", body: { provider: model.provider, modelId: model.id } });
+    await refreshState();
+    await refreshModels();
+  } catch (error) {
+    addEvent(error.message, "error");
+  } finally {
+    document.body.classList.toggle("footer-model-picker-open", footerModelPickerOpen);
+    renderFooter();
+  }
+}
+
+function renderFooterModelPicker() {
+  const picker = make("div", "footer-model-picker");
+  picker.setAttribute("role", "listbox");
+  picker.setAttribute("aria-label", "Scoped models");
+  picker.append(make("div", "footer-model-picker-title", "Scoped models"));
+  picker.append(make("div", "footer-model-picker-source", footerScopedModelSource === "none" ? "No saved scope" : `Source: ${footerScopedModelSource}${footerScopedModelPatterns.length ? ` · ${footerScopedModelPatterns.join(", ")}` : ""}`));
+  if (footerScopedModels.length === 0) {
+    const empty = make("div", "footer-model-picker-empty muted");
+    empty.append(
+      make("strong", undefined, "No scoped models available."),
+      make("span", undefined, " If you changed /scoped-models in the terminal UI, choose its Save action so Web UI can read it from settings, or start Web UI with forwarded Pi args like -- --models model-a,model-b."),
+    );
+    picker.append(empty);
+    return picker;
+  }
+  const current = currentState?.model;
+  for (const model of footerScopedModels) {
+    const selected = current?.provider === model.provider && current?.id === model.id;
+    const button = make("button", `footer-model-option${selected ? " active" : ""}`);
+    button.type = "button";
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", selected ? "true" : "false");
+    button.title = `${model.provider}/${model.id}${model.name ? ` · ${model.name}` : ""}`;
+    button.append(
+      make("span", "footer-model-option-main", `${model.provider}/${model.id}`),
+      make("span", "footer-model-option-name", model.name || ""),
+    );
+    button.addEventListener("click", () => applyFooterModel(model));
+    picker.append(button);
+  }
+  return picker;
+}
+
 function pathPickerButton(label, title, onClick, className = "") {
   const button = make("button", className, label);
   button.type = "button";
@@ -515,7 +752,7 @@ function normalizeFastPicks(value) {
   return picks.slice(0, 30);
 }
 
-function loadFastPicks() {
+function loadLegacyFastPicks() {
   try {
     return normalizeFastPicks(JSON.parse(localStorage.getItem(PATH_FAST_PICKS_STORAGE_KEY) || "[]"));
   } catch {
@@ -523,12 +760,62 @@ function loadFastPicks() {
   }
 }
 
-function saveFastPicks(picks) {
+function clearLegacyFastPicks() {
   try {
-    localStorage.setItem(PATH_FAST_PICKS_STORAGE_KEY, JSON.stringify(normalizeFastPicks(picks)));
-  } catch (error) {
-    addEvent(`failed to save path fast picks: ${error.message}`, "error");
+    localStorage.removeItem(PATH_FAST_PICKS_STORAGE_KEY);
+  } catch {
+    // Ignore storage cleanup failures; server persistence is authoritative.
   }
+}
+
+function loadFastPicks() {
+  return pathFastPicks;
+}
+
+async function fetchFastPicks() {
+  const response = await api("/api/path-fast-picks", { scoped: false });
+  return normalizeFastPicks(response.data?.picks || []);
+}
+
+async function saveFastPicks(picks) {
+  pathFastPicks = normalizeFastPicks(picks);
+  pathFastPicksReady = true;
+  renderFastPicks();
+  try {
+    const response = await api("/api/path-fast-picks", { method: "POST", body: { picks: pathFastPicks }, scoped: false });
+    pathFastPicks = normalizeFastPicks(response.data?.picks || pathFastPicks);
+    clearLegacyFastPicks();
+  } catch (error) {
+    try {
+      localStorage.setItem(PATH_FAST_PICKS_STORAGE_KEY, JSON.stringify(pathFastPicks));
+    } catch {
+      // Ignore fallback storage failure; the event log still reports the server-side error.
+    }
+    addEvent(`failed to persist path fast picks on server; saved in this browser only: ${error.message}`, "error");
+  }
+  renderFastPicks();
+}
+
+async function initializeFastPicks() {
+  if (pathFastPicksLoadPromise) return pathFastPicksLoadPromise;
+  pathFastPicksLoadPromise = (async () => {
+    const legacy = loadLegacyFastPicks();
+    try {
+      const serverPicks = await fetchFastPicks();
+      const merged = normalizeFastPicks([...serverPicks, ...legacy]);
+      pathFastPicks = merged;
+      pathFastPicksReady = true;
+      if (legacy.length > 0 && JSON.stringify(merged) !== JSON.stringify(serverPicks)) await saveFastPicks(merged);
+      else clearLegacyFastPicks();
+    } catch (error) {
+      pathFastPicks = legacy;
+      pathFastPicksReady = true;
+      if (legacy.length > 0) addEvent(`using browser-only path fast picks; server load failed: ${error.message}`, "warn");
+      else addEvent(`failed to load path fast picks: ${error.message}`, "error");
+    }
+    renderFastPicks();
+  })();
+  return pathFastPicksLoadPromise;
 }
 
 function fastPickLabel(pick) {
@@ -544,6 +831,11 @@ function currentFastPick() {
 }
 
 function updateAddFastPickButton() {
+  if (!pathFastPicksReady) {
+    elements.pathPickerAddFastPickButton.disabled = true;
+    elements.pathPickerAddFastPickButton.textContent = "Loading fast picks…";
+    return;
+  }
   const pick = currentFastPick();
   const exists = !!pick && loadFastPicks().some((item) => item.cwd === pick.cwd);
   elements.pathPickerAddFastPickButton.disabled = !pick || exists;
@@ -553,6 +845,11 @@ function updateAddFastPickButton() {
 function renderFastPicks() {
   const picks = loadFastPicks();
   elements.pathPickerFastPicks.replaceChildren();
+  if (!pathFastPicksReady) {
+    elements.pathPickerFastPicks.append(make("div", "path-picker-fast-picks-empty muted", "Loading fast picks…"));
+    updateAddFastPickButton();
+    return;
+  }
   if (picks.length === 0) {
     elements.pathPickerFastPicks.append(make("div", "path-picker-fast-picks-empty muted", "No fast picks yet."));
     updateAddFastPickButton();
@@ -562,9 +859,8 @@ function renderFastPicks() {
   for (const pick of picks) {
     const item = make("span", "path-picker-fast-pick");
     const jump = pathPickerButton(fastPickLabel(pick), pick.cwd, () => loadPathPickerDirectory(pick.cwd), "path-picker-fast-pick-button");
-    const remove = pathPickerButton("×", `Remove fast pick ${pick.cwd}`, () => {
-      saveFastPicks(loadFastPicks().filter((item) => item.cwd !== pick.cwd));
-      renderFastPicks();
+    const remove = pathPickerButton("×", `Remove fast pick ${pick.cwd}`, async () => {
+      await saveFastPicks(loadFastPicks().filter((item) => item.cwd !== pick.cwd));
     }, "path-picker-fast-pick-remove");
     item.append(jump, remove);
     elements.pathPickerFastPicks.append(item);
@@ -572,13 +868,12 @@ function renderFastPicks() {
   updateAddFastPickButton();
 }
 
-function addCurrentFastPick() {
+async function addCurrentFastPick() {
   const pick = currentFastPick();
   if (!pick) return;
   const picks = loadFastPicks().filter((item) => item.cwd !== pick.cwd);
   picks.unshift(pick);
-  saveFastPicks(picks);
-  renderFastPicks();
+  await saveFastPicks(picks);
 }
 
 function renderPathPicker(data) {
@@ -655,6 +950,7 @@ function pickCwd(tab, initialCwd) {
     setPathPickerError("");
     elements.pathPickerAddFastPickButton.disabled = true;
     elements.pathPickerChooseButton.disabled = true;
+    initializeFastPicks().catch((error) => addEvent(`failed to initialize path fast picks: ${error.message}`, "error"));
     elements.pathPickerDialog.showModal();
     loadPathPickerDirectory(initialCwd);
   });
@@ -708,6 +1004,7 @@ function renderFooter() {
   const modelLine = `${shortModelLabel(currentState?.model)} · ${currentState?.thinkingLevel || "?"}`;
 
   elements.statusBar.replaceChildren();
+  document.body.classList.toggle("footer-model-picker-open", footerModelPickerOpen);
   const row1 = make("div", "footer-line footer-line-main");
   row1.append(
     footerMetric("🪙", "tokens", `↑ ${formatTokenCount(tokens.input ?? 0)}  ↓ ${formatTokenCount(tokens.output ?? 0)}`, "tone-pink"),
@@ -717,6 +1014,10 @@ function renderFooter() {
     footerMetric("💸", subscriptionSuffix(), formatCost(stats?.cost ?? 0), "tone-green"),
     footerMetric("🧠", "context", contextLabel, "tone-teal"),
   );
+  const footerToggle = make("button", "footer-details-toggle", mobileFooterExpanded ? "Less" : "Details");
+  footerToggle.type = "button";
+  footerToggle.setAttribute("aria-expanded", mobileFooterExpanded ? "true" : "false");
+  footerToggle.addEventListener("click", () => setMobileFooterExpanded(!mobileFooterExpanded));
 
   const row2 = make("div", "footer-line footer-line-meta");
   row2.append(
@@ -727,9 +1028,17 @@ function renderFooter() {
     footerMeta("git", branchLabel, "footer-branch"),
     footerMeta("changes", changeLabel, "footer-changes"),
     footerMeta("runtime", `⏱ ${runtime} · Agent`, "footer-runtime"),
-    footerMeta("model", modelLine, "footer-model"),
+    footerMeta("context", contextLabel, "footer-context"),
+    footerMeta("model", modelLine, "footer-model", {
+      onClick: () => setFooterModelPickerOpen(!footerModelPickerOpen),
+      title: `Change scoped model: ${modelLine}`,
+    }),
+    footerToggle,
   );
   elements.statusBar.append(row1, row2);
+  if (footerModelPickerOpen) elements.statusBar.append(renderFooterModelPicker());
+  setMobileFooterExpanded(mobileFooterExpanded);
+  updateFooterModelPickerPosition();
 }
 
 function scheduleRefreshMessages(delay = 120) {
@@ -749,6 +1058,7 @@ function scheduleRefreshFooter(delay = 300) {
 
 function renderStatus() {
   const state = currentState;
+  updateComposerModeButtons();
   const running = state?.isStreaming ? "running" : "idle";
   const compacting = state?.isCompacting ? " · compacting" : "";
   const queue = state?.pendingMessageCount ? ` · queued ${state.pendingMessageCount}` : "";
@@ -778,12 +1088,88 @@ function renderStatus() {
   renderFooter();
 }
 
+function stripAnsi(text) {
+  return String(text || "").replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "");
+}
+
+function parseTodoProgressWidget(lines) {
+  const cleanLines = lines.map(stripAnsi).map((line) => line.trim()).filter(Boolean);
+  const headerIndex = cleanLines.findIndex((line) => /^Todo\s+\d+\/\d+\s+done/i.test(line));
+  if (headerIndex === -1) return null;
+
+  const header = cleanLines[headerIndex];
+  const match = header.match(/^Todo\s+(\d+)\/(\d+)\s+done(?:,\s+(\d+)\s+partial)?/i);
+  if (!match) return null;
+
+  const items = [];
+  let footer = "";
+  for (const line of cleanLines.slice(headerIndex + 1)) {
+    const item = line.match(/^\[( |x|X|-)\]\s+(.+)$/);
+    if (item) {
+      const mark = item[1].toLowerCase();
+      items.push({ status: mark === "x" ? "done" : mark === "-" ? "partial" : "todo", text: item[2].trim() });
+    } else if (/^Scroll\s+/i.test(line)) {
+      footer = line;
+    }
+  }
+
+  return {
+    done: Number.parseInt(match[1], 10) || 0,
+    total: Number.parseInt(match[2], 10) || items.length,
+    partial: Number.parseInt(match[3] || "0", 10) || 0,
+    items,
+    footer,
+  };
+}
+
+function renderTodoProgressWidget(_key, lines) {
+  const todo = parseTodoProgressWidget(lines);
+  if (!todo) return null;
+
+  const node = make("section", "widget todo-widget");
+  node.setAttribute("aria-label", "Todo progress");
+
+  const percent = todo.total > 0 ? Math.max(0, Math.min(100, (todo.done / todo.total) * 100)) : 0;
+  const header = make("div", "todo-widget-header");
+  header.append(
+    make("span", "todo-widget-title", "Todo progress"),
+    make("span", "todo-widget-count", `${todo.done}/${todo.total}`),
+    make("span", "todo-widget-meta", todo.partial ? `${todo.partial} partial` : "active"),
+  );
+
+  const progress = make("div", "todo-widget-progress");
+  const fill = make("span", "todo-widget-progress-fill");
+  fill.style.width = `${percent}%`;
+  progress.append(fill);
+
+  const list = make("ol", "todo-widget-list");
+  for (const item of todo.items) {
+    const row = make("li", `todo-widget-item ${item.status}`);
+    row.append(
+      make("span", "todo-widget-marker", item.status === "done" ? "✓" : item.status === "partial" ? "–" : ""),
+      make("span", "todo-widget-text", item.text),
+    );
+    list.append(row);
+  }
+
+  node.append(header, progress, list);
+  if (todo.footer) node.append(make("div", "todo-widget-footer", todo.footer));
+  return node;
+}
+
 function renderWidgets() {
   elements.widgetArea.replaceChildren();
   for (const [key, value] of widgets) {
-    const node = make("div", "widget");
     const lines = Array.isArray(value.widgetLines) ? value.widgetLines : [];
-    node.textContent = `${key}\n${lines.join("\n")}`;
+    const specialized = key === "todo-progress" ? renderTodoProgressWidget(key, lines) : null;
+    if (specialized) {
+      elements.widgetArea.append(specialized);
+      continue;
+    }
+
+    const node = make("div", "widget");
+    const cleanLines = lines.map(stripAnsi);
+    node.textContent = `${key}\n${cleanLines.join("\n")}`;
     elements.widgetArea.append(node);
   }
 }
@@ -1112,6 +1498,7 @@ function renderContent(parent, content) {
 }
 
 function messageTitle(message) {
+  if (message.title) return message.title;
   if (message.role === "toolResult") return `tool result: ${message.toolName || "unknown"}`;
   if (message.role === "bashExecution") return `bash: ${message.command || ""}`;
   return message.role || "message";
@@ -1120,7 +1507,7 @@ function messageTitle(message) {
 function appendMessage(message, { streaming = false } = {}) {
   const role = String(message.role || "message");
   const safeRole = role.replace(/[^a-z0-9_-]/gi, "");
-  const bubble = make("article", `message ${safeRole}${streaming ? " streaming" : ""}`);
+  const bubble = make("article", `message ${safeRole}${message.level ? ` ${message.level}` : ""}${streaming ? " streaming" : ""}`);
   const isCollapsibleOutput = !streaming && (message.role === "toolResult" || message.role === "bashExecution");
 
   const header = make(isCollapsibleOutput ? "summary" : "div", "message-header");
@@ -1149,15 +1536,89 @@ function appendMessage(message, { streaming = false } = {}) {
   return { bubble, body };
 }
 
-function scrollChatToBottom() {
+function renderAllMessages({ preserveScroll = false } = {}) {
+  const shouldFollow = !preserveScroll && (autoFollowChat || isChatNearBottom());
+  const previousScrollTop = elements.chat.scrollTop;
+  elements.chat.replaceChildren();
+  for (const message of latestMessages) appendMessage(message);
+  for (const message of transientMessages) appendMessage(message);
+  if (shouldFollow) scrollChatToBottom({ force: true });
+  else {
+    elements.chat.scrollTop = Math.min(previousScrollTop, elements.chat.scrollHeight);
+    autoFollowChat = isChatNearBottom();
+    updateJumpToLatestButton();
+  }
+}
+
+function addTransientMessage({ role = "notice", title, content, level = "info" }) {
+  transientMessages.push({
+    role,
+    title,
+    level,
+    content,
+    timestamp: Date.now(),
+  });
+  if (transientMessages.length > 80) transientMessages.splice(0, transientMessages.length - 80);
+  renderAllMessages();
+}
+
+function isChatNearBottom() {
+  const remaining = elements.chat.scrollHeight - elements.chat.scrollTop - elements.chat.clientHeight;
+  return remaining <= CHAT_BOTTOM_THRESHOLD_PX;
+}
+
+function updateJumpToLatestButton() {
+  elements.jumpToLatestButton.hidden = autoFollowChat || isChatNearBottom();
+}
+
+function scrollChatToBottom({ force = false } = {}) {
+  if (!force && !autoFollowChat) {
+    updateJumpToLatestButton();
+    return;
+  }
   elements.chat.scrollTop = elements.chat.scrollHeight;
+  autoFollowChat = true;
+  updateJumpToLatestButton();
+}
+
+function jumpToLatest() {
+  scrollChatToBottom({ force: true });
+}
+
+function syncMobileChatToBottomForInput() {
+  if (!isMobileView()) return;
+  autoFollowChat = true;
+  scrollChatToBottom({ force: true });
+  requestAnimationFrame(() => scrollChatToBottom({ force: true }));
+  setTimeout(() => scrollChatToBottom({ force: true }), 140);
+  setTimeout(() => scrollChatToBottom({ force: true }), 360);
+}
+
+function showComposerButtonTooltip(button) {
+  if (!button) return;
+  button.classList.add("tooltip-open");
+  button.focus({ preventScroll: true });
+  clearTimeout(button._tooltipTimer);
+  button._tooltipTimer = setTimeout(() => button.classList.remove("tooltip-open"), 3200);
+}
+
+function sendPromptFromModeButton(kind, button) {
+  if (!elements.promptInput.value.trim()) {
+    showComposerButtonTooltip(button);
+    return;
+  }
+  sendPrompt(kind);
+}
+
+function shouldSendPromptFromEnter(event) {
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing) return false;
+  if (event.ctrlKey || event.metaKey) return true;
+  return !isMobileView();
 }
 
 function renderMessages(messages) {
   latestMessages = messages || [];
-  elements.chat.replaceChildren();
-  for (const message of latestMessages) appendMessage(message);
-  scrollChatToBottom();
+  renderAllMessages();
   renderFooter();
 }
 
@@ -1324,6 +1785,18 @@ async function refreshMessages() {
 async function refreshModels() {
   const response = await api("/api/models");
   const models = response.data?.models || [];
+  availableModels = models;
+  try {
+    const scopedResponse = await api("/api/scoped-models");
+    footerScopedModels = scopedResponse.data?.models || [];
+    footerScopedModelPatterns = scopedResponse.data?.patterns || [];
+    footerScopedModelSource = scopedResponse.data?.source || "none";
+  } catch (error) {
+    footerScopedModels = [];
+    footerScopedModelPatterns = [];
+    footerScopedModelSource = "none";
+    addEvent(`failed to load scoped models: ${error.message}`, "warn");
+  }
   elements.modelSelect.replaceChildren();
   for (const model of models) {
     const option = document.createElement("option");
@@ -1332,6 +1805,7 @@ async function refreshModels() {
     elements.modelSelect.append(option);
   }
   syncModelSelectToState();
+  renderFooter();
 }
 
 function syncModelSelectToState() {
@@ -1545,30 +2019,52 @@ async function sendPrompt(kind = "prompt") {
   const message = elements.promptInput.value.trim();
   if (!message) return;
 
+  autoFollowChat = true;
+  updateJumpToLatestButton();
+  setComposerActionsOpen(false);
+
   try {
+    let response;
     if (kind === "steer") {
-      await api("/api/steer", { method: "POST", body: { message } });
+      response = await api("/api/steer", { method: "POST", body: { message } });
     } else if (kind === "follow-up") {
-      await api("/api/follow-up", { method: "POST", body: { message } });
+      response = await api("/api/follow-up", { method: "POST", body: { message } });
     } else {
       const body = { message };
       if (currentState?.isStreaming) body.streamingBehavior = elements.busyBehavior.value || "followUp";
-      await api("/api/prompt", { method: "POST", body });
+      response = await api("/api/prompt", { method: "POST", body });
+    }
+    if (response?.command === "native_slash_command" && response.data?.copyText) {
+      try {
+        await navigator.clipboard.writeText(response.data.copyText);
+      } catch (error) {
+        response.data.message = `${response.data.message || "Copy requested, but clipboard access failed."}\n\nClipboard access failed: ${error.message}\n\n${response.data.copyText}`;
+        response.data.level = "warn";
+      }
+    }
+    if (response?.command === "native_slash_command" && response.data?.message) {
+      addTransientMessage({ role: "native", title: message.split(/\s+/, 1)[0], content: response.data.message, level: response.data.level || "info" });
     }
     elements.promptInput.value = "";
+    resizePromptInput();
     hideCommandSuggestions();
     scheduleRefreshState();
   } catch (error) {
     addEvent(error.message, "error");
+    addTransientMessage({ role: "error", title: message.startsWith("/") ? message.split(/\s+/, 1)[0] : "error", content: error.message, level: "error" });
   }
 }
 
 function handleExtensionUiRequest(request) {
   request.tabId ||= activeTabId;
   switch (request.method) {
-    case "notify":
-      addEvent(request.message || "notification", request.notifyType === "error" ? "error" : request.notifyType === "warning" ? "warn" : "info");
+    case "notify": {
+      const level = request.notifyType === "error" ? "error" : request.notifyType === "warning" ? "warn" : "info";
+      const message = request.message || "notification";
+      addEvent(message, level);
+      addTransientMessage({ role: "extension", title: "extension output", content: message, level });
       return;
+    }
     case "setStatus":
       if (request.statusText) statusEntries.set(request.statusKey || "extension", request.statusText);
       else statusEntries.delete(request.statusKey || "extension");
@@ -1584,6 +2080,7 @@ function handleExtensionUiRequest(request) {
       return;
     case "set_editor_text":
       elements.promptInput.value = request.text || "";
+      resizePromptInput();
       elements.promptInput.focus();
       renderCommandSuggestions();
       return;
@@ -1678,6 +2175,16 @@ function handleEvent(event) {
       break;
     case "webui_tab_restarting":
       addEvent(`restarting ${event.tabTitle || "terminal"} in ${event.cwd}`);
+      break;
+    case "webui_tab_reloading":
+      addEvent(`reloading ${event.tabTitle || "terminal"} native Pi resources`);
+      addTransientMessage({ role: "native", title: "/reload", content: `Reloading ${event.tabTitle || "terminal"} native Pi resources…`, level: "info" });
+      break;
+    case "webui_tab_reloaded":
+      addEvent(`${event.tabTitle || "terminal"} reloaded`);
+      addTransientMessage({ role: "native", title: "/reload", content: `${event.tabTitle || "terminal"} reloaded. Keybindings, extensions, skills, prompts, and themes were refreshed by restarting the RPC tab${event.sessionFile ? ` and resuming ${event.sessionFile}` : ""}.`, level: "info" });
+      refreshTabs().catch((error) => addEvent(error.message, "error"));
+      setTimeout(() => refreshAll().catch((error) => addEvent(error.message, "error")), 500);
       break;
     case "webui_cwd_changed":
       addEvent(`${event.tabTitle || "terminal"} cwd changed to ${event.cwd}`);
@@ -1787,10 +2294,19 @@ elements.composer.addEventListener("submit", (event) => {
   event.preventDefault();
   sendPrompt("prompt");
 });
-elements.steerButton.addEventListener("click", () => sendPrompt("steer"));
-elements.followUpButton.addEventListener("click", () => sendPrompt("follow-up"));
+elements.composerActionsButton.addEventListener("click", () => {
+  setComposerActionsOpen(!document.body.classList.contains("composer-actions-open"));
+});
+elements.steerButton.addEventListener("click", () => sendPromptFromModeButton("steer", elements.steerButton));
+elements.followUpButton.addEventListener("click", () => sendPromptFromModeButton("follow-up", elements.followUpButton));
+elements.terminalTabsToggleButton.addEventListener("click", () => {
+  setMobileTabsExpanded(!document.body.classList.contains("mobile-tabs-expanded"));
+});
 elements.newTabButton.addEventListener("click", createTerminalTab);
-elements.gitWorkflowButton.addEventListener("click", startGitWorkflow);
+elements.gitWorkflowButton.addEventListener("click", () => {
+  setComposerActionsOpen(false);
+  startGitWorkflow();
+});
 elements.gitWorkflowCancelButton.addEventListener("click", cancelGitWorkflow);
 elements.abortButton.addEventListener("click", async () => {
   try {
@@ -1800,6 +2316,7 @@ elements.abortButton.addEventListener("click", async () => {
   }
 });
 elements.newSessionButton.addEventListener("click", async () => {
+  setComposerActionsOpen(false);
   if (!confirm("Start a new Pi session?")) return;
   try {
     await api("/api/new-session", { method: "POST", body: {} });
@@ -1809,6 +2326,7 @@ elements.newSessionButton.addEventListener("click", async () => {
   }
 });
 elements.compactButton.addEventListener("click", async () => {
+  setComposerActionsOpen(false);
   try {
     elements.compactButton.disabled = true;
     elements.compactButton.textContent = "Compacting…";
@@ -1847,10 +2365,47 @@ elements.toggleSidePanelButton.addEventListener("click", () => {
   setSidePanelCollapsed(true);
 });
 elements.sidePanelExpandButton.addEventListener("click", () => {
-  setSidePanelCollapsed(false);
+  setSidePanelCollapsed(false, { focusPanel: true });
+});
+elements.sidePanelBackdrop.addEventListener("click", () => {
+  setSidePanelCollapsed(true);
+});
+elements.jumpToLatestButton.addEventListener("click", jumpToLatest);
+elements.chat.addEventListener("scroll", () => {
+  autoFollowChat = isChatNearBottom();
+  updateJumpToLatestButton();
+}, { passive: true });
+document.addEventListener("pointerdown", (event) => {
+  if (document.body.classList.contains("composer-actions-open") && !elements.composer.contains(event.target)) {
+    setComposerActionsOpen(false);
+  }
+  if (document.body.classList.contains("mobile-tabs-expanded") && !elements.tabBar.contains(event.target) && !elements.terminalTabsToggleButton.contains(event.target)) {
+    setMobileTabsExpanded(false);
+  }
+  if (footerModelPickerOpen && !elements.statusBar.contains(event.target)) {
+    setFooterModelPickerOpen(false);
+  }
+}, { passive: true });
+window.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (document.body.classList.contains("composer-actions-open")) {
+    setComposerActionsOpen(false);
+    return;
+  }
+  if (document.body.classList.contains("mobile-tabs-expanded")) {
+    setMobileTabsExpanded(false);
+    return;
+  }
+  if (footerModelPickerOpen) {
+    setFooterModelPickerOpen(false);
+    return;
+  }
+  if (isMobileView() && !document.body.classList.contains("side-panel-collapsed")) {
+    setSidePanelCollapsed(true);
+  }
 });
 
-elements.pathPickerAddFastPickButton.addEventListener("click", addCurrentFastPick);
+elements.pathPickerAddFastPickButton.addEventListener("click", () => addCurrentFastPick().catch((error) => addEvent(error.message, "error")));
 elements.pathPickerCancelButton.addEventListener("click", () => closePathPicker(null));
 elements.pathPickerChooseButton.addEventListener("click", () => closePathPicker(pathPickerState?.cwd || null));
 elements.pathPickerDialog.addEventListener("cancel", (event) => {
@@ -1862,7 +2417,7 @@ elements.pathPickerDialog.addEventListener("close", () => {
 });
 
 elements.promptInput.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+  if (shouldSendPromptFromEnter(event)) {
     event.preventDefault();
     hideCommandSuggestions();
     sendPrompt("prompt");
@@ -1892,8 +2447,19 @@ elements.promptInput.addEventListener("keydown", (event) => {
   }
 });
 
-elements.promptInput.addEventListener("input", () => renderCommandSuggestions());
-elements.promptInput.addEventListener("click", () => renderCommandSuggestions());
+elements.promptInput.addEventListener("input", () => {
+  resizePromptInput();
+  renderCommandSuggestions();
+});
+elements.promptInput.addEventListener("focus", () => {
+  syncMobileChatToBottomForInput();
+  setTimeout(updateVisualViewportVars, 0);
+});
+elements.promptInput.addEventListener("click", () => {
+  updateVisualViewportVars();
+  syncMobileChatToBottomForInput();
+  renderCommandSuggestions();
+});
 elements.promptInput.addEventListener("keyup", (event) => {
   if (["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(event.key)) return;
   renderCommandSuggestions({ keepIndex: true });
@@ -1901,8 +2467,15 @@ elements.promptInput.addEventListener("keyup", (event) => {
 elements.promptInput.addEventListener("blur", () => {
   setTimeout(() => {
     if (document.activeElement !== elements.promptInput) hideCommandSuggestions();
+    updateVisualViewportVars();
   }, 120);
 });
 
+resizePromptInput();
+updateComposerModeButtons();
+installViewportHandlers();
+initializeFastPicks().catch((error) => addEvent(`failed to initialize path fast picks: ${error.message}`, "error"));
 restoreSidePanelState();
+bindMobileViewChanges();
+registerPwaServiceWorker();
 initializeTabs().catch((error) => addEvent(error.message, "error"));

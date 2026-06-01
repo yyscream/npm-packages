@@ -21,6 +21,10 @@
   "bin": {
     "pi-webui": "./bin/pi-webui.mjs"
   },
+  "scripts": {
+    "check": "node --check public/app.js && node --check bin/pi-webui.mjs && node tests/mobile-static.test.mjs",
+    "test": "node tests/mobile-static.test.mjs"
+  },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.78.0"
   },
@@ -28,6 +32,7 @@
     "index.ts",
     "bin",
     "public",
+    "tests",
     "README.md",
     "LICENSE"
   ],

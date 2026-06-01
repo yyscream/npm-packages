@@ -2,8 +2,8 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import { access, readFile, readdir, stat } from "node:fs/promises";
-import { networkInterfaces } from "node:os";
+import { access, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
+import { homedir, networkInterfaces } from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
@@ -19,13 +19,41 @@ const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 const BODY_LIMIT_BYTES = 1024 * 1024;
 const EVENT_HISTORY_LIMIT = 200;
 const STATUS_RPC_TIMEOUT_MS = 1_800;
+const FAST_PICK_LIMIT = 30;
 
 const MIME_TYPES = new Map([
   [".html", "text/html; charset=utf-8"],
   [".js", "text/javascript; charset=utf-8"],
   [".css", "text/css; charset=utf-8"],
   [".svg", "image/svg+xml"],
+  [".png", "image/png"],
+  [".webmanifest", "application/manifest+json; charset=utf-8"],
 ]);
+
+const NATIVE_SLASH_COMMANDS = [
+  { name: "settings", description: "Open settings menu" },
+  { name: "model", description: "Select model (opens selector UI)" },
+  { name: "scoped-models", description: "Enable/disable models for Ctrl+P cycling" },
+  { name: "export", description: "Export session (HTML default, or specify path: .html/.jsonl)" },
+  { name: "import", description: "Import and resume a session from a JSONL file" },
+  { name: "share", description: "Share session as a secret GitHub gist" },
+  { name: "copy", description: "Copy last agent message to clipboard" },
+  { name: "name", description: "Set session display name" },
+  { name: "session", description: "Show session info and stats" },
+  { name: "changelog", description: "Show changelog entries" },
+  { name: "hotkeys", description: "Show all keyboard shortcuts" },
+  { name: "fork", description: "Create a new fork from a previous user message" },
+  { name: "clone", description: "Duplicate the current session at the current position" },
+  { name: "tree", description: "Navigate session tree (switch branches)" },
+  { name: "login", description: "Configure provider authentication" },
+  { name: "logout", description: "Remove provider authentication" },
+  { name: "new", description: "Start a new session" },
+  { name: "compact", description: "Manually compact the session context" },
+  { name: "resume", description: "Resume a different session" },
+  { name: "reload", description: "Reload keybindings, extensions, skills, prompts, and themes" },
+  { name: "quit", description: "Quit Pi" },
+].map((command) => ({ ...command, source: "native", location: "Pi" }));
+const NATIVE_SLASH_COMMAND_NAMES = new Set(NATIVE_SLASH_COMMANDS.map((command) => command.name));
 
 function usage() {
   console.log(`pi-webui ${packageJson.version}
@@ -354,6 +382,20 @@ function sendSse(res, event) {
   res.write(`data: ${JSON.stringify(event)}\n\n`);
 }
 
+function rpcSuccess(command, data = {}) {
+  return { type: "response", command, success: true, data };
+}
+
+function parseSlashCommand(message) {
+  const text = String(message || "").trim();
+  if (!text.startsWith("/") || text.includes("\n")) return undefined;
+  const match = text.match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/);
+  if (!match) return undefined;
+  const name = match[1].toLowerCase();
+  if (!NATIVE_SLASH_COMMAND_NAMES.has(name)) return undefined;
+  return { name, args: (match[2] || "").trim(), text };
+}
+
 const eventHistory = [];
 
 function truncateStatusText(value, maxLength = 240) {
@@ -465,6 +507,137 @@ function uniquePathItems(items) {
     result.push(item);
   }
   return result;
+}
+
+function normalizePathFastPicks(value) {
+  const items = Array.isArray(value) ? value : Array.isArray(value?.picks) ? value.picks : [];
+  const seen = new Set();
+  const picks = [];
+  for (const item of items) {
+    const rawCwd = typeof item === "string" ? item : item?.cwd;
+    if (!rawCwd) continue;
+    let cwd;
+    try {
+      cwd = path.resolve(options.cwd, expandUserPath(rawCwd));
+    } catch {
+      continue;
+    }
+    if (!cwd || seen.has(cwd)) continue;
+    seen.add(cwd);
+    const displayCwd = String(typeof item === "object" && item?.displayCwd ? item.displayCwd : displayPath(cwd)).slice(0, 4096);
+    picks.push({ cwd, displayCwd });
+    if (picks.length >= FAST_PICK_LIMIT) break;
+  }
+  return picks;
+}
+
+function fastPicksStorageFile() {
+  if (process.env.PI_WEBUI_FAST_PICKS_FILE) return path.resolve(expandUserPath(process.env.PI_WEBUI_FAST_PICKS_FILE));
+  const stateRoot = process.env.XDG_STATE_HOME || path.join(homedir(), ".local", "state");
+  return path.join(stateRoot, "pi-webui", "fast-picks.json");
+}
+
+let pathFastPicksCache = null;
+
+async function readPathFastPicks() {
+  if (pathFastPicksCache) return pathFastPicksCache;
+  try {
+    const parsed = JSON.parse(await readFile(fastPicksStorageFile(), "utf8"));
+    pathFastPicksCache = normalizePathFastPicks(parsed);
+  } catch (error) {
+    if (error?.code !== "ENOENT") console.warn(`failed to read path fast picks: ${sanitizeError(error)}`);
+    pathFastPicksCache = [];
+  }
+  return pathFastPicksCache;
+}
+
+async function writePathFastPicks(picks) {
+  const normalized = normalizePathFastPicks(picks);
+  const storageFile = fastPicksStorageFile();
+  await mkdir(path.dirname(storageFile), { recursive: true });
+  const tmpFile = `${storageFile}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tmpFile, `${JSON.stringify({ version: 1, picks: normalized }, null, 2)}\n`, { mode: 0o600 });
+  await rename(tmpFile, storageFile);
+  pathFastPicksCache = normalized;
+  return normalized;
+}
+
+function parseCliScopedModelPatterns() {
+  for (let index = 0; index < options.piArgs.length; index++) {
+    const arg = options.piArgs[index];
+    if (arg === "--models" && options.piArgs[index + 1]) return options.piArgs[index + 1].split(",").map((item) => item.trim()).filter(Boolean);
+    if (arg.startsWith("--models=")) return arg.slice("--models=".length).split(",").map((item) => item.trim()).filter(Boolean);
+  }
+  return undefined;
+}
+
+async function readJsonFileIfExists(filePath) {
+  try {
+    return JSON.parse(await readFile(filePath, "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") return undefined;
+    console.warn(`failed to read ${filePath}: ${sanitizeError(error)}`);
+    return undefined;
+  }
+}
+
+async function configuredScopedModelPatterns(cwd = options.cwd) {
+  const cliPatterns = parseCliScopedModelPatterns();
+  if (cliPatterns !== undefined) return { patterns: cliPatterns, source: "cli" };
+
+  const agentDir = process.env.PI_CODING_AGENT_DIR ? path.resolve(expandUserPath(process.env.PI_CODING_AGENT_DIR)) : path.join(homedir(), ".pi", "agent");
+  const [globalSettings, projectSettings] = await Promise.all([
+    readJsonFileIfExists(path.join(agentDir, "settings.json")),
+    readJsonFileIfExists(path.join(cwd, ".pi", "settings.json")),
+  ]);
+
+  if (Array.isArray(projectSettings?.enabledModels)) return { patterns: projectSettings.enabledModels, source: "project" };
+  if (Array.isArray(globalSettings?.enabledModels)) return { patterns: globalSettings.enabledModels, source: "global" };
+  return { patterns: [], source: "none" };
+}
+
+function stripThinkingSuffix(pattern) {
+  const text = String(pattern || "").trim();
+  const slashIndex = text.indexOf("/");
+  const colonIndex = text.lastIndexOf(":");
+  if (colonIndex > (slashIndex === -1 ? -1 : slashIndex)) return text.slice(0, colonIndex);
+  return text;
+}
+
+function globToRegExp(pattern) {
+  const escaped = pattern.replace(/[.+^${}()|\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
+  return new RegExp(`^${escaped}$`, "i");
+}
+
+function modelMatchesPattern(model, pattern) {
+  const clean = stripThinkingSuffix(pattern).toLowerCase();
+  if (!clean) return false;
+  const full = `${model.provider}/${model.id}`.toLowerCase();
+  const id = String(model.id || "").toLowerCase();
+  if (/[?*\[]/.test(clean)) return globToRegExp(clean).test(full) || globToRegExp(clean).test(id);
+  return full === clean || id === clean || full.includes(clean) || id.includes(clean);
+}
+
+function resolveScopedModelsFromPatterns(patterns, models) {
+  const scoped = [];
+  const seen = new Set();
+  for (const pattern of patterns || []) {
+    for (const model of models || []) {
+      const key = `${model.provider}/${model.id}`;
+      if (seen.has(key) || !modelMatchesPattern(model, pattern)) continue;
+      seen.add(key);
+      scoped.push(model);
+    }
+  }
+  return scoped;
+}
+
+async function getScopedModelData(tab) {
+  const { patterns, source } = await configuredScopedModelPatterns(tab.cwd);
+  if (!patterns.length) return { models: [], patterns, source };
+  const response = await tab.rpc.send({ type: "get_available_models" });
+  if (response.success === false) throw makeHttpError(400, response.error || "failed to load available models");
+  return { models: resolveScopedModelsFromPatterns(patterns, response.data?.models || []), patterns, source };
 }
 
 function pathPickerRoots(activeCwd, viewedCwd) {
@@ -683,7 +856,7 @@ async function handleGitWorkflowRequest(pathname, body = {}, cwd = options.cwd) 
 function normalizeStaticPath(urlPath) {
   if (urlPath === "/") return "index.html";
   const name = urlPath.startsWith("/") ? urlPath.slice(1) : urlPath;
-  if (!["index.html", "app.js", "styles.css"].includes(name)) return undefined;
+  if (!["index.html", "app.js", "styles.css", "favicon.svg", "apple-touch-icon.png", "icon-192.png", "icon-512.png", "manifest.webmanifest", "service-worker.js"].includes(name)) return undefined;
   return name;
 }
 
@@ -912,6 +1085,117 @@ async function updateTabCwd(id, cwd) {
     sendSse(client, changedEvent);
   }
   return { tab, changed: true };
+}
+
+async function restartTabRpc(tab, reason = "reload") {
+  const state = await tab.rpc.send({ type: "get_state" });
+  if (state.success === false) throw makeHttpError(400, state.error || "Unable to read Pi state before reload");
+  if (state.data?.isStreaming) throw makeHttpError(409, "Wait for the current response to finish before reloading.");
+  if (state.data?.isCompacting) throw makeHttpError(409, "Wait for compaction to finish before reloading.");
+
+  const piArgs = buildPiArgsForTab(tab.index, tab.title);
+  if (state.data?.sessionFile && !options.noSession) piArgs.push("--session", state.data.sessionFile);
+  const piCommand = await resolvePiCommand(piArgs);
+  const reloadingEvent = { type: "webui_tab_reloading", tabId: tab.id, tabTitle: tab.title, cwd: tab.cwd, reason, sessionFile: state.data?.sessionFile };
+  recordEvent(reloadingEvent);
+  for (const client of tab.sseClients) sendSse(client, reloadingEvent);
+
+  const oldRpc = tab.rpc;
+  tab.rpcUnsubscribe?.();
+  tab.rpcUnsubscribe = undefined;
+  oldRpc.stop();
+
+  const rpc = new PiRpcProcess({ ...piCommand, cwd: tab.cwd });
+  attachRpcToTab(tab, rpc);
+  rpc.start();
+
+  const reloadedEvent = { type: "webui_tab_reloaded", tabId: tab.id, tabTitle: tab.title, cwd: tab.cwd, pid: tab.rpc.child?.pid, reason, sessionFile: state.data?.sessionFile };
+  recordEvent(reloadedEvent);
+  for (const client of tab.sseClients) sendSse(client, reloadedEvent);
+  return tab;
+}
+
+async function getCommandData(tab) {
+  const response = await tab.rpc.send({ type: "get_commands" });
+  if (response.success === false) throw makeHttpError(400, response.error || "failed to load commands");
+  return { commands: [...NATIVE_SLASH_COMMANDS, ...(response.data?.commands || [])] };
+}
+
+function formatSessionOutput(tab, state, stats) {
+  return [
+    `Session: ${state.sessionName || state.sessionId || "unknown"}`,
+    `Tab: ${tab.title}`,
+    `CWD: ${tab.cwd}`,
+    `Model: ${state.model ? `${state.model.provider}/${state.model.id}` : "none"}`,
+    `Thinking: ${state.thinkingLevel || "unknown"}`,
+    `Status: ${state.isStreaming ? "running" : state.isCompacting ? "compacting" : "idle"}`,
+    `Messages: ${state.messageCount ?? "?"}`,
+    `Queue: ${state.pendingMessageCount ?? 0}`,
+    `Session file: ${state.sessionFile || "none"}`,
+    stats ? `Tokens: input ${stats.tokens?.input ?? 0}, output ${stats.tokens?.output ?? 0}, cache read ${stats.tokens?.cacheRead ?? 0}` : undefined,
+    stats?.cost !== undefined ? `Cost: ${stats.cost}` : undefined,
+  ].filter(Boolean).join("\n");
+}
+
+function webuiHotkeysOutput() {
+  return [
+    "Web UI hotkeys:",
+    "Enter: send on desktop; newline on mobile",
+    "Ctrl/Cmd+Enter: send from textarea",
+    "Tab: accept slash-command suggestion",
+    "Arrow up/down: move through slash-command suggestions",
+    "Escape: close actions, tabs, model picker, or mobile drawer",
+    "Mobile: Send button submits; Return inserts a newline",
+  ].join("\n");
+}
+
+async function handleNativeSlashCommand(tab, body) {
+  const parsed = parseSlashCommand(body.message);
+  if (!parsed) return undefined;
+
+  switch (parsed.name) {
+    case "reload": {
+      const reloaded = await restartTabRpc(tab, "slash-command");
+      return rpcSuccess("native_slash_command", { command: "reload", tab: tabMeta(reloaded), message: "Reloaded keybindings, extensions, skills, prompts, and themes." });
+    }
+    case "new": {
+      const response = await tab.rpc.send({ type: "new_session" });
+      return response.success === false ? response : rpcSuccess("native_slash_command", { command: "new", message: "Started a new session.", result: response.data });
+    }
+    case "compact": {
+      const response = await tab.rpc.send(parsed.args ? { type: "compact", customInstructions: parsed.args } : { type: "compact" });
+      return response.success === false ? response : rpcSuccess("native_slash_command", { command: "compact", message: "Compaction finished.", result: response.data });
+    }
+    case "name": {
+      if (!parsed.args) throw makeHttpError(400, "Usage: /name <session name>");
+      const response = await tab.rpc.send({ type: "set_session_name", name: parsed.args });
+      return response.success === false ? response : rpcSuccess("native_slash_command", { command: "name", message: `Session name set to: ${parsed.args}` });
+    }
+    case "session": {
+      const [state, stats] = await Promise.all([
+        tab.rpc.send({ type: "get_state" }),
+        tab.rpc.send({ type: "get_session_stats" }).catch((error) => ({ success: false, error: sanitizeError(error) })),
+      ]);
+      if (state.success === false) return state;
+      return rpcSuccess("native_slash_command", { command: "session", message: formatSessionOutput(tab, state.data || {}, stats.success === false ? null : stats.data) });
+    }
+    case "copy": {
+      const response = await tab.rpc.send({ type: "get_last_assistant_text" });
+      if (response.success === false) return response;
+      const text = String(response.data?.text || "");
+      if (!text.trim()) throw makeHttpError(400, "No assistant message to copy.");
+      return rpcSuccess("native_slash_command", { command: "copy", message: "Copied the last assistant message.", copyText: text });
+    }
+    case "hotkeys": {
+      return rpcSuccess("native_slash_command", { command: "hotkeys", message: webuiHotkeysOutput() });
+    }
+    case "clone": {
+      const response = await tab.rpc.send({ type: "clone" });
+      return response.success === false ? response : rpcSuccess("native_slash_command", { command: "clone", message: "Cloned the current session.", result: response.data });
+    }
+    default:
+      throw makeHttpError(400, `/${parsed.name} is a native Pi TUI command, but this Web UI cannot run that interactive command yet.`);
+  }
 }
 
 function closeTab(id) {
@@ -1239,6 +1523,44 @@ const server = createServer(async (req, res) => {
         ok: true,
         data: await getDirectoryPickerData(url.searchParams.get("path"), tab.cwd),
       });
+      return;
+    }
+
+    if (url.pathname === "/api/path-fast-picks" && req.method === "GET") {
+      sendJson(res, 200, { ok: true, data: { picks: await readPathFastPicks() } });
+      return;
+    }
+
+    if (url.pathname === "/api/path-fast-picks" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const picks = await writePathFastPicks(body.picks ?? body);
+      sendJson(res, 200, { ok: true, data: { picks } });
+      return;
+    }
+
+    if (url.pathname === "/api/scoped-models" && req.method === "GET") {
+      const tab = getRequestedTab(req, url);
+      sendJson(res, 200, { ok: true, data: await getScopedModelData(tab) });
+      return;
+    }
+
+    if (url.pathname === "/api/commands" && req.method === "GET") {
+      const tab = getRequestedTab(req, url);
+      sendJson(res, 200, { type: "response", command: "get_commands", success: true, data: await getCommandData(tab) });
+      return;
+    }
+
+    if (url.pathname === "/api/prompt" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const tab = getRequestedTab(req, url, body);
+      const nativeResponse = await handleNativeSlashCommand(tab, body);
+      if (nativeResponse) {
+        sendJson(res, nativeResponse.success === false ? 400 : 200, nativeResponse);
+        return;
+      }
+      const command = commandFromPost(url.pathname, body);
+      const response = await tab.rpc.send(command);
+      sendJson(res, response.success === false ? 400 : 200, response);
       return;
     }
 

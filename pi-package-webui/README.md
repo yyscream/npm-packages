@@ -57,12 +57,19 @@ pi-webui --cwd /path/to/project
 - Slash-command autocomplete while typing `/...`
 - Tool, process, compaction, queue, and extension event log
 - Collapsible side panel with session state, queue, available commands, events, and local-network exposure status/control
-- Pi-style footer with token, cache, estimated Pi-context tokens, speed, cost, context usage, clickable per-tab cwd picker with browser-saved fast picks, git branch, changes, runtime, model, and thinking level
+- Pi-style footer with token, cache, estimated Pi-context tokens, speed, cost, context usage, clickable per-tab cwd picker with server-persisted fast picks, git branch, changes, runtime, model, and thinking level
 - Guided Git workflow: `git add .`, ask Pi to run `/git-staged-msg`, preview short/long messages, commit with the selected message, and `git push`
 - Basic rendering for user, assistant, tool result, bash execution, and thinking messages
 - Basic extension UI bridge for `notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`, `select`, `confirm`, `input`, and `editor`
 - Cyberpunk/Catppuccin-inspired theme
+- PWA metadata, icons, and service worker for install-to-home-screen support when served from a secure context
 - Static frontend: no bundler, no frontend install step
+
+## Mobile/PWA notes
+
+- The mobile composer starts as a one-line `Ask Pi…` input, grows with user-entered lines, and scrolls the transcript to the latest output when focused.
+- When Pi is idle, `Steer` and `Follow-up` live inside `Actions`; while a run is active, they move back into the main composer row for quick steering/follow-up.
+- PWA install support requires browser service-worker support and usually HTTPS or `localhost`. Plain `http://<LAN-IP>` may show the app but may not offer install on Chrome/Safari.
 
 ## Pi slash commands
 
@@ -167,6 +174,7 @@ The local server exposes:
 - static files from `public/`
 - `GET /api/tabs`, `POST /api/tabs`, `PATCH /api/tabs/:id`, and `DELETE /api/tabs/:id` for isolated Web UI terminal tabs and per-tab cwd changes
 - `GET /api/directories?tab=<tabId>&path=<path>` for the browser cwd picker
+- `GET /api/path-fast-picks` and `POST /api/path-fast-picks` for cwd picker fast picks persisted across browser tabs, Pi terminal tabs, and Web UI server restarts
 - `GET /api/network` and localhost-only `POST /api/network/open` for local-network exposure status/control
 - `GET /api/webui-status?detailed=1` for slash-command status reporting
 - `POST /api/shutdown` for localhost-only graceful restarts from `/webui-start`
