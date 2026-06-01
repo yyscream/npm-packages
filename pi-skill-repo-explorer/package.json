@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-skill-repo-explorer",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Agents should invoke this skill before modifying unfamiliar codebases, answering where/how something is implemented, tracing dependencies, mapping repo structure, or planning changes. Explores a repository and returns a strict JSON handoff with key files, symbols, risks, and evidence.",
   "license": "MIT",
   "keywords": [
