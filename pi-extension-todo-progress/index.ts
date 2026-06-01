@@ -19,13 +19,13 @@ function clear(ctx: ExtensionContext, s: TodoState) {
   s.visible = false;
   s.items = [];
   s.offset = 0;
-  if (ctx.hasUI) ctx.ui.setWidget(KEY, []);
+  if (ctx.hasUI) ctx.ui.setWidget(KEY, undefined);
 }
 
 function render(ctx: ExtensionContext, s: TodoState) {
   if (!ctx.hasUI) return;
   if (!s.visible || s.items.length === 0) {
-    ctx.ui.setWidget(KEY, []);
+    ctx.ui.setWidget(KEY, undefined);
     return;
   }
 
@@ -96,7 +96,8 @@ function stripChecklistLines(text: string): string {
 export default function todoProgress(pi: ExtensionAPI) {
   const state: TodoState = { visible: false, items: [], offset: 0 };
 
-  pi.on("before_agent_start", async (event) => {
+  pi.on("before_agent_start", async (event, ctx) => {
+    clear(ctx, state);
     return {
       systemPrompt:
         event.systemPrompt +
@@ -135,6 +136,17 @@ export default function todoProgress(pi: ExtensionAPI) {
     // Do not leave stale partial/todo items visible if the model forgets a final update.
     clear(ctx, state);
   });
+
+  pi.on("session_shutdown", async (_event, ctx) => clear(ctx, state));
+  pi.on("session_before_switch", async (_event, ctx) => {
+    clear(ctx, state);
+    return undefined;
+  });
+  pi.on("session_before_fork", async (_event, ctx) => {
+    clear(ctx, state);
+    return undefined;
+  });
+  pi.on("session_tree", async (_event, ctx) => clear(ctx, state));
 
   pi.registerShortcut("ctrl+alt+x", {
     description: "Dismiss completed todo widget",

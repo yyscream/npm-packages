@@ -467,10 +467,15 @@ for pkg_dir in $(gather_packages); do
   fi
 
   resource_count="$(node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));let n=0;for(const k of ["extensions","skills","prompts","themes"]){if(Array.isArray(p.pi?.[k])) n+=p.pi[k].length}console.log(n)' "$pkg_json" 2>/dev/null || echo 0)"
+  has_bin="$(node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));const b=p.bin;console.log(typeof b==="string" || (b && typeof b==="object" && Object.keys(b).length>0) ? "true" : "false")' "$pkg_json" 2>/dev/null || echo false)"
   if [[ "$resource_count" -eq 0 ]]; then
-    print_check "$(fail)" "pi manifest has no extensions, skills, prompts, or themes"
-    pkg_fail=1
-    pkg_reasons+=("pi manifest has no extensions, skills, prompts, or themes")
+    if [[ "$has_bin" == "true" ]]; then
+      print_check "$(ok)" "CLI/bin companion package (no pi manifest resources)"
+    else
+      print_check "$(fail)" "pi manifest has no extensions, skills, prompts, or themes"
+      pkg_fail=1
+      pkg_reasons+=("pi manifest has no extensions, skills, prompts, or themes")
+    fi
   else
     print_check "$(ok)" "pi manifest resource entries: $resource_count"
 

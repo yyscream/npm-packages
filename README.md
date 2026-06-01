@@ -2,7 +2,7 @@
 
 This repository contains my public JavaScript/TypeScript packages published via npm (using Bun and/or npm).
 
-Right now it contains **Pi extension, skill, package, and theme bundle packages**.
+Right now it contains **Pi extension, skill, package, theme bundle, and companion utility packages**.
 
 ## Skill authoring standards
 
@@ -45,6 +45,14 @@ Extension-bundled skills kept as direct Pi config includes instead of duplicate 
 - `@firstpick/pi-skill-vulnerability-scanner` (`pi-skill-vulnerability-scanner`) — Use automatically when checking CVEs or known vulnerabilities in installed packages, dependencies, Docker images, OS packages, exposed services, or software versions. Produces severity-rated scan reports.
 
 ## Packages
+
+### `@firstpick/pi-package-webui`
+Pi Web UI companion package for Pi coding agent RPC mode.
+
+- Bundles the `pi-webui` CLI server and `/start-webui` Pi extension command
+- Starts `pi --mode rpc` and serves a no-build HTTP/SSE web app
+- Supports prompt, steer, follow-up, abort, new session, model/thinking controls, slash-command autocomplete, and guided git workflow
+- Binds to `127.0.0.1` by default; no authentication, so do not expose it to untrusted networks
 
 ### `@firstpick/pi-package-skill-lifecycle`
 Bundles the skill lifecycle packages that are designed to work together.
