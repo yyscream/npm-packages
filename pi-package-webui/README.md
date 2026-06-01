@@ -5,7 +5,8 @@ Local browser companion for [Pi coding agent](https://www.npmjs.com/package/@ear
 This package provides:
 
 - `pi-webui`: a local HTTP/SSE server that starts `pi --mode rpc`, serves the static browser UI, and proxies browser actions to Pi RPC commands.
-- `/start-webui`: a Pi slash command that launches `pi-webui` for the current Pi working directory and opens the browser.
+- `/webui-start`: a Pi slash command that launches `pi-webui` for the current Pi working directory and opens the browser.
+- `/webui-status`: a Pi slash command that reports the Web UI URL, online state, network exposure, and optional detailed runtime info.
 - A no-build web app in `public/` with no runtime frontend dependencies.
 
 > **Security:** Pi Web UI has no authentication. It can control the spawned Pi session, including any tools Pi is allowed to run. It binds to `127.0.0.1` by default; do not expose it on untrusted networks.
@@ -18,7 +19,7 @@ This package provides:
 
 ## Quick start
 
-Install the package from npm into Pi, then restart Pi so `/start-webui` is loaded:
+Install the package from npm into Pi, then restart Pi so `/webui-start` and `/webui-status` are loaded:
 
 ```bash
 pi install npm:@firstpick/pi-package-webui
@@ -27,10 +28,10 @@ pi install npm:@firstpick/pi-package-webui
 From inside terminal Pi:
 
 ```text
-/start-webui
+/webui-start
 ```
 
-Open the printed URL, usually <http://127.0.0.1:31415/>. The command opens it automatically unless `--no-open` is passed.
+Open the printed URL, usually <http://127.0.0.1:31415/>. The command opens it automatically unless `--no-open` is passed. Check a running instance with `/webui-status` or `/webui-status detailed`.
 
 For direct development from this package directory:
 
@@ -63,10 +64,10 @@ pi-webui --cwd /path/to/project
 - Cyberpunk/Catppuccin-inspired theme
 - Static frontend: no bundler, no frontend install step
 
-## Pi slash command
+## Pi slash commands
 
 ```text
-/start-webui [port] [options] [-- <pi args...>]
+/webui-start [port] [options] [-- <pi args...>]
 ```
 
 Options:
@@ -84,13 +85,23 @@ Options:
 Examples:
 
 ```text
-/start-webui
-/start-webui 31500
-/start-webui --port 31500 --no-open
-/start-webui --name browser -- --model anthropic/claude-sonnet-4-5:high
+/webui-start
+/webui-start 31500
+/webui-start --port 31500 --no-open
+/webui-start --name browser -- --model anthropic/claude-sonnet-4-5:high
 ```
 
-If a compatible Web UI is already running on the target URL, `/start-webui` stops that instance first, then starts a fresh server for the current cwd and opens it.
+If a compatible Web UI is already running on the target URL, `/webui-start` stops that instance first, then starts a fresh server for the current cwd and opens it.
+
+Status commands:
+
+```text
+/webui-status
+/webui-status detailed
+/webui-status detailed --port 31500
+```
+
+`/webui-status` reports the page URL, whether the server is online, and whether it is open to the local network. `detailed` adds Web UI/Pi PIDs, bind info, tabs, current session/model/thinking state, available providers, per-tab workspace/stats summaries, and recent backend events.
 
 ## CLI
 
@@ -157,7 +168,8 @@ The local server exposes:
 - `GET /api/tabs`, `POST /api/tabs`, `PATCH /api/tabs/:id`, and `DELETE /api/tabs/:id` for isolated Web UI terminal tabs and per-tab cwd changes
 - `GET /api/directories?tab=<tabId>&path=<path>` for the browser cwd picker
 - `GET /api/network` and localhost-only `POST /api/network/open` for local-network exposure status/control
-- `POST /api/shutdown` for localhost-only graceful restarts from `/start-webui`
+- `GET /api/webui-status?detailed=1` for slash-command status reporting
+- `POST /api/shutdown` for localhost-only graceful restarts from `/webui-start`
 - HTTP endpoints for prompt/session/model/thinking/compact/git actions; tab-scoped calls use `?tab=<tabId>`
 - `/api/events?tab=<tabId>` as a per-tab Server-Sent Events stream for Pi RPC events
 - `/api/extension-ui-response?tab=<tabId>` for browser responses to extension UI prompts

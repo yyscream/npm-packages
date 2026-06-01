@@ -17,6 +17,8 @@ const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 31415;
 const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 const BODY_LIMIT_BYTES = 1024 * 1024;
+const EVENT_HISTORY_LIMIT = 200;
+const STATUS_RPC_TIMEOUT_MS = 1_800;
 
 const MIME_TYPES = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -350,6 +352,37 @@ async function readJsonBody(req) {
 
 function sendSse(res, event) {
   res.write(`data: ${JSON.stringify(event)}\n\n`);
+}
+
+const eventHistory = [];
+
+function truncateStatusText(value, maxLength = 240) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
+function statusEventSummary(event) {
+  const summary = {
+    timestamp: new Date().toISOString(),
+    type: String(event?.type || "event"),
+  };
+  for (const key of ["tabId", "tabTitle", "pid", "cwd", "code", "signal", "command", "queueLength", "pendingMessageCount"]) {
+    if (event?.[key] !== undefined) summary[key] = event[key];
+  }
+  if (event?.assistantMessageEvent?.type) summary.updateType = event.assistantMessageEvent.type;
+  if (event?.message?.role) summary.messageRole = event.message.role;
+  if (event?.error) summary.error = truncateStatusText(event.error);
+  if (event?.text && summary.type === "pi_stderr") summary.text = truncateStatusText(event.text);
+  return summary;
+}
+
+function recordEvent(event) {
+  eventHistory.push(statusEventSummary(event));
+  if (eventHistory.length > EVENT_HISTORY_LIMIT) eventHistory.splice(0, eventHistory.length - EVENT_HISTORY_LIMIT);
+}
+
+function latestEvents(limit = 40) {
+  return eventHistory.slice(-Math.max(0, Math.min(EVENT_HISTORY_LIMIT, limit)));
 }
 
 function runCommand(command, args, { cwd, timeoutMs = 2000 } = {}) {
@@ -795,6 +828,7 @@ function attachRpcToTab(tab, rpc) {
   tab.rpc = rpc;
   tab.rpcUnsubscribe = rpc.onEvent((event) => {
     const scopedEvent = { ...event, tabId: tab.id, tabTitle: tab.title };
+    recordEvent(scopedEvent);
     for (const client of tab.sseClients) sendSse(client, scopedEvent);
   });
 }
@@ -856,8 +890,10 @@ async function updateTabCwd(id, cwd) {
 
   const piArgs = buildPiArgsForTab(tab.index, tab.title);
   const piCommand = await resolvePiCommand(piArgs);
+  const restartingEvent = { type: "webui_tab_restarting", tabId: tab.id, tabTitle: tab.title, cwd: nextCwd };
+  recordEvent(restartingEvent);
   for (const client of tab.sseClients) {
-    sendSse(client, { type: "webui_tab_restarting", tabId: tab.id, tabTitle: tab.title, cwd: nextCwd });
+    sendSse(client, restartingEvent);
   }
 
   const oldRpc = tab.rpc;
@@ -870,8 +906,10 @@ async function updateTabCwd(id, cwd) {
   attachRpcToTab(tab, rpc);
   rpc.start();
 
+  const changedEvent = { type: "webui_cwd_changed", tabId: tab.id, tabTitle: tab.title, cwd: tab.cwd, pid: tab.rpc.child?.pid };
+  recordEvent(changedEvent);
   for (const client of tab.sseClients) {
-    sendSse(client, { type: "webui_cwd_changed", tabId: tab.id, tabTitle: tab.title, cwd: tab.cwd, pid: tab.rpc.child?.pid });
+    sendSse(client, changedEvent);
   }
   return { tab, changed: true };
 }
@@ -881,8 +919,10 @@ function closeTab(id) {
   if (!tab) throw makeHttpError(404, `Unknown Pi tab: ${id}`);
   if (tabs.size <= 1) throw makeHttpError(400, "Cannot close the last Pi tab");
 
+  const closingEvent = { type: "webui_tab_closing", tabId: tab.id, tabTitle: tab.title };
+  recordEvent(closingEvent);
   for (const client of tab.sseClients) {
-    sendSse(client, { type: "webui_tab_closing", tabId: tab.id, tabTitle: tab.title });
+    sendSse(client, closingEvent);
     client.end();
   }
   tab.sseClients.clear();
@@ -910,6 +950,7 @@ function getRequestedTab(req, url, body = {}) {
   return tab;
 }
 
+const serverStartedAt = new Date().toISOString();
 const initialTab = await createTab();
 let currentHost = options.host;
 let networkRebindInProgress = false;
@@ -940,8 +981,10 @@ function networkStatus() {
 
 function closeSseClientsForRebind(nextHost) {
   for (const tab of tabs.values()) {
+    const rebindEvent = { type: "webui_network_rebinding", tabId: tab.id, tabTitle: tab.title, host: nextHost, port: options.port };
+    recordEvent(rebindEvent);
     for (const client of tab.sseClients) {
-      sendSse(client, { type: "webui_network_rebinding", tabId: tab.id, tabTitle: tab.title, host: nextHost, port: options.port });
+      sendSse(client, rebindEvent);
       client.end();
     }
     tab.sseClients.clear();
@@ -1009,6 +1052,75 @@ async function openToLocalNetwork() {
   }
 }
 
+async function safeRpcData(tab, command, timeoutMs = STATUS_RPC_TIMEOUT_MS) {
+  try {
+    const response = await tab.rpc.send(command, timeoutMs);
+    if (response?.success === false) return { ok: false, error: response.error || `${command.type} failed` };
+    return { ok: true, data: response?.data ?? null };
+  } catch (error) {
+    return { ok: false, error: sanitizeError(error) };
+  }
+}
+
+function providerList(models) {
+  const providers = new Set();
+  for (const model of Array.isArray(models) ? models : []) {
+    if (model?.provider) providers.add(String(model.provider));
+  }
+  return [...providers].sort();
+}
+
+async function tabStatusDetails(tab) {
+  const [stateResult, modelsResult, statsResult, workspaceResult] = await Promise.all([
+    safeRpcData(tab, { type: "get_state" }),
+    safeRpcData(tab, { type: "get_available_models" }),
+    safeRpcData(tab, { type: "get_session_stats" }),
+    getWorkspaceInfo(tab.cwd, tab.rpc.startedAt).then((data) => ({ ok: true, data })).catch((error) => ({ ok: false, error: sanitizeError(error) })),
+  ]);
+  const models = modelsResult.ok ? modelsResult.data?.models || [] : [];
+  return {
+    ...tabMeta(tab),
+    state: stateResult.ok ? stateResult.data : null,
+    stateError: stateResult.ok ? undefined : stateResult.error,
+    stats: statsResult.ok ? statsResult.data : null,
+    statsError: statsResult.ok ? undefined : statsResult.error,
+    workspace: workspaceResult.ok ? workspaceResult.data : null,
+    workspaceError: workspaceResult.ok ? undefined : workspaceResult.error,
+    models: {
+      count: models.length,
+      providers: providerList(models),
+      error: modelsResult.ok ? undefined : modelsResult.error,
+    },
+  };
+}
+
+async function webuiStatus({ detailed = false, eventLimit = 40 } = {}) {
+  const tab = firstTab();
+  const network = networkStatus();
+  const data = {
+    online: true,
+    webuiVersion: packageJson.version,
+    webuiPid: process.pid,
+    startedAt: serverStartedAt,
+    cwd: options.cwd,
+    boundHost: currentHost,
+    port: options.port,
+    pageUrl: network.localUrl,
+    boundUrl: `http://${formatUrlHost(currentHost)}:${options.port}/`,
+    network,
+    piPid: tab?.rpc.child?.pid,
+    piRunning: !!tab?.rpc.child && tab.rpc.child.exitCode === null,
+    tabs: listTabs(),
+  };
+
+  if (detailed) {
+    data.tabs = await Promise.all([...tabs.values()].map((item) => tabStatusDetails(item)));
+    data.events = latestEvents(eventLimit);
+  }
+
+  return data;
+}
+
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
@@ -1068,17 +1180,25 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/health" && req.method === "GET") {
-      const tab = firstTab();
+      const status = await webuiStatus();
       sendJson(res, 200, {
         ok: true,
-        webuiVersion: packageJson.version,
-        webuiPid: process.pid,
-        piPid: tab?.rpc.child?.pid,
-        piRunning: !!tab?.rpc.child && tab.rpc.child.exitCode === null,
-        cwd: options.cwd,
-        network: networkStatus(),
-        tabs: listTabs(),
+        webuiVersion: status.webuiVersion,
+        webuiPid: status.webuiPid,
+        piPid: status.piPid,
+        piRunning: status.piRunning,
+        cwd: status.cwd,
+        network: status.network,
+        tabs: status.tabs,
       });
+      return;
+    }
+
+    if (url.pathname === "/api/webui-status" && req.method === "GET") {
+      const detailed = ["1", "true", "yes", "detailed"].includes(String(url.searchParams.get("detailed") || "").toLowerCase());
+      const parsedEventLimit = Number.parseInt(url.searchParams.get("events") || "40", 10);
+      const eventLimit = Number.isFinite(parsedEventLimit) ? parsedEventLimit : 40;
+      sendJson(res, 200, { ok: true, data: await webuiStatus({ detailed, eventLimit }) });
       return;
     }
 

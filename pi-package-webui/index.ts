@@ -12,19 +12,28 @@ const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 31415;
 const START_TIMEOUT_MS = 12_000;
 
-type StartWebuiOptions = {
+type WebuiAddress = {
   host: string;
   port: number;
+};
+
+type StartWebuiOptions = WebuiAddress & {
   open: boolean;
   noSession: boolean;
   name?: string;
   piArgs: string[];
 };
 
+type WebuiStatusOptions = WebuiAddress & {
+  detailed: boolean;
+};
+
 type ExistingWebui = {
   webuiVersion?: string;
   webuiPid?: number;
   piPid?: number;
+  network?: any;
+  tabs?: any[];
 };
 
 type WebuiChild = ChildProcessByStdio<null, Readable, Readable>;
@@ -129,7 +138,45 @@ function parseStartWebuiArgs(args: string): StartWebuiOptions {
   return options;
 }
 
-function urlFor(options: StartWebuiOptions): string {
+function parseWebuiStatusArgs(args: string): WebuiStatusOptions {
+  const options: WebuiStatusOptions = {
+    host: DEFAULT_HOST,
+    port: DEFAULT_PORT,
+    detailed: false,
+  };
+  const tokens = tokenizeArgs(args || "");
+
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (["detailed", "detail", "details", "--detailed"].includes(token.toLowerCase())) {
+      options.detailed = true;
+      continue;
+    }
+    if (token === "--host") {
+      options.host = takeValue(tokens, i, token);
+      i++;
+      continue;
+    }
+    if (token === "--port") {
+      const port = Number.parseInt(takeValue(tokens, i, token), 10);
+      if (!Number.isFinite(port) || port <= 0 || port > 65535) throw new Error("--port must be between 1 and 65535");
+      options.port = port;
+      i++;
+      continue;
+    }
+    if (/^\d+$/.test(token)) {
+      const port = Number.parseInt(token, 10);
+      if (!Number.isFinite(port) || port <= 0 || port > 65535) throw new Error("port must be between 1 and 65535");
+      options.port = port;
+      continue;
+    }
+    throw new Error(`Unknown option: ${token}`);
+  }
+
+  return options;
+}
+
+function urlFor(options: WebuiAddress): string {
   const host = options.host.includes(":") && !options.host.startsWith("[") ? `[${options.host}]` : options.host;
   return `http://${host}:${options.port}/`;
 }
@@ -361,15 +408,245 @@ async function startWebui(options: StartWebuiOptions, ctx: ExtensionCommandConte
   return waitForWebuiUrl(child);
 }
 
+type WebuiStatusFetchResult = {
+  online: boolean;
+  url: string;
+  endpointSupported: boolean;
+  data?: any;
+  error?: string;
+};
+
+async function fetchWebuiStatus(options: WebuiStatusOptions): Promise<WebuiStatusFetchResult> {
+  const url = urlFor(options);
+  const baseUrl = url.replace(/\/$/, "");
+  const query = options.detailed ? "?detailed=1&events=40" : "";
+  const statusResult = await fetchJsonWithTimeout(`${baseUrl}/api/webui-status${query}`, {}, options.detailed ? 7_000 : 1_500);
+  if (statusResult?.ok && statusResult.body?.ok === true) {
+    return { online: true, url, endpointSupported: true, data: statusResult.body.data };
+  }
+
+  const healthResult = await fetchJsonWithTimeout(`${baseUrl}/api/health`, {}, 1_500);
+  if (healthResult?.ok && healthResult.body?.ok === true) {
+    return {
+      online: true,
+      url,
+      endpointSupported: false,
+      data: {
+        ...healthResult.body,
+        online: true,
+        pageUrl: healthResult.body.network?.localUrl || url,
+        port: options.port,
+      },
+      error: statusResult?.body?.error,
+    };
+  }
+
+  return {
+    online: false,
+    url,
+    endpointSupported: false,
+    error: statusResult?.body?.error || healthResult?.body?.error || "No Pi Web UI responded at this URL",
+  };
+}
+
+function yesNo(value: unknown): string {
+  return value ? "yes" : "no";
+}
+
+function modelLabel(model: any): string {
+  if (!model) return "unknown";
+  return [model.provider, model.id].filter(Boolean).join("/") || "unknown";
+}
+
+function sessionLabel(state: any): string {
+  return state?.sessionName || state?.sessionId || "unknown";
+}
+
+function displayPath(value: unknown): string {
+  const text = String(value || "").trim();
+  if (!text) return "unknown";
+  const normalized = text.replace(/\\/g, "/");
+  const home = (process.env.USERPROFILE || process.env.HOME || "").replace(/\\/g, "/");
+  return home && normalized.toLowerCase().startsWith(home.toLowerCase()) ? `~${normalized.slice(home.length)}` || "~" : normalized;
+}
+
+function compactSessionFile(value: unknown): string {
+  const shown = displayPath(value);
+  if (shown === "unknown") return "in-memory/unknown";
+  const parts = shown.split("/");
+  if (parts.length <= 4) return shown;
+  return `${parts.slice(0, 3).join("/")}/…/${parts.at(-1)}`;
+}
+
+function formatStatusTime(value: unknown): string {
+  const date = new Date(String(value || ""));
+  if (Number.isNaN(date.getTime())) return String(value || "unknown");
+  return date.toLocaleString();
+}
+
+function formatEventTime(value: unknown): string {
+  const date = new Date(String(value || ""));
+  if (Number.isNaN(date.getTime())) return String(value || "time?");
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function detailLine(label: string, value: unknown, indent = "  "): string {
+  return `${indent}${label.padEnd(10)} ${String(value ?? "unknown")}`;
+}
+
+function formatStats(stats: any): string {
+  if (!stats || typeof stats !== "object") return "unavailable";
+  const parts = [];
+  if (stats.userMessages !== undefined) parts.push(`${stats.userMessages} user`);
+  if (stats.assistantMessages !== undefined) parts.push(`${stats.assistantMessages} assistant`);
+  if (stats.toolCalls !== undefined) parts.push(`${stats.toolCalls} tool calls`);
+  if (stats.toolResults !== undefined) parts.push(`${stats.toolResults} tool results`);
+  if (stats.totalTokens !== undefined) parts.push(`${stats.totalTokens} tokens`);
+  if (stats.costUsd !== undefined) parts.push(`$${stats.costUsd}`);
+  return parts.length ? parts.join(" · ") : "available";
+}
+
+function formatProviders(models: any): string {
+  const providers = Array.isArray(models?.providers) ? models.providers : [];
+  const providerText = providers.length ? providers.join(", ") : "unknown";
+  return models?.count ? `${models.count} models · ${providerText}` : providerText;
+}
+
+function eventDetails(event: any): string[] {
+  const details = [];
+  if (event.command) details.push(event.command);
+  if (event.updateType) details.push(`update ${event.updateType}`);
+  if (event.pid) details.push(`pid ${event.pid}`);
+  if (event.code !== undefined || event.signal !== undefined) details.push(`exit ${event.code ?? event.signal}`);
+  if (event.error) details.push(`error: ${event.error}`);
+  if (event.text) details.push(event.text);
+  return details;
+}
+
+function eventGroupKey(event: any): string {
+  return JSON.stringify([event.tabTitle || "webui", event.type || "event", ...eventDetails(event)]);
+}
+
+function formatEvent(event: any, count = 1): string {
+  const details = eventDetails(event);
+  const repeat = count > 1 ? ` ×${count}` : "";
+  return `  ${formatEventTime(event.timestamp)}  ${event.tabTitle || "webui"} · ${event.type || "event"}${repeat}${details.length ? ` · ${details.join(" · ")}` : ""}`;
+}
+
+function formatEventGroups(events: any[]): string[] {
+  const groups: { event: any; count: number }[] = [];
+  for (const event of events) {
+    const previous = groups.at(-1);
+    if (previous && eventGroupKey(previous.event) === eventGroupKey(event)) {
+      previous.count += 1;
+    } else {
+      groups.push({ event, count: 1 });
+    }
+  }
+  return groups.map((group) => formatEvent(group.event, group.count));
+}
+
+function formatWebuiStatus(result: WebuiStatusFetchResult, requestedDetailed: boolean): string {
+  if (!result.online) {
+    return [
+      "Pi Web UI status",
+      detailLine("URL", result.url),
+      detailLine("Online", "no"),
+      detailLine("Network", "unknown"),
+      detailLine("Error", result.error || "offline"),
+      "",
+      "Start it with: /webui-start",
+    ].join("\n");
+  }
+
+  const data = result.data || {};
+  const network = data.network || {};
+  const tabs = Array.isArray(data.tabs) ? data.tabs : [];
+  const networkUrls = Array.isArray(network.networkUrls) ? network.networkUrls : [];
+  const pageUrl = data.pageUrl || network.localUrl || result.url;
+  const networkLabel = network.open ? `open to LAN${network.opening ? " (opening)" : ""}` : network.opening ? "opening" : "local only";
+
+  if (!requestedDetailed) {
+    const lines = [
+      "Pi Web UI status",
+      "",
+      detailLine("URL", pageUrl),
+      detailLine("Online", "yes"),
+      detailLine("Network", networkLabel),
+      detailLine("Tabs", tabs.length || "?"),
+    ];
+    if (networkUrls.length) lines.push(detailLine("LAN URLs", networkUrls.join(", ")));
+    if (data.webuiPid) lines.push(detailLine("Web UI PID", data.webuiPid));
+    return lines.join("\n");
+  }
+
+  const lines = [
+    "Pi Web UI — detailed status",
+    "",
+    "Summary",
+    detailLine("URL", pageUrl),
+    detailLine("Online", "yes"),
+    detailLine("Network", networkLabel),
+    detailLine("Bind", `${data.boundHost || network.host || "unknown"}:${data.port || network.port || "?"}`),
+    detailLine("Version", data.webuiVersion || "unknown"),
+    detailLine("PIDs", `webui ${data.webuiPid || "unknown"} · pi ${data.piPid || "unknown"}`),
+    detailLine("Started", formatStatusTime(data.startedAt)),
+    detailLine("Root cwd", displayPath(data.cwd)),
+  ];
+
+  if (networkUrls.length) lines.push(detailLine("LAN URLs", networkUrls.join(", ")));
+
+  if (!result.endpointSupported) {
+    lines.push("", "Detailed endpoint unavailable on the running server. Restart it with /webui-start to enable full details.");
+    return lines.join("\n");
+  }
+
+  lines.push("", `Tabs (${tabs.length})`);
+  if (!tabs.length) lines.push("  none");
+  for (const [index, tab] of tabs.entries()) {
+    const state = tab.state || {};
+    const status = tab.running ? "● running" : "○ stopped";
+    const activity = state.isStreaming ? "streaming" : state.isCompacting ? "compacting" : "idle";
+    lines.push(
+      "",
+      `  ${index + 1}. ${tab.title || tab.id || "tab"}  ${status}`,
+      detailLine("Process", `pid ${tab.pid || "unknown"} · clients ${tab.clientCount ?? 0} · started ${formatStatusTime(tab.startedAt)}`, "     "),
+      detailLine("Workspace", displayPath(tab.workspace?.cwd || tab.cwd), "     "),
+      detailLine("Session", sessionLabel(state), "     "),
+      detailLine("File", compactSessionFile(state.sessionFile), "     "),
+      detailLine("Model", `${modelLabel(state.model)} · thinking ${state.thinkingLevel || "unknown"}`, "     "),
+      detailLine("Activity", `${activity} · messages ${state.messageCount ?? "?"} · queue ${state.pendingMessageCount ?? 0}`, "     "),
+      detailLine("Providers", formatProviders(tab.models), "     "),
+      detailLine("Stats", formatStats(tab.stats), "     "),
+    );
+    if (tab.stateError) lines.push(detailLine("State err", tab.stateError, "     "));
+    if (tab.models?.error) lines.push(detailLine("Model err", tab.models.error, "     "));
+    if (tab.statsError) lines.push(detailLine("Stats err", tab.statsError, "     "));
+    if (tab.workspaceError) lines.push(detailLine("Work err", tab.workspaceError, "     "));
+  }
+
+  const events = Array.isArray(data.events) ? data.events.slice(-20) : [];
+  lines.push("", `Recent events (latest ${events.length}; repeated adjacent events are grouped)`);
+  lines.push(...(events.length ? formatEventGroups(events) : ["  none"]));
+  return lines.join("\n");
+}
+
 function usage(): string {
   return [
-    "Usage: /start-webui [port] [--port N] [--no-open] [--no-session] [--name NAME] [-- --model provider/model]",
+    "Usage: /webui-start [port] [--port N] [--no-open] [--no-session] [--name NAME] [-- --model provider/model]",
     "Starts the Pi Web UI companion server for the current cwd, prints the localhost URL, and opens it in your default browser.",
   ].join("\n");
 }
 
+function statusUsage(): string {
+  return [
+    "Usage: /webui-status [detailed] [port] [--port N] [--host HOST]",
+    "Shows the Pi Web UI URL, online state, and local-network exposure. Add 'detailed' for tabs, sessions, models/providers, and recent events.",
+  ].join("\n");
+}
+
 export default function (pi: ExtensionAPI) {
-  pi.registerCommand("start-webui", {
+  pi.registerCommand("webui-start", {
     description: "Start the local Pi browser Web UI and open it",
     handler: async (args, ctx) => {
       let options: StartWebuiOptions;
@@ -397,6 +674,29 @@ export default function (pi: ExtensionAPI) {
       } catch (error) {
         ctx.ui.setStatus("pi-webui", "");
         ctx.ui.notify(`Failed to start Pi Web UI:\n${error instanceof Error ? error.message : String(error)}\n${usage()}`, "error");
+      }
+    },
+  });
+
+  pi.registerCommand("webui-status", {
+    description: "Show Pi Web UI URL, online state, network exposure, and optional detailed runtime info",
+    handler: async (args, ctx) => {
+      let options: WebuiStatusOptions;
+      try {
+        options = parseWebuiStatusArgs(args);
+      } catch (error) {
+        ctx.ui.notify(`${error instanceof Error ? error.message : String(error)}\n${statusUsage()}`, "error");
+        return;
+      }
+
+      ctx.ui.setStatus("pi-webui", "checking webui status…");
+      try {
+        const result = await fetchWebuiStatus(options);
+        ctx.ui.notify(formatWebuiStatus(result, options.detailed), result.online ? "info" : "warning");
+      } catch (error) {
+        ctx.ui.notify(`Failed to check Pi Web UI status:\n${error instanceof Error ? error.message : String(error)}\n${statusUsage()}`, "error");
+      } finally {
+        ctx.ui.setStatus("pi-webui", "");
       }
     },
   });

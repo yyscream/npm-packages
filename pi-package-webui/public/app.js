@@ -82,6 +82,7 @@ const dialogQueue = [];
 const SIDE_PANEL_STORAGE_KEY = "pi-webui-side-panel-collapsed";
 const TAB_STORAGE_KEY = "pi-webui-active-tab";
 const PATH_FAST_PICKS_STORAGE_KEY = "pi-webui-path-fast-picks";
+const MOBILE_VIEW_QUERY = "(max-width: 720px)";
 const statusEntries = new Map();
 const widgets = new Map();
 const gitWorkflow = {
@@ -132,9 +133,14 @@ function setSidePanelCollapsed(collapsed) {
 
 function restoreSidePanelState() {
   try {
-    setSidePanelCollapsed(localStorage.getItem(SIDE_PANEL_STORAGE_KEY) === "1");
+    const stored = localStorage.getItem(SIDE_PANEL_STORAGE_KEY);
+    if (stored === null) {
+      setSidePanelCollapsed(window.matchMedia?.(MOBILE_VIEW_QUERY).matches || false);
+      return;
+    }
+    setSidePanelCollapsed(stored === "1");
   } catch {
-    setSidePanelCollapsed(false);
+    setSidePanelCollapsed(window.matchMedia?.(MOBILE_VIEW_QUERY).matches || false);
   }
 }
 
@@ -288,6 +294,7 @@ function renderTabs() {
 
     elements.tabBar.append(wrapper);
   }
+  elements.tabBar.append(elements.newTabButton);
   updateDocumentTitle();
 }
 
@@ -1257,14 +1264,38 @@ function renderNetworkStatus() {
   const network = latestNetwork;
   const open = !!network?.open;
   const opening = !!network?.opening;
-  const url = network?.networkUrls?.[0] || (open ? network?.localUrl : "");
+  const localUrl = network?.localUrl || `${window.location.origin}/`;
+  const networkUrls = Array.isArray(network?.networkUrls) ? network.networkUrls : [];
   elements.networkStatus.className = `network-status ${opening ? "opening" : open ? "open" : "closed"}`;
-  elements.networkStatus.textContent = opening ? "Opening to local network…" : open ? `Open to LAN${url ? ` · ${url}` : ""}` : "Closed · local only";
   elements.networkStatus.title = open
-    ? `Reachable on local network${(network?.networkUrls || []).length ? `:\n${network.networkUrls.join("\n")}` : " (no LAN address detected)"}`
+    ? `Reachable on local network${networkUrls.length ? `:\n${networkUrls.join("\n")}` : " (no LAN address detected)"}`
     : "Only reachable from this machine";
+
+  const heading = make("div", "network-status-heading", opening ? "Opening to local network…" : open ? "Open to local network" : "Closed · local only");
+  const detail = make("div", "network-status-detail", open ? "Use one of these URLs from a trusted device:" : "Only this machine can connect until you open the network listener.");
+  const list = make("div", "network-url-list");
+
+  const addUrl = (label, url) => {
+    if (!url) return;
+    const row = make("div", "network-status-url-row");
+    const labelNode = make("span", "network-status-url-label", label);
+    const link = make("a", "network-status-url", url);
+    link.href = url;
+    link.target = "_blank";
+    link.rel = "noreferrer";
+    row.append(labelNode, link);
+    list.append(row);
+  };
+
+  addUrl("Local", localUrl);
+  if (open) {
+    for (const url of networkUrls) addUrl("LAN", url);
+    if (networkUrls.length === 0) list.append(make("div", "network-status-empty", "No LAN address detected."));
+  }
+
+  elements.networkStatus.replaceChildren(heading, detail, list);
   elements.openNetworkButton.disabled = opening || open;
-  elements.openNetworkButton.textContent = opening ? "Opening…" : open ? "Open to network" : "Open to network";
+  elements.openNetworkButton.textContent = opening ? "Opening…" : open ? "Network open" : "Open to network";
 }
 
 async function refreshNetworkStatus() {
