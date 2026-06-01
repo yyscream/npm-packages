@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Pi Web UI</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -16,6 +17,10 @@
 
     <main class="layout">
       <section class="chat-panel">
+        <header class="terminal-tabs-shell">
+          <div id="tabBar" class="terminal-tabs" role="tablist" aria-label="Pi terminal tabs"></div>
+          <button id="newTabButton" class="terminal-new-tab-button" type="button" title="Start a separate isolated Pi terminal">+ Tab</button>
+        </header>
         <div id="widgetArea" class="widget-area"></div>
         <div id="chat" class="chat" aria-live="polite"></div>
         <div id="statusBar" class="statusbar" aria-live="polite"></div>
@@ -95,6 +100,11 @@
               </select>
               <button id="setThinkingButton" type="button">Set thinking</button>
             </div>
+            <div class="control-field network-control-field">
+              <label>Network</label>
+              <div id="networkStatus" class="network-status closed">Local only</div>
+              <button id="openNetworkButton" type="button">Open to network</button>
+            </div>
             <button id="abortButton" type="button" class="danger">Abort</button>
           </div>
           <h2>Session</h2>
@@ -115,6 +125,24 @@
         <p id="dialogMessage" class="muted"></p>
         <div id="dialogBody"></div>
         <menu id="dialogActions"></menu>
+      </form>
+    </dialog>
+
+    <dialog id="pathPickerDialog" class="extension-dialog path-picker-dialog">
+      <form method="dialog">
+        <h2 id="pathPickerTitle">Choose working directory</h2>
+        <div class="path-picker-current-row">
+          <p id="pathPickerCurrent" class="path-picker-current"></p>
+          <button id="pathPickerAddFastPickButton" type="button" class="path-picker-add-fast-pick">Add fast pick</button>
+        </div>
+        <div id="pathPickerFastPicks" class="path-picker-fast-picks" aria-label="Fast picks"></div>
+        <div id="pathPickerRoots" class="path-picker-roots"></div>
+        <div id="pathPickerList" class="path-picker-list" role="listbox" aria-label="Directories"></div>
+        <p id="pathPickerError" class="path-picker-error" hidden></p>
+        <menu>
+          <button id="pathPickerCancelButton" type="button">Cancel</button>
+          <button id="pathPickerChooseButton" type="button" class="primary">Use this directory</button>
+        </menu>
       </form>
     </dialog>
 

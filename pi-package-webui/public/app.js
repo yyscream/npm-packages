@@ -2,6 +2,8 @@ const $ = (selector) => document.querySelector(selector);
 
 const elements = {
   sessionLine: $("#sessionLine"),
+  tabBar: $("#tabBar"),
+  newTabButton: $("#newTabButton"),
   statusBar: $("#statusBar"),
   widgetArea: $("#widgetArea"),
   chat: $("#chat"),
@@ -26,6 +28,8 @@ const elements = {
   setModelButton: $("#setModelButton"),
   thinkingSelect: $("#thinkingSelect"),
   setThinkingButton: $("#setThinkingButton"),
+  networkStatus: $("#networkStatus"),
+  openNetworkButton: $("#openNetworkButton"),
   toggleSidePanelButton: $("#toggleSidePanelButton"),
   sidePanelExpandButton: $("#sidePanelExpandButton"),
   sidePanel: $("#sidePanel"),
@@ -38,9 +42,22 @@ const elements = {
   dialogMessage: $("#dialogMessage"),
   dialogBody: $("#dialogBody"),
   dialogActions: $("#dialogActions"),
+  pathPickerDialog: $("#pathPickerDialog"),
+  pathPickerTitle: $("#pathPickerTitle"),
+  pathPickerCurrent: $("#pathPickerCurrent"),
+  pathPickerAddFastPickButton: $("#pathPickerAddFastPickButton"),
+  pathPickerFastPicks: $("#pathPickerFastPicks"),
+  pathPickerRoots: $("#pathPickerRoots"),
+  pathPickerList: $("#pathPickerList"),
+  pathPickerError: $("#pathPickerError"),
+  pathPickerCancelButton: $("#pathPickerCancelButton"),
+  pathPickerChooseButton: $("#pathPickerChooseButton"),
 };
 
 let currentState = null;
+let tabs = [];
+let activeTabId = null;
+let tabDrafts = new Map();
 let streamBubble = null;
 let streamText = null;
 let streamThinking = null;
@@ -50,17 +67,21 @@ let refreshStateTimer = null;
 let refreshFooterTimer = null;
 let eventSource = null;
 let activeDialog = null;
+let pathPickerState = null;
 let availableCommands = [];
 let commandSuggestions = [];
 let commandSuggestIndex = 0;
 let latestStats = null;
 let latestWorkspace = null;
+let latestNetwork = null;
 let latestMessages = [];
 let currentRunStartedAt = null;
 let currentRunStreamChars = 0;
 let latestTokPerSecond = null;
 const dialogQueue = [];
 const SIDE_PANEL_STORAGE_KEY = "pi-webui-side-panel-collapsed";
+const TAB_STORAGE_KEY = "pi-webui-active-tab";
+const PATH_FAST_PICKS_STORAGE_KEY = "pi-webui-path-fast-picks";
 const statusEntries = new Map();
 const widgets = new Map();
 const gitWorkflow = {
@@ -92,6 +113,10 @@ function make(tag, className, text) {
   return node;
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function setSidePanelCollapsed(collapsed) {
   document.body.classList.toggle("side-panel-collapsed", collapsed);
   elements.toggleSidePanelButton.setAttribute("aria-expanded", collapsed ? "false" : "true");
@@ -113,8 +138,15 @@ function restoreSidePanelState() {
   }
 }
 
-async function api(path, { method = "GET", body } = {}) {
-  const response = await fetch(path, {
+function scopedApiPath(path, tabId = activeTabId) {
+  if (!tabId || !path.startsWith("/api/") || path === "/api/tabs" || path.startsWith("/api/tabs?") || path.startsWith("/api/tabs/")) return path;
+  const url = new URL(path, window.location.origin);
+  url.searchParams.set("tab", tabId);
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+
+async function api(path, { method = "GET", body, tabId = activeTabId, scoped = true } = {}) {
+  const response = await fetch(scoped ? scopedApiPath(path, tabId) : path, {
     method,
     headers: body === undefined ? undefined : { "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -124,6 +156,218 @@ async function api(path, { method = "GET", body } = {}) {
     throw new Error(data.error || data.message || JSON.stringify(data));
   }
   return data;
+}
+
+function activeTab() {
+  return tabs.find((tab) => tab.id === activeTabId) || null;
+}
+
+function rememberActiveTab() {
+  try {
+    if (activeTabId) localStorage.setItem(TAB_STORAGE_KEY, activeTabId);
+  } catch {
+    // Ignore storage failures; tabs still work for this page load.
+  }
+}
+
+function restoreStoredTabId() {
+  try {
+    return localStorage.getItem(TAB_STORAGE_KEY) || null;
+  } catch {
+    return null;
+  }
+}
+
+function updateDocumentTitle() {
+  const tab = activeTab();
+  document.title = tab ? `Pi Web UI · ${tab.title}` : "Pi Web UI";
+}
+
+function saveActiveDraft() {
+  if (activeTabId) tabDrafts.set(activeTabId, elements.promptInput.value || "");
+}
+
+function restoreActiveDraft() {
+  elements.promptInput.value = activeTabId ? tabDrafts.get(activeTabId) || "" : "";
+  renderCommandSuggestions();
+}
+
+function clearRefreshTimers() {
+  clearTimeout(refreshMessagesTimer);
+  clearTimeout(refreshStateTimer);
+  clearTimeout(refreshFooterTimer);
+  refreshMessagesTimer = null;
+  refreshStateTimer = null;
+  refreshFooterTimer = null;
+}
+
+function cancelPendingDialogs() {
+  const pending = activeDialog ? [activeDialog] : [];
+  pending.push(...dialogQueue.splice(0));
+  for (const request of pending) {
+    if (!request?.id || !["select", "confirm", "input", "editor"].includes(request.method)) continue;
+    api("/api/extension-ui-response", {
+      method: "POST",
+      body: { type: "extension_ui_response", id: request.id, cancelled: true },
+      tabId: request.tabId || activeTabId,
+    }).catch((error) => console.warn("failed to cancel stale extension dialog", error));
+  }
+  activeDialog = null;
+  if (elements.dialog.open) elements.dialog.close();
+}
+
+function resetActiveTabUi() {
+  clearRefreshTimers();
+  eventSource?.close();
+  eventSource = null;
+  currentState = null;
+  latestStats = null;
+  latestWorkspace = null;
+  latestMessages = [];
+  currentRunStartedAt = null;
+  currentRunStreamChars = 0;
+  latestTokPerSecond = null;
+  statusEntries.clear();
+  widgets.clear();
+  availableCommands = [];
+  commandSuggestions = [];
+  commandSuggestIndex = 0;
+  resetStreamBubble();
+  hideCommandSuggestions();
+  cancelPendingDialogs();
+  Object.assign(gitWorkflow, {
+    active: false,
+    step: "idle",
+    busy: false,
+    output: "",
+    error: "",
+    message: null,
+    messageRequestedAt: 0,
+  });
+  elements.chat.replaceChildren();
+  elements.stateDetails.replaceChildren();
+  elements.eventLog.replaceChildren();
+  elements.queueBox.textContent = "No queued messages.";
+  elements.queueBox.classList.add("muted");
+  elements.commandsBox.textContent = "Loading…";
+  elements.commandsBox.classList.add("muted");
+  elements.sessionLine.textContent = activeTab() ? "Connecting…" : "No terminal tabs.";
+  renderWidgets();
+  renderGitWorkflow();
+  renderFooter();
+}
+
+function renderTabs() {
+  elements.tabBar.replaceChildren();
+  for (const tab of tabs) {
+    const isActive = tab.id === activeTabId;
+    const wrapper = make("div", `terminal-tab${isActive ? " active" : ""}${tab.running ? "" : " stopped"}`);
+    const button = make("button", "terminal-tab-button");
+    button.type = "button";
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-selected", isActive ? "true" : "false");
+    button.title = `${tab.title}${tab.running ? ` · pid ${tab.pid || "starting"}` : " · stopped"}`;
+    button.append(
+      make("span", "terminal-tab-title", tab.title),
+      make("span", "terminal-tab-meta", tab.running ? `pid ${tab.pid || "…"}` : "stopped"),
+    );
+    button.addEventListener("click", () => switchTab(tab.id));
+    wrapper.append(button);
+
+    if (tabs.length > 1) {
+      const close = make("button", "terminal-tab-close", "×");
+      close.type = "button";
+      close.title = `Close ${tab.title}`;
+      close.setAttribute("aria-label", `Close ${tab.title}`);
+      close.addEventListener("click", (event) => {
+        event.stopPropagation();
+        closeTerminalTab(tab.id);
+      });
+      wrapper.append(close);
+    }
+
+    elements.tabBar.append(wrapper);
+  }
+  updateDocumentTitle();
+}
+
+async function refreshTabs({ selectStored = false } = {}) {
+  const response = await api("/api/tabs", { scoped: false });
+  tabs = response.data?.tabs || [];
+  const stored = selectStored ? restoreStoredTabId() : null;
+  if (!activeTabId || !tabs.some((tab) => tab.id === activeTabId)) {
+    activeTabId = (stored && tabs.some((tab) => tab.id === stored) ? stored : tabs[0]?.id) || null;
+    rememberActiveTab();
+  }
+  renderTabs();
+  return tabs;
+}
+
+async function switchTab(tabId) {
+  if (!tabId || tabId === activeTabId || !tabs.some((tab) => tab.id === tabId)) return;
+  saveActiveDraft();
+  activeTabId = tabId;
+  rememberActiveTab();
+  resetActiveTabUi();
+  renderTabs();
+  restoreActiveDraft();
+  connectEvents();
+  await refreshAll();
+}
+
+async function createTerminalTab() {
+  elements.newTabButton.disabled = true;
+  try {
+    const response = await api("/api/tabs", { method: "POST", body: { cwd: activeTab()?.cwd }, scoped: false });
+    tabs = response.data?.tabs || tabs;
+    const tab = response.data?.tab;
+    renderTabs();
+    if (tab?.id) {
+      await switchTab(tab.id);
+      addEvent(`created isolated terminal ${tab.title}`, "info");
+    }
+  } catch (error) {
+    addEvent(error.message, "error");
+  } finally {
+    elements.newTabButton.disabled = false;
+  }
+}
+
+async function closeTerminalTab(tabId) {
+  const tab = tabs.find((item) => item.id === tabId);
+  if (!tab || tabs.length <= 1) return;
+  if (!confirm(`Close ${tab.title}? This terminates its isolated Pi process.`)) return;
+
+  const wasActive = tabId === activeTabId;
+  const fallbackTabId = tabs.find((item) => item.id !== tabId)?.id || null;
+  try {
+    if (wasActive) eventSource?.close();
+    const response = await api(`/api/tabs/${encodeURIComponent(tabId)}`, { method: "DELETE", scoped: false });
+    tabs = response.data?.tabs || tabs.filter((item) => item.id !== tabId);
+    tabDrafts.delete(tabId);
+    if (wasActive) {
+      activeTabId = (fallbackTabId && tabs.some((item) => item.id === fallbackTabId) ? fallbackTabId : tabs[0]?.id) || null;
+      rememberActiveTab();
+      resetActiveTabUi();
+      renderTabs();
+      restoreActiveDraft();
+      connectEvents();
+      if (activeTabId) await refreshAll();
+    } else {
+      renderTabs();
+    }
+  } catch (error) {
+    addEvent(error.message, "error");
+  }
+}
+
+async function initializeTabs() {
+  await refreshTabs({ selectStored: true });
+  resetActiveTabUi();
+  renderTabs();
+  restoreActiveDraft();
+  connectEvents();
+  if (activeTabId) await refreshAll();
 }
 
 function addEvent(message, level = "info") {
@@ -226,11 +470,213 @@ function footerMetric(icon, label, value, tone = "") {
   return node;
 }
 
-function footerMeta(label, value, className = "") {
-  const node = make("span", `footer-meta ${className}`.trim());
+function footerMeta(label, value, className = "", options = {}) {
+  const isAction = typeof options.onClick === "function";
+  const node = make(isAction ? "button" : "span", `footer-meta ${className}${isAction ? " footer-meta-action" : ""}`.trim());
+  if (isAction) {
+    node.type = "button";
+    node.addEventListener("click", options.onClick);
+  }
   node.append(make("span", "footer-meta-label", label), make("span", "footer-meta-value", value));
-  node.title = `${label}: ${value}`;
+  node.title = options.title || `${label}: ${value}`;
   return node;
+}
+
+function pathPickerButton(label, title, onClick, className = "") {
+  const button = make("button", className, label);
+  button.type = "button";
+  button.title = title || label;
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+function setPathPickerError(message) {
+  elements.pathPickerError.textContent = message || "";
+  elements.pathPickerError.hidden = !message;
+}
+
+function normalizeFastPicks(value) {
+  const items = Array.isArray(value) ? value : [];
+  const seen = new Set();
+  const picks = [];
+  for (const item of items) {
+    const cwd = typeof item === "string" ? item : String(item?.cwd || "");
+    if (!cwd || seen.has(cwd)) continue;
+    seen.add(cwd);
+    picks.push({ cwd, displayCwd: String(item?.displayCwd || cwd) });
+  }
+  return picks.slice(0, 30);
+}
+
+function loadFastPicks() {
+  try {
+    return normalizeFastPicks(JSON.parse(localStorage.getItem(PATH_FAST_PICKS_STORAGE_KEY) || "[]"));
+  } catch {
+    return [];
+  }
+}
+
+function saveFastPicks(picks) {
+  try {
+    localStorage.setItem(PATH_FAST_PICKS_STORAGE_KEY, JSON.stringify(normalizeFastPicks(picks)));
+  } catch (error) {
+    addEvent(`failed to save path fast picks: ${error.message}`, "error");
+  }
+}
+
+function fastPickLabel(pick) {
+  const cwd = String(pick.cwd || pick.displayCwd || "");
+  const trimmed = cwd.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (!trimmed) return cwd || "directory";
+  return trimmed.split("/").filter(Boolean).pop() || trimmed;
+}
+
+function currentFastPick() {
+  if (!pathPickerState?.cwd) return null;
+  return { cwd: pathPickerState.cwd, displayCwd: elements.pathPickerCurrent.textContent || pathPickerState.cwd };
+}
+
+function updateAddFastPickButton() {
+  const pick = currentFastPick();
+  const exists = !!pick && loadFastPicks().some((item) => item.cwd === pick.cwd);
+  elements.pathPickerAddFastPickButton.disabled = !pick || exists;
+  elements.pathPickerAddFastPickButton.textContent = exists ? "Fast pick added" : "Add fast pick";
+}
+
+function renderFastPicks() {
+  const picks = loadFastPicks();
+  elements.pathPickerFastPicks.replaceChildren();
+  if (picks.length === 0) {
+    elements.pathPickerFastPicks.append(make("div", "path-picker-fast-picks-empty muted", "No fast picks yet."));
+    updateAddFastPickButton();
+    return;
+  }
+
+  for (const pick of picks) {
+    const item = make("span", "path-picker-fast-pick");
+    const jump = pathPickerButton(fastPickLabel(pick), pick.cwd, () => loadPathPickerDirectory(pick.cwd), "path-picker-fast-pick-button");
+    const remove = pathPickerButton("×", `Remove fast pick ${pick.cwd}`, () => {
+      saveFastPicks(loadFastPicks().filter((item) => item.cwd !== pick.cwd));
+      renderFastPicks();
+    }, "path-picker-fast-pick-remove");
+    item.append(jump, remove);
+    elements.pathPickerFastPicks.append(item);
+  }
+  updateAddFastPickButton();
+}
+
+function addCurrentFastPick() {
+  const pick = currentFastPick();
+  if (!pick) return;
+  const picks = loadFastPicks().filter((item) => item.cwd !== pick.cwd);
+  picks.unshift(pick);
+  saveFastPicks(picks);
+  renderFastPicks();
+}
+
+function renderPathPicker(data) {
+  if (!pathPickerState) return;
+  pathPickerState.cwd = data.cwd;
+  elements.pathPickerCurrent.textContent = data.displayCwd || data.cwd;
+  elements.pathPickerCurrent.title = data.cwd;
+  elements.pathPickerChooseButton.disabled = false;
+  elements.pathPickerChooseButton.textContent = "Use this directory";
+  setPathPickerError(data.truncated ? "Showing the first 500 directories." : "");
+  renderFastPicks();
+
+  elements.pathPickerRoots.replaceChildren();
+  if (data.parent) {
+    elements.pathPickerRoots.append(pathPickerButton("↑ Parent", data.parent, () => loadPathPickerDirectory(data.parent), "path-picker-root-button"));
+  }
+  for (const root of data.roots || []) {
+    elements.pathPickerRoots.append(pathPickerButton(root.label, root.cwd, () => loadPathPickerDirectory(root.cwd), "path-picker-root-button"));
+  }
+
+  elements.pathPickerList.replaceChildren();
+  if (!data.directories?.length) {
+    elements.pathPickerList.append(make("div", "path-picker-empty muted", "No subdirectories."));
+    return;
+  }
+
+  for (const directory of data.directories) {
+    const button = pathPickerButton(`${directory.name}/`, directory.cwd, () => loadPathPickerDirectory(directory.cwd), `path-picker-directory${directory.hidden ? " hidden-directory" : ""}`);
+    button.setAttribute("role", "option");
+    elements.pathPickerList.append(button);
+  }
+}
+
+async function loadPathPickerDirectory(cwd) {
+  if (!pathPickerState) return;
+  const requestId = ++pathPickerState.requestId;
+  elements.pathPickerAddFastPickButton.disabled = true;
+  elements.pathPickerChooseButton.disabled = true;
+  elements.pathPickerCurrent.textContent = "Loading…";
+  setPathPickerError("");
+
+  try {
+    const query = cwd ? `?path=${encodeURIComponent(cwd)}` : "";
+    const response = await api(`/api/directories${query}`);
+    if (!pathPickerState || pathPickerState.requestId !== requestId) return;
+    renderPathPicker(response.data || {});
+  } catch (error) {
+    if (!pathPickerState || pathPickerState.requestId !== requestId) return;
+    elements.pathPickerChooseButton.disabled = false;
+    elements.pathPickerCurrent.textContent = pathPickerState.cwd || "Unable to load directory";
+    setPathPickerError(error.message);
+    updateAddFastPickButton();
+  }
+}
+
+function closePathPicker(cwd) {
+  const state = pathPickerState;
+  if (!state) return;
+  pathPickerState = null;
+  if (elements.pathPickerDialog.open) elements.pathPickerDialog.close();
+  state.resolve(cwd || null);
+}
+
+function pickCwd(tab, initialCwd) {
+  if (pathPickerState) return Promise.resolve(null);
+
+  return new Promise((resolve) => {
+    pathPickerState = { tabId: tab.id, cwd: initialCwd, requestId: 0, resolve };
+    elements.pathPickerTitle.textContent = `Choose CWD for ${tab.title}`;
+    elements.pathPickerCurrent.textContent = "Loading…";
+    elements.pathPickerFastPicks.replaceChildren();
+    elements.pathPickerRoots.replaceChildren();
+    elements.pathPickerList.replaceChildren();
+    setPathPickerError("");
+    elements.pathPickerAddFastPickButton.disabled = true;
+    elements.pathPickerChooseButton.disabled = true;
+    elements.pathPickerDialog.showModal();
+    loadPathPickerDirectory(initialCwd);
+  });
+}
+
+async function changeActiveTabCwd() {
+  const tab = activeTab();
+  if (!tab) return;
+
+  const currentCwd = latestWorkspace?.cwd || tab.cwd || "";
+  const cwd = await pickCwd(tab, currentCwd);
+  if (!cwd || cwd === currentCwd) return;
+  if (!window.confirm(`Restart ${tab.title} in:\n${cwd}\n\nCurrent in-flight work in this tab will be stopped.`)) return;
+
+  saveActiveDraft();
+  try {
+    const response = await api(`/api/tabs/${encodeURIComponent(tab.id)}`, { method: "PATCH", body: { cwd }, scoped: false });
+    tabs = response.data?.tabs || tabs;
+    activeTabId = response.data?.tab?.id || activeTabId;
+    resetActiveTabUi();
+    renderTabs();
+    restoreActiveDraft();
+    connectEvents();
+    await refreshAll();
+    const changedCwd = response.data?.tab?.cwd || cwd;
+    addEvent(response.data?.changed === false ? `cwd unchanged: ${changedCwd}` : `changed ${tab.title} cwd to ${changedCwd}`, "info");
+  } catch (error) {
+    addEvent(error.message, "error");
+  }
 }
 
 function renderFooter() {
@@ -246,10 +692,11 @@ function renderFooter() {
     ? `${contextUsage.percent !== null && contextUsage.percent !== undefined ? `${Number(contextUsage.percent).toFixed(1)}% / ` : ""}${formatTokenCount(contextUsage.contextWindow)}`
     : "?";
 
+  const tab = activeTab();
   const git = latestWorkspace?.git;
   const branchLabel = git?.isRepo ? git.branch || "detached" : "no repo";
   const changeLabel = git?.isRepo ? `✎ ${git.changed ?? 0}  ◌ ${git.untracked ?? 0}` : "no git";
-  const workspaceLabel = latestWorkspace?.displayCwd || "loading…";
+  const workspaceLabel = latestWorkspace?.displayCwd || (tab?.cwd ? normalizeDisplayPath(tab.cwd) : "loading…");
   const runtime = latestWorkspace?.uptimeMs ? formatDuration(latestWorkspace.uptimeMs) : "--";
   const modelLine = `${shortModelLabel(currentState?.model)} · ${currentState?.thinkingLevel || "?"}`;
 
@@ -266,7 +713,10 @@ function renderFooter() {
 
   const row2 = make("div", "footer-line footer-line-meta");
   row2.append(
-    footerMeta("cwd", workspaceLabel, "footer-workspace"),
+    footerMeta("cwd", workspaceLabel, "footer-workspace", tab ? {
+      onClick: changeActiveTabCwd,
+      title: `Change cwd for ${tab.title}: ${workspaceLabel}`,
+    } : {}),
     footerMeta("git", branchLabel, "footer-branch"),
     footerMeta("changes", changeLabel, "footer-changes"),
     footerMeta("runtime", `⏱ ${runtime} · Agent`, "footer-runtime"),
@@ -803,6 +1253,31 @@ async function refreshWorkspace() {
   renderFooter();
 }
 
+function renderNetworkStatus() {
+  const network = latestNetwork;
+  const open = !!network?.open;
+  const opening = !!network?.opening;
+  const url = network?.networkUrls?.[0] || (open ? network?.localUrl : "");
+  elements.networkStatus.className = `network-status ${opening ? "opening" : open ? "open" : "closed"}`;
+  elements.networkStatus.textContent = opening ? "Opening to local network…" : open ? `Open to LAN${url ? ` · ${url}` : ""}` : "Closed · local only";
+  elements.networkStatus.title = open
+    ? `Reachable on local network${(network?.networkUrls || []).length ? `:\n${network.networkUrls.join("\n")}` : " (no LAN address detected)"}`
+    : "Only reachable from this machine";
+  elements.openNetworkButton.disabled = opening || open;
+  elements.openNetworkButton.textContent = opening ? "Opening…" : open ? "Open to network" : "Open to network";
+}
+
+async function refreshNetworkStatus() {
+  try {
+    const response = await api("/api/network", { scoped: false });
+    latestNetwork = response.data || null;
+  } catch {
+    const health = await api("/api/health", { scoped: false });
+    latestNetwork = health.network || { open: false, opening: false, localUrl: window.location.origin };
+  }
+  renderNetworkStatus();
+}
+
 async function refreshFooterData() {
   await Promise.allSettled([refreshStats(), refreshWorkspace()]);
 }
@@ -999,9 +1474,39 @@ async function refreshCommands() {
 }
 
 async function refreshAll() {
-  const results = await Promise.allSettled([refreshState(), refreshMessages(), refreshModels(), refreshCommands(), refreshStats(), refreshWorkspace()]);
+  const results = await Promise.allSettled([refreshState(), refreshMessages(), refreshModels(), refreshCommands(), refreshStats(), refreshWorkspace(), refreshNetworkStatus()]);
   for (const result of results) {
     if (result.status === "rejected") addEvent(result.reason.message || String(result.reason), "error");
+  }
+}
+
+async function openToNetwork() {
+  if (latestNetwork?.open) return;
+  if (!confirm("Open Pi Web UI to your local network?\n\nThe Web UI has no authentication and can control Pi/tools. Only do this on a trusted LAN.")) return;
+
+  elements.openNetworkButton.disabled = true;
+  elements.openNetworkButton.textContent = "Opening…";
+  try {
+    await api("/api/network/open", { method: "POST", body: {}, scoped: false });
+    addEvent("opening webui to local network", "warn");
+    for (let attempt = 0; attempt < 20; attempt++) {
+      await delay(350);
+      try {
+        await refreshNetworkStatus();
+        if (latestNetwork?.open) {
+          const url = latestNetwork.networkUrls?.[0];
+          addEvent(`webui open to local network${url ? `: ${url}` : ""}`, "warn");
+          return;
+        }
+      } catch {
+        // The listener briefly drops while rebinding; retry.
+      }
+    }
+    await refreshNetworkStatus();
+  } catch (error) {
+    addEvent(error.message, "error");
+  } finally {
+    renderNetworkStatus();
   }
 }
 
@@ -1028,6 +1533,7 @@ async function sendPrompt(kind = "prompt") {
 }
 
 function handleExtensionUiRequest(request) {
+  request.tabId ||= activeTabId;
   switch (request.method) {
     case "notify":
       addEvent(request.message || "notification", request.notifyType === "error" ? "error" : request.notifyType === "warning" ? "warn" : "info");
@@ -1063,8 +1569,9 @@ function handleExtensionUiRequest(request) {
 }
 
 async function sendDialogResponse(payload) {
+  const { tabId = activeTabId, ...body } = payload;
   try {
-    await api("/api/extension-ui-response", { method: "POST", body: payload });
+    await api("/api/extension-ui-response", { method: "POST", body, tabId });
   } catch (error) {
     addEvent(error.message, "error");
   } finally {
@@ -1092,36 +1599,36 @@ function showNextDialog() {
   elements.dialogBody.replaceChildren();
   elements.dialogActions.replaceChildren();
 
-  const cancel = () => sendDialogResponse({ type: "extension_ui_response", id: request.id, cancelled: true });
+  const cancel = () => sendDialogResponse({ type: "extension_ui_response", id: request.id, cancelled: true, tabId: request.tabId });
 
   if (request.method === "select") {
     const options = make("div", "dialog-options");
     for (const option of request.options || []) {
       const button = make("button", undefined, String(option));
       button.type = "button";
-      button.addEventListener("click", () => sendDialogResponse({ type: "extension_ui_response", id: request.id, value: String(option) }));
+      button.addEventListener("click", () => sendDialogResponse({ type: "extension_ui_response", id: request.id, value: String(option), tabId: request.tabId }));
       options.append(button);
     }
     elements.dialogBody.append(options);
     addDialogButton("Cancel", cancel);
   } else if (request.method === "confirm") {
     addDialogButton("Cancel", cancel);
-    addDialogButton("No", () => sendDialogResponse({ type: "extension_ui_response", id: request.id, confirmed: false }));
-    addDialogButton("Yes", () => sendDialogResponse({ type: "extension_ui_response", id: request.id, confirmed: true }), "primary");
+    addDialogButton("No", () => sendDialogResponse({ type: "extension_ui_response", id: request.id, confirmed: false, tabId: request.tabId }));
+    addDialogButton("Yes", () => sendDialogResponse({ type: "extension_ui_response", id: request.id, confirmed: true, tabId: request.tabId }), "primary");
   } else if (request.method === "input") {
     const input = make("input", "dialog-input");
     input.value = request.prefill || "";
     input.placeholder = request.placeholder || "";
     elements.dialogBody.append(input);
     addDialogButton("Cancel", cancel);
-    addDialogButton("Submit", () => sendDialogResponse({ type: "extension_ui_response", id: request.id, value: input.value }), "primary");
+    addDialogButton("Submit", () => sendDialogResponse({ type: "extension_ui_response", id: request.id, value: input.value, tabId: request.tabId }), "primary");
     setTimeout(() => input.focus(), 0);
   } else if (request.method === "editor") {
     const textarea = make("textarea", "dialog-editor");
     textarea.value = request.prefill || "";
     elements.dialogBody.append(textarea);
     addDialogButton("Cancel", cancel);
-    addDialogButton("Submit", () => sendDialogResponse({ type: "extension_ui_response", id: request.id, value: textarea.value }), "primary");
+    addDialogButton("Submit", () => sendDialogResponse({ type: "extension_ui_response", id: request.id, value: textarea.value, tabId: request.tabId }), "primary");
     setTimeout(() => textarea.focus(), 0);
   }
 
@@ -1131,16 +1638,33 @@ function showNextDialog() {
 function handleEvent(event) {
   switch (event.type) {
     case "webui_connected":
-      addEvent(`connected to webui for ${event.cwd}`);
+      addEvent(`connected to ${event.tabTitle || "terminal"} for ${event.cwd}`);
+      refreshTabs().catch((error) => addEvent(error.message, "error"));
       break;
     case "pi_process_start":
       addEvent(`started pi rpc pid ${event.pid}`);
+      refreshTabs().catch((error) => addEvent(error.message, "error"));
+      break;
+    case "webui_tab_restarting":
+      addEvent(`restarting ${event.tabTitle || "terminal"} in ${event.cwd}`);
+      break;
+    case "webui_cwd_changed":
+      addEvent(`${event.tabTitle || "terminal"} cwd changed to ${event.cwd}`);
+      refreshTabs().catch((error) => addEvent(error.message, "error"));
+      scheduleRefreshFooter();
+      break;
+    case "webui_network_rebinding":
+      addEvent(`webui network listener rebinding on ${event.host}:${event.port}; event stream will reconnect`, "warn");
+      latestNetwork = { ...(latestNetwork || {}), opening: true };
+      renderNetworkStatus();
       break;
     case "pi_process_exit":
       addEvent(`pi rpc exited (${event.code ?? event.signal ?? "unknown"})`, "error");
+      refreshTabs().catch((error) => addEvent(error.message, "error"));
       break;
     case "pi_process_error":
       addEvent(event.error || "pi rpc process error", "error");
+      refreshTabs().catch((error) => addEvent(error.message, "error"));
       break;
     case "pi_stderr":
       addEvent(event.text.trim(), "warn");
@@ -1216,7 +1740,8 @@ function handleEvent(event) {
 
 function connectEvents() {
   eventSource?.close();
-  eventSource = new EventSource("/api/events");
+  if (!activeTabId) return;
+  eventSource = new EventSource(`/api/events?tab=${encodeURIComponent(activeTabId)}`);
   eventSource.onmessage = (message) => {
     try {
       handleEvent(JSON.parse(message.data));
@@ -1233,6 +1758,7 @@ elements.composer.addEventListener("submit", (event) => {
 });
 elements.steerButton.addEventListener("click", () => sendPrompt("steer"));
 elements.followUpButton.addEventListener("click", () => sendPrompt("follow-up"));
+elements.newTabButton.addEventListener("click", createTerminalTab);
 elements.gitWorkflowButton.addEventListener("click", startGitWorkflow);
 elements.gitWorkflowCancelButton.addEventListener("click", cancelGitWorkflow);
 elements.abortButton.addEventListener("click", async () => {
@@ -1285,11 +1811,23 @@ elements.setThinkingButton.addEventListener("click", async () => {
     addEvent(error.message, "error");
   }
 });
+elements.openNetworkButton.addEventListener("click", openToNetwork);
 elements.toggleSidePanelButton.addEventListener("click", () => {
   setSidePanelCollapsed(true);
 });
 elements.sidePanelExpandButton.addEventListener("click", () => {
   setSidePanelCollapsed(false);
+});
+
+elements.pathPickerAddFastPickButton.addEventListener("click", addCurrentFastPick);
+elements.pathPickerCancelButton.addEventListener("click", () => closePathPicker(null));
+elements.pathPickerChooseButton.addEventListener("click", () => closePathPicker(pathPickerState?.cwd || null));
+elements.pathPickerDialog.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closePathPicker(null);
+});
+elements.pathPickerDialog.addEventListener("close", () => {
+  if (pathPickerState) closePathPicker(null);
 });
 
 elements.promptInput.addEventListener("keydown", (event) => {
@@ -1336,5 +1874,4 @@ elements.promptInput.addEventListener("blur", () => {
 });
 
 restoreSidePanelState();
-connectEvents();
-refreshAll();
+initializeTabs().catch((error) => addEvent(error.message, "error"));

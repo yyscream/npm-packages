@@ -48,14 +48,15 @@ pi-webui --cwd /path/to/project
 ## Features
 
 - Browser chat with Pi over RPC
+- Isolated terminal tabs: each Web UI tab starts its own separate `pi --mode rpc` subprocess, event stream, session state, and prompt draft
 - Live assistant text streaming, including streamed thinking blocks when exposed by the provider
 - Prompt, steer, follow-up, abort, new session, and manual compact controls
 - Busy-session behavior selector for follow-up vs steer
 - Model and thinking-level controls
 - Slash-command autocomplete while typing `/...`
 - Tool, process, compaction, queue, and extension event log
-- Collapsible side panel with session state, queue, available commands, and events
-- Pi-style footer with token, cache, estimated Pi-context tokens, speed, cost, context usage, cwd, git branch, changes, runtime, model, and thinking level
+- Collapsible side panel with session state, queue, available commands, events, and local-network exposure status/control
+- Pi-style footer with token, cache, estimated Pi-context tokens, speed, cost, context usage, clickable per-tab cwd picker with browser-saved fast picks, git branch, changes, runtime, model, and thinking level
 - Guided Git workflow: `git add .`, ask Pi to run `/git-staged-msg`, preview short/long messages, commit with the selected message, and `git push`
 - Basic rendering for user, assistant, tool result, bash execution, and thinking messages
 - Basic extension UI bridge for `notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`, `select`, `confirm`, `input`, and `editor`
@@ -89,7 +90,7 @@ Examples:
 /start-webui --name browser -- --model anthropic/claude-sonnet-4-5:high
 ```
 
-If a compatible Web UI is already running on the target URL, `/start-webui` reuses it and opens the browser instead of spawning another server.
+If a compatible Web UI is already running on the target URL, `/start-webui` stops that instance first, then starts a fresh server for the current cwd and opens it.
 
 ## CLI
 
@@ -102,7 +103,7 @@ Options:
 ```text
   --host <host>       HTTP bind host (default: 127.0.0.1)
   --port <port>       HTTP port (default: 31415)
-  --cwd <path>        Working directory for the Pi session (default: current dir)
+  --cwd <path>        Default working directory for Pi tabs (default: current dir)
   --pi <command>      Pi executable to spawn (default: bundled dependency, then "pi")
   --no-session        Start Pi RPC with --no-session
   --name <name>       Initial Pi session name
@@ -138,13 +139,13 @@ This workflow assumes `/git-staged-msg` is available in the Pi session and write
 
 ## How it works
 
-`pi-webui` starts a Pi RPC subprocess:
+`pi-webui` starts a Pi RPC subprocess for the initial browser terminal tab, and each additional Web UI tab starts another isolated subprocess:
 
 ```bash
 pi --mode rpc
 ```
 
-With options, the spawned command becomes:
+With options, each spawned command becomes:
 
 ```bash
 pi --mode rpc [--no-session] [--name <name>] [...extra Pi args]
@@ -153,15 +154,20 @@ pi --mode rpc [--no-session] [--name <name>] [...extra Pi args]
 The local server exposes:
 
 - static files from `public/`
-- HTTP endpoints for prompt/session/model/thinking/compact/git actions
-- `/api/events` as a Server-Sent Events stream for Pi RPC events
-- `/api/extension-ui-response` for browser responses to extension UI prompts
+- `GET /api/tabs`, `POST /api/tabs`, `PATCH /api/tabs/:id`, and `DELETE /api/tabs/:id` for isolated Web UI terminal tabs and per-tab cwd changes
+- `GET /api/directories?tab=<tabId>&path=<path>` for the browser cwd picker
+- `GET /api/network` and localhost-only `POST /api/network/open` for local-network exposure status/control
+- `POST /api/shutdown` for localhost-only graceful restarts from `/start-webui`
+- HTTP endpoints for prompt/session/model/thinking/compact/git actions; tab-scoped calls use `?tab=<tabId>`
+- `/api/events?tab=<tabId>` as a per-tab Server-Sent Events stream for Pi RPC events
+- `/api/extension-ui-response?tab=<tabId>` for browser responses to extension UI prompts
 
 Pi stdout is read as JSONL and split only on `\n`, matching Pi RPC framing.
 
 ## Network and safety notes
 
 - Default bind is localhost-only: `127.0.0.1:31415`.
-- `--host 0.0.0.0` makes the UI reachable from the network and is unsafe unless the network is trusted.
+- The side-panel "Open to network" button rebinds the current server to `0.0.0.0` and shows LAN URLs when available.
+- `--host 0.0.0.0` also makes the UI reachable from the network and is unsafe unless the network is trusted.
 - The UI is intended as a local companion, not a hardened multi-user web service.
 - Browser actions can trigger Pi tools, shell commands, file edits, and git operations according to the spawned Pi session's permissions.

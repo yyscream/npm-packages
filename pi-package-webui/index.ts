@@ -1,5 +1,6 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
 import path from "node:path";
+import type { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
@@ -19,6 +20,14 @@ type StartWebuiOptions = {
   name?: string;
   piArgs: string[];
 };
+
+type ExistingWebui = {
+  webuiVersion?: string;
+  webuiPid?: number;
+  piPid?: number;
+};
+
+type WebuiChild = ChildProcessByStdio<null, Readable, Readable>;
 
 function tokenizeArgs(input: string): string[] {
   const tokens: string[] = [];
@@ -125,18 +134,143 @@ function urlFor(options: StartWebuiOptions): string {
   return `http://${host}:${options.port}/`;
 }
 
-async function probeExistingWebui(url: string): Promise<boolean> {
+async function fetchJsonWithTimeout(url: string, init: RequestInit = {}, timeoutMs = 900): Promise<{ ok: boolean; status: number; body: any } | null> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 900);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(`${url.replace(/\/$/, "")}/api/health`, { signal: controller.signal });
+    const response = await fetch(url, { ...init, signal: controller.signal });
     const body = await response.json().catch(() => undefined);
-    return response.ok && body?.ok === true && typeof body.webuiVersion === "string";
+    return { ok: response.ok, status: response.status, body };
   } catch {
-    return false;
+    return null;
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function probeExistingWebui(url: string): Promise<ExistingWebui | null> {
+  const result = await fetchJsonWithTimeout(`${url.replace(/\/$/, "")}/api/health`);
+  const body = result?.body;
+  if (!result?.ok || body?.ok !== true || typeof body.webuiVersion !== "string") return null;
+  return body;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForWebuiToStop(url: string, timeoutMs = 7_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!(await probeExistingWebui(url))) return true;
+    await sleep(180);
+  }
+  return !(await probeExistingWebui(url));
+}
+
+async function requestWebuiShutdown(url: string): Promise<boolean> {
+  const result = await fetchJsonWithTimeout(`${url.replace(/\/$/, "")}/api/shutdown`, { method: "POST" }, 1_500);
+  return result?.ok === true && result.body?.ok === true;
+}
+
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code === "EPERM";
+  }
+}
+
+async function terminatePid(pid: number): Promise<void> {
+  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid || !isProcessRunning(pid)) return;
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    return;
+  }
+
+  const deadline = Date.now() + 4_000;
+  while (Date.now() < deadline) {
+    if (!isProcessRunning(pid)) return;
+    await sleep(160);
+  }
+
+  try {
+    if (isProcessRunning(pid)) process.kill(pid, "SIGKILL");
+  } catch {
+    // Ignore kill races; the restart path verifies the port separately.
+  }
+}
+
+function runCommand(command: string, args: string[], timeoutMs = 1_500): Promise<{ exitCode?: number; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const finish = (result: { exitCode?: number; stdout: string; stderr: string }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve(result);
+    };
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish({ stdout, stderr });
+    }, timeoutMs);
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+      if (stdout.length > 100_000) stdout = stdout.slice(-100_000);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+      if (stderr.length > 20_000) stderr = stderr.slice(-20_000);
+    });
+    child.on("error", (error) => finish({ stdout, stderr: stderr || (error instanceof Error ? error.message : String(error)) }));
+    child.on("exit", (exitCode) => finish({ exitCode: exitCode ?? undefined, stdout, stderr }));
+  });
+}
+
+function commandLooksLikeWebui(command: string, options: StartWebuiOptions): boolean {
+  if (!command.includes("pi-webui.mjs")) return false;
+  const escapedPort = String(options.port).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^|\\s)--port\\s+${escapedPort}(?:\\s|$)`).test(command);
+}
+
+async function findWebuiPidsByCommand(options: StartWebuiOptions): Promise<number[]> {
+  if (process.platform === "win32") return [];
+  let result = await runCommand("ps", ["-Ao", "pid=,args="], 1_500);
+  if (result.exitCode !== 0) result = await runCommand("ps", ["-eo", "pid=,args="], 1_500);
+  if (result.exitCode !== 0) return [];
+
+  const pids: number[] = [];
+  for (const line of result.stdout.split(/\r?\n/)) {
+    const match = line.match(/^\s*(\d+)\s+(.+)$/);
+    if (!match) continue;
+    const pid = Number.parseInt(match[1], 10);
+    const command = match[2];
+    if (pid !== process.pid && commandLooksLikeWebui(command, options)) pids.push(pid);
+  }
+  return [...new Set(pids)];
+}
+
+async function stopExistingWebui(url: string, options: StartWebuiOptions, existing: ExistingWebui): Promise<void> {
+  if (await requestWebuiShutdown(url)) {
+    if (await waitForWebuiToStop(url)) return;
+  }
+
+  if (Number.isInteger(existing.webuiPid)) {
+    await terminatePid(existing.webuiPid!);
+    if (await waitForWebuiToStop(url)) return;
+  }
+
+  for (const pid of await findWebuiPidsByCommand(options)) {
+    await terminatePid(pid);
+  }
+  if (await waitForWebuiToStop(url)) return;
+
+  throw new Error(`Existing Pi Web UI is still running at ${url}. Stop it manually and retry.`);
 }
 
 function openDefaultBrowser(url: string): void {
@@ -158,15 +292,15 @@ function openDefaultBrowser(url: string): void {
   child.unref();
 }
 
-function releaseStartedChild(child: ChildProcessWithoutNullStreams): void {
+function releaseStartedChild(child: WebuiChild): void {
   child.stdout.removeAllListeners("data");
   child.stderr.removeAllListeners("data");
-  child.stdout.unref?.();
-  child.stderr.unref?.();
+  (child.stdout as Readable & { unref?: () => void }).unref?.();
+  (child.stderr as Readable & { unref?: () => void }).unref?.();
   child.unref();
 }
 
-function terminateFailedChild(child: ChildProcessWithoutNullStreams): void {
+function terminateFailedChild(child: WebuiChild): void {
   if (child.exitCode === null) child.kill("SIGTERM");
   setTimeout(() => {
     if (child.exitCode === null) child.kill("SIGKILL");
@@ -175,7 +309,7 @@ function terminateFailedChild(child: ChildProcessWithoutNullStreams): void {
   child.stderr.destroy();
 }
 
-function waitForWebuiUrl(child: ChildProcessWithoutNullStreams): Promise<string> {
+function waitForWebuiUrl(child: WebuiChild): Promise<string> {
   return new Promise((resolve, reject) => {
     let settled = false;
     let output = "";
@@ -249,17 +383,15 @@ export default function (pi: ExtensionAPI) {
       const url = urlFor(options);
       ctx.ui.setStatus("pi-webui", "starting webui…");
       try {
-        if (await probeExistingWebui(url)) {
-          if (options.open) openDefaultBrowser(url);
-          ctx.ui.notify(`Pi Web UI is already running:\n${url}`, "info");
-          ctx.ui.setStatus("pi-webui", url);
-          setTimeout(() => ctx.ui.setStatus("pi-webui", ""), 20_000).unref?.();
-          return;
+        const existing = await probeExistingWebui(url);
+        if (existing) {
+          ctx.ui.setStatus("pi-webui", "restarting existing webui…");
+          await stopExistingWebui(url, options, existing);
         }
 
         const startedUrl = await startWebui(options, ctx);
         if (options.open) openDefaultBrowser(startedUrl);
-        ctx.ui.notify(`Pi Web UI started:\n${startedUrl}`, "info");
+        ctx.ui.notify(`${existing ? "Pi Web UI restarted" : "Pi Web UI started"}:\n${startedUrl}`, "info");
         ctx.ui.setStatus("pi-webui", startedUrl);
         setTimeout(() => ctx.ui.setStatus("pi-webui", ""), 20_000).unref?.();
       } catch (error) {

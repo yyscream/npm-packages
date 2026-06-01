@@ -2,7 +2,8 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import { access, readFile, stat } from "node:fs/promises";
+import { access, readFile, readdir, stat } from "node:fs/promises";
+import { networkInterfaces } from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
@@ -135,6 +136,14 @@ function parseArgs(argv) {
 
 function isLocalHost(host) {
   return host === "localhost" || host === "::1" || host === "[::1]" || host.startsWith("127.");
+}
+
+function formatUrlHost(host) {
+  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+}
+
+function isLocalAddress(address = "") {
+  return address === "::1" || address.startsWith("127.") || address === "::ffff:127.0.0.1" || address.startsWith("::ffff:127.");
 }
 
 function sanitizeError(error) {
@@ -315,6 +324,12 @@ function sendJson(res, statusCode, payload) {
   res.end(body);
 }
 
+function makeHttpError(statusCode, message) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+}
+
 function sendError(res, statusCode, error) {
   sendJson(res, statusCode, { ok: false, error: sanitizeError(error) });
 }
@@ -377,6 +392,84 @@ function displayPath(cwd) {
     return `~${normalized.slice(home.length)}` || "~";
   }
   return normalized;
+}
+
+function expandUserPath(value) {
+  const input = String(value || "").trim();
+  if (input === "~") {
+    const home = process.env.HOME || process.env.USERPROFILE;
+    if (!home) throw makeHttpError(400, "Cannot expand ~ because no home directory is configured");
+    return home;
+  }
+  if (input.startsWith("~/") || input.startsWith("~\\")) {
+    const home = process.env.HOME || process.env.USERPROFILE;
+    if (!home) throw makeHttpError(400, "Cannot expand ~ because no home directory is configured");
+    return path.join(home, input.slice(2));
+  }
+  return input;
+}
+
+async function resolveCwd(value, baseCwd = options.cwd) {
+  const input = expandUserPath(value);
+  if (!input) throw makeHttpError(400, "cwd is required");
+  const cwd = path.resolve(baseCwd, input);
+  let info;
+  try {
+    info = await stat(cwd);
+  } catch {
+    throw makeHttpError(400, `cwd does not exist: ${cwd}`);
+  }
+  if (!info.isDirectory()) throw makeHttpError(400, `cwd is not a directory: ${cwd}`);
+  return cwd;
+}
+
+function uniquePathItems(items) {
+  const seen = new Set();
+  const result = [];
+  for (const item of items) {
+    if (!item?.cwd || seen.has(item.cwd)) continue;
+    seen.add(item.cwd);
+    result.push(item);
+  }
+  return result;
+}
+
+function pathPickerRoots(activeCwd, viewedCwd) {
+  const home = process.env.HOME || process.env.USERPROFILE;
+  return uniquePathItems([
+    { label: "Tab", cwd: activeCwd, displayCwd: displayPath(activeCwd) },
+    { label: "Default", cwd: options.cwd, displayCwd: displayPath(options.cwd) },
+    home ? { label: "Home", cwd: home, displayCwd: displayPath(home) } : undefined,
+    { label: "Root", cwd: path.parse(viewedCwd || activeCwd || options.cwd).root, displayCwd: path.parse(viewedCwd || activeCwd || options.cwd).root },
+  ]);
+}
+
+async function getDirectoryPickerData(viewPath, activeCwd) {
+  const cwd = await resolveCwd(viewPath || activeCwd, activeCwd);
+  let entries;
+  try {
+    entries = await readdir(cwd, { withFileTypes: true });
+  } catch (error) {
+    throw makeHttpError(error?.code === "EACCES" ? 403 : 400, `Cannot read directory ${cwd}: ${sanitizeError(error)}`);
+  }
+
+  const directoryEntries = entries
+    .filter((entry) => entry.isDirectory())
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
+  const directories = directoryEntries.slice(0, 500).map((entry) => {
+    const entryPath = path.join(cwd, entry.name);
+    return { name: entry.name, cwd: entryPath, displayCwd: displayPath(entryPath), hidden: entry.name.startsWith(".") };
+  });
+  const parent = path.dirname(cwd);
+
+  return {
+    cwd,
+    displayCwd: displayPath(cwd),
+    parent: parent === cwd ? null : parent,
+    roots: pathPickerRoots(activeCwd, cwd),
+    directories,
+    truncated: directoryEntries.length > directories.length,
+  };
 }
 
 async function getWorkspaceInfo(cwd, startedAt) {
@@ -517,18 +610,18 @@ function gitWorkflowCommandPayload(result) {
   };
 }
 
-async function handleGitWorkflowRequest(pathname, body = {}) {
+async function handleGitWorkflowRequest(pathname, body = {}, cwd = options.cwd) {
   try {
     switch (pathname) {
       case "/api/git-workflow/message":
-        return { ok: true, data: await readGitWorkflowMessages(options.cwd) };
+        return { ok: true, data: await readGitWorkflowMessages(cwd) };
       case "/api/git-workflow/add":
-        await getGitRoot(options.cwd);
-        return gitWorkflowCommandPayload(await runGitWorkflowCommand(["add", "."], { cwd: options.cwd }));
+        await getGitRoot(cwd);
+        return gitWorkflowCommandPayload(await runGitWorkflowCommand(["add", "."], { cwd }));
       case "/api/git-workflow/commit": {
         const variant = String(body.variant || "").trim();
         if (!["short", "long"].includes(variant)) throw new Error("variant must be 'short' or 'long'");
-        const messages = await readGitWorkflowMessages(options.cwd);
+        const messages = await readGitWorkflowMessages(cwd);
         if (variant === "short") {
           const message = messages.short.trim();
           if (!message) throw new Error(`${messages.shortPath} is empty`);
@@ -538,7 +631,7 @@ async function handleGitWorkflowRequest(pathname, body = {}) {
         return gitWorkflowCommandPayload(await runGitWorkflowCommand(["commit", "-F", messages.longPath], { cwd: messages.root, label: "git commit -F dev/COMMIT/staged-commit-long.txt" }));
       }
       case "/api/git-workflow/push": {
-        const root = await getGitRoot(options.cwd);
+        const root = await getGitRoot(cwd);
         return gitWorkflowCommandPayload(await runGitWorkflowCommand(["push"], { cwd: root, timeoutMs: 15 * 60 * 1000 }));
       }
       case "/api/git-workflow/cancel": {
@@ -660,12 +753,18 @@ if (options.version) {
   process.exit(0);
 }
 
-const piArgs = ["--mode", "rpc"];
-if (options.noSession) piArgs.push("--no-session");
-if (options.name) piArgs.push("--name", options.name);
-piArgs.push(...options.piArgs);
+function buildPiArgsForTab(tabIndex, title) {
+  const args = ["--mode", "rpc"];
+  if (options.noSession) args.push("--no-session");
 
-async function resolvePiCommand() {
+  const sessionName = tabIndex === 1 ? options.name : title;
+  if (sessionName) args.push("--name", sessionName);
+
+  args.push(...options.piArgs);
+  return args;
+}
+
+async function resolvePiCommand(piArgs) {
   if (options.piBinExplicit) {
     return { command: options.piBin, args: piArgs, displayCommand: `${options.piBin} ${piArgs.join(" ")}` };
   }
@@ -683,19 +782,266 @@ async function resolvePiCommand() {
   }
 }
 
-const piCommand = await resolvePiCommand();
-const rpc = new PiRpcProcess({ ...piCommand, cwd: options.cwd });
-const sseClients = new Set();
-rpc.onEvent((event) => {
-  for (const client of sseClients) sendSse(client, event);
-});
-rpc.start();
+const tabs = new Map();
+let nextTabIndex = 1;
+
+function defaultTabTitle(tabIndex) {
+  if (options.name) return tabIndex === 1 ? options.name : `${options.name} ${tabIndex}`;
+  return `Terminal ${tabIndex}`;
+}
+
+function attachRpcToTab(tab, rpc) {
+  tab.rpcUnsubscribe?.();
+  tab.rpc = rpc;
+  tab.rpcUnsubscribe = rpc.onEvent((event) => {
+    const scopedEvent = { ...event, tabId: tab.id, tabTitle: tab.title };
+    for (const client of tab.sseClients) sendSse(client, scopedEvent);
+  });
+}
+
+async function createTab({ title, cwd } = {}) {
+  const tabIndex = nextTabIndex++;
+  const tabTitle = String(title || "").trim() || defaultTabTitle(tabIndex);
+  const tabCwd = cwd ? await resolveCwd(cwd, options.cwd) : options.cwd;
+  const id = randomUUID();
+  const piArgs = buildPiArgsForTab(tabIndex, tabTitle);
+  const piCommand = await resolvePiCommand(piArgs);
+  const rpc = new PiRpcProcess({ ...piCommand, cwd: tabCwd });
+  const tab = {
+    id,
+    index: tabIndex,
+    title: tabTitle,
+    cwd: tabCwd,
+    createdAt: new Date().toISOString(),
+    rpc: undefined,
+    rpcUnsubscribe: undefined,
+    sseClients: new Set(),
+  };
+
+  attachRpcToTab(tab, rpc);
+  tabs.set(id, tab);
+  rpc.start();
+  return tab;
+}
+
+function firstTab() {
+  return tabs.values().next().value;
+}
+
+function tabMeta(tab) {
+  return {
+    id: tab.id,
+    index: tab.index,
+    title: tab.title,
+    cwd: tab.cwd,
+    createdAt: tab.createdAt,
+    startedAt: tab.rpc.startedAt,
+    pid: tab.rpc.child?.pid,
+    running: !!tab.rpc.child && tab.rpc.child.exitCode === null,
+    command: tab.rpc.displayCommand,
+    clientCount: tab.sseClients.size,
+  };
+}
+
+function listTabs() {
+  return [...tabs.values()].map(tabMeta);
+}
+
+async function updateTabCwd(id, cwd) {
+  const tab = tabs.get(id);
+  if (!tab) throw makeHttpError(404, `Unknown Pi tab: ${id}`);
+
+  const nextCwd = await resolveCwd(cwd, tab.cwd);
+  if (nextCwd === tab.cwd) return { tab, changed: false };
+
+  const piArgs = buildPiArgsForTab(tab.index, tab.title);
+  const piCommand = await resolvePiCommand(piArgs);
+  for (const client of tab.sseClients) {
+    sendSse(client, { type: "webui_tab_restarting", tabId: tab.id, tabTitle: tab.title, cwd: nextCwd });
+  }
+
+  const oldRpc = tab.rpc;
+  tab.rpcUnsubscribe?.();
+  tab.rpcUnsubscribe = undefined;
+  oldRpc.stop();
+
+  tab.cwd = nextCwd;
+  const rpc = new PiRpcProcess({ ...piCommand, cwd: tab.cwd });
+  attachRpcToTab(tab, rpc);
+  rpc.start();
+
+  for (const client of tab.sseClients) {
+    sendSse(client, { type: "webui_cwd_changed", tabId: tab.id, tabTitle: tab.title, cwd: tab.cwd, pid: tab.rpc.child?.pid });
+  }
+  return { tab, changed: true };
+}
+
+function closeTab(id) {
+  const tab = tabs.get(id);
+  if (!tab) throw makeHttpError(404, `Unknown Pi tab: ${id}`);
+  if (tabs.size <= 1) throw makeHttpError(400, "Cannot close the last Pi tab");
+
+  for (const client of tab.sseClients) {
+    sendSse(client, { type: "webui_tab_closing", tabId: tab.id, tabTitle: tab.title });
+    client.end();
+  }
+  tab.sseClients.clear();
+  tab.rpcUnsubscribe?.();
+  tab.rpc.stop();
+  tabs.delete(id);
+  return tab;
+}
+
+function requestedTabId(req, url, body) {
+  const header = req.headers["x-pi-webui-tab"];
+  const headerValue = Array.isArray(header) ? header[0] : header;
+  return String(url.searchParams.get("tab") || url.searchParams.get("tabId") || body?.tabId || body?.tab || headerValue || "").trim();
+}
+
+function getRequestedTab(req, url, body = {}) {
+  const id = requestedTabId(req, url, body);
+  if (!id) {
+    const tab = firstTab();
+    if (!tab) throw makeHttpError(503, "No Pi tabs are available");
+    return tab;
+  }
+  const tab = tabs.get(id);
+  if (!tab) throw makeHttpError(404, `Unknown Pi tab: ${id}`);
+  return tab;
+}
+
+const initialTab = await createTab();
+let currentHost = options.host;
+let networkRebindInProgress = false;
+
+function localNetworkAddresses() {
+  const addresses = [];
+  for (const entries of Object.values(networkInterfaces())) {
+    for (const entry of entries || []) {
+      if (entry.internal || entry.family !== "IPv4") continue;
+      addresses.push(entry.address);
+    }
+  }
+  return [...new Set(addresses)].sort();
+}
+
+function networkStatus() {
+  const open = !isLocalHost(currentHost);
+  const networkUrls = open ? localNetworkAddresses().map((address) => `http://${address}:${options.port}/`) : [];
+  return {
+    open,
+    opening: networkRebindInProgress,
+    host: currentHost,
+    port: options.port,
+    localUrl: `http://127.0.0.1:${options.port}/`,
+    networkUrls,
+  };
+}
+
+function closeSseClientsForRebind(nextHost) {
+  for (const tab of tabs.values()) {
+    for (const client of tab.sseClients) {
+      sendSse(client, { type: "webui_network_rebinding", tabId: tab.id, tabTitle: tab.title, host: nextHost, port: options.port });
+      client.end();
+    }
+    tab.sseClients.clear();
+  }
+}
+
+function closeServerListener() {
+  return new Promise((resolve, reject) => {
+    if (!server.listening) {
+      resolve();
+      return;
+    }
+    server.close((error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
+function listenOn(host) {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      server.off("error", onError);
+      server.off("listening", onListening);
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const onListening = () => {
+      cleanup();
+      resolve();
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(options.port, host);
+  });
+}
+
+async function openToLocalNetwork() {
+  const nextHost = "0.0.0.0";
+  if (!isLocalHost(currentHost) || networkRebindInProgress) return networkStatus();
+
+  networkRebindInProgress = true;
+  closeSseClientsForRebind(nextHost);
+  const previousHost = currentHost;
+  try {
+    await closeServerListener();
+    await listenOn(nextHost);
+    currentHost = nextHost;
+    console.warn("WARNING: Web UI is now reachable from the local network and has no authentication.");
+    return networkStatus();
+  } catch (error) {
+    console.error("Failed to open Web UI to local network:", sanitizeError(error));
+    if (!server.listening) {
+      try {
+        await listenOn(previousHost);
+      } catch (restoreError) {
+        console.error("Failed to restore Web UI listener:", sanitizeError(restoreError));
+      }
+    }
+    throw error;
+  } finally {
+    networkRebindInProgress = false;
+  }
+}
 
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
 
+    if (url.pathname === "/api/tabs" && req.method === "GET") {
+      sendJson(res, 200, { ok: true, data: { tabs: listTabs() } });
+      return;
+    }
+
+    if (url.pathname === "/api/tabs" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const tab = await createTab({ title: body.title, cwd: body.cwd });
+      sendJson(res, 201, { ok: true, data: { tab: tabMeta(tab), tabs: listTabs() } });
+      return;
+    }
+
+    if (url.pathname.startsWith("/api/tabs/") && req.method === "PATCH") {
+      const id = decodeURIComponent(url.pathname.slice("/api/tabs/".length));
+      const body = await readJsonBody(req);
+      const { tab, changed } = await updateTabCwd(id, body.cwd);
+      sendJson(res, 200, { ok: true, data: { tab: tabMeta(tab), tabs: listTabs(), changed } });
+      return;
+    }
+
+    if (url.pathname.startsWith("/api/tabs/") && req.method === "DELETE") {
+      const id = decodeURIComponent(url.pathname.slice("/api/tabs/".length));
+      closeTab(id);
+      sendJson(res, 200, { ok: true, data: { tabs: listTabs(), activeTabId: firstTab()?.id || null } });
+      return;
+    }
+
     if (url.pathname === "/api/events" && req.method === "GET") {
+      const tab = getRequestedTab(req, url);
       res.writeHead(200, {
         "content-type": "text/event-stream; charset=utf-8",
         "cache-control": "no-cache, no-transform",
@@ -703,44 +1049,83 @@ const server = createServer(async (req, res) => {
         "x-content-type-options": "nosniff",
       });
       res.write(": connected\n\n");
-      sseClients.add(res);
+      tab.sseClients.add(res);
       sendSse(res, {
         type: "webui_connected",
         version: packageJson.version,
-        pid: rpc.child?.pid,
-        cwd: options.cwd,
-        startedAt: rpc.startedAt,
+        tabId: tab.id,
+        tabTitle: tab.title,
+        pid: tab.rpc.child?.pid,
+        cwd: tab.cwd,
+        startedAt: tab.rpc.startedAt,
       });
       const keepAlive = setInterval(() => res.write(": keepalive\n\n"), 15000);
       req.on("close", () => {
         clearInterval(keepAlive);
-        sseClients.delete(res);
+        tab.sseClients.delete(res);
       });
       return;
     }
 
     if (url.pathname === "/api/health" && req.method === "GET") {
+      const tab = firstTab();
       sendJson(res, 200, {
         ok: true,
         webuiVersion: packageJson.version,
-        piPid: rpc.child?.pid,
-        piRunning: !!rpc.child && rpc.child.exitCode === null,
+        webuiPid: process.pid,
+        piPid: tab?.rpc.child?.pid,
+        piRunning: !!tab?.rpc.child && tab.rpc.child.exitCode === null,
         cwd: options.cwd,
+        network: networkStatus(),
+        tabs: listTabs(),
       });
       return;
     }
 
+    if (url.pathname === "/api/network" && req.method === "GET") {
+      sendJson(res, 200, { ok: true, data: networkStatus() });
+      return;
+    }
+
+    if (url.pathname === "/api/network/open" && req.method === "POST") {
+      if (!isLocalAddress(req.socket.remoteAddress)) throw makeHttpError(403, "Opening to the network is only allowed from localhost");
+      const before = networkStatus();
+      sendJson(res, 202, { ok: true, data: { ...before, opening: true } });
+      if (!before.open && !networkRebindInProgress) {
+        setTimeout(() => openToLocalNetwork().catch((error) => console.error("network open failed:", sanitizeError(error))), 20).unref();
+      }
+      return;
+    }
+
+    if (url.pathname === "/api/shutdown" && req.method === "POST") {
+      if (!isLocalAddress(req.socket.remoteAddress)) throw makeHttpError(403, "Shutdown is only allowed from localhost");
+      sendJson(res, 200, { ok: true, message: "Pi Web UI shutting down", webuiPid: process.pid });
+      setTimeout(() => shutdown("api shutdown"), 20).unref();
+      return;
+    }
+
     if (url.pathname === "/api/workspace" && req.method === "GET") {
+      const tab = getRequestedTab(req, url);
       sendJson(res, 200, {
         ok: true,
-        data: await getWorkspaceInfo(options.cwd, rpc.startedAt),
+        data: await getWorkspaceInfo(tab.cwd, tab.rpc.startedAt),
+      });
+      return;
+    }
+
+    if (url.pathname === "/api/directories" && req.method === "GET") {
+      const tab = getRequestedTab(req, url);
+      sendJson(res, 200, {
+        ok: true,
+        data: await getDirectoryPickerData(url.searchParams.get("path"), tab.cwd),
       });
       return;
     }
 
     if (url.pathname.startsWith("/api/git-workflow/")) {
       const body = req.method === "POST" ? await readJsonBody(req) : {};
-      const response = await handleGitWorkflowRequest(url.pathname, body);
+      const tab = getRequestedTab(req, url, body);
+      const response = await handleGitWorkflowRequest(url.pathname, body, tab.cwd);
       if (response) {
         sendJson(res, 200, response);
         return;
@@ -749,16 +1134,19 @@ const server = createServer(async (req, res) => {
 
     const getCommand = req.method === "GET" ? commandFromGet(url.pathname) : undefined;
     if (getCommand) {
-      const response = await rpc.send(getCommand);
+      const tab = getRequestedTab(req, url);
+      const response = await tab.rpc.send(getCommand);
       sendJson(res, response.success === false ? 400 : 200, response);
       return;
     }
 
     if (req.method === "POST" && url.pathname === "/api/extension-ui-response") {
       const body = await readJsonBody(req);
-      if (body.type !== "extension_ui_response") body.type = "extension_ui_response";
-      if (!body.id) throw new Error("id is required");
-      await rpc.writeRaw(body);
+      const tab = getRequestedTab(req, url, body);
+      const { tabId, tab: _tab, ...payload } = body;
+      if (payload.type !== "extension_ui_response") payload.type = "extension_ui_response";
+      if (!payload.id) throw new Error("id is required");
+      await tab.rpc.writeRaw(payload);
       sendJson(res, 200, { ok: true });
       return;
     }
@@ -767,7 +1155,8 @@ const server = createServer(async (req, res) => {
       const body = await readJsonBody(req);
       const command = commandFromPost(url.pathname, body);
       if (command) {
-        const response = await rpc.send(command);
+        const tab = getRequestedTab(req, url, body);
+        const response = await tab.rpc.send(command);
         sendJson(res, response.success === false ? 400 : 200, response);
         return;
       }
@@ -777,22 +1166,26 @@ const server = createServer(async (req, res) => {
 
     sendError(res, 404, "Not found");
   } catch (error) {
-    sendError(res, 500, error);
+    sendError(res, error?.statusCode || 500, error);
   }
 });
 
 server.on("error", (error) => {
+  if (networkRebindInProgress) {
+    console.error("Web UI network rebind failed:", sanitizeError(error));
+    return;
+  }
   console.error("Web UI server failed:", sanitizeError(error));
-  rpc.stop();
+  for (const tab of tabs.values()) tab.rpc.stop();
   process.exit(1);
 });
 
-server.listen(options.port, options.host, () => {
-  const urlHost = options.host.includes(":") && !options.host.startsWith("[") ? `[${options.host}]` : options.host;
+server.listen(options.port, currentHost, () => {
+  const urlHost = formatUrlHost(currentHost);
   console.log(`Pi Web UI: http://${urlHost}:${options.port}/`);
   console.log(`Working directory: ${options.cwd}`);
-  console.log(`Pi RPC: ${piCommand.displayCommand}`);
-  if (!isLocalHost(options.host)) {
+  console.log(`Pi RPC: ${initialTab.rpc.displayCommand}`);
+  if (!isLocalHost(currentHost)) {
     console.warn("WARNING: Web UI has no authentication. Only expose it on trusted networks.");
   }
 });
@@ -800,7 +1193,7 @@ server.listen(options.port, options.host, () => {
 function shutdown(signal) {
   console.log(`\n${signal}: shutting down Pi Web UI...`);
   server.close(() => process.exit(0));
-  rpc.stop();
+  for (const tab of tabs.values()) tab.rpc.stop();
   setTimeout(() => process.exit(0), 4000).unref();
 }
 
