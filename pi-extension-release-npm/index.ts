@@ -356,8 +356,8 @@ const EXPANDED_LINES = 160;
 let activeReleaseRun: { abort: () => void; toggleOutput: () => void } | undefined;
 let activeLogViewerCleanup: (() => void) | undefined;
 
-function truncateLine(line: string, width: number): string {
-  return line.length > width ? `${line.slice(0, Math.max(0, width - 1))}…` : line;
+function truncateWidgetLine(line: string, maxLength = 240): string {
+  return line.length > maxLength ? `${line.slice(0, Math.max(0, maxLength - 1))}…` : line;
 }
 
 export default function releaseNpmExtension(pi: ExtensionAPI) {
@@ -442,15 +442,12 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
       };
 
       if (ctx.hasUI) {
-        ctx.ui.setWidget(RELEASE_LOG_WIDGET_KEY, (_tui, theme) => ({
-          render: (width: number) => [
-            truncateLine(theme.fg("accent", `Release log: ${selected.title}`), width),
-            truncateLine(theme.fg("dim", `Path: ${selected.file} · showing last ${Math.min(renderLimit, lines.length)}/${lines.length} lines · Esc/q closes`), width),
-            "",
-            ...lines.slice(-renderLimit).map((line) => truncateLine(line, width)),
-          ],
-          invalidate: () => {},
-        }), { placement: "aboveEditor" });
+        ctx.ui.setWidget(RELEASE_LOG_WIDGET_KEY, [
+          `Release log: ${selected.title}`,
+          `Path: ${selected.file} · showing last ${Math.min(renderLimit, lines.length)}/${lines.length} lines · Esc/q closes in TUI; /release-npm-logs close also closes`,
+          "",
+          ...lines.slice(-renderLimit).map((line) => truncateWidgetLine(line, 500)),
+        ], { placement: "aboveEditor" });
       }
       ctx.ui.notify(`Showing release log ${selected.title}.`, "info");
     },
@@ -503,24 +500,16 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
       };
       const renderReleaseUi = () => {
         if (!ctx.hasUI) return;
-        ctx.ui.setWidget(RELEASE_OUTPUT_KEY, (_tui, _theme) => ({
-          render: (width: number) => {
-            const lines = outputLines();
-            const limit = expanded ? EXPANDED_LINES : COLLAPSED_LINES;
-            const visibleLines = lines.slice(-limit);
-            return visibleLines.length
-              ? visibleLines.map((line) => truncateLine(line, width))
-              : [truncateLine("Waiting for release output...", width)];
-          },
-          invalidate: () => {},
-        }), { placement: "aboveEditor" });
-        ctx.ui.setWidget(RELEASE_FOOTER_KEY, (_tui, theme) => ({
-          render: (width: number) => [
-            truncateLine(theme.fg("accent", phase) + theme.fg("dim", ` · ${modeText()}`), width),
-            truncateLine(theme.fg("dim", "Controls: /release-toggle expands/collapses · /release-abort stops the running subprocess"), width),
-          ],
-          invalidate: () => {},
-        }), { placement: "belowEditor" });
+        const lines = outputLines();
+        const limit = expanded ? EXPANDED_LINES : COLLAPSED_LINES;
+        const visibleLines = lines.slice(-limit);
+        ctx.ui.setWidget(RELEASE_OUTPUT_KEY, visibleLines.length
+          ? visibleLines.map((line) => truncateWidgetLine(line, 500))
+          : ["Waiting for release output..."], { placement: "aboveEditor" });
+        ctx.ui.setWidget(RELEASE_FOOTER_KEY, [
+          `${phase} · ${modeText()}`,
+          "Controls: /release-toggle expands/collapses · /release-abort stops the running subprocess",
+        ], { placement: "belowEditor" });
       };
       const setPhase = (nextPhase: string) => {
         phase = nextPhase;

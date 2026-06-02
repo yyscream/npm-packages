@@ -2185,6 +2185,48 @@ function isGuardrailDialogPrompt(prompt) {
   return /(?:dangerous|high-risk|protected).*(?:command|file)|safety rule|execute anyway\?/i.test(`${plainTitle}\n${plainMessage}`);
 }
 
+function releaseDialogPromptParts(prompt) {
+  const combined = [prompt.title, prompt.message].filter((part) => stripAnsi(part).trim()).join("\n").trimEnd();
+  if (!/Release preflight summary:/i.test(combined) || !/Publish eligible packages now\?/i.test(combined)) return null;
+
+  const lines = combined.split("\n");
+  const questionIndex = lines.findIndex((line) => stripAnsi(line).trim() === "Publish eligible packages now?");
+  const summaryLines = questionIndex === -1 ? lines : [...lines.slice(0, questionIndex), ...lines.slice(questionIndex + 1)];
+  const message = summaryLines.join("\n").replace(/\n+$/, "");
+  return {
+    title: "Publish eligible packages now?",
+    message,
+    plainMessage: stripAnsi(message),
+  };
+}
+
+function releaseDialogLineClass(plainLine, section) {
+  const text = plainLine.trim();
+  if (!text) return "release-dialog-spacer";
+  if (/^(Release preflight summary|Version changes|Bump summary|Will publish|Will skip|Blocked|Other|Publish targets after confirmation|Missing local package dirs):$/i.test(text)) {
+    return "release-dialog-heading";
+  }
+  if (/^none$/i.test(text)) return "release-dialog-muted";
+  if (/->\s*error\b|\bfailed\b|\bmissing\b|\berrors?:\s*[1-9]/i.test(text) || /^blocked$/i.test(section)) return "release-dialog-danger";
+  if (/publish-(?:first|update)|would bump up|first release/i.test(text) || /^(will publish|publish targets after confirmation)$/i.test(section)) return "release-dialog-success";
+  if (/\bskip(?:ped)?\b|\bunchanged\b|would reduce down|already published/i.test(text) || /^will skip$/i.test(section)) return "release-dialog-warning";
+  return "";
+}
+
+function renderReleaseDialogMessage(parent, text) {
+  parent.replaceChildren();
+  let section = "";
+  for (const line of String(text || "").split("\n")) {
+    const plainLine = stripAnsi(line);
+    const heading = plainLine.trim().match(/^(Release preflight summary|Version changes|Bump summary|Will publish|Will skip|Blocked|Other|Publish targets after confirmation|Missing local package dirs):$/i);
+    const rowClass = ["release-dialog-line", releaseDialogLineClass(plainLine, section)].filter(Boolean).join(" ");
+    const row = make("span", rowClass);
+    renderAnsiText(row, line || " ");
+    parent.append(row);
+    if (heading) section = heading[1].toLowerCase();
+  }
+}
+
 function stripTodoProgressLines(text, { streaming = false } = {}) {
   let inFence = false;
   const kept = [];
@@ -3324,12 +3366,31 @@ function scheduleAbortStateChecks() {
   }
 }
 
+function messageTimestampMs(message) {
+  const timestamp = message?.timestamp;
+  const date = typeof timestamp === "number" ? new Date(timestamp) : new Date(String(timestamp || ""));
+  const time = date.getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
+function orderedTranscriptItems() {
+  const items = [];
+  latestMessages.forEach((message, index) => {
+    items.push({ message, messageIndex: index, transient: false, timestampMs: messageTimestampMs(message), order: index });
+  });
+  transientMessages.forEach((message, index) => {
+    items.push({ message, messageIndex: index, transient: true, timestampMs: messageTimestampMs(message), order: latestMessages.length + index });
+  });
+  return items.sort((a, b) => a.timestampMs - b.timestampMs || a.order - b.order);
+}
+
 function renderAllMessages({ preserveScroll = false } = {}) {
   const shouldFollow = !preserveScroll && (autoFollowChat || isChatNearBottom());
   const previousScrollTop = elements.chat.scrollTop;
   resetChatOutput();
-  latestMessages.forEach((message, index) => appendTranscriptMessage(message, { messageIndex: index }));
-  transientMessages.forEach((message, index) => appendTranscriptMessage(message, { messageIndex: index, transient: true }));
+  for (const item of orderedTranscriptItems()) {
+    appendTranscriptMessage(item.message, { messageIndex: item.messageIndex, transient: item.transient });
+  }
   renderRunIndicator({ scroll: false });
   updateStickyUserPromptButton();
   if (shouldFollow) scrollChatToBottom({ force: true });
@@ -4330,11 +4391,16 @@ function showNextDialog() {
   const request = activeDialog;
 
   const prompt = normalizeDialogPrompt(request);
-  const isGuardrailDialog = isGuardrailDialogPrompt(prompt);
+  const releasePrompt = request.method === "select" ? releaseDialogPromptParts(prompt) : null;
+  const displayPrompt = releasePrompt || prompt;
+  const isGuardrailDialog = isGuardrailDialogPrompt(displayPrompt);
+  const isReleaseDialog = !!releasePrompt;
   elements.dialog.classList.toggle("guardrail-dialog", isGuardrailDialog);
-  elements.dialogTitle.textContent = prompt.title;
-  renderAnsiText(elements.dialogMessage, prompt.message);
-  elements.dialogMessage.hidden = !prompt.plainMessage;
+  elements.dialog.classList.toggle("release-dialog", isReleaseDialog);
+  elements.dialogTitle.textContent = displayPrompt.title;
+  if (isReleaseDialog) renderReleaseDialogMessage(elements.dialogMessage, displayPrompt.message);
+  else renderAnsiText(elements.dialogMessage, displayPrompt.message);
+  elements.dialogMessage.hidden = !displayPrompt.plainMessage;
   elements.dialogBody.replaceChildren();
   elements.dialogActions.replaceChildren();
 
@@ -4348,6 +4414,8 @@ function showNextDialog() {
       button.type = "button";
       if (isGuardrailDialog && /^Block$/i.test(optionLabel)) button.classList.add("guardrail-safe-action");
       if (isGuardrailDialog && /^Allow/i.test(optionLabel)) button.classList.add("guardrail-allow-action");
+      if (isReleaseDialog && /^Yes$/i.test(optionLabel)) button.classList.add("primary", "release-publish-action");
+      if (isReleaseDialog && /^No$/i.test(optionLabel)) button.classList.add("release-cancel-action");
       button.addEventListener("click", () => sendDialogResponse({ type: "extension_ui_response", id: request.id, value: optionLabel, tabId: request.tabId }));
       options.append(button);
     }

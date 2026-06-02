@@ -108,6 +108,10 @@ assert.match(css, /\.extension-dialog[\s\S]*?max-height:\s*calc\(var\(--visual-v
 assert.match(css, /\.extension-dialog[\s\S]*?inset:\s*auto 0 0 0/, "mobile dialogs should behave like bottom sheets");
 assert.match(css, /#dialogMessage \{[\s\S]*?white-space:\s*pre-wrap/, "extension dialog messages should preserve multiline prompts");
 assert.match(css, /\.extension-dialog\.guardrail-dialog[\s\S]*?border-color:\s*rgba\(249, 226, 175/, "guardrail dialogs should have warning-specific styling");
+assert.match(css, /\.extension-dialog\.release-dialog[\s\S]*?width:\s*min\(64rem/, "release confirmation dialogs should have more horizontal room");
+assert.match(css, /\.extension-dialog\.release-dialog #dialogMessage[\s\S]*?max-height:\s*min\(56vh, 34rem\)/, "release confirmation summaries should scroll in a roomy panel");
+assert.match(css, /\.release-dialog-success \{ color: var\(--ctp-green\); \}/, "release confirmation should color publish/update lines as success");
+assert.match(css, /\.release-dialog-danger \{ color: var\(--ctp-red\); \}/, "release confirmation should color blocked/error lines as danger");
 
 assert.match(app, /const MOBILE_VIEW_QUERY = "\(max-width: 720px\), \(max-device-width: 720px\), \(pointer: coarse\) and \(hover: none\)"/, "mobile detection should include phones that report desktop-like layout widths");
 assert.match(app, /const THEME_STORAGE_KEY = "pi-webui-theme"/, "theme selection should be persisted in browser storage");
@@ -143,8 +147,12 @@ assert.match(app, /function renderAnsiText\(parent, text\)/, "extension dialogs 
 assert.match(app, /function applyAnsiSgr\(codes, state\)/, "ANSI SGR color state should be parsed for dialog rendering");
 assert.match(app, /function normalizeDialogPrompt\(request\)/, "extension dialogs should split multiline prompts into title and body");
 assert.match(app, /plainMessage: stripAnsi\(message\)/, "dialog prompt parsing should keep a plain-text copy for detection and visibility");
-assert.match(app, /renderAnsiText\(elements\.dialogMessage, prompt\.message\)/, "dialog prompts should preserve TUI highlight colors in the browser");
+assert.match(app, /function releaseDialogPromptParts\(prompt\)/, "release confirmation dialogs should promote the publish question into the dialog title");
+assert.match(app, /function renderReleaseDialogMessage\(parent, text\)/, "release confirmation dialogs should semantically color summary lines");
+assert.match(app, /else renderAnsiText\(elements\.dialogMessage, displayPrompt\.message\)/, "non-release dialog prompts should preserve TUI highlight colors in the browser");
 assert.match(app, /elements\.dialog\.classList\.toggle\("guardrail-dialog", isGuardrailDialog\)/, "guardrail extension dialogs should get dedicated styling");
+assert.match(app, /elements\.dialog\.classList\.toggle\("release-dialog", isReleaseDialog\)/, "release extension dialogs should get dedicated roomy styling");
+assert.match(app, /release-publish-action/, "release dialogs should distinguish the publish confirmation button");
 assert.match(app, /guardrail-safe-action/, "guardrail dialogs should distinguish safe and allow actions");
 assert.match(app, /function hasQueuedDialogRequest\(id\)/, "frontend should deduplicate replayed extension UI dialogs by request id");
 assert.match(app, /if \(request\.replayed\) addEvent\(`recovered pending \$\{request\.method\} request`, "warn"\)/, "frontend should surface replayed extension UI blockers");
@@ -152,6 +160,8 @@ assert.match(app, /case "webui_extension_ui_cancelled":/, "frontend should close
 assert.match(app, /function parseTodoProgressWidget\(lines\)/, "todo-progress widgets should be parsed from extension widget lines");
 assert.match(app, /key === "todo-progress" \? renderTodoProgressWidget\(key, lines\) : null/, "todo-progress should use the specialized widget renderer");
 assert.match(app, /let transientMessages = \[\]/, "frontend should keep transient Web UI/extension output messages");
+assert.match(app, /function orderedTranscriptItems\(\)/, "frontend should merge persisted and transient messages chronologically");
+assert.match(app, /items\.sort\(\(a, b\) => a\.timestampMs - b\.timestampMs \|\| a\.order - b\.order\)/, "transient extension output should not pin itself below newer persisted messages");
 assert.match(app, /const ACTION_FEEDBACK_REACTIONS = \{/, "frontend should define direct feedback reactions");
 assert.match(app, /message\?\.role === "assistant" \|\| message\?\.role === "toolResult" \|\| message\?\.role === "bashExecution"/, "frontend should allow reactions on final assistant output as well as actions");
 assert.match(app, /function renderActionFeedbackControls\(/, "frontend should render per-message reaction controls");

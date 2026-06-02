@@ -18,7 +18,7 @@ Release orchestration command for this npm-packages workspace.
 - Toggles compact/expanded output with `/release-toggle` while `/release-npm` runs in the background.
 - Aborts the active release subprocess with `/release-abort` while `/release-npm` runs in the background.
 - Saves each release run log under `~/.pi/agent/release-npm-logs/`.
-- Shows saved logs with `/release-npm-logs` in a custom above-editor display.
+- Shows saved logs with `/release-npm-logs` in an above-editor widget display that works in both TUI and Web UI.
 
 ## Install
 
@@ -102,7 +102,7 @@ Readiness checks require or verify:
 - `/release-npm` — runs `./dev/scripts/release-workflow.sh --plan --all`, shows the planned version/publish summary plus exact package targets, prompts for confirmation, then runs `./dev/scripts/release-workflow.sh --publish --target <dir>` only for those detected targets. It does not install packages after publishing.
 - `/release-toggle` — toggles active release output between compact and expanded mode.
 - `/release-abort` — aborts the active release subprocess.
-- `/release-npm-logs` — select a saved release run and display it above the editor; press `Esc`/`q` or run `/release-npm-logs close` to close it.
+- `/release-npm-logs` — select a saved release run and display it above the editor; press `Esc`/`q` in TUI or run `/release-npm-logs close` to close it.
 
 ## Tools
 

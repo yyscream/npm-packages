@@ -2018,6 +2018,61 @@ summary { cursor: pointer; color: var(--warning); }
   border-color: rgba(249, 226, 175, 0.46);
   color: var(--ctp-yellow);
 }
+.extension-dialog.release-dialog {
+  width: min(64rem, calc(100vw - 1.5rem));
+  max-height: min(82vh, 54rem);
+}
+.extension-dialog.release-dialog form {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  max-height: calc(min(82vh, 54rem) - 2rem);
+}
+.extension-dialog.release-dialog #dialogTitle {
+  color: var(--ctp-green);
+  text-shadow: 0 0 1rem rgba(166, 227, 161, 0.20);
+}
+.extension-dialog.release-dialog #dialogMessage {
+  min-height: 14rem;
+  max-height: min(56vh, 34rem);
+  margin: 0.75rem 0 1rem;
+  padding: 0.9rem 1rem;
+  overflow: auto;
+  border: 1px solid rgba(137, 180, 250, 0.25);
+  border-radius: 0.85rem;
+  background: rgba(var(--ctp-crust-rgb), 0.58);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.88rem;
+  line-height: 1.48;
+}
+.release-dialog-line {
+  display: block;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.release-dialog-heading {
+  margin-top: 0.55rem;
+  color: var(--ctp-blue);
+  font-weight: 800;
+}
+.release-dialog-heading:first-child { margin-top: 0; }
+.release-dialog-success { color: var(--ctp-green); }
+.release-dialog-warning { color: var(--ctp-yellow); }
+.release-dialog-danger { color: var(--ctp-red); }
+.release-dialog-muted { color: rgba(var(--ctp-subtext-rgb), 0.72); }
+.release-dialog-spacer { min-height: 0.55rem; }
+.extension-dialog.release-dialog .dialog-options {
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: 0.7rem;
+}
+.extension-dialog.release-dialog .dialog-options button {
+  text-align: center;
+  font-weight: 800;
+}
+.extension-dialog.release-dialog .dialog-options button.release-cancel-action {
+  border-color: rgba(249, 226, 175, 0.38);
+  color: var(--ctp-yellow);
+}
 .extension-dialog menu {
   display: flex;
   justify-content: flex-end;
@@ -2636,6 +2691,13 @@ summary { cursor: pointer; color: var(--warning); }
     margin: 0;
     overflow: auto;
     border-radius: 1rem 1rem 0 0;
+  }
+  .extension-dialog.release-dialog form {
+    max-height: calc(var(--visual-viewport-height, 100dvh) - 2rem - env(safe-area-inset-top));
+  }
+  .extension-dialog.release-dialog #dialogMessage {
+    min-height: 10rem;
+    max-height: 48dvh;
   }
   .extension-dialog menu {
     position: sticky;
