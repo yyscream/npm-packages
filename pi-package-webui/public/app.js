@@ -27,6 +27,10 @@ const elements = {
   newSessionButton: $("#newSessionButton"),
   compactButton: $("#compactButton"),
   gitWorkflowButton: $("#gitWorkflowButton"),
+  publishButton: $("#publishButton"),
+  publishMenu: $("#publishMenu"),
+  releaseNpmButton: $("#releaseNpmButton"),
+  releaseAurButton: $("#releaseAurButton"),
   gitWorkflowPanel: $("#gitWorkflowPanel"),
   gitWorkflowTitle: $("#gitWorkflowTitle"),
   gitWorkflowHint: $("#gitWorkflowHint"),
@@ -41,6 +45,8 @@ const elements = {
   themeSelect: $("#themeSelect"),
   networkStatus: $("#networkStatus"),
   openNetworkButton: $("#openNetworkButton"),
+  agentDoneNotificationsToggle: $("#agentDoneNotificationsToggle"),
+  agentDoneNotificationsStatus: $("#agentDoneNotificationsStatus"),
   toggleSidePanelButton: $("#toggleSidePanelButton"),
   sidePanelExpandButton: $("#sidePanelExpandButton"),
   sidePanelBackdrop: $("#sidePanelBackdrop"),
@@ -75,6 +81,8 @@ let tabSeenCompletionSerials = new Map();
 let streamBubble = null;
 let streamText = null;
 let streamRawText = "";
+let streamBubbleVisibleSince = 0;
+let streamBubbleHideTimer = null;
 let streamThinkingBubble = null;
 let streamThinking = null;
 let runIndicatorBubble = null;
@@ -103,6 +111,8 @@ let commandSuggestions = [];
 let pathSuggestions = [];
 let suggestionMode = "none";
 let commandSuggestIndex = 0;
+let lastPointerPosition = null;
+let pathSuggestActiveQuery = null;
 let pathSuggestRequestSerial = 0;
 let pathSuggestAbortController = null;
 let latestStats = null;
@@ -116,6 +126,10 @@ let actionFeedbackSendBusy = false;
 let blockedTabNotificationKeys = new Set();
 let blockedTabNotificationPermissionRequested = false;
 let blockedTabNotificationFallbackNoted = false;
+let agentDoneNotificationsEnabled = false;
+let agentDoneNotificationPermissionRequested = false;
+let agentDoneNotificationFallbackNoted = false;
+let agentDoneNotificationKeys = new Set();
 let availableModels = [];
 let availableThemes = [];
 let currentThemeName = "catppuccin-mocha";
@@ -129,6 +143,7 @@ let lastChatProgrammaticScrollAt = 0;
 let chatUserScrollIntentUntil = 0;
 let mobileFooterExpanded = false;
 let footerModelPickerOpen = false;
+let publishMenuOpen = false;
 let maxVisualViewportHeight = 0;
 let currentRunStartedAt = null;
 let currentRunStreamChars = 0;
@@ -137,6 +152,7 @@ const dialogQueue = [];
 const SIDE_PANEL_STORAGE_KEY = "pi-webui-side-panel-collapsed";
 const TAB_STORAGE_KEY = "pi-webui-active-tab";
 const PATH_FAST_PICKS_STORAGE_KEY = "pi-webui-path-fast-picks";
+const AGENT_DONE_NOTIFICATIONS_STORAGE_KEY = "pi-webui-agent-done-notifications";
 const THEME_STORAGE_KEY = "pi-webui-theme";
 const LAST_USER_PROMPT_STORAGE_KEY = "pi-webui-last-user-prompts";
 const DEFAULT_THEME_NAME = "catppuccin-mocha";
@@ -150,6 +166,8 @@ const CHAT_USER_SCROLL_INTENT_MS = 700;
 const RUN_INDICATOR_TICK_MS = 1000;
 const RUN_INDICATOR_START_GRACE_MS = 2500;
 const RUN_INDICATOR_STATE_RECHECK_MS = 5000;
+const STREAM_OUTPUT_HIDE_DELAY_MS = 300;
+const STREAM_OUTPUT_MIN_VISIBLE_MS = 900;
 const TODO_PROGRESS_LINE_REGEX = /^\s*(?:(?:[-*]|\d+[.)])\s*)?\[(?: |x|X|-)\]\s+.+$/;
 const TODO_PROGRESS_PARTIAL_LINE_REGEX = /^\s*(?:(?:[-*]|\d+[.)])\s*)?\[(?: |x|X|-)?\]?\s*.*$/;
 const CHAT_SCROLL_KEYS = new Set(["ArrowDown", "ArrowUp", "End", "Home", "PageDown", "PageUp", " "]);
@@ -157,6 +175,7 @@ const TAB_ACTIVITY_IDLE_RECONCILE_GRACE_MS = 1200;
 const TAB_GROUP_STATUS_PRIORITY = ["blocked", "done", "idle", "working"];
 const EXTENSION_UI_BLOCKING_METHODS = new Set(["select", "confirm", "input", "editor"]);
 const BLOCKED_TAB_NOTIFICATION_TAG_PREFIX = "pi-webui-blocked-tab";
+const AGENT_DONE_NOTIFICATION_TAG_PREFIX = "pi-webui-agent-done";
 const BLOCKED_TAB_NOTIFICATION_ICON = "/icon-192.png";
 const mobileViewMedia = window.matchMedia?.(MOBILE_VIEW_QUERY) || null;
 const statusEntries = new Map();
@@ -213,10 +232,77 @@ function readStoredSidePanelCollapsed() {
   }
 }
 
+function readStoredAgentDoneNotificationsEnabled() {
+  try {
+    return localStorage.getItem(AGENT_DONE_NOTIFICATIONS_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function persistAgentDoneNotificationsEnabled(enabled) {
+  try {
+    localStorage.setItem(AGENT_DONE_NOTIFICATIONS_STORAGE_KEY, enabled ? "1" : "0");
+  } catch {
+    // Ignore storage failures; the toggle should still work for this page load.
+  }
+}
+
+function agentDoneNotificationsStatusText() {
+  if (!browserNotificationSupported()) return "Unavailable here";
+  const permission = browserNotificationPermission();
+  if (permission === "denied") return "Permission denied";
+  if (agentDoneNotificationsEnabled) return permission === "granted" ? "On" : "Permission needed";
+  return permission === "granted" ? "Off · permission granted" : "Off";
+}
+
+function renderAgentDoneNotificationsToggle() {
+  if (!elements.agentDoneNotificationsToggle) return;
+  const supported = browserNotificationSupported();
+  const permission = browserNotificationPermission();
+  elements.agentDoneNotificationsToggle.checked = agentDoneNotificationsEnabled;
+  elements.agentDoneNotificationsToggle.disabled = !supported || permission === "denied";
+  elements.agentDoneNotificationsToggle.setAttribute("aria-describedby", "agentDoneNotificationsStatus");
+  if (elements.agentDoneNotificationsStatus) elements.agentDoneNotificationsStatus.textContent = agentDoneNotificationsStatusText();
+}
+
+async function setAgentDoneNotificationsEnabled(enabled, { requestPermission = false, announce = false } = {}) {
+  let next = !!enabled;
+  if (next) {
+    if (!browserNotificationSupported()) {
+      addEvent("agent-done notifications require HTTPS or localhost", "warn");
+      next = false;
+    } else if (browserNotificationPermission() === "denied") {
+      addEvent("agent-done notifications are blocked by browser permission", "warn");
+      next = false;
+    } else if (requestPermission && browserNotificationPermission() !== "granted") {
+      next = await ensureAgentDoneNotificationPermission();
+      if (!next) addEvent("agent-done notifications not enabled; browser permission was not granted", "warn");
+    } else if (browserNotificationPermission() !== "granted") {
+      next = false;
+    }
+  }
+  agentDoneNotificationsEnabled = next;
+  persistAgentDoneNotificationsEnabled(next);
+  renderAgentDoneNotificationsToggle();
+  if (announce) addEvent(next ? "agent-done notifications enabled" : "agent-done notifications disabled", next ? "info" : "warn");
+  return next;
+}
+
+function restoreAgentDoneNotificationsSetting() {
+  agentDoneNotificationsEnabled = readStoredAgentDoneNotificationsEnabled();
+  if (agentDoneNotificationsEnabled && (!browserNotificationSupported() || browserNotificationPermission() !== "granted")) {
+    agentDoneNotificationsEnabled = false;
+    persistAgentDoneNotificationsEnabled(false);
+  }
+  renderAgentDoneNotificationsToggle();
+}
+
 function setComposerActionsOpen(open) {
   const shouldOpen = open && isMobileView();
   document.body.classList.toggle("composer-actions-open", shouldOpen);
   elements.composerActionsButton.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
+  if (!shouldOpen) setPublishMenuOpen(false);
 }
 
 function isRunActive() {
@@ -1211,6 +1297,7 @@ async function refreshTabs({ selectStored = false } = {}) {
   tabs = response.data?.tabs || [];
   syncTabMetadata(tabs);
   syncBlockedTabNotificationsFromTabs(tabs, previousTabs);
+  syncAgentDoneNotificationsFromTabs(tabs, previousTabs);
   const stored = selectStored ? restoreStoredTabId() : null;
   if (!activeTabId || !tabs.some((tab) => tab.id === activeTabId)) {
     activeTabId = (stored && tabs.some((tab) => tab.id === stored) ? stored : tabs[0]?.id) || null;
@@ -1312,13 +1399,21 @@ function addEvent(message, level = "info") {
   while (elements.eventLog.children.length > 120) elements.eventLog.lastElementChild?.remove();
 }
 
-function blockedTabNotificationSupported() {
+function browserNotificationSupported() {
   return "Notification" in window && window.isSecureContext;
 }
 
-function blockedTabNotificationPermission() {
+function browserNotificationPermission() {
   if (!("Notification" in window)) return "unsupported";
   return Notification.permission || "default";
+}
+
+function blockedTabNotificationSupported() {
+  return browserNotificationSupported();
+}
+
+function blockedTabNotificationPermission() {
+  return browserNotificationPermission();
 }
 
 async function ensureBlockedTabNotificationPermission() {
@@ -1335,6 +1430,24 @@ async function ensureBlockedTabNotificationPermission() {
     }
   } catch (error) {
     addEvent(`blocked-tab notification permission request failed: ${error.message}`, "warn");
+  }
+  return false;
+}
+
+async function ensureAgentDoneNotificationPermission() {
+  if (!browserNotificationSupported()) return false;
+  if (Notification.permission === "granted") return true;
+  if (Notification.permission === "denied" || agentDoneNotificationPermissionRequested || typeof Notification.requestPermission !== "function") return false;
+
+  agentDoneNotificationPermissionRequested = true;
+  try {
+    const permission = await Notification.requestPermission();
+    if (permission === "granted") {
+      addEvent("browser notifications enabled for completed agent work", "info");
+      return true;
+    }
+  } catch (error) {
+    addEvent(`agent-done notification permission request failed: ${error.message}`, "warn");
   }
   return false;
 }
@@ -1421,6 +1534,97 @@ function notifyBlockedTab(tabOrId, { request = null, count } = {}) {
   const body = `${tabTitle} is blocked, ${detail}.`;
   addEvent(`${tabTitle} blocked: ${detail}`, "warn");
   showBlockedTabBrowserNotification({ tabId, title, body, method, count: pendingCount });
+}
+
+function noteAgentDoneNotificationFallback(reason) {
+  if (agentDoneNotificationFallbackNoted) return;
+  agentDoneNotificationFallbackNoted = true;
+  addEvent(`browser notifications unavailable for completed agent work: ${reason}`, "warn");
+}
+
+async function showAgentDoneBrowserNotification({ tabId, title, body }) {
+  if (!agentDoneNotificationsEnabled) return false;
+  if (!browserNotificationSupported()) {
+    noteAgentDoneNotificationFallback("requires HTTPS or localhost");
+    renderAgentDoneNotificationsToggle();
+    return false;
+  }
+  if (!(await ensureAgentDoneNotificationPermission())) {
+    const permission = browserNotificationPermission();
+    noteAgentDoneNotificationFallback(permission === "denied" ? "permission denied" : "permission not granted");
+    if (permission !== "granted") {
+      agentDoneNotificationsEnabled = false;
+      persistAgentDoneNotificationsEnabled(false);
+    }
+    renderAgentDoneNotificationsToggle();
+    return false;
+  }
+
+  const options = {
+    body,
+    tag: `${AGENT_DONE_NOTIFICATION_TAG_PREFIX}:${tabId}`,
+    renotify: true,
+    requireInteraction: false,
+    icon: BLOCKED_TAB_NOTIFICATION_ICON,
+    badge: BLOCKED_TAB_NOTIFICATION_ICON,
+    data: { tabId, url: location.href },
+  };
+
+  try {
+    let registration = null;
+    if ("serviceWorker" in navigator) {
+      registration = await Promise.race([navigator.serviceWorker.ready, delay(1200).then(() => null)]).catch(() => null);
+    }
+    if (registration?.showNotification) {
+      await registration.showNotification(title, options);
+      return true;
+    }
+
+    const notification = new Notification(title, options);
+    notification.onclick = () => {
+      window.focus();
+      if (tabId && tabId !== activeTabId) switchTab(tabId).catch((error) => addEvent(error.message, "error"));
+      notification.close();
+    };
+    return true;
+  } catch (error) {
+    noteAgentDoneNotificationFallback(error.message || "notification failed");
+    return false;
+  }
+}
+
+function agentDoneNotificationKey(tabId, activity = {}) {
+  const serial = Number(activity?.completionSerial);
+  return `${tabId}:${Number.isFinite(serial) && serial > 0 ? serial : "done"}`;
+}
+
+function notifyAgentDone(tabOrId, { activity = null, tabTitle = "" } = {}) {
+  if (!agentDoneNotificationsEnabled) return;
+  const tabId = typeof tabOrId === "string" ? tabOrId : tabOrId?.id || activeTabId;
+  if (!tabId) return;
+  const tab = typeof tabOrId === "object" && tabOrId !== null ? tabOrId : tabs.find((item) => item.id === tabId);
+  const normalizedActivity = normalizeTabActivity(activity || tab?.activity || activityForTab(tab));
+  if (!normalizedActivity.completionSerial) return;
+  const key = agentDoneNotificationKey(tabId, normalizedActivity);
+  if (agentDoneNotificationKeys.has(key)) return;
+  agentDoneNotificationKeys.add(key);
+
+  const displayTitle = tabTitle || tab?.title || "terminal";
+  showAgentDoneBrowserNotification({
+    tabId,
+    title: "Pi finished work",
+    body: `${displayTitle} finished its agent run.`,
+  });
+}
+
+function syncAgentDoneNotificationsFromTabs(nextTabs = [], previousTabs = []) {
+  if (!agentDoneNotificationsEnabled || previousTabs.length === 0) return;
+  const previousSerials = new Map(previousTabs.filter((tab) => tab?.id).map((tab) => [tab.id, normalizeTabActivity(tab.activity).completionSerial]));
+  for (const tab of nextTabs) {
+    if (!tab?.id || !previousSerials.has(tab.id)) continue;
+    const activity = normalizeTabActivity(tab.activity);
+    if (!activity.isWorking && activity.completionSerial > previousSerials.get(tab.id)) notifyAgentDone(tab, { activity });
+  }
 }
 
 function syncBlockedTabNotificationsFromTabs(nextTabs = [], previousTabs = []) {
@@ -2187,14 +2391,17 @@ function isGuardrailDialogPrompt(prompt) {
 
 function releaseDialogPromptParts(prompt) {
   const combined = [prompt.title, prompt.message].filter((part) => stripAnsi(part).trim()).join("\n").trimEnd();
-  if (!/Release preflight summary:/i.test(combined) || !/Publish eligible packages now\?/i.test(combined)) return null;
-
   const lines = combined.split("\n");
-  const questionIndex = lines.findIndex((line) => stripAnsi(line).trim() === "Publish eligible packages now?");
+  const questionIndex = lines.findIndex((line) => /^(Publish eligible packages now\?|Publish to AUR\?|Publish newly created\/converged AUR package\?)$/i.test(stripAnsi(line).trim()));
+  const question = questionIndex === -1 ? "Publish eligible packages now?" : stripAnsi(lines[questionIndex]).trim();
+  const isNpmReleasePrompt = /Release preflight summary:/i.test(combined) && /Publish eligible packages now\?/i.test(combined);
+  const isAurReleasePrompt = /AUR release summary:/i.test(combined) && questionIndex !== -1;
+  if (!isNpmReleasePrompt && !isAurReleasePrompt) return null;
+
   const summaryLines = questionIndex === -1 ? lines : [...lines.slice(0, questionIndex), ...lines.slice(questionIndex + 1)];
   const message = summaryLines.join("\n").replace(/\n+$/, "");
   return {
-    title: "Publish eligible packages now?",
+    title: question,
     message,
     plainMessage: stripAnsi(message),
   };
@@ -2203,7 +2410,7 @@ function releaseDialogPromptParts(prompt) {
 function releaseDialogLineClass(plainLine, section) {
   const text = plainLine.trim();
   if (!text) return "release-dialog-spacer";
-  if (/^(Release preflight summary|Version changes|Bump summary|Will publish|Will skip|Blocked|Other|Publish targets after confirmation|Missing local package dirs):$/i.test(text)) {
+  if (/^(Release preflight summary|AUR release summary|Version changes|Bump summary|Will publish|Will skip|Blocked|Other|Publish targets after confirmation|Missing local package dirs):$/i.test(text)) {
     return "release-dialog-heading";
   }
   if (/^none$/i.test(text)) return "release-dialog-muted";
@@ -2314,9 +2521,202 @@ function renderTodoProgressWidget(_key, lines) {
   return node;
 }
 
+function getWidgetLines(key) {
+  const value = widgets.get(key);
+  return Array.isArray(value?.widgetLines) ? value.widgetLines : [];
+}
+
+function releaseNpmFooterDetails(lines) {
+  const primary = cleanStatusText(lines[0] || "").replace(/^release-(?:npm|aur):\s*/i, "");
+  const parts = primary.split(/\s+·\s+/).map((part) => part.trim()).filter(Boolean);
+  return {
+    phase: parts[0] || "release workflow",
+    mode: parts[1] || "",
+    elapsed: parts[2] || "",
+    controls: lines.slice(1).map(cleanStatusText).filter(Boolean).join(" · "),
+  };
+}
+
+function releaseNpmLineTone(line) {
+  const clean = stripAnsi(line).trim();
+  if (/^\$\s+/.test(clean)) return "command";
+  if (/^==>/.test(clean)) return "target";
+  if (/^(PASS|✓|Published)\b/i.test(clean)) return "pass";
+  if (/^(FAIL|ERROR|ERR|✗)\b/i.test(clean)) return "fail";
+  if (/^(WARN|warning)\b/i.test(clean)) return "warn";
+  if (/^(INFO|npm notice|notice)\b/i.test(clean)) return "info";
+  if (/^RELEASE_NPM_EVENT\b/.test(clean)) return "event";
+  return "";
+}
+
+function appendReleaseNpmTerminalLine(parent, line) {
+  const tone = releaseNpmLineTone(line);
+  const row = make("div", `release-npm-line${tone ? ` ${tone}` : ""}`);
+  if (String(line ?? "") === "") row.textContent = "\u00a0";
+  else renderAnsiText(row, line);
+  parent.append(row);
+}
+
+async function sendReleaseNpmCommand(command) {
+  try {
+    await api("/api/prompt", { method: "POST", body: { message: command }, tabId: activeTabId });
+    addEvent(`${command} sent`, "info");
+    scheduleRefreshState();
+  } catch (error) {
+    addEvent(error.message, "error");
+    addTransientMessage({ role: "error", title: command, content: error.message, level: "error" });
+  }
+}
+
+function releaseNpmActionButton(label, command, className = "") {
+  const button = make("button", `release-npm-action ${className}`.trim(), label);
+  button.type = "button";
+  button.addEventListener("click", () => sendReleaseNpmCommand(command));
+  return button;
+}
+
+function renderReleaseNpmOutputWidget() {
+  const outputLines = getWidgetLines("release-npm:output");
+  const footerLines = getWidgetLines("release-npm:footer");
+  if (outputLines.length === 0 && footerLines.length === 0) return null;
+
+  const details = releaseNpmFooterDetails(footerLines);
+  const node = make("section", "widget release-npm-widget release-npm-live-widget");
+  node.setAttribute("aria-label", "npm release output");
+
+  const header = make("div", "release-npm-header");
+  const titleWrap = make("div", "release-npm-title-wrap");
+  titleWrap.append(make("span", "release-npm-kicker", "npm release"), make("strong", "release-npm-title", details.phase));
+
+  const meta = make("div", "release-npm-meta");
+  if (details.mode) meta.append(make("span", "release-npm-pill", details.mode));
+  if (details.elapsed) meta.append(make("span", "release-npm-pill elapsed", details.elapsed));
+
+  const actions = make("div", "release-npm-actions");
+  actions.append(
+    releaseNpmActionButton("Toggle output", "/release-toggle"),
+    releaseNpmActionButton("Abort", "/release-abort", "danger"),
+  );
+  header.append(titleWrap, meta, actions);
+
+  const terminal = make("div", "release-npm-terminal");
+  terminal.setAttribute("role", "log");
+  terminal.setAttribute("aria-live", "polite");
+  for (const line of (outputLines.length ? outputLines : ["Waiting for release output..."])) {
+    appendReleaseNpmTerminalLine(terminal, line);
+  }
+
+  const controls = make("div", "release-npm-controls", details.controls || "Controls: /release-toggle expands/collapses · /release-abort stops subprocess");
+  node.append(header, terminal, controls);
+  requestAnimationFrame(() => { terminal.scrollTop = terminal.scrollHeight; });
+  return node;
+}
+
+function renderReleaseNpmLogWidget() {
+  const lines = getWidgetLines("release-npm:logs");
+  if (lines.length === 0) return null;
+
+  const node = make("section", "widget release-npm-widget release-npm-log-widget");
+  node.setAttribute("aria-label", "npm release log");
+  const header = make("div", "release-npm-header");
+  const titleWrap = make("div", "release-npm-title-wrap");
+  titleWrap.append(
+    make("span", "release-npm-kicker", "saved log"),
+    make("strong", "release-npm-title", stripAnsi(lines[0] || "release-npm log")),
+  );
+  const meta = make("div", "release-npm-meta");
+  if (lines[1]) meta.append(make("span", "release-npm-pill", stripAnsi(lines[1])));
+  const actions = make("div", "release-npm-actions");
+  actions.append(releaseNpmActionButton("Close log", "/release-npm-logs close"));
+  header.append(titleWrap, meta, actions);
+
+  const terminal = make("div", "release-npm-terminal");
+  for (const line of lines.slice(2).filter((line, index) => index > 0 || stripAnsi(line).trim())) {
+    appendReleaseNpmTerminalLine(terminal, line);
+  }
+  node.append(header, terminal);
+  requestAnimationFrame(() => { terminal.scrollTop = terminal.scrollHeight; });
+  return node;
+}
+
+function renderReleaseAurOutputWidget() {
+  const outputLines = getWidgetLines("release-aur:output");
+  const footerLines = getWidgetLines("release-aur:footer");
+  if (outputLines.length === 0 && footerLines.length === 0) return null;
+
+  const details = releaseNpmFooterDetails(footerLines);
+  const node = make("section", "widget release-npm-widget release-aur-widget release-aur-live-widget");
+  node.setAttribute("aria-label", "AUR release output");
+
+  const header = make("div", "release-npm-header");
+  const titleWrap = make("div", "release-npm-title-wrap");
+  titleWrap.append(make("span", "release-npm-kicker", "AUR release"), make("strong", "release-npm-title", details.phase));
+
+  const meta = make("div", "release-npm-meta");
+  if (details.mode) meta.append(make("span", "release-npm-pill", details.mode));
+  if (details.elapsed) meta.append(make("span", "release-npm-pill elapsed", details.elapsed));
+
+  const actions = make("div", "release-npm-actions");
+  actions.append(
+    releaseNpmActionButton("Toggle output", "/release-aur toggle"),
+    releaseNpmActionButton("Abort", "/release-aur abort", "danger"),
+  );
+  header.append(titleWrap, meta, actions);
+
+  const terminal = make("div", "release-npm-terminal");
+  terminal.setAttribute("role", "log");
+  terminal.setAttribute("aria-live", "polite");
+  for (const line of (outputLines.length ? outputLines : ["Waiting for release-aur output..."])) {
+    appendReleaseNpmTerminalLine(terminal, line);
+  }
+
+  const controls = make("div", "release-npm-controls", details.controls || "Controls: /release-aur toggle expands/collapses · /release-aur abort stops subprocess");
+  node.append(header, terminal, controls);
+  requestAnimationFrame(() => { terminal.scrollTop = terminal.scrollHeight; });
+  return node;
+}
+
+function renderReleaseAurLogWidget() {
+  const lines = getWidgetLines("release-aur:logs");
+  if (lines.length === 0) return null;
+
+  const node = make("section", "widget release-npm-widget release-aur-widget release-aur-log-widget");
+  node.setAttribute("aria-label", "AUR release log");
+  const header = make("div", "release-npm-header");
+  const titleWrap = make("div", "release-npm-title-wrap");
+  titleWrap.append(
+    make("span", "release-npm-kicker", "saved AUR log"),
+    make("strong", "release-npm-title", stripAnsi(lines[0] || "release-aur log")),
+  );
+  const meta = make("div", "release-npm-meta");
+  if (lines[1]) meta.append(make("span", "release-npm-pill", stripAnsi(lines[1])));
+  const actions = make("div", "release-npm-actions");
+  actions.append(releaseNpmActionButton("Close log", "/release-aur logs close"));
+  header.append(titleWrap, meta, actions);
+
+  const terminal = make("div", "release-npm-terminal");
+  for (const line of lines.slice(2).filter((line, index) => index > 0 || stripAnsi(line).trim())) {
+    appendReleaseNpmTerminalLine(terminal, line);
+  }
+  node.append(header, terminal);
+  requestAnimationFrame(() => { terminal.scrollTop = terminal.scrollHeight; });
+  return node;
+}
+
 function renderWidgets() {
   elements.widgetArea.replaceChildren();
+  const releaseOutput = renderReleaseNpmOutputWidget();
+  if (releaseOutput) elements.widgetArea.append(releaseOutput);
+  const releaseLog = renderReleaseNpmLogWidget();
+  if (releaseLog) elements.widgetArea.append(releaseLog);
+  const releaseAurOutput = renderReleaseAurOutputWidget();
+  if (releaseAurOutput) elements.widgetArea.append(releaseAurOutput);
+  const releaseAurLog = renderReleaseAurLogWidget();
+  if (releaseAurLog) elements.widgetArea.append(releaseAurLog);
+
+  const releaseWidgetKeys = new Set(["release-npm:output", "release-npm:footer", "release-npm:logs", "release-aur:output", "release-aur:footer", "release-aur:logs"]);
   for (const [key, value] of widgets) {
+    if (releaseWidgetKeys.has(key)) continue;
     const lines = Array.isArray(value.widgetLines) ? value.widgetLines : [];
     const specialized = key === "todo-progress" ? renderTodoProgressWidget(key, lines) : null;
     if (specialized) {
@@ -3414,6 +3814,21 @@ function addTransientMessage({ role = "notice", title, content, level = "info" }
   renderAllMessages();
 }
 
+function addAbortTranscriptNotice({ activeRun = false, errorMessage = "" } = {}) {
+  if (errorMessage) {
+    addTransientMessage({ role: "error", title: "Abort failed", content: `Abort request failed: ${errorMessage}`, level: "error" });
+    return;
+  }
+  addTransientMessage({
+    role: "native",
+    title: activeRun ? "Agent aborted" : "Abort requested",
+    content: activeRun
+      ? "⛔ Agent run aborted by user from the Web UI. Pi was told to stop; this transcript marks the run as aborted."
+      : "⛔ Abort requested from the Web UI, but no active agent run was visible in this tab.",
+    level: activeRun ? "warn" : "info",
+  });
+}
+
 function isChatNearBottom() {
   const remaining = elements.chat.scrollHeight - elements.chat.scrollTop - elements.chat.clientHeight;
   return remaining <= CHAT_BOTTOM_THRESHOLD_PX;
@@ -3518,6 +3933,19 @@ function sendPromptFromModeButton(kind, button) {
   sendPrompt(kind);
 }
 
+function setPublishMenuOpen(open) {
+  publishMenuOpen = !!open;
+  elements.publishButton.setAttribute("aria-expanded", publishMenuOpen ? "true" : "false");
+  elements.publishButton.classList.toggle("menu-open", publishMenuOpen);
+  elements.publishButton.parentElement?.classList.toggle("open", publishMenuOpen);
+}
+
+function runPublishWorkflow(command) {
+  setComposerActionsOpen(false);
+  setPublishMenuOpen(false);
+  sendPrompt("prompt", command);
+}
+
 function shouldSendPromptFromEnter(event) {
   if (event.key !== "Enter" || event.shiftKey || event.isComposing) return false;
   if (event.ctrlKey || event.metaKey) return true;
@@ -3532,11 +3960,39 @@ function renderMessages(messages) {
   renderFeedbackTray();
 }
 
+function cancelStreamBubbleHide() {
+  clearTimeout(streamBubbleHideTimer);
+  streamBubbleHideTimer = null;
+}
+
+function removeStreamBubble() {
+  cancelStreamBubbleHide();
+  streamBubble?.remove();
+  streamBubble = null;
+  streamText = null;
+  streamBubbleVisibleSince = 0;
+  renderRunIndicator({ scroll: false });
+}
+
+function scheduleStreamBubbleHide() {
+  if (!streamBubble) return;
+  const visibleForMs = streamBubbleVisibleSince ? performance.now() - streamBubbleVisibleSince : STREAM_OUTPUT_MIN_VISIBLE_MS;
+  const delayMs = Math.max(STREAM_OUTPUT_HIDE_DELAY_MS, STREAM_OUTPUT_MIN_VISIBLE_MS - visibleForMs);
+  clearTimeout(streamBubbleHideTimer);
+  streamBubbleHideTimer = setTimeout(() => {
+    streamBubbleHideTimer = null;
+    if (stripTodoProgressLines(streamRawText, { streaming: true }) || !streamBubble) return;
+    removeStreamBubble();
+  }, delayMs);
+}
+
 function ensureStreamBubble() {
+  cancelStreamBubbleHide();
   if (streamBubble) return;
   const created = appendMessage({ role: "assistant", title: "Assistant", timestamp: Date.now(), content: "" }, { streaming: true });
   streamBubble = created.bubble;
   streamText = appendText(created.body, "");
+  streamBubbleVisibleSince = performance.now();
   renderRunIndicator({ scroll: false });
   scrollChatToBottom();
 }
@@ -3556,9 +4012,11 @@ function showStreamingThinking(placeholder = "Thinking…") {
 }
 
 function resetStreamBubble() {
+  cancelStreamBubbleHide();
   streamBubble = null;
   streamText = null;
   streamRawText = "";
+  streamBubbleVisibleSince = 0;
   streamThinkingBubble = null;
   streamThinking = null;
 }
@@ -3640,11 +4098,8 @@ function handleMessageUpdate(event) {
     if (assistantText) {
       ensureStreamBubble();
       streamText.textContent = assistantText;
-    } else if (streamBubble) {
-      streamBubble.remove();
-      streamBubble = null;
-      streamText = null;
-      renderRunIndicator({ scroll: false });
+    } else {
+      scheduleStreamBubbleHide();
     }
     renderFooter();
     scrollChatToBottom();
@@ -3919,12 +4374,14 @@ function abortPathSuggestionRequest() {
 
 function cancelPathSuggestionRequest() {
   pathSuggestRequestSerial++;
+  pathSuggestActiveQuery = null;
   abortPathSuggestionRequest();
 }
 
 function hideCommandSuggestions() {
   cancelPathSuggestionRequest();
   elements.commandSuggest.hidden = true;
+  elements.commandSuggest.removeAttribute("aria-busy");
   elements.commandSuggest.replaceChildren();
   commandSuggestions = [];
   pathSuggestions = [];
@@ -3945,6 +4402,33 @@ function setActiveCommandSuggestion(index) {
   }
 }
 
+function pointerPositionFromEvent(event) {
+  if (!Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return null;
+  return { x: event.clientX, y: event.clientY };
+}
+
+function rememberPointerPosition(event) {
+  lastPointerPosition = pointerPositionFromEvent(event);
+}
+
+function commandSuggestionPointerActuallyMoved(event) {
+  const movementX = Number.isFinite(event.movementX) ? event.movementX : 0;
+  const movementY = Number.isFinite(event.movementY) ? event.movementY : 0;
+  if (movementX !== 0 || movementY !== 0) return true;
+
+  const position = pointerPositionFromEvent(event);
+  return Boolean(
+    position &&
+      lastPointerPosition &&
+      (position.x !== lastPointerPosition.x || position.y !== lastPointerPosition.y),
+  );
+}
+
+function setActiveCommandSuggestionFromPointerMove(index, event) {
+  if (!commandSuggestionPointerActuallyMoved(event)) return;
+  setActiveCommandSuggestion(index);
+}
+
 function renderCommandSuggestionItems(trigger, { keepIndex = false } = {}) {
   suggestionMode = "command";
   pathSuggestions = [];
@@ -3962,7 +4446,7 @@ function renderCommandSuggestionItems(trigger, { keepIndex = false } = {}) {
     item.type = "button";
     item.setAttribute("role", "option");
     item.addEventListener("mousedown", (event) => event.preventDefault());
-    item.addEventListener("mouseenter", () => setActiveCommandSuggestion(index));
+    item.addEventListener("pointermove", (event) => setActiveCommandSuggestionFromPointerMove(index, event));
     item.addEventListener("click", () => insertCommandSuggestion(index));
 
     item.append(
@@ -4004,7 +4488,7 @@ function renderPathSuggestionItems(trigger, { keepIndex = false } = {}) {
     item.type = "button";
     item.setAttribute("role", "option");
     item.addEventListener("mousedown", (event) => event.preventDefault());
-    item.addEventListener("mouseenter", () => setActiveCommandSuggestion(index));
+    item.addEventListener("pointermove", (event) => setActiveCommandSuggestionFromPointerMove(index, event));
     item.addEventListener("click", () => insertPathSuggestion(index));
 
     item.append(
@@ -4020,15 +4504,25 @@ function renderPathSuggestionItems(trigger, { keepIndex = false } = {}) {
 }
 
 async function renderPathSuggestions(trigger, { keepIndex = false } = {}) {
+  if (suggestionMode === "path" && pathSuggestActiveQuery === trigger.query && !elements.commandSuggest.hidden) {
+    if (keepIndex && activeSuggestionCount() > 0) setActiveCommandSuggestion(commandSuggestIndex);
+    return;
+  }
+
+  const keepExistingPathMenu = suggestionMode === "path" && !elements.commandSuggest.hidden && elements.commandSuggest.childElementCount > 0;
   abortPathSuggestionRequest();
   const requestSerial = ++pathSuggestRequestSerial;
   const controller = new AbortController();
+  pathSuggestActiveQuery = trigger.query;
   pathSuggestAbortController = controller;
   suggestionMode = "path";
   commandSuggestions = [];
-  pathSuggestions = [];
-  elements.commandSuggest.replaceChildren(make("div", "command-suggest-empty", "Finding paths…"));
+  if (!keepExistingPathMenu) {
+    pathSuggestions = [];
+    elements.commandSuggest.replaceChildren(make("div", "command-suggest-empty", "Finding paths…"));
+  }
   elements.commandSuggest.hidden = false;
+  elements.commandSuggest.setAttribute("aria-busy", "true");
 
   try {
     const response = await api(`/api/path-suggestions?query=${encodeURIComponent(trigger.query)}`, { signal: controller.signal });
@@ -4041,7 +4535,10 @@ async function renderPathSuggestions(trigger, { keepIndex = false } = {}) {
     elements.commandSuggest.replaceChildren(make("div", "command-suggest-empty", `Path suggestions unavailable: ${error.message}`));
     elements.commandSuggest.hidden = false;
   } finally {
-    if (requestSerial === pathSuggestRequestSerial) pathSuggestAbortController = null;
+    if (requestSerial === pathSuggestRequestSerial) {
+      pathSuggestAbortController = null;
+      elements.commandSuggest.removeAttribute("aria-busy");
+    }
   }
 }
 
@@ -4527,6 +5024,7 @@ function handleEvent(event) {
       break;
     case "agent_end":
       addEvent("agent finished");
+      notifyAgentDone(event.tabId || activeTabId, { activity: event.tabActivity, tabTitle: event.tabTitle });
       currentRunStartedAt = null;
       if (currentState) currentState = { ...currentState, isStreaming: false };
       clearRunIndicatorActivity();
@@ -4635,14 +5133,31 @@ elements.gitWorkflowButton.addEventListener("click", () => {
   setComposerActionsOpen(false);
   startGitWorkflow();
 });
+const publishMenuContainer = elements.publishButton.parentElement;
+elements.publishButton.addEventListener("click", () => {
+  setPublishMenuOpen(true);
+});
+publishMenuContainer?.addEventListener("pointerenter", () => setPublishMenuOpen(true));
+publishMenuContainer?.addEventListener("pointerleave", () => setPublishMenuOpen(false));
+publishMenuContainer?.addEventListener("focusin", () => setPublishMenuOpen(true));
+publishMenuContainer?.addEventListener("focusout", () => {
+  setTimeout(() => {
+    if (!publishMenuContainer?.contains(document.activeElement)) setPublishMenuOpen(false);
+  }, 0);
+});
+elements.releaseNpmButton.addEventListener("click", () => runPublishWorkflow("/release-npm"));
+elements.releaseAurButton.addEventListener("click", () => runPublishWorkflow("/release-aur"));
 elements.gitWorkflowCancelButton.addEventListener("click", cancelGitWorkflow);
 elements.abortButton.addEventListener("click", async () => {
+  const hadActiveRun = runIndicatorIsActive();
   try {
-    if (runIndicatorIsActive()) setRunIndicatorActivity("Abort requested; checking whether Pi stopped…");
+    if (hadActiveRun) setRunIndicatorActivity("Abort requested; checking whether Pi stopped…");
     await api("/api/abort", { method: "POST", body: {} });
+    addAbortTranscriptNotice({ activeRun: hadActiveRun });
     scheduleAbortStateChecks();
   } catch (error) {
     addEvent(error.message, "error");
+    addAbortTranscriptNotice({ errorMessage: error.message });
   }
 });
 elements.newSessionButton.addEventListener("click", async () => {
@@ -4698,6 +5213,15 @@ elements.setThinkingButton.addEventListener("click", async () => {
 });
 elements.themeSelect.addEventListener("change", () => setThemeByName(elements.themeSelect.value, { persist: true, announce: true }));
 elements.openNetworkButton.addEventListener("click", openToNetwork);
+elements.agentDoneNotificationsToggle.addEventListener("change", () => {
+  setAgentDoneNotificationsEnabled(elements.agentDoneNotificationsToggle.checked, {
+    requestPermission: elements.agentDoneNotificationsToggle.checked,
+    announce: true,
+  }).catch((error) => {
+    addEvent(error.message, "error");
+    renderAgentDoneNotificationsToggle();
+  });
+});
 elements.toggleSidePanelButton.addEventListener("click", () => {
   setSidePanelCollapsed(true);
 });
@@ -4726,6 +5250,9 @@ document.addEventListener("pointerdown", (event) => {
   if (document.body.classList.contains("composer-actions-open") && !elements.composer.contains(event.target)) {
     setComposerActionsOpen(false);
   }
+  if (publishMenuOpen && !event.target?.closest?.(".composer-publish-menu")) {
+    setPublishMenuOpen(false);
+  }
   if (document.body.classList.contains("mobile-tabs-expanded") && !elements.tabBar.contains(event.target) && !elements.terminalTabsToggleButton.contains(event.target)) {
     setMobileTabsExpanded(false);
   }
@@ -4737,9 +5264,14 @@ document.addEventListener("pointermove", (event) => {
   if (openTerminalTabGroupKey && !event.target?.closest?.(".terminal-tab-group")) {
     clearOpenTerminalTabGroup(openTerminalTabGroupKey);
   }
+  rememberPointerPosition(event);
 }, { passive: true });
 window.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
+  if (publishMenuOpen) {
+    setPublishMenuOpen(false);
+    return;
+  }
   if (document.body.classList.contains("composer-actions-open")) {
     setComposerActionsOpen(false);
     return;
@@ -4830,6 +5362,7 @@ loadLastUserPromptCache();
 installViewportHandlers();
 initializeThemes().catch((error) => addEvent(`failed to load themes: ${error.message}`, "warn"));
 initializeFastPicks().catch((error) => addEvent(`failed to initialize path fast picks: ${error.message}`, "error"));
+restoreAgentDoneNotificationsSetting();
 restoreSidePanelState();
 bindMobileViewChanges();
 registerPwaServiceWorker();

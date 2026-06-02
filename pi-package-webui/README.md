@@ -51,7 +51,7 @@ pi-webui --cwd /path/to/project
 - Browser chat with Pi over RPC
 - Isolated terminal tabs: each Web UI tab starts its own separate `pi --mode rpc` subprocess, event stream, session state, and prompt draft
 - Automatic tab naming from the first prompt on default-named tabs, plus `/name <title>` to manually sync the Pi session and browser tab name
-- Per-tab activity indicators for idle, working, blocked, and completed unseen work, with browser notifications when a tab needs an extension UI response
+- Per-tab activity indicators for idle, working, blocked, and completed unseen work, with browser notifications when a tab needs an extension UI response and an optional side-panel toggle for agent-done notifications
 - Live assistant text streaming, including streamed thinking blocks when exposed by the provider
 - Prompt, steer, follow-up, abort, new session, and manual compact controls
 - Busy-session behavior selector for follow-up vs steer
@@ -62,9 +62,11 @@ pi-webui --cwd /path/to/project
 - Collapsible side panel with session state, queue, available commands, events, local-network exposure status/control, and a theme picker
 - Pi-style footer with token, cache, estimated Pi-context tokens, speed, cost, context usage, clickable per-tab cwd picker with server-persisted fast picks, git branch, changes, runtime, model, and thinking level
 - Guided Git workflow: `git add .`, ask Pi to run `/git-staged-msg`, preview short/long messages, commit with the selected message, and `git push`
+- Hover-expand Publish workflow menu beside Git workflow, currently offering NPM Release and AUR Release
 - Basic rendering for user, assistant, tool result, bash execution, and thinking messages
 - Feedback reactions (`👍`, `👎`, `?`) on final assistant output plus tool/bash action cards, with queued post-run submission that asks Pi to create/update a LEARNING
 - Basic extension UI bridge for `notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`, `select`, `confirm`, `input`, and `editor`
+- Specialized `/release-npm` and `/release-aur` widget rendering with scrollable live logs plus toggle/abort actions
 - Side-panel theme picker backed by the bundled `@firstpick/pi-themes-bundle` themes
 - PWA metadata, icons, and service worker for install-to-home-screen support when served from a secure context
 - Static frontend: no bundler, no frontend install step
@@ -73,7 +75,7 @@ pi-webui --cwd /path/to/project
 
 - The mobile composer starts as a one-line `Ask Pi…` input, grows with user-entered lines, and scrolls the transcript to the latest output when focused.
 - When Pi is idle, `Steer` and `Follow-up` live inside `Actions`; while a run is active, they move back into the main composer row for quick steering/follow-up.
-- PWA install support and blocked-tab browser notifications require browser service-worker/notification support and usually HTTPS or `localhost`. Plain `http://<LAN-IP>` may show the app but may not offer install or notifications on Chrome/Safari.
+- PWA install support, blocked-tab browser notifications, and optional agent-done notifications require browser service-worker/notification support and usually HTTPS or `localhost`. Plain `http://<LAN-IP>` may show the app but may not offer install or notifications on Chrome/Safari.
 
 ## Pi slash commands
 

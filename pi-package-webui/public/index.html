@@ -76,6 +76,26 @@
                 aria-label="Start guided Git workflow: git add dot, run git-staged-msg, preview messages, commit short or long, then git push. Cancel is available at each step."
                 data-tooltip="Guided Git workflow:&#10;1. Run git add .&#10;2. Run /git-staged-msg&#10;3. Preview short + long messages&#10;4. Commit with short or long message&#10;5. Run git push&#10;Cancel is available at each step."
               >Git workflow</button>
+              <div class="composer-publish-menu">
+                <button
+                  id="publishButton"
+                  class="composer-publish-button"
+                  type="button"
+                  title="Choose a publish workflow"
+                  aria-label="Open publish workflows"
+                  aria-haspopup="menu"
+                  aria-expanded="false"
+                  aria-controls="publishMenu"
+                >Publish</button>
+                <div id="publishMenu" class="composer-publish-menu-panel" role="menu" aria-label="Publish workflows">
+                  <button id="releaseNpmButton" class="composer-publish-menu-item" type="button" role="menuitem" data-command="/release-npm">
+                    <span>NPM Release</span>
+                  </button>
+                  <button id="releaseAurButton" class="composer-publish-menu-item" type="button" role="menuitem" data-command="/release-aur">
+                    <span>AUR Release</span>
+                  </button>
+                </div>
+              </div>
             </div>
             <div class="spacer"></div>
             <button
@@ -140,6 +160,16 @@
               <label>Network</label>
               <div id="networkStatus" class="network-status closed">Local only</div>
               <button id="openNetworkButton" type="button">Open to network</button>
+            </div>
+            <div class="control-field notification-control-field">
+              <span class="control-label">Notifications</span>
+              <label class="toggle-control" for="agentDoneNotificationsToggle">
+                <input id="agentDoneNotificationsToggle" type="checkbox" />
+                <span>
+                  <span class="toggle-control-label">Agent done notifications</span>
+                  <span id="agentDoneNotificationsStatus" class="toggle-control-hint">Off</span>
+                </span>
+              </label>
             </div>
             <button id="abortButton" type="button" class="danger">Abort</button>
           </div>

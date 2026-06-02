@@ -8,6 +8,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 const RELEASE_STATUS_KEY = "release-npm";
 const RELEASE_LOG_WIDGET_KEY = "release-npm:logs";
 const COLLAPSED_LINES = 40;
+const OUTPUT_RENDER_INTERVAL_MS = 80;
+const ANSI_ESCAPE_RE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
 
 type RunResult = { ok: boolean; output: string; aborted: boolean };
 type CommandResult = { ok: boolean; output: string };
@@ -208,7 +210,7 @@ function isCtrlC(data: string): boolean {
 }
 
 function stripAnsi(input: string): string {
-  return input.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+  return input.replace(ANSI_ESCAPE_RE, "");
 }
 
 function extractSection(output: string, heading: string): string[] {
@@ -356,8 +358,39 @@ const EXPANDED_LINES = 160;
 let activeReleaseRun: { abort: () => void; toggleOutput: () => void } | undefined;
 let activeLogViewerCleanup: (() => void) | undefined;
 
-function truncateWidgetLine(line: string, maxLength = 240): string {
-  return line.length > maxLength ? `${line.slice(0, Math.max(0, maxLength - 1))}…` : line;
+function appendDisplayChunk(lines: string[], chunk: string): void {
+  if (lines.length === 0) lines.push("");
+
+  for (let i = 0; i < chunk.length; i++) {
+    const char = chunk[i];
+    if (char === "\r") {
+      if (chunk[i + 1] === "\n") {
+        lines.push("");
+        i++;
+      } else {
+        lines[lines.length - 1] = "";
+      }
+      continue;
+    }
+    if (char === "\n") {
+      lines.push("");
+      continue;
+    }
+    lines[lines.length - 1] += char;
+  }
+}
+
+function outputLinesFromDisplay(lines: string[]): string[] {
+  const visible = lines.slice();
+  while (visible.length > 0 && visible[visible.length - 1] === "") visible.pop();
+  return visible;
+}
+
+function formatElapsed(startMs: number): string {
+  const seconds = Math.max(0, Math.floor((Date.now() - startMs) / 1000));
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return minutes > 0 ? `${minutes}m${String(remainder).padStart(2, "0")}s` : `${remainder}s`;
 }
 
 export default function releaseNpmExtension(pi: ExtensionAPI) {
@@ -446,7 +479,7 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
           `Release log: ${selected.title}`,
           `Path: ${selected.file} · showing last ${Math.min(renderLimit, lines.length)}/${lines.length} lines · Esc/q closes in TUI; /release-npm-logs close also closes`,
           "",
-          ...lines.slice(-renderLimit).map((line) => truncateWidgetLine(line, 500)),
+          ...lines.slice(-renderLimit),
         ], { placement: "aboveEditor" });
       }
       ctx.ui.notify(`Showing release log ${selected.title}.`, "info");
@@ -485,40 +518,65 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
       }
 
       const runLog = createReleaseRunLog(ctx.cwd);
+      let cleanupReleaseUi: (() => void) | undefined;
       void (async () => {
       let liveBuffer = "";
+      let liveLines: string[] = [];
       let expanded = false;
       let phase = "Release preflight checks";
+      const startedAtMs = Date.now();
       let currentChild: AbortableChild | undefined;
       let unsubscribeKeys: (() => void) | undefined;
+      let elapsedTimer: ReturnType<typeof setInterval> | undefined;
+      let renderQueued = false;
+      let uiClosed = false;
 
-      const outputLines = () => liveBuffer.split(/\r?\n/).filter(Boolean);
+      const outputLines = () => outputLinesFromDisplay(liveLines);
       const modeText = () => {
         const total = outputLines().length;
         const shown = expanded ? Math.min(EXPANDED_LINES, total) : Math.min(COLLAPSED_LINES, total);
         return expanded ? `expanded ${shown}/${total}` : `compact ${shown}/${total}`;
       };
-      const renderReleaseUi = () => {
-        if (!ctx.hasUI) return;
+      const renderReleaseUiNow = () => {
+        if (!ctx.hasUI || uiClosed) return;
         const lines = outputLines();
         const limit = expanded ? EXPANDED_LINES : COLLAPSED_LINES;
         const visibleLines = lines.slice(-limit);
         ctx.ui.setWidget(RELEASE_OUTPUT_KEY, visibleLines.length
-          ? visibleLines.map((line) => truncateWidgetLine(line, 500))
+          ? visibleLines
           : ["Waiting for release output..."], { placement: "aboveEditor" });
         ctx.ui.setWidget(RELEASE_FOOTER_KEY, [
-          `${phase} · ${modeText()}`,
-          "Controls: /release-toggle expands/collapses · /release-abort stops the running subprocess",
+          `release-npm: ${phase} · ${modeText()} · ${formatElapsed(startedAtMs)}`,
+          "Controls: Ctrl+O or /release-toggle expands/collapses · Ctrl+C or /release-abort stops subprocess",
         ], { placement: "belowEditor" });
+      };
+      const renderReleaseUi = (immediate = false) => {
+        if (immediate) {
+          renderReleaseUiNow();
+          return;
+        }
+        if (!ctx.hasUI || uiClosed || renderQueued) return;
+        renderQueued = true;
+        setTimeout(() => {
+          renderQueued = false;
+          renderReleaseUiNow();
+        }, OUTPUT_RENDER_INTERVAL_MS);
       };
       const setPhase = (nextPhase: string) => {
         phase = nextPhase;
-        renderReleaseUi();
+        renderReleaseUi(true);
+      };
+      const startElapsedTimer = () => {
+        if (!ctx.hasUI || elapsedTimer) return;
+        elapsedTimer = setInterval(() => renderReleaseUi(true), 1000);
       };
       const abortCurrentStep = () => currentChild?.abortReleaseStep?.();
       const closeReleaseUi = () => {
+        uiClosed = true;
         unsubscribeKeys?.();
         unsubscribeKeys = undefined;
+        if (elapsedTimer) clearInterval(elapsedTimer);
+        elapsedTimer = undefined;
         activeReleaseRun = undefined;
         if (ctx.hasUI) {
           ctx.ui.setWidget(RELEASE_OUTPUT_KEY, undefined);
@@ -526,13 +584,21 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
           ctx.ui.setWidget(RELEASE_STATUS_KEY, undefined);
         }
       };
+      cleanupReleaseUi = closeReleaseUi;
       const toggleOutput = () => {
         expanded = !expanded;
-        renderReleaseUi();
+        renderReleaseUi(true);
+      };
+      const resetLiveOutput = () => {
+        liveBuffer = "";
+        liveLines = [];
+        uiClosed = false;
+        renderReleaseUi(true);
       };
       const finishLog = (status: string, summary?: string) => saveReleaseRunLog(runLog, status, summary);
       const appendOutput = (chunk: string) => {
         liveBuffer += chunk;
+        appendDisplayChunk(liveLines, chunk);
         appendReleaseLog(runLog, chunk);
         renderReleaseUi();
       };
@@ -541,7 +607,8 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
       if (ctx.hasUI) {
         ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg("accent", "Release:Checking"));
         ctx.ui.notify("Running release preflight checks. Output stays above input; controls are below input.", "info");
-        renderReleaseUi();
+        renderReleaseUi(true);
+        startElapsedTimer();
         unsubscribeKeys = ctx.ui.onTerminalInput((data) => {
           if (isCtrlO(data)) {
             toggleOutput();
@@ -557,6 +624,7 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
 
       const planCommand = releaseScriptCommand(ctx.cwd, "release-workflow.sh", ["--plan", "--all"]);
       ctx.ui.notify("Running release-workflow.sh --plan --all...", "info");
+      appendOutput(`$ ${planCommand}\n`);
       const plan = await runScriptLive(ctx.cwd, planCommand, appendOutput, (child) => { currentChild = child; });
       currentChild = undefined;
 
@@ -612,13 +680,15 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
         return;
       }
 
-      liveBuffer = "";
+      phase = "Release publishing";
       expanded = false;
+      resetLiveOutput();
       activeReleaseRun = { abort: abortCurrentStep, toggleOutput };
       if (ctx.hasUI) {
         ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg("accent", "Release:Publishing"));
         ctx.ui.notify("Starting publish workflow. Output stays above input; controls are below input.", "info");
-        setPhase("Release publishing");
+        renderReleaseUi(true);
+        startElapsedTimer();
       }
 
       if (plannedTargetResolution.targets.length === 0) {
@@ -717,17 +787,14 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
         `  - ${failed.length ? failed.map((f) => `${f.pkg}: ${f.reason}`).join(" | ") : "none"}`,
       ].join("\n");
 
-      let combinedPublishOutput = "";
-      for (const target of plannedTargetResolution.targets) {
+      for (const [index, target] of plannedTargetResolution.targets.entries()) {
         const publishCommand = releaseScriptCommand(ctx.cwd, "release-workflow.sh", ["--publish", "--target", target.target]);
+        setPhase(`Release publishing ${index + 1}/${plannedTargetResolution.targets.length}: ${target.target}`);
         ctx.ui.notify(`Running release-workflow.sh --publish --target ${target.target}...`, "info");
-        appendOutput(`\n==> Publishing target ${target.target} (${target.label})\n`);
-        const publish = await runScriptLive(ctx.cwd, publishCommand, (chunk) => {
-          appendOutput(chunk);
-          parsePublishOutput(liveBuffer);
-        }, (child) => { currentChild = child; });
+        appendOutput(`\n==> Publishing target ${index + 1}/${plannedTargetResolution.targets.length}: ${target.target} (${target.label})\n`);
+        appendOutput(`$ ${publishCommand}\n`);
+        const publish = await runScriptLive(ctx.cwd, publishCommand, appendOutput, (child) => { currentChild = child; });
         currentChild = undefined;
-        combinedPublishOutput += publish.output;
 
         if (publish.aborted) {
           const logPath = finishLog("aborted-publish", `target=${target.target}`);
@@ -749,8 +816,6 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
         parsePublishOutput(publish.output);
       }
 
-      parsePublishOutput(combinedPublishOutput);
-
       if (ctx.hasUI) {
         ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg("success", "Release:OK"));
         ctx.ui.setWidget(RELEASE_STATUS_KEY, undefined);
@@ -760,6 +825,7 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
       const logPath = finishLog("completed", finalSummary);
       ctx.ui.notify(`${finalSummary}\nRelease flow completed successfully.${logPath ? `\nLog: ${logPath}` : ""}`, "success");
       })().catch((error: unknown) => {
+        cleanupReleaseUi?.();
         activeReleaseRun = undefined;
         if (ctx.hasUI) {
           ctx.ui.setWidget(RELEASE_OUTPUT_KEY, undefined);

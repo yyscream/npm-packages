@@ -63,6 +63,10 @@ The setup menu also includes AUR SSH publishing access:
 
 For fully automated key creation, the setup can create an empty-passphrase key only after a warning and explicit confirmation. Use the manual command option if you want `ssh-keygen` to prompt for a passphrase.
 
+## Web UI output
+
+`/release-aur` streams workflow output through Pi extension widgets using Web UI-compatible text payloads. In Pi Web UI, the companion renderer shows a scrollable AUR release card with phase, compact/expanded line counts, elapsed time, and `Toggle output`/`Abort` actions.
+
 ## Safety model
 
 `/release-aur plan`:

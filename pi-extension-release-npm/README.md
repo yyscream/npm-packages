@@ -13,10 +13,12 @@ Release orchestration command for this npm-packages workspace.
 - After confirmation, publishes only package targets detected in the pre-confirmation publish plan instead of scanning all packages again.
 - After a successful publish, updates installed Pi extensions only for packages detected in that same pre-confirmation publish plan.
 - Streams live release output in an above-editor panel, separate from the conversation transcript.
+- Shows exact helper commands and current publish target/progress in the live stream.
+- In Pi Web UI, renders the live stream as a scrollable release card with toggle/abort actions.
 - Keeps the normal Pi input row usable while the release is running.
-- Shows phase/status/help in a below-editor footer instead of at the top of the output.
-- Toggles compact/expanded output with `/release-toggle` while `/release-npm` runs in the background.
-- Aborts the active release subprocess with `/release-abort` while `/release-npm` runs in the background.
+- Shows phase, output mode, elapsed time, and controls in a below-editor footer.
+- Toggles compact/expanded output with `Ctrl+O` or `/release-toggle` while `/release-npm` runs in the background.
+- Aborts the active release subprocess with `Ctrl+C` or `/release-abort` while `/release-npm` runs in the background.
 - Saves each release run log under `~/.pi/agent/release-npm-logs/`.
 - Shows saved logs with `/release-npm-logs` in an above-editor widget display that works in both TUI and Web UI.
 
@@ -100,8 +102,8 @@ Readiness checks require or verify:
 
 - `/release-npm-setup` — prompts for an npm token with Pi native input, saves it using `npm config set //registry.npmjs.org/:_authToken <token>`, then verifies with `npm whoami`.
 - `/release-npm` — runs `./dev/scripts/release-workflow.sh --plan --all`, shows the planned version/publish summary plus exact package targets, prompts for confirmation, then runs `./dev/scripts/release-workflow.sh --publish --target <dir>` only for those detected targets. It does not install packages after publishing.
-- `/release-toggle` — toggles active release output between compact and expanded mode.
-- `/release-abort` — aborts the active release subprocess.
+- `/release-toggle` — toggles active release output between compact and expanded mode (`Ctrl+O` also toggles in TUI).
+- `/release-abort` — aborts the active release subprocess (`Ctrl+C` also aborts in TUI while the release subprocess is active).
 - `/release-npm-logs` — select a saved release run and display it above the editor; press `Esc`/`q` in TUI or run `/release-npm-logs close` to close it.
 
 ## Tools

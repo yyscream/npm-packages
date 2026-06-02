@@ -14,6 +14,7 @@ const SETUP_WIDGET_KEY = "release-aur:setup";
 const COLLAPSED_LINES = 36;
 const EXPANDED_LINES = 160;
 const LOG_RENDER_LIMIT = 240;
+const OUTPUT_RENDER_INTERVAL_MS = 80;
 const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_RESOURCE_DIR = join(EXTENSION_DIR, "node_modules", "@firstpick", "pi-extension-release-aur");
 const LOG_DIR = join(homedir(), ".pi", "agent", "release-aur-logs");
@@ -396,6 +397,41 @@ function isCtrlC(data: string): boolean {
 
 function truncateLine(line: string, width: number): string {
   return line.length > width ? `${line.slice(0, Math.max(0, width - 1))}…` : line;
+}
+
+function appendDisplayChunk(lines: string[], chunk: string): void {
+  if (lines.length === 0) lines.push("");
+
+  for (let i = 0; i < chunk.length; i++) {
+    const char = chunk[i];
+    if (char === "\r") {
+      if (chunk[i + 1] === "\n") {
+        lines.push("");
+        i++;
+      } else {
+        lines[lines.length - 1] = "";
+      }
+      continue;
+    }
+    if (char === "\n") {
+      lines.push("");
+      continue;
+    }
+    lines[lines.length - 1] += char;
+  }
+}
+
+function outputLinesFromDisplay(lines: string[]): string[] {
+  const visible = lines.slice();
+  while (visible.length > 0 && visible[visible.length - 1] === "") visible.pop();
+  return visible;
+}
+
+function formatElapsed(startMs: number): string {
+  const seconds = Math.max(0, Math.floor((Date.now() - startMs) / 1000));
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return minutes > 0 ? `${minutes}m${String(remainder).padStart(2, "0")}s` : `${remainder}s`;
 }
 
 function resolveUserPath(input: string, cwd: string): string {
@@ -1354,15 +1390,12 @@ async function showLogs(ctx: ExtensionCommandContext): Promise<void> {
   };
 
   if (ctx.hasUI) {
-    ctx.ui.setWidget(LOG_WIDGET_KEY, (_tui, theme) => ({
-      render: (width: number) => [
-        truncateLine(theme.fg("accent", `release-aur log: ${selected.title}`), width),
-        truncateLine(theme.fg("dim", `Path: ${selected.file} · showing last ${Math.min(LOG_RENDER_LIMIT, lines.length)}/${lines.length} lines · Esc/q closes`), width),
-        "",
-        ...lines.slice(-LOG_RENDER_LIMIT).map((line) => truncateLine(line, width)),
-      ],
-      invalidate: () => {},
-    }), { placement: "aboveEditor" });
+    ctx.ui.setWidget(LOG_WIDGET_KEY, [
+      `release-aur log: ${selected.title}`,
+      `Path: ${selected.file} · showing last ${Math.min(LOG_RENDER_LIMIT, lines.length)}/${lines.length} lines · Esc/q closes; /release-aur logs close also closes`,
+      "",
+      ...lines.slice(-LOG_RENDER_LIMIT),
+    ], { placement: "aboveEditor" });
   }
   ctx.ui.notify(`Showing release-aur log ${selected.title}.`, "info");
 }
@@ -1458,6 +1491,12 @@ export default function releaseAurExtension(pi: ExtensionAPI) {
         return;
       }
       if (parsed.action === "logs") {
+        if (parsed.target?.toLowerCase() === "close") {
+          activeLogViewerCleanup?.();
+          activeLogViewerCleanup = undefined;
+          ctx.ui.notify("release-aur log viewer closed.", "info");
+          return;
+        }
         await showLogs(ctx);
         return;
       }
@@ -1569,62 +1608,88 @@ async function runCreateFlow(
   queueReview: boolean,
 ): Promise<void> {
   const runLog = createRunLog(rootDir);
+  let cleanupUi: (() => void) | undefined;
   void (async () => {
     let liveBuffer = "";
+    let liveLines: string[] = [];
     let expanded = false;
+    const startedAtMs = Date.now();
     let currentChild: AbortableChild | undefined;
     let unsubscribeKeys: (() => void) | undefined;
+    let elapsedTimer: ReturnType<typeof setInterval> | undefined;
+    let renderQueued = false;
+    let uiClosed = false;
     let phase = "create";
 
-    const outputLines = () => liveBuffer.split(/\r?\n/).filter(Boolean);
+    const outputLines = () => outputLinesFromDisplay(liveLines);
     const modeText = () => {
       const total = outputLines().length;
       const shown = expanded ? Math.min(EXPANDED_LINES, total) : Math.min(COLLAPSED_LINES, total);
       return expanded ? `expanded ${shown}/${total}` : `compact ${shown}/${total}`;
     };
-    const render = () => {
-      if (!ctx.hasUI) return;
-      ctx.ui.setWidget(OUTPUT_WIDGET_KEY, (_tui, _theme) => ({
-        render: (width: number) => {
-          const lines = outputLines();
-          const limit = expanded ? EXPANDED_LINES : COLLAPSED_LINES;
-          const visible = lines.slice(-limit);
-          return visible.length ? visible.map((line) => truncateLine(line, width)) : ["Waiting for release-aur output..."];
-        },
-        invalidate: () => {},
-      }), { placement: "aboveEditor" });
-      ctx.ui.setWidget(FOOTER_WIDGET_KEY, (_tui, theme) => ({
-        render: (width: number) => [
-          truncateLine(theme.fg("accent", `release-aur: ${phase}`) + theme.fg("dim", ` · ${modeText()}`), width),
-          truncateLine(theme.fg("dim", "Controls: /release-aur toggle expands/collapses · /release-aur abort stops subprocess"), width),
-        ],
-        invalidate: () => {},
-      }), { placement: "belowEditor" });
+    const renderNow = () => {
+      if (!ctx.hasUI || uiClosed) return;
+      const lines = outputLines();
+      const limit = expanded ? EXPANDED_LINES : COLLAPSED_LINES;
+      const visible = lines.slice(-limit);
+      ctx.ui.setWidget(OUTPUT_WIDGET_KEY, visible.length ? visible : ["Waiting for release-aur output..."], { placement: "aboveEditor" });
+      ctx.ui.setWidget(FOOTER_WIDGET_KEY, [
+        `release-aur: ${phase} · ${modeText()} · ${formatElapsed(startedAtMs)}`,
+        "Controls: Ctrl+O or /release-aur toggle expands/collapses · Ctrl+C or /release-aur abort stops subprocess",
+      ], { placement: "belowEditor" });
+    };
+    const render = (immediate = false) => {
+      if (immediate) {
+        renderNow();
+        return;
+      }
+      if (!ctx.hasUI || uiClosed || renderQueued) return;
+      renderQueued = true;
+      setTimeout(() => {
+        renderQueued = false;
+        renderNow();
+      }, OUTPUT_RENDER_INTERVAL_MS);
     };
     const append = (chunk: string) => {
       liveBuffer += chunk;
+      appendDisplayChunk(liveLines, chunk);
       appendLog(runLog, chunk);
       render();
     };
     const closeUi = () => {
+      uiClosed = true;
       unsubscribeKeys?.();
       unsubscribeKeys = undefined;
+      if (elapsedTimer) clearInterval(elapsedTimer);
+      elapsedTimer = undefined;
       activeRun = undefined;
       if (ctx.hasUI) {
         ctx.ui.setWidget(OUTPUT_WIDGET_KEY, undefined);
         ctx.ui.setWidget(FOOTER_WIDGET_KEY, undefined);
       }
     };
+    cleanupUi = closeUi;
     const abort = () => currentChild?.abortReleaseStep?.();
     const toggle = () => {
       expanded = !expanded;
-      render();
+      render(true);
+    };
+    const resetOutput = () => {
+      liveBuffer = "";
+      liveLines = [];
+      uiClosed = false;
+      render(true);
+    };
+    const startElapsedTimer = () => {
+      if (!ctx.hasUI || elapsedTimer) return;
+      elapsedTimer = setInterval(() => render(true), 1000);
     };
     const startUi = (status: string) => {
       activeRun = { abort, toggleOutput: toggle };
       if (!ctx.hasUI) return;
       ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", status));
-      render();
+      render(true);
+      startElapsedTimer();
       if (!unsubscribeKeys) {
         unsubscribeKeys = ctx.ui.onTerminalInput((data) => {
           if (isCtrlO(data)) {
@@ -1679,7 +1744,7 @@ async function runCreateFlow(
         return;
       }
 
-      liveBuffer = "";
+      resetOutput();
       const recreate = await runPhase("create", ["--create", "--pkgbase", pkgbase]);
       if (recreate.aborted) {
         const logPath = saveRunLog(runLog, "aborted-create-after-pkgbuild");
@@ -1741,7 +1806,7 @@ async function runCreateFlow(
       return;
     }
 
-    liveBuffer = "";
+    resetOutput();
     const publish = await runPhase("publish", ["--publish", "--target", pkgbase, ...withDefaultReleaseUpdate(flags)]);
     if (publish.aborted) {
       const logPath = saveRunLog(runLog, "aborted-create-publish");
@@ -1765,6 +1830,7 @@ async function runCreateFlow(
     if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("success", "AUR:OK"));
     ctx.ui.notify(`${finalSummary}\nrelease-aur create --push completed.${logPath ? `\nLog: ${logPath}` : ""}`, "info");
   })().catch((error: unknown) => {
+    cleanupUi?.();
     activeRun = undefined;
     if (ctx.hasUI) {
       ctx.ui.setWidget(OUTPUT_WIDGET_KEY, undefined);
@@ -1789,63 +1855,89 @@ async function runWorkflow(
   secondArgs?: string[],
 ): Promise<void> {
   const runLog = createRunLog(rootDir);
+  let cleanupUi: (() => void) | undefined;
   void (async () => {
     let liveBuffer = "";
+    let liveLines: string[] = [];
     let expanded = false;
+    const startedAtMs = Date.now();
     let currentChild: AbortableChild | undefined;
     let unsubscribeKeys: (() => void) | undefined;
+    let elapsedTimer: ReturnType<typeof setInterval> | undefined;
+    let renderQueued = false;
+    let uiClosed = false;
     let phase = phaseLabel;
 
-    const outputLines = () => liveBuffer.split(/\r?\n/).filter(Boolean);
+    const outputLines = () => outputLinesFromDisplay(liveLines);
     const modeText = () => {
       const total = outputLines().length;
       const shown = expanded ? Math.min(EXPANDED_LINES, total) : Math.min(COLLAPSED_LINES, total);
       return expanded ? `expanded ${shown}/${total}` : `compact ${shown}/${total}`;
     };
-    const render = () => {
-      if (!ctx.hasUI) return;
-      ctx.ui.setWidget(OUTPUT_WIDGET_KEY, (_tui, _theme) => ({
-        render: (width: number) => {
-          const lines = outputLines();
-          const limit = expanded ? EXPANDED_LINES : COLLAPSED_LINES;
-          const visible = lines.slice(-limit);
-          return visible.length ? visible.map((line) => truncateLine(line, width)) : ["Waiting for release-aur output..."];
-        },
-        invalidate: () => {},
-      }), { placement: "aboveEditor" });
-      ctx.ui.setWidget(FOOTER_WIDGET_KEY, (_tui, theme) => ({
-        render: (width: number) => [
-          truncateLine(theme.fg("accent", `release-aur: ${phase}`) + theme.fg("dim", ` · ${modeText()}`), width),
-          truncateLine(theme.fg("dim", "Controls: /release-aur toggle expands/collapses · /release-aur abort stops subprocess"), width),
-        ],
-        invalidate: () => {},
-      }), { placement: "belowEditor" });
+    const renderNow = () => {
+      if (!ctx.hasUI || uiClosed) return;
+      const lines = outputLines();
+      const limit = expanded ? EXPANDED_LINES : COLLAPSED_LINES;
+      const visible = lines.slice(-limit);
+      ctx.ui.setWidget(OUTPUT_WIDGET_KEY, visible.length ? visible : ["Waiting for release-aur output..."], { placement: "aboveEditor" });
+      ctx.ui.setWidget(FOOTER_WIDGET_KEY, [
+        `release-aur: ${phase} · ${modeText()} · ${formatElapsed(startedAtMs)}`,
+        "Controls: Ctrl+O or /release-aur toggle expands/collapses · Ctrl+C or /release-aur abort stops subprocess",
+      ], { placement: "belowEditor" });
+    };
+    const render = (immediate = false) => {
+      if (immediate) {
+        renderNow();
+        return;
+      }
+      if (!ctx.hasUI || uiClosed || renderQueued) return;
+      renderQueued = true;
+      setTimeout(() => {
+        renderQueued = false;
+        renderNow();
+      }, OUTPUT_RENDER_INTERVAL_MS);
     };
     const append = (chunk: string) => {
       liveBuffer += chunk;
+      appendDisplayChunk(liveLines, chunk);
       appendLog(runLog, chunk);
       render();
     };
     const closeUi = () => {
+      uiClosed = true;
       unsubscribeKeys?.();
       unsubscribeKeys = undefined;
+      if (elapsedTimer) clearInterval(elapsedTimer);
+      elapsedTimer = undefined;
       activeRun = undefined;
       if (ctx.hasUI) {
         ctx.ui.setWidget(OUTPUT_WIDGET_KEY, undefined);
         ctx.ui.setWidget(FOOTER_WIDGET_KEY, undefined);
       }
     };
+    cleanupUi = closeUi;
     const abort = () => currentChild?.abortReleaseStep?.();
     const toggle = () => {
       expanded = !expanded;
-      render();
+      render(true);
+    };
+    const resetOutput = () => {
+      liveBuffer = "";
+      liveLines = [];
+      uiClosed = false;
+      render(true);
+    };
+    const startElapsedTimer = () => {
+      if (!ctx.hasUI || elapsedTimer) return;
+      elapsedTimer = setInterval(() => render(true), 1000);
     };
 
     activeRun = { abort, toggleOutput: toggle };
     if (ctx.hasUI) {
       ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", "AUR:Running"));
       ctx.ui.notify(`Running release-aur ${phaseLabel}...`, "info");
-      render();
+      render(true);
+      startElapsedTimer();
       unsubscribeKeys = ctx.ui.onTerminalInput((data) => {
         if (isCtrlO(data)) {
           toggle();
@@ -1892,12 +1984,13 @@ async function runWorkflow(
         return;
       }
 
-      liveBuffer = "";
       phase = "publish";
       activeRun = { abort, toggleOutput: toggle };
+      resetOutput();
       if (ctx.hasUI) {
         ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", "AUR:Publishing"));
-        render();
+        render(true);
+        startElapsedTimer();
       }
       const secondCommand = scriptCommand(rootDir, secondArgs);
       append(`$ ${secondCommand}\n`);
@@ -1935,6 +2028,7 @@ async function runWorkflow(
     ctx.ui.notify(`${summary}\nrelease-aur ${phaseLabel} completed.${logPath ? `\nLog: ${logPath}` : ""}`, "info");
     if (queueReview) queueAgentReview(pi, rootDir, targetLabel, first.output);
   })().catch((error: unknown) => {
+    cleanupUi?.();
     activeRun = undefined;
     if (ctx.hasUI) {
       ctx.ui.setWidget(OUTPUT_WIDGET_KEY, undefined);
