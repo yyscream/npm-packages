@@ -14,9 +14,9 @@
     "bgSelect": "#313244",
     "bgUser": "#1e1e2e",
     "bgPending": "#181825",
-    "bgSuccess": "#1f2d2a",
-    "bgError": "#33222b",
-    "bgCustom": "#2a2337"
+    "bgSuccess": "#313244",
+    "bgError": "#313244",
+    "bgCustom": "#313244"
   },
   "colors": {
     "accent": "accent",
@@ -74,6 +74,6 @@
   "export": {
     "pageBg": "#11111b",
     "cardBg": "#1e1e2e",
-    "infoBg": "#2a2337"
+    "infoBg": "#313244"
   }
 }

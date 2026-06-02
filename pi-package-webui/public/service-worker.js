@@ -1,4 +1,4 @@
-const CACHE_NAME = "pi-webui-pwa-v1";
+const CACHE_NAME = "pi-webui-pwa-v6";
 const APP_SHELL = [
   "/",
   "/index.html",
@@ -20,6 +20,18 @@ self.addEventListener("activate", (event) => {
     caches.keys()
       .then((keys) => Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))))
       .then(() => self.clients.claim()),
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const targetUrl = event.notification.data?.url || `${self.location.origin}/`;
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+      const webuiClient = clients.find((client) => client.url.startsWith(self.location.origin));
+      if (webuiClient) return webuiClient.focus();
+      return self.clients.openWindow?.(targetUrl);
+    }),
   );
 });
 

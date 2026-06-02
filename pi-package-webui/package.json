@@ -26,7 +26,8 @@
     "test": "node tests/mobile-static.test.mjs"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "^0.78.0"
+    "@earendil-works/pi-coding-agent": "^0.78.0",
+    "@firstpick/pi-themes-bundle": "^0.1.0"
   },
   "files": [
     "index.ts",

@@ -5,7 +5,7 @@ Local browser companion for [Pi coding agent](https://www.npmjs.com/package/@ear
 This package provides:
 
 - `pi-webui`: a local HTTP/SSE server that starts `pi --mode rpc`, serves the static browser UI, and proxies browser actions to Pi RPC commands.
-- `/webui-start`: a Pi slash command that launches `pi-webui` for the current Pi working directory and opens the browser.
+- `/webui-start` (alias: `/start-webui`): a Pi slash command that launches `pi-webui` for the current Pi working directory and opens the browser.
 - `/webui-status`: a Pi slash command that reports the Web UI URL, online state, network exposure, and optional detailed runtime info.
 - A no-build web app in `public/` with no runtime frontend dependencies.
 
@@ -19,7 +19,7 @@ This package provides:
 
 ## Quick start
 
-Install the package from npm into Pi, then restart Pi so `/webui-start` and `/webui-status` are loaded:
+Install the package from npm into Pi, then restart Pi so `/webui-start` (also available as `/start-webui`) and `/webui-status` are loaded:
 
 ```bash
 pi install npm:@firstpick/pi-package-webui
@@ -51,20 +51,21 @@ pi-webui --cwd /path/to/project
 - Browser chat with Pi over RPC
 - Isolated terminal tabs: each Web UI tab starts its own separate `pi --mode rpc` subprocess, event stream, session state, and prompt draft
 - Automatic tab naming from the first prompt on default-named tabs, plus `/name <title>` to manually sync the Pi session and browser tab name
-- Per-tab activity indicators for idle, working, and completed unseen work
+- Per-tab activity indicators for idle, working, blocked, and completed unseen work, with browser notifications when a tab needs an extension UI response
 - Live assistant text streaming, including streamed thinking blocks when exposed by the provider
 - Prompt, steer, follow-up, abort, new session, and manual compact controls
 - Busy-session behavior selector for follow-up vs steer
 - Model and thinking-level controls
 - Slash-command autocomplete while typing `/...`
+- `@` file/path references with live suggestions from the active tab cwd
 - Tool, process, compaction, queue, and extension event log
-- Collapsible side panel with session state, queue, available commands, events, and local-network exposure status/control
+- Collapsible side panel with session state, queue, available commands, events, local-network exposure status/control, and a theme picker
 - Pi-style footer with token, cache, estimated Pi-context tokens, speed, cost, context usage, clickable per-tab cwd picker with server-persisted fast picks, git branch, changes, runtime, model, and thinking level
 - Guided Git workflow: `git add .`, ask Pi to run `/git-staged-msg`, preview short/long messages, commit with the selected message, and `git push`
 - Basic rendering for user, assistant, tool result, bash execution, and thinking messages
 - Feedback reactions (`👍`, `👎`, `?`) on final assistant output plus tool/bash action cards, with queued post-run submission that asks Pi to create/update a LEARNING
 - Basic extension UI bridge for `notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`, `select`, `confirm`, `input`, and `editor`
-- Cyberpunk/Catppuccin-inspired theme
+- Side-panel theme picker backed by the bundled `@firstpick/pi-themes-bundle` themes
 - PWA metadata, icons, and service worker for install-to-home-screen support when served from a secure context
 - Static frontend: no bundler, no frontend install step
 
@@ -72,7 +73,7 @@ pi-webui --cwd /path/to/project
 
 - The mobile composer starts as a one-line `Ask Pi…` input, grows with user-entered lines, and scrolls the transcript to the latest output when focused.
 - When Pi is idle, `Steer` and `Follow-up` live inside `Actions`; while a run is active, they move back into the main composer row for quick steering/follow-up.
-- PWA install support requires browser service-worker support and usually HTTPS or `localhost`. Plain `http://<LAN-IP>` may show the app but may not offer install on Chrome/Safari.
+- PWA install support and blocked-tab browser notifications require browser service-worker/notification support and usually HTTPS or `localhost`. Plain `http://<LAN-IP>` may show the app but may not offer install or notifications on Chrome/Safari.
 
 ## Pi slash commands
 
@@ -101,7 +102,7 @@ Examples:
 /webui-start --name browser -- --model anthropic/claude-sonnet-4-5:high
 ```
 
-If a compatible Web UI is already running on the target URL, `/webui-start` stops that instance first, then starts a fresh server for the current cwd and opens it.
+If a compatible Web UI is already running on the target URL, `/webui-start`/`/start-webui` captures its open terminal tabs plus any terminal tabs closed during the current server run, stops that instance, then starts a fresh server and reopens those tabs from their session files when available.
 
 Status commands:
 
@@ -177,10 +178,12 @@ The local server exposes:
 - static files from `public/`
 - `GET /api/tabs`, `POST /api/tabs`, `PATCH /api/tabs/:id`, and `DELETE /api/tabs/:id` for isolated Web UI terminal tabs and per-tab cwd changes; default-named tabs are auto-renamed from the first conversation prompt
 - `GET /api/directories?tab=<tabId>&path=<path>` for the browser cwd picker
+- `GET /api/path-suggestions?tab=<tabId>&query=<path>` for `@` file/path reference autocomplete in the prompt composer
 - `GET /api/path-fast-picks` and `POST /api/path-fast-picks` for cwd picker fast picks persisted across browser tabs, Pi terminal tabs, and Web UI server restarts
+- `GET /api/themes` for bundled theme data from `@firstpick/pi-themes-bundle`
 - `GET /api/network` and localhost-only `POST /api/network/open` for local-network exposure status/control
 - `GET /api/webui-status?detailed=1` for slash-command status reporting
-- `POST /api/shutdown` for localhost-only graceful restarts from `/webui-start`
+- `POST /api/shutdown` for localhost-only graceful restarts from `/webui-start`/`/start-webui`; restart captures detailed tab status first so open and recently closed tabs can be restored with their session files
 - HTTP endpoints for prompt/session/model/thinking/compact/git actions; tab-scoped calls use `?tab=<tabId>`
 - `POST /api/action-feedback?tab=<tabId>` to turn queued action/final-output reactions into a Pi prompt that creates/updates a LEARNING after the run is idle
 - `/api/events?tab=<tabId>` as a per-tab Server-Sent Events stream for Pi RPC events
@@ -191,7 +194,7 @@ Pi stdout is read as JSONL and split only on `\n`, matching Pi RPC framing.
 ## Network and safety notes
 
 - Default bind is localhost-only: `127.0.0.1:31415`.
-- The side-panel "Open to network" button rebinds the current server to `0.0.0.0` and shows LAN URLs when available.
+- The side-panel "Open to network" button rebinds the current server to `0.0.0.0`, shows LAN URLs when available, and toggles to "Close for network" to rebind back to localhost-only access.
 - `--host 0.0.0.0` also makes the UI reachable from the network and is unsafe unless the network is trusted.
 - The UI is intended as a local companion, not a hardened multi-user web service.
 - Browser actions can trigger Pi tools, shell commands, file edits, and git operations according to the spawned Pi session's permissions.

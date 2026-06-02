@@ -31,7 +31,9 @@
           </div>
         </header>
         <div id="widgetArea" class="widget-area"></div>
-        <div id="chat" class="chat" aria-live="polite"></div>
+        <div id="chat" class="chat" aria-live="polite">
+          <button id="stickyUserPromptButton" class="sticky-user-prompt-button" type="button" aria-controls="chat" hidden></button>
+        </div>
         <div id="feedbackTray" class="feedback-tray" aria-live="polite" hidden>
           <span id="feedbackTraySummary">No action feedback queued.</span>
           <button id="sendFeedbackButton" type="button">Send &amp; create LEARNING</button>
@@ -52,8 +54,8 @@
           <div id="gitWorkflowActions" class="git-workflow-actions"></div>
         </section>
         <form id="composer" class="composer">
-          <textarea id="promptInput" rows="1" enterkeyhint="enter" placeholder="Ask Pi…"></textarea>
-          <div id="commandSuggest" class="command-suggest" role="listbox" aria-label="Command suggestions" hidden></div>
+          <textarea id="promptInput" rows="1" enterkeyhint="enter" placeholder="Ask Pi…" autofocus></textarea>
+          <div id="commandSuggest" class="command-suggest" role="listbox" aria-label="Command and path suggestions" hidden></div>
           <div class="composer-row">
             <button id="composerActionsButton" class="composer-actions-button" type="button" aria-controls="composerActionsPanel" aria-expanded="false">Actions</button>
             <div id="composerActionsPanel" class="composer-actions-panel" aria-label="Composer actions">
@@ -129,6 +131,10 @@
                 <option value="xhigh">xhigh</option>
               </select>
               <button id="setThinkingButton" type="button">Set thinking</button>
+            </div>
+            <div class="control-field">
+              <label for="themeSelect">Theme</label>
+              <select id="themeSelect" title="Theme"></select>
             </div>
             <div class="control-field network-control-field">
               <label>Network</label>

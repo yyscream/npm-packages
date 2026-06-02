@@ -4,12 +4,13 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const [pkgRaw, html, css, app, server, readme, manifestRaw, serviceWorker, appleIcon, icon192, icon512] = await Promise.all([
+const [pkgRaw, html, css, app, server, extension, readme, manifestRaw, serviceWorker, appleIcon, icon192, icon512] = await Promise.all([
   readFile(join(root, "package.json"), "utf8"),
   readFile(join(root, "public", "index.html"), "utf8"),
   readFile(join(root, "public", "styles.css"), "utf8"),
   readFile(join(root, "public", "app.js"), "utf8"),
   readFile(join(root, "bin", "pi-webui.mjs"), "utf8"),
+  readFile(join(root, "index.ts"), "utf8"),
   readFile(join(root, "README.md"), "utf8"),
   readFile(join(root, "public", "manifest.webmanifest"), "utf8"),
   readFile(join(root, "public", "service-worker.js"), "utf8"),
@@ -27,7 +28,10 @@ assert.match(html, /<link rel="manifest" href="\/manifest\.webmanifest" \/>/, "P
 assert.match(html, /<link rel="apple-touch-icon" href="\/apple-touch-icon\.png" \/>/, "PWA should expose the conventional iOS home-screen icon path");
 assert.match(html, /id="terminalTabsToggleButton"/, "mobile should expose a compact terminal-tabs toggle");
 assert.match(html, /id="sidePanelBackdrop"/, "mobile side panel needs an overlay/backdrop close target");
+assert.match(html, /id="themeSelect"/, "side panel should expose a theme selector");
+assert.match(html, /<label for="themeSelect">Theme<\/label>/, "theme selector should be labeled in side-panel controls");
 assert.match(html, /id="jumpToLatestButton"/, "chat should expose a jump-to-latest control for non-forced streaming");
+assert.match(html, /id="stickyUserPromptButton"/, "chat should expose a fixed last-user-prompt jump control");
 assert.match(html, /id="feedbackTray"/, "chat should expose a queued action-feedback tray");
 assert.match(html, /id="sendFeedbackButton"/, "action feedback should be submittable after the agent finishes");
 assert.match(html, /<textarea id="promptInput"[^>]*rows="1"[^>]*enterkeyhint="enter"/, "prompt textarea should start at one row and hint that Return inserts a newline");
@@ -42,12 +46,19 @@ assert.ok(
 );
 
 assert.match(css, /--visual-viewport-height:\s*100dvh/, "CSS should define a visual viewport height fallback");
+assert.match(css, /color-scheme:\s*var\(--theme-color-scheme\)/, "CSS should allow JS-selected themes to update browser color-scheme");
+assert.match(css, /--background-glow-pink/, "CSS should expose theme-controlled page glow colors");
 assert.match(css, /height:\s*var\(--visual-viewport-height, 100dvh\)/, "layout should consume visual viewport height");
 assert.match(css, /button, select, input \{ min-height: 44px; \}/, "base controls should meet 44px touch-target height");
 assert.match(css, /\.composer-row button[\s\S]*?min-height:\s*44px/, "mobile composer buttons should keep 44px touch targets");
 assert.match(css, /#promptInput \{[\s\S]*?min-height:\s*calc\(1\.5em \+ 1\.8rem\)/, "prompt input should default to a compact single-line height");
 assert.match(css, /#promptInput \{[\s\S]*?overflow-y:\s*hidden/, "prompt input should be JS-resized instead of showing a scrollbar by default");
+assert.match(css, /\.sticky-user-prompt-button \{[\s\S]*?grid-template-columns:\s*auto minmax\(0, 1fr\) auto/, "last-user-prompt jump control should render as a fixed transcript header");
 assert.match(css, /\.message\.extension,[\s\S]*?\.message\.native/, "extension and native command output should have visible transcript styling");
+assert.match(css, /\.message\.run-indicator-message \{[\s\S]*?border-color/, "active agent runs should render a visible transcript indicator card");
+assert.match(css, /\.message\.thinking,\n\.message\.toolCall,\n\.message\.assistantEvent/, "thinking and assistant events should have non-assistant transcript card styling");
+assert.match(css, /\.message\.toolResult, \.message\.bashExecution, \.message\.compactionSummary/, "compaction summaries should render as compact collapsible transcript cards");
+assert.match(css, /\.run-indicator-pulse \{[\s\S]*?animation:\s*run-indicator-pulse/, "active agent run indicator should have an animated pulse");
 assert.match(css, /\.todo-widget \{[\s\S]*?display:\s*grid/, "todo-progress widget should render as a styled checklist card");
 assert.match(css, /\.todo-widget-item\.partial \.todo-widget-marker/, "todo-progress partial items should have distinct styling");
 assert.match(css, /\.todo-widget-item\.done \.todo-widget-text[\s\S]*?text-decoration:\s*line-through/, "todo-progress completed items should be visually crossed out");
@@ -56,7 +67,11 @@ assert.match(css, /\.commands-box \{[\s\S]*?max-height:\s*min\(32rem, 52vh\)/, "
 assert.match(css, /\.command-item \{[\s\S]*?width:\s*100%/, "side-panel commands should render as full-width click targets");
 assert.match(css, /\.command-item:hover,[\s\S]*?\.command-item:focus-visible/, "side-panel commands should have hover and keyboard focus affordances");
 assert.match(css, /\.feedback-tray\[hidden\] \{ display: none; \}/, "queued action-feedback tray should hide when empty");
-assert.match(css, /\.action-feedback-controls \{[\s\S]*?justify-content:\s*flex-end/, "action reactions should render at the bottom right of action cards");
+assert.match(css, /\.action-feedback-controls \{[\s\S]*?position:\s*absolute/, "action reactions should be absolutely positioned so they do not expand cards");
+assert.match(css, /\.action-feedback-controls \{[\s\S]*?top:\s*calc\(100% - 0\.18rem\)/, "action reactions should sit outside the message box by default");
+assert.match(css, /\.action-feedback-controls \{[\s\S]*?opacity:\s*0/, "action reactions should stay hidden until hovered or focused");
+assert.match(css, /\.action-feedback-controls:hover,[\s\S]*?\.action-feedback-controls:focus-within/, "action reactions should reveal on hover or keyboard focus");
+assert.match(css, /\.action-feedback-controls:not\(:hover\):not\(:focus-within\) \.action-feedback-button/, "hidden action reactions should not expose button hit targets until the hover area is reached");
 assert.match(css, /\.action-feedback-button\.feedback-question\.active/, "question-mark reaction should have selected styling");
 assert.match(css, /\.composer-row button\[data-tooltip\]::after/, "composer button tooltips should be shared across Git, Steer, and Follow-up buttons");
 assert.match(css, /\.composer-row button\[data-tooltip\]\.tooltip-open::after/, "composer button tooltips should be triggerable from JS for empty mobile taps");
@@ -65,7 +80,14 @@ assert.match(css, /body\.composer-actions-open \.composer-actions-panel \{ displ
 assert.match(css, /\.terminal-tabs-toggle-button \{ display: none; \}/, "terminal tab toggle should be hidden outside mobile CSS");
 assert.match(css, /body\.mobile-tabs-expanded \.terminal-tabs \{ display: flex; \}/, "mobile tabs should expand only when toggled");
 assert.match(css, /\.terminal-tab-activity-indicator/, "terminal tabs should expose per-tab agent activity indicators");
+assert.match(css, /\.terminal-tab-group-item \{[\s\S]*?background:\s*var\(--ctp-crust\)/, "grouped terminal tab items should use opaque backgrounds");
+assert.match(css, /\.terminal-tab-group\.active \{[\s\S]*?background:[\s\S]*?var\(--ctp-crust\)/, "active terminal tab groups should keep opaque backgrounds");
+assert.match(css, /\.terminal-tab-group\.stopped \{[\s\S]*?opacity:\s*1/, "stopped terminal tab groups should not become transparent");
+assert.match(css, /\.terminal-tabs:has\(\.terminal-tab-group\.menu-open\)/, "open terminal tab groups should keep the tab strip usable across rerenders");
+assert.match(css, /\.terminal-tab-group\.menu-open \.terminal-tab-group-menu \{[\s\S]*?display:\s*flex/, "open terminal tab group menus should remain visible without hover");
 assert.match(css, /\.terminal-tab\.activity-working[\s\S]*?terminal-tab-working-pulse/, "working tab indicators should be visibly animated");
+assert.match(css, /\.terminal-tab\.activity-blocked[\s\S]*?rgba\(250, 179, 135/, "blocked tab indicators should use orange styling");
+assert.match(css, /\.terminal-tab\.activity-blocked \.terminal-tab-activity-indicator[\s\S]*?background:\s*var\(--ctp-peach\)/, "blocked tab indicator dots should be orange");
 assert.match(css, /\.terminal-tab\.activity-done/, "completed unseen work should have a distinct tab style");
 assert.match(css, /\.terminal-tabs[\s\S]*?position:\s*absolute/, "expanded mobile tabs should overlay instead of consuming transcript space");
 assert.match(css, /body\.mobile-keyboard-open \.terminal-tabs-shell,[\s\S]*?body\.mobile-keyboard-open \.widget-area,[\s\S]*?body\.mobile-keyboard-open \.statusbar/, "mobile keyboard mode should hide header, widgets, and footer");
@@ -88,8 +110,26 @@ assert.match(css, /#dialogMessage \{[\s\S]*?white-space:\s*pre-wrap/, "extension
 assert.match(css, /\.extension-dialog\.guardrail-dialog[\s\S]*?border-color:\s*rgba\(249, 226, 175/, "guardrail dialogs should have warning-specific styling");
 
 assert.match(app, /const MOBILE_VIEW_QUERY = "\(max-width: 720px\), \(max-device-width: 720px\), \(pointer: coarse\) and \(hover: none\)"/, "mobile detection should include phones that report desktop-like layout widths");
+assert.match(app, /const THEME_STORAGE_KEY = "pi-webui-theme"/, "theme selection should be persisted in browser storage");
+assert.match(app, /async function initializeThemes\(\)/, "frontend should initialize bundled themes");
+assert.match(app, /api\("\/api\/themes", \{ scoped: false \}\)/, "theme loading should use the unscoped themes endpoint");
+assert.match(app, /function applyTheme\(theme/, "frontend should apply a selected theme to CSS variables");
+assert.match(app, /Restart Web UI to load themes/, "frontend should explain when a stale server cannot serve the themes endpoint");
+assert.match(app, /themeSelect\.addEventListener\("change"/, "side-panel theme selector should switch themes immediately");
+assert.match(app, /open \? "Close for network" : "Open to network"/, "network button should toggle from open to close action");
+assert.match(app, /api\("\/api\/network\/close", \{ method: "POST"/, "network close action should call the close endpoint");
+assert.match(server, /async function closeNetworkAccess\(\)/, "server should expose a local-only rebind helper for closing network access");
+assert.match(server, /url\.pathname === "\/api\/network\/close" && req\.method === "POST"/, "server should route network close requests");
+assert.match(server, /server\.closeAllConnections\?\.\(\)/, "network rebind should force-close long-lived clients so close-to-localhost can complete");
+assert.match(server, /connection: "close"/, "network rebind API responses should not hold keep-alive sockets open");
+assert.match(readme, /toggles to "Close for network"/, "README should document the close-network toggle");
 assert.match(app, /window\.visualViewport/, "app should listen to VisualViewport for keyboard/viewport updates");
+assert.match(html, /<textarea id="promptInput"[^>]*autofocus/, "prompt composer should autofocus for new Web UI/app launches");
 assert.match(app, /function syncMobileChatToBottomForInput\(\)/, "mobile input focus should force the output view to the latest message");
+assert.match(app, /function focusPromptInput\(\{ defer = false \} = \{\}\)/, "frontend should focus the prompt composer programmatically after tab/app startup");
+assert.match(app, /async function switchTab\(tabId\)[\s\S]*?restoreActiveDraft\(\);\n\s+focusPromptInput\(\{ defer: true \}\);/, "switching to a newly opened tab should focus the prompt input immediately");
+assert.match(app, /async function initializeTabs\(\)[\s\S]*?restoreActiveDraft\(\);\n\s+focusPromptInput\(\{ defer: true \}\);/, "starting the Web UI should focus the prompt input after restoring the active tab");
+assert.match(app, /resizePromptInput\(\);\nfocusPromptInput\(\{ defer: true \}\);\nupdateComposerModeButtons\(\);/, "startup should request prompt focus before waiting for tab state refreshes");
 assert.match(app, /elements\.promptInput\.addEventListener\("focus", \(\) => \{\n\s+syncMobileChatToBottomForInput\(\);/, "focusing mobile input should scroll output to bottom");
 assert.match(app, /navigator\.serviceWorker\.register\("\/service-worker\.js"\)/, "PWA service worker should be registered by the app");
 assert.match(app, /function isChatNearBottom\(/, "chat should detect whether the user is reading above the bottom");
@@ -115,12 +155,44 @@ assert.match(app, /let transientMessages = \[\]/, "frontend should keep transien
 assert.match(app, /const ACTION_FEEDBACK_REACTIONS = \{/, "frontend should define direct feedback reactions");
 assert.match(app, /message\?\.role === "assistant" \|\| message\?\.role === "toolResult" \|\| message\?\.role === "bashExecution"/, "frontend should allow reactions on final assistant output as well as actions");
 assert.match(app, /function renderActionFeedbackControls\(/, "frontend should render per-message reaction controls");
+assert.match(app, /function assistantDisplayMessages\(message\)/, "assistant history should split thinking and tool-call parts out of the final Assistant output card");
+assert.match(app, /return content\.trim\(\) \? \[\{ \.\.\.message, title: "Assistant" \}\] : \[\]/, "assistant messages with stripped empty text should not render empty Assistant cards");
+assert.match(app, /part\.type === "text"\) return typeof part\.text === "string" && part\.text\.trim\(\) \? part : null/, "empty assistant text parts should be filtered after todo/widget extraction");
+assert.match(app, /displayMessage\.role === "assistant" \? messageIndex : -1/, "only final Assistant output cards should keep the assistant message index for feedback");
+assert.match(app, /function ensureStreamingThinkingBubble\(\)/, "live thinking should render in a dedicated non-assistant streaming card");
+assert.match(app, /function assistantStreamingMessage\(event\)/, "live streaming should read the authoritative partial assistant message from RPC events like the TUI");
+assert.match(app, /assistantThinkingTextFromMessage\(assistantStreamingMessage\(event\)\) \|\| thinkingDeltaText\(update\)/, "live thinking end should replace deltas with the final partial-message thinking content");
+assert.match(app, /if \(typeof partialText === "string"\) streamRawText = partialText;/, "live assistant text should synchronize from partial messages instead of relying only on deltas");
+assert.match(app, /const TODO_PROGRESS_LINE_REGEX = /, "frontend should recognize live todo progress lines that will be moved into the todo widget");
+assert.match(app, /function stripTodoProgressLines\(text, \{ streaming = false \} = \{\}\)/, "live Assistant output should strip todo-progress lines before rendering final-output text");
+assert.match(app, /streamRawText \+= delta;[\s\S]*?const assistantText = stripTodoProgressLines\(streamRawText, \{ streaming: true \}\)/, "streamed Assistant text should classify from accumulated output without flashing partial todo-progress lines");
+assert.match(app, /const created = appendMessage\(\{ role: "assistant", title: "Assistant"/, "live Assistant cards should be created only for final output text");
 assert.match(app, /api\("\/api\/action-feedback", \{ method: "POST"/, "queued action feedback should post to the server after the run is idle");
 assert.match(app, /function postQueuedFeedback\(tabId, items\)/, "queued feedback should have a backward-compatible submit path");
 assert.match(app, /\/api\/action-feedback not found; falling back to a normal prompt/, "new frontend should gracefully handle older running Web UI servers");
 assert.match(app, /actionFeedbackSteerMessage\(item\)/, "live action feedback should be sent as steering while the agent is running");
 assert.match(app, /function addTransientMessage\(\{ role = "notice"/, "frontend should render transient command output into the transcript");
 assert.match(app, /addTransientMessage\(\{ role: "extension", title: "extension output"/, "extension notify output should appear in the transcript, not only the event log");
+assert.match(app, /function renderRunIndicator\(/, "frontend should render a transcript-level active agent indicator");
+assert.match(app, /return "Agent is still runing: ";/, "active agent indicator should use the requested headline wording");
+assert.doesNotMatch(app, /"agent running"/, "active agent indicator should not render a separate title/header label");
+assert.doesNotMatch(app, /runIndicatorTimestamp/, "active agent indicator should not render a separate live timestamp header");
+assert.match(app, /runIndicatorBubble = make\("article", "message runIndicator run-indicator-message streaming"\)/, "active agent indicator should use a dedicated streaming transcript card");
+assert.match(app, /runIndicatorShowsElapsed\(\) \? `\$\{detail\} · run time/, "active agent indicator should label elapsed run time instead of showing a bare counter");
+assert.match(app, /Abort requested; checking whether Pi stopped/, "abort feedback should clarify that Web UI is checking stop status");
+assert.match(app, /let runIndicatorGraceCheckTimer = null/, "local-only run indicators should have a grace-check timer");
+assert.match(app, /const RUN_INDICATOR_STATE_RECHECK_MS = 5000/, "active run indicators should periodically re-check state");
+assert.match(app, /function scheduleRunIndicatorGraceCheck\(/, "local-only run indicators should schedule a follow-up state check");
+assert.match(app, /function maybeRefreshRunIndicatorState\([\s\S]*?refreshState\(\)/, "active run indicators should poll state so missed completion events do not leave stale cards");
+assert.match(app, /function clearRunIndicatorActivity[\s\S]*?clearRunIndicatorGraceCheck\(\)[\s\S]*?runIndicatorLastStateCheckAt = 0/, "clearing the active agent indicator should cancel pending grace checks and reset state polling");
+assert.match(app, /scheduleRunIndicatorGraceCheck\(\)[\s\S]*?refreshState\(\)/, "stale local-only run indicators should re-check state after the start grace period");
+assert.match(app, /function scheduleAbortStateChecks\(/, "abort handling should poll state so the active indicator can clear after stop confirmation");
+assert.match(app, /case "tool_execution_start":[\s\S]*?setRunIndicatorActivity\(`Running tool:/, "tool execution should update the active agent transcript indicator");
+assert.match(app, /setRunIndicatorActivity\("Requesting context compaction…"\);\n\s+scrollChatToBottom\(\{ force: true \}\);/, "manual compaction should force-follow the transcript to the bottom status card");
+assert.match(app, /case "agent_end":[\s\S]*?clearRunIndicatorActivity\(\)/, "agent completion should remove the active agent transcript indicator");
+assert.match(app, /function getPathTrigger\(\)/, "prompt composer should detect @ file\/path reference triggers");
+assert.match(app, /api\(`\/api\/path-suggestions\?query=\$\{encodeURIComponent\(trigger\.query\)\}`/, "@ reference suggestions should load from the server as the user types");
+assert.match(app, /formatPathReference\(suggestion\.path, trigger\.quoted\)/, "accepting a path suggestion should insert an @ reference into the prompt");
 assert.match(app, /function resizePromptInput\(\)/, "prompt textarea should auto-resize from a one-line default");
 assert.match(app, /elements\.promptInput\.addEventListener\("input", \(\) => \{\n\s+resizePromptInput\(\);/, "prompt textarea should resize whenever the user edits it");
 assert.match(app, /function updateComposerModeButtons\(\)/, "composer should relocate Steer and Follow-up based on run state");
@@ -138,10 +210,32 @@ assert.match(app, /return !isMobileView\(\);/, "plain Enter should send only out
 assert.match(app, /mobile-keyboard-open/, "JS should toggle mobile keyboard mode from viewport/focus state");
 assert.match(app, /maxVisualViewportHeight - viewportHeight > 120/, "keyboard mode should detect viewport shrink even when keyboard inset is unavailable");
 assert.match(app, /jumpToLatestButton/, "jump-to-latest button should be wired in JS");
+assert.match(app, /function updateStickyUserPromptButton\(/, "last user prompt header should update from scroll position");
+assert.match(app, /function jumpToStickyUserPrompt\(/, "last user prompt header should jump to its source message");
+assert.match(app, /data-user-prompt/, "user prompt messages should be marked for sticky prompt navigation");
+assert.match(app, /function resetChatOutput\(\)[\s\S]*?stickyUserPromptButton/, "chat rerenders should preserve the sticky user prompt control inside the transcript scroller");
+assert.match(app, /LAST_USER_PROMPT_STORAGE_KEY/, "last user prompt should be cached so compaction cannot remove the sticky prompt preview");
+assert.match(app, /function syncLastUserPromptFromMessages\(messages = latestMessages\)/, "message refresh should preserve the latest user prompt across compacted transcripts");
+assert.match(app, /dataset\.compacted/, "sticky prompt should expose a compacted fallback state when its source message was summarized away");
+assert.match(app, /stickyUserPromptButton\?\.addEventListener\("click", jumpToStickyUserPrompt\)/, "last user prompt header should be clickable without breaking stale cached HTML");
 assert.match(app, /function setComposerActionsOpen\(/, "mobile composer actions panel should be JS-toggleable");
 assert.match(app, /function setMobileTabsExpanded\(/, "mobile tab strip should be JS-toggleable");
+assert.match(app, /let openTerminalTabGroupKey = null/, "frontend should track the open terminal tab group across tab bar rerenders");
+assert.match(app, /function updateTerminalTabGroupOpenState\(\)/, "frontend should be able to reapply open terminal tab group state after rerenders");
+assert.match(app, /wrapper\.addEventListener\("pointerenter", \(\) => setOpenTerminalTabGroup\(group\.key\)\)/, "terminal tab groups should mark themselves open while hovered");
+assert.match(app, /if \(openTerminalTabGroupKey\) \{\n\s+scheduleRefreshTabs\(600\);/, "tab polling should defer full tab refreshes while a group menu is open");
+assert.match(app, /function shouldRenderTerminalTabGroup\(group, groupCount\) \{\n\s+return groupCount > 1 && group\.tabs\.length > 1 && Boolean\(group\.cwd\);\n\}/, "terminal tabs should only collapse cwd groups when multiple groups are available");
+assert.match(app, /const groups = tabCwdGroups\(\);[\s\S]*?for \(const group of groups\) \{\n\s+if \(shouldRenderTerminalTabGroup\(group, groups\.length\)\)[\s\S]*?for \(const tab of group\.tabs\) elements\.tabBar\.append\(renderTerminalTab\(tab\)\);/, "terminal tabs should render every tab ungrouped when grouping is skipped");
 assert.match(app, /let tabSeenCompletionSerials = new Map\(\)/, "frontend should track which tab completions have been seen");
-assert.match(app, /function tabIndicator\(tab\)/, "frontend should derive idle, working, and work-done tab indicator states");
+assert.match(app, /function tabIndicator\(tab\)/, "frontend should derive idle, working, blocked, and work-done tab indicator states");
+assert.match(app, /pendingBlockerCount > 0[\s\S]*?state: "blocked"/, "frontend should show blocked tabs when extension UI blockers are pending");
+assert.match(app, /const EXTENSION_UI_BLOCKING_METHODS = new Set\(\["select", "confirm", "input", "editor"\]\)/, "frontend should share blocking extension UI method detection for dialogs and notifications");
+assert.match(app, /function notifyBlockedTab\(/, "frontend should send blocked-tab notifications when extension UI blocks a run");
+assert.match(app, /function showBlockedTabBrowserNotification\(/, "frontend should use browser notifications for blocked tabs when permission allows");
+assert.match(app, /Notification\.requestPermission\(\)/, "frontend should request notification permission before blocked-tab browser alerts");
+assert.match(app, /syncBlockedTabNotificationsFromTabs\(tabs, previousTabs\)/, "tab refreshes should notify when a background tab becomes blocked");
+assert.match(app, /notifyBlockedTab\(request\.tabId, \{ request, count: request\.pendingExtensionUiRequestCount \}\)/, "extension UI requests should trigger blocked-tab notifications");
+assert.match(app, /pendingExtensionUiRequestCount[\s\S]*?setTabPendingBlockerCount/, "frontend should ingest pending blocker counts from tab events");
 assert.match(app, /function markTabOutputSeen\(/, "frontend should clear work-done indicators once output is seen");
 assert.match(app, /function markTabDoneLocally\(/, "frontend should locally recover tabs that were left working after idle state refreshes");
 assert.match(app, /function syncActiveTabActivityFromState\(state = currentState\)/, "frontend should reconcile active-tab indicators from authoritative state snapshots");
@@ -175,7 +269,9 @@ assert.equal(manifest.start_url, "/", "PWA manifest should start at the web UI r
 assert.ok(manifest.icons?.some((icon) => icon.src === "/apple-touch-icon.png" && icon.sizes === "180x180"), "PWA manifest should include a conventional 180px apple touch icon");
 assert.ok(manifest.icons?.some((icon) => icon.src === "/icon-192.png" && icon.sizes === "192x192"), "PWA manifest should include a 192px icon");
 assert.ok(manifest.icons?.some((icon) => icon.src === "/icon-512.png" && icon.sizes === "512x512"), "PWA manifest should include a 512px icon");
-assert.match(serviceWorker, /const CACHE_NAME = "pi-webui-pwa-v1"/, "PWA service worker should define an app-shell cache");
+assert.match(serviceWorker, /const CACHE_NAME = "pi-webui-pwa-v6"/, "PWA service worker should define an app-shell cache");
+assert.match(serviceWorker, /self\.addEventListener\("notificationclick"/, "PWA service worker should focus Web UI when blocked-tab notifications are clicked");
+assert.match(serviceWorker, /event\.notification\.data\?\.url/, "blocked-tab notifications should carry a URL for service-worker click handling");
 assert.match(serviceWorker, /"\/apple-touch-icon\.png"/, "PWA service worker should cache the apple touch icon");
 assert.match(serviceWorker, /url\.pathname\.startsWith\("\/api\/"\)/, "PWA service worker should not cache live API or SSE calls");
 assert.ok(appleIcon.length > 1000, "PWA apple touch icon should be present");
@@ -189,6 +285,7 @@ assert.match(server, /function generatedTabTitleFromPrompt\(message\)/, "server 
 assert.match(server, /function maybeNameTabForConversation\(tab, command\)/, "server should auto-name default tabs when a conversation starts");
 assert.match(server, /function createTabActivity\(/, "server should track per-tab activity for idle, working, and completed work");
 assert.match(server, /function reconcileTabActivityFromState\(tab, state/, "server should recover stale working tab activity from get_state snapshots");
+assert.match(server, /pendingExtensionUiRequests\(tab\)\.length > 0[\s\S]*?markTabWorking\(tab, timestamp\)/, "server should keep tabs with pending blockers in working activity until the blocker resolves");
 assert.match(server, /case "response":[\s\S]*?event\.command === "get_state"[\s\S]*?reconcileTabActivityFromState\(tab, event\.data/, "server should reconcile tab activity when get_state responses flow through RPC events");
 assert.match(server, /async function listTabsWithReconciledActivity\(\)/, "server tab listing should reconcile stale working tabs before returning metadata");
 assert.match(server, /tabs: await listTabsWithReconciledActivity\(\)/, "GET /api/tabs should use reconciled tab activity metadata");
@@ -197,13 +294,31 @@ assert.match(server, /const EXTENSION_UI_BLOCKING_METHODS = new Set\(\["select",
 assert.match(server, /function trackPendingExtensionUiRequest\(tab, event\)/, "server should track blocking extension UI requests per tab");
 assert.match(server, /pendingExtensionUiRequests: new Map\(\)/, "new tabs should initialize pending extension UI request storage");
 assert.match(server, /trackPendingExtensionUiRequest\(tab, scopedEvent\)/, "RPC events should populate pending extension UI storage before broadcasting");
+assert.match(server, /scopedEvent = \{ \.\.\.scopedEvent,[\s\S]*?pendingExtensionUiRequestCount: pendingExtensionUiRequests\(tab\)\.length \}/, "RPC events should broadcast pending blocker counts for tab indicators");
 assert.match(server, /function replayPendingExtensionUiRequests\(tab, res\)/, "server should be able to replay missed extension UI requests on SSE reconnect");
 assert.match(server, /replayPendingExtensionUiRequests\(tab, res\)/, "SSE connections should replay pending extension UI blockers");
 assert.match(server, /pendingExtensionUiRequests: pendingExtensionUiRequestSummaries\(tab\)/, "detailed Web UI status should expose pending extension UI blockers");
 assert.match(server, /resolvePendingExtensionUiRequest\(tab, payload\.id\)/, "extension UI responses should clear the pending blocker cache");
+assert.match(server, /type: "webui_extension_ui_resolved"[\s\S]*?pendingExtensionUiRequestCount/, "extension UI responses should notify clients that a blocker resolved");
 assert.match(server, /command\.type === "abort"[\s\S]*?cancelPendingExtensionUiRequests\(tab\)/, "abort should cancel hidden pending extension UI requests");
 assert.match(server, /type: "webui_extension_ui_cancelled"/, "server should notify browsers when pending extension UI requests are cancelled");
 assert.match(server, /async function handleNativeSlashCommand\(tab, body\)/, "server should intercept supported native slash commands");
+assert.match(server, /const restoreTabs = readRestoreTabsFromEnv\(\)/, "server should accept restart tab restore descriptors from the launcher environment");
+assert.match(server, /delete process\.env\.PI_WEBUI_RESTORE_TABS/, "server should avoid leaking restore descriptors into spawned Pi RPC processes");
+assert.match(server, /if \(sessionFile && !options\.noSession\) piArgs\.push\("--session", sessionFile\)/, "restored tabs should resume previous session files");
+assert.match(server, /const closedRestorableTabs = \[\]/, "server should remember recently closed tabs for slash-command restarts");
+assert.match(server, /async function closeTab\(id\)[\s\S]*?rememberClosedRestorableTab\(tab, restorableState\)/, "closing a tab should capture its restorable session before stopping RPC");
+assert.match(server, /function rememberTabState\(tab, state\)/, "server should cache last-known tab state for restart-safe session restoration");
+assert.match(server, /sessionFile: tabRestorableSessionFile\(tab\)/, "tab metadata should expose cached session files for health/status restore descriptors");
+assert.match(server, /restorableTabs: mergeRestorableTabDescriptors\(statusTabs, closedRestorableTabs\)/, "status should expose open plus recently closed restorable tabs");
+assert.match(server, /data\.restorableTabs = mergeRestorableTabDescriptors\(detailedTabs, closedRestorableTabs\)/, "detailed status should include session-aware closed tab restore descriptors");
+assert.match(server, /const stateData = stateResult\.ok \? stateResult\.data : tab\.lastState \|\| null/, "detailed status should fall back to cached state when live RPC state is temporarily unavailable");
+assert.match(server, /const initialTabs = await createInitialTabs\(\)/, "server should recreate restored tabs before listening");
+assert.match(extension, /api\/webui-status\?detailed=1&events=0/, "launcher should capture detailed tab status before restarting an existing Web UI");
+assert.match(extension, /function mergeRestorableTabsFromStatusSources\(sources: unknown\[\], options: StartWebuiOptions\)/, "launcher should merge all available restore sources instead of trusting only the first one");
+assert.match(extension, /statusData\?\.restorableTabs, statusData\?\.tabs, existing\.restorableTabs, existing\.tabs/, "launcher should combine detailed, health, open, and closed restore descriptors");
+assert.match(extension, /env\.PI_WEBUI_RESTORE_TABS = JSON\.stringify\(restoreTabs\)/, "launcher should pass restorable tabs to the new detached server");
+assert.match(extension, /pi\.registerCommand\("start-webui"/, "extension should expose /start-webui as an alias for users who invoke that command name");
 assert.match(server, /if \(state\.data\?\.sessionFile && !options\.noSession\) piArgs\.push\("--session", state\.data\.sessionFile\)/, "native /reload should resume the same session file when restarting the RPC tab");
 assert.match(server, /case "reload": \{[\s\S]*?restartTabRpc\(tab, "slash-command"\)/, "native /reload should restart the active RPC tab");
 assert.match(server, /message: "Reloaded keybindings, extensions, skills, prompts, and themes\."/, "native /reload should return visible command output");
@@ -221,9 +336,14 @@ assert.match(server, /Wait for the current agent run or compaction to finish bef
 assert.match(server, /url\.pathname === "\/api\/prompt" && req\.method === "POST"[\s\S]*?handleNativeSlashCommand\(tab, body\)/, "POST /api/prompt should intercept native slash commands before normal prompt forwarding");
 assert.match(server, /function fastPicksStorageFile\(/, "server should define a persistent fast-picks storage file");
 assert.match(server, /PI_WEBUI_FAST_PICKS_FILE/, "server should allow overriding the fast-picks storage path");
+assert.match(server, /async function getPathSuggestionData\(tab, rawQuery\)/, "server should compute @ file\/path reference suggestions for the active tab cwd");
+assert.match(server, /url\.pathname === "\/api\/path-suggestions" && req\.method === "GET"/, "server should expose GET /api/path-suggestions for @ reference autocomplete");
 assert.match(server, /url\.pathname === "\/api\/path-fast-picks" && req\.method === "GET"/, "server should expose GET /api/path-fast-picks");
 assert.match(server, /url\.pathname === "\/api\/path-fast-picks" && req\.method === "POST"/, "server should expose POST /api/path-fast-picks");
 assert.match(server, /url\.pathname === "\/api\/scoped-models" && req\.method === "GET"/, "server should expose GET /api/scoped-models");
+assert.match(server, /@firstpick\/pi-themes-bundle/, "server should discover themes from the bundled theme package");
+assert.match(server, /url\.pathname === "\/api\/themes" && req\.method === "GET"/, "server should expose GET /api/themes");
+assert.match(server, /readBundledThemes\(\)/, "server should read bundled theme JSON files for the browser");
 assert.match(server, /"apple-touch-icon\.png", "icon-192\.png"/, "server should serve the conventional apple touch icon path");
 assert.match(server, /"manifest\.webmanifest", "service-worker\.js"/, "server should serve PWA manifest and service worker as static assets");
 assert.match(server, /\["\.webmanifest", "application\/manifest\+json; charset=utf-8"\]/, "server should serve manifest with the correct MIME type");
@@ -235,9 +355,15 @@ assert.match(server, /writeFile\(tmpFile[\s\S]*?rename\(tmpFile, storageFile\)/,
 assert.match(readme, /Automatic tab naming from the first prompt/, "README should describe automatic terminal-tab naming");
 assert.match(readme, /Feedback reactions \(`👍`, `👎`, `\?`\) on final assistant output plus tool\/bash action cards/, "README should describe final-output and action feedback reactions");
 assert.match(readme, /POST \/api\/action-feedback\?tab=<tabId>/, "README should document the action-feedback endpoint");
+assert.match(readme, /`@` file\/path references with live suggestions/, "README should describe @ file/path reference autocomplete");
+assert.match(readme, /GET \/api\/path-suggestions\?tab=<tabId>&query=<path>/, "README should document the path-suggestions endpoint");
 assert.match(readme, /server-persisted fast picks/, "README should describe server-persisted fast picks");
+assert.match(readme, /browser notifications when a tab needs an extension UI response/, "README should describe blocked-tab notifications");
+assert.match(readme, /blocked-tab browser notifications require browser service-worker\/notification support/, "README should document blocked-tab notification requirements");
+assert.match(readme, /Side-panel theme picker backed by the bundled `@firstpick\/pi-themes-bundle` themes/, "README should describe bundled theme selection");
 
 assert.equal(pkg.scripts?.test, "node tests/mobile-static.test.mjs", "package test script should run the mobile static harness");
+assert.equal(pkg.dependencies?.["@firstpick/pi-themes-bundle"], "^0.1.0", "webui package should depend on the bundled theme package");
 assert.ok(pkg.scripts?.check?.includes("node --check public/app.js"), "check script should syntax-check app.js");
 assert.ok(pkg.scripts?.check?.includes("node tests/mobile-static.test.mjs"), "check script should include mobile static assertions");
 

@@ -10,19 +10,19 @@
     "orange": "#cb4b16",
     "purple": "#6c71c4",
     "cyan": "#2aa198",
-    "textSoft": "#eee8d5",
-    "muted": "#93a1a1",
-    "dim": "#839496",
+    "textSoft": "#93a1a1",
+    "muted": "#839496",
+    "dim": "#657b83",
     "comment": "#586e75",
-    "borderMuted": "#073642",
+    "borderMuted": "#586e75",
     "thinkingMin": "#657b83",
     "bgSelect": "#073642",
-    "bgUser": "#002b36",
-    "bgPending": "#00212b",
-    "bgSuccess": "#12342f",
-    "bgError": "#3b1f24",
-    "bgCustom": "#102d40",
-    "pageBg": "#001f27"
+    "bgUser": "#073642",
+    "bgPending": "#002b36",
+    "bgSuccess": "#073642",
+    "bgError": "#073642",
+    "bgCustom": "#073642",
+    "pageBg": "#002b36"
   },
   "colors": {
     "accent": "accent",
@@ -78,8 +78,8 @@
     "bashMode": "green"
   },
   "export": {
-    "pageBg": "#001f27",
-    "cardBg": "#002b36",
-    "infoBg": "#102d40"
+    "pageBg": "#002b36",
+    "cardBg": "#073642",
+    "infoBg": "#073642"
   }
 }

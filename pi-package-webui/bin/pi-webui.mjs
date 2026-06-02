@@ -2,6 +2,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
+import { createRequire } from "node:module";
 import { access, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { homedir, networkInterfaces } from "node:os";
 import path from "node:path";
@@ -9,6 +10,7 @@ import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
 const packageRoot = path.resolve(__dirname, "..");
 const publicDir = path.join(packageRoot, "public");
 const packageJson = JSON.parse(await readFile(path.join(packageRoot, "package.json"), "utf8"));
@@ -21,6 +23,14 @@ const EVENT_HISTORY_LIMIT = 200;
 const EXTENSION_UI_BLOCKING_METHODS = new Set(["select", "confirm", "input", "editor"]);
 const STATUS_RPC_TIMEOUT_MS = 1_800;
 const FAST_PICK_LIMIT = 30;
+const PATH_SUGGESTION_LIMIT = 20;
+const PATH_SUGGESTION_QUERY_LIMIT = 512;
+const PATH_SUGGESTION_SCAN_LIMIT = 5000;
+const PATH_SUGGESTION_MAX_OUTPUT_LENGTH = 300000;
+const PATH_SUGGESTION_EXCLUDED_DIRS = new Set([".git", "node_modules"]);
+const RESTORE_TAB_LIMIT = 30;
+const NETWORK_REBIND_DELAY_MS = 100;
+const NETWORK_REBIND_FORCE_CLOSE_MS = 750;
 const AUTO_TAB_TITLE_MAX_LENGTH = 44;
 const AUTO_TAB_TITLE_WORD_LIMIT = 8;
 const AUTO_TAB_TITLE_STOP_WORDS = new Set([
@@ -384,12 +394,13 @@ class PiRpcProcess {
   }
 }
 
-function sendJson(res, statusCode, payload) {
+function sendJson(res, statusCode, payload, headers = {}) {
   const body = JSON.stringify(payload, null, 2);
   res.writeHead(statusCode, {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
     "x-content-type-options": "nosniff",
+    ...headers,
   });
   res.end(body);
 }
@@ -590,7 +601,7 @@ function latestEvents(limit = 40) {
   return eventHistory.slice(-Math.max(0, Math.min(EVENT_HISTORY_LIMIT, limit)));
 }
 
-function runCommand(command, args, { cwd, timeoutMs = 2000 } = {}) {
+function runCommand(command, args, { cwd, timeoutMs = 2000, maxOutputLength = 20000 } = {}) {
   return new Promise((resolve) => {
     const child = spawn(command, args, {
       cwd,
@@ -612,11 +623,11 @@ function runCommand(command, args, { cwd, timeoutMs = 2000 } = {}) {
     }, timeoutMs);
     child.stdout.on("data", (chunk) => {
       stdout += String(chunk);
-      if (stdout.length > 20000) stdout = stdout.slice(-20000);
+      if (stdout.length > maxOutputLength) stdout = stdout.slice(-maxOutputLength);
     });
     child.stderr.on("data", (chunk) => {
       stderr += String(chunk);
-      if (stderr.length > 20000) stderr = stderr.slice(-20000);
+      if (stderr.length > maxOutputLength) stderr = stderr.slice(-maxOutputLength);
     });
     child.on("error", (error) => finish({ exitCode: undefined, stdout, stderr: sanitizeError(error), error: sanitizeError(error) }));
     child.on("exit", (exitCode) => finish({ exitCode, stdout, stderr, timedOut: false }));
@@ -841,6 +852,199 @@ async function getDirectoryPickerData(viewPath, activeCwd) {
   };
 }
 
+function normalizeSuggestionPath(value) {
+  return String(value || "").replace(/\\/g, "/");
+}
+
+function cleanPathSuggestionQuery(value) {
+  return normalizeSuggestionPath(value).replace(/\0/g, "").slice(0, PATH_SUGGESTION_QUERY_LIMIT);
+}
+
+function splitSuggestionPathQuery(query) {
+  const normalized = normalizeSuggestionPath(query);
+  if (normalized === "~") return { displayBase: "~", prefix: "" };
+  if (!normalized || normalized.endsWith("/")) return { displayBase: normalized, prefix: "" };
+  const slashIndex = normalized.lastIndexOf("/");
+  if (slashIndex === -1) return { displayBase: "", prefix: normalized };
+  return { displayBase: normalized.slice(0, slashIndex + 1), prefix: normalized.slice(slashIndex + 1) };
+}
+
+function resolveSuggestionBase(displayBase, cwd) {
+  const base = displayBase || ".";
+  if (base === "~" || base.startsWith("~/")) return path.resolve(expandUserPath(base));
+  if (base.startsWith("/")) return path.resolve(base);
+  return path.resolve(cwd, base);
+}
+
+function joinSuggestionDisplayPath(displayBase, name) {
+  const base = normalizeSuggestionPath(displayBase);
+  if (!base || base === ".") return name;
+  if (base === "/") return `/${name}`;
+  return `${base.replace(/\/+$/, "")}/${name}`;
+}
+
+function pathSuggestionLabel(pathText) {
+  const normalized = normalizeSuggestionPath(pathText).replace(/\/+$/, "");
+  const name = normalized ? path.posix.basename(normalized) : pathText;
+  return `${name || pathText}${pathText.endsWith("/") ? "/" : ""}`;
+}
+
+function sortPathSuggestions(items) {
+  return items.sort((a, b) => {
+    if (a.type !== b.type) return a.type === "directory" ? -1 : 1;
+    return a.path.localeCompare(b.path, undefined, { numeric: true, sensitivity: "base" });
+  });
+}
+
+async function getDirectPathSuggestions(query, cwd) {
+  const { displayBase, prefix } = splitSuggestionPathQuery(query);
+  const searchDir = resolveSuggestionBase(displayBase, cwd);
+  let entries;
+  try {
+    entries = await readdir(searchDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const normalizedPrefix = prefix.toLowerCase();
+  const suggestions = [];
+  for (const entry of entries) {
+    if (entry.name === ".git" || (!normalizedPrefix && PATH_SUGGESTION_EXCLUDED_DIRS.has(entry.name))) continue;
+    if (normalizedPrefix && !entry.name.toLowerCase().startsWith(normalizedPrefix)) continue;
+    let isDirectory = entry.isDirectory();
+    if (!isDirectory && entry.isSymbolicLink()) {
+      try {
+        isDirectory = (await stat(path.join(searchDir, entry.name))).isDirectory();
+      } catch {
+        isDirectory = false;
+      }
+    }
+    const pathText = normalizeSuggestionPath(`${joinSuggestionDisplayPath(displayBase, entry.name)}${isDirectory ? "/" : ""}`);
+    suggestions.push({
+      path: pathText,
+      label: `${entry.name}${isDirectory ? "/" : ""}`,
+      type: isDirectory ? "directory" : "file",
+      description: pathText,
+    });
+  }
+  return sortPathSuggestions(suggestions).slice(0, PATH_SUGGESTION_LIMIT);
+}
+
+function addSuggestionEntry(entries, pathText, isDirectory) {
+  const normalized = normalizeSuggestionPath(pathText).replace(/^\.\//, "");
+  if (!normalized || normalized === ".git" || normalized.startsWith(".git/")) return;
+  const value = isDirectory && !normalized.endsWith("/") ? `${normalized}/` : normalized;
+  if (!entries.has(value)) entries.set(value, { path: value, isDirectory });
+}
+
+function addSuggestionPathWithParents(entries, pathText) {
+  const normalized = normalizeSuggestionPath(pathText).replace(/^\.\//, "");
+  if (!normalized || normalized.startsWith(".git/")) return;
+  const parts = normalized.split("/").filter(Boolean);
+  let parent = "";
+  for (let index = 0; index < parts.length - 1; index++) {
+    parent = parent ? `${parent}/${parts[index]}` : parts[index];
+    addSuggestionEntry(entries, `${parent}/`, true);
+  }
+  addSuggestionEntry(entries, normalized, false);
+}
+
+async function getGitPathSuggestionEntries(cwd) {
+  const result = await runCommand("git", ["-C", cwd, "ls-files", "-co", "--exclude-standard"], {
+    timeoutMs: 1200,
+    maxOutputLength: PATH_SUGGESTION_MAX_OUTPUT_LENGTH,
+  });
+  if (result.exitCode !== 0 || !result.stdout.trim()) return null;
+  const entries = new Map();
+  for (const line of result.stdout.split("\n")) addSuggestionPathWithParents(entries, line.trim());
+  return [...entries.values()];
+}
+
+async function getFilesystemPathSuggestionEntries(cwd) {
+  const entries = new Map();
+  async function walk(dir, relativeDir = "", depth = 0) {
+    if (entries.size >= PATH_SUGGESTION_SCAN_LIMIT || depth > 6) return;
+    let dirEntries;
+    try {
+      dirEntries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    dirEntries.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
+    for (const entry of dirEntries) {
+      if (entries.size >= PATH_SUGGESTION_SCAN_LIMIT) return;
+      const relativePath = normalizeSuggestionPath(relativeDir ? `${relativeDir}/${entry.name}` : entry.name);
+      let isDirectory = entry.isDirectory();
+      if (!isDirectory && entry.isSymbolicLink()) {
+        try {
+          isDirectory = (await stat(path.join(dir, entry.name))).isDirectory();
+        } catch {
+          isDirectory = false;
+        }
+      }
+      if (isDirectory) {
+        addSuggestionEntry(entries, `${relativePath}/`, true);
+        if (!PATH_SUGGESTION_EXCLUDED_DIRS.has(entry.name)) await walk(path.join(dir, entry.name), relativePath, depth + 1);
+      } else {
+        addSuggestionEntry(entries, relativePath, false);
+      }
+    }
+  }
+  await walk(cwd);
+  return [...entries.values()];
+}
+
+function isSubsequence(needle, haystack) {
+  let index = 0;
+  for (const char of haystack) {
+    if (char === needle[index]) index++;
+    if (index >= needle.length) return true;
+  }
+  return needle.length === 0;
+}
+
+function scorePathSuggestion(entry, query) {
+  const q = normalizeSuggestionPath(query).replace(/^\.\//, "").replace(/\/+$/, "").toLowerCase();
+  if (!q) return entry.isDirectory ? 2 : 1;
+  const entryPath = entry.path.replace(/\/+$/, "").toLowerCase();
+  const name = path.posix.basename(entryPath);
+  let score = 0;
+  if (name === q) score = 100;
+  else if (name.startsWith(q)) score = 90;
+  else if (entryPath.startsWith(q)) score = 80;
+  else if (name.includes(q)) score = 70;
+  else if (entryPath.includes(q)) score = 55;
+  else if (isSubsequence(q, name)) score = 40;
+  else if (isSubsequence(q, entryPath)) score = 25;
+  if (entry.isDirectory && score > 0) score += 5;
+  return score;
+}
+
+function formatRankedPathSuggestions(entries, query) {
+  return entries
+    .map((entry) => ({ ...entry, score: scorePathSuggestion(entry, query) }))
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score || a.path.length - b.path.length || a.path.localeCompare(b.path))
+    .slice(0, PATH_SUGGESTION_LIMIT)
+    .map((entry) => ({
+      path: entry.path,
+      label: pathSuggestionLabel(entry.path),
+      type: entry.isDirectory ? "directory" : "file",
+      description: entry.path,
+    }));
+}
+
+async function getPathSuggestionData(tab, rawQuery) {
+  const query = cleanPathSuggestionQuery(rawQuery);
+  const shouldUseDirect = !query || query.includes("/") || query.startsWith(".") || query.startsWith("~");
+  let suggestions = shouldUseDirect ? await getDirectPathSuggestions(query, tab.cwd) : [];
+  if (suggestions.length === 0 && query) {
+    const entries = (await getGitPathSuggestionEntries(tab.cwd)) ?? (await getFilesystemPathSuggestionEntries(tab.cwd));
+    suggestions = formatRankedPathSuggestions(entries, query);
+  }
+  return { cwd: tab.cwd, displayCwd: displayPath(tab.cwd), query, suggestions };
+}
+
 async function getWorkspaceInfo(cwd, startedAt) {
   const info = {
     cwd,
@@ -1016,6 +1220,82 @@ async function handleGitWorkflowRequest(pathname, body = {}, cwd = options.cwd) 
   }
 }
 
+function themeLabel(name) {
+  return String(name || "")
+    .split(/[-_]+/)
+    .filter(Boolean)
+    .map((part) => part.length <= 3 ? part.toUpperCase() : `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+    .join(" ");
+}
+
+function stringRecord(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const record = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (typeof item === "string" || typeof item === "number" || typeof item === "boolean") record[key] = String(item);
+  }
+  return record;
+}
+
+async function directoryExists(dir) {
+  try {
+    const info = await stat(dir);
+    return info.isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+async function resolveBundledThemesDir() {
+  const candidates = [];
+  try {
+    const manifestPath = require.resolve("@firstpick/pi-themes-bundle/package.json");
+    const root = path.dirname(manifestPath);
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    const declaredThemes = Array.isArray(manifest.pi?.themes) ? manifest.pi.themes : ["./themes"];
+    for (const entry of declaredThemes) {
+      if (typeof entry === "string" && entry.trim()) candidates.push(path.resolve(root, entry));
+    }
+  } catch {
+    // In repo development the bundle may be a sibling package rather than an installed dependency.
+  }
+  candidates.push(path.resolve(packageRoot, "..", "pi-package-themes-bundle", "themes"));
+
+  for (const candidate of candidates) {
+    if (await directoryExists(candidate)) return candidate;
+  }
+  return null;
+}
+
+function sanitizeBundledTheme(theme, fileName) {
+  const name = typeof theme?.name === "string" && theme.name.trim() ? theme.name.trim() : path.basename(fileName, ".json");
+  return {
+    name,
+    label: themeLabel(name),
+    vars: stringRecord(theme?.vars),
+    colors: stringRecord(theme?.colors),
+    export: stringRecord(theme?.export),
+  };
+}
+
+async function readBundledThemes() {
+  const dir = await resolveBundledThemesDir();
+  if (!dir) return { source: "@firstpick/pi-themes-bundle", themes: [] };
+
+  const files = (await readdir(dir)).filter((file) => file.endsWith(".json")).sort((a, b) => a.localeCompare(b));
+  const themes = [];
+  for (const file of files) {
+    try {
+      const raw = await readFile(path.join(dir, file), "utf8");
+      themes.push(sanitizeBundledTheme(JSON.parse(raw), file));
+    } catch (error) {
+      console.error(`Skipping invalid theme ${file}: ${sanitizeError(error)}`);
+    }
+  }
+  themes.sort((a, b) => a.label.localeCompare(b.label));
+  return { source: "@firstpick/pi-themes-bundle", themes };
+}
+
 function normalizeStaticPath(urlPath) {
   if (urlPath === "/") return "index.html";
   const name = urlPath.startsWith("/") ? urlPath.slice(1) : urlPath;
@@ -1122,6 +1402,49 @@ if (options.version) {
   process.exit(0);
 }
 
+const restoreTabs = readRestoreTabsFromEnv();
+
+function normalizedRestoreString(value, maxLength) {
+  const text = typeof value === "string" ? value.trim() : "";
+  return text ? text.slice(0, maxLength) : undefined;
+}
+
+function normalizeRestoreTabDescriptor(item, seenIds) {
+  if (!item || typeof item !== "object") return null;
+  const state = item.state && typeof item.state === "object" ? item.state : {};
+  const rawId = normalizedRestoreString(item.id, 128);
+  const id = rawId && /^[A-Za-z0-9._:-]+$/.test(rawId) && !seenIds.has(rawId) ? rawId : undefined;
+  if (id) seenIds.add(id);
+
+  const descriptor = {
+    id,
+    title: normalizedRestoreString(item.title, 160),
+    titleSource: ["explicit", "auto", "default"].includes(item.titleSource) ? item.titleSource : undefined,
+    cwd: normalizedRestoreString(item.cwd || item.workspace?.cwd, 4096),
+    conversationStarted: item.conversationStarted === true,
+    sessionFile: normalizedRestoreString(item.sessionFile || state.sessionFile, 4096),
+  };
+
+  if (Number.isInteger(item.index) && item.index > 0) descriptor.index = item.index;
+  return descriptor;
+}
+
+function readRestoreTabsFromEnv() {
+  const raw = process.env.PI_WEBUI_RESTORE_TABS;
+  delete process.env.PI_WEBUI_RESTORE_TABS;
+  if (!raw) return [];
+
+  try {
+    const parsed = JSON.parse(raw);
+    const items = Array.isArray(parsed) ? parsed : [];
+    const seenIds = new Set();
+    return items.map((item) => normalizeRestoreTabDescriptor(item, seenIds)).filter(Boolean).slice(0, RESTORE_TAB_LIMIT);
+  } catch (error) {
+    console.warn(`failed to parse PI_WEBUI_RESTORE_TABS: ${sanitizeError(error)}`);
+    return [];
+  }
+}
+
 function buildPiArgsForTab(tabIndex, title) {
   const args = ["--mode", "rpc"];
   if (options.noSession) args.push("--no-session");
@@ -1152,10 +1475,32 @@ async function resolvePiCommand(piArgs) {
 }
 
 const tabs = new Map();
+const closedRestorableTabs = [];
 let nextTabIndex = 1;
 const TAB_ACTIVITY_IDLE_RECONCILE_GRACE_MS = 1200;
 const TAB_ACTIVITY_STATE_RECONCILE_INTERVAL_MS = 2500;
 const TAB_ACTIVITY_STATE_RECONCILE_TIMEOUT_MS = 1200;
+
+function sessionFileFromState(state) {
+  return state && typeof state === "object" ? normalizedRestoreString(state.sessionFile, 4096) : undefined;
+}
+
+function rememberTabState(tab, state) {
+  if (!tab || !state || typeof state !== "object") return;
+  tab.lastState = state;
+  if (!options.noSession && Object.prototype.hasOwnProperty.call(state, "sessionFile")) tab.sessionFile = sessionFileFromState(state);
+}
+
+function forgetTabState(tab) {
+  if (!tab) return;
+  tab.lastState = null;
+  tab.sessionFile = undefined;
+}
+
+function tabRestorableSessionFile(tab) {
+  if (options.noSession) return undefined;
+  return normalizedRestoreString(tab?.sessionFile || tab?.lastState?.sessionFile, 4096);
+}
 
 function createTabActivity(now = new Date().toISOString()) {
   return {
@@ -1216,6 +1561,7 @@ function trackPendingExtensionUiRequest(tab, event) {
   const timeoutMs = Number(event.timeout);
   const expiresAt = Number.isFinite(timeoutMs) && timeoutMs > 0 ? new Date(Date.parse(receivedAt) + timeoutMs + 1000).toISOString() : undefined;
   pendingExtensionUiMap(tab).set(String(event.id), { ...event, receivedAt, expiresAt });
+  if (!tab.activity?.isWorking) markTabWorking(tab, receivedAt);
 }
 
 function resolvePendingExtensionUiRequest(tab, id) {
@@ -1313,6 +1659,10 @@ function activityRecentlyStarted(activity, nowMs = Date.now()) {
 function reconcileTabActivityFromState(tab, state, timestamp = new Date().toISOString()) {
   if (!tab) return createTabActivity(timestamp);
   if (!state || typeof state !== "object") return tabActivitySnapshot(tab);
+  if (pendingExtensionUiRequests(tab).length > 0) {
+    if (!tab.activity?.isWorking) markTabWorking(tab, timestamp);
+    return tabActivitySnapshot(tab);
+  }
   if (stateHasVisibleWork(state)) {
     if (!tab.activity?.isWorking) markTabWorking(tab, timestamp);
     return tabActivitySnapshot(tab);
@@ -1331,7 +1681,10 @@ async function reconcileWorkingTabActivity(tab) {
   tab.activityStateReconcileAt = now;
   try {
     const response = await tab.rpc.send({ type: "get_state" }, TAB_ACTIVITY_STATE_RECONCILE_TIMEOUT_MS);
-    if (response?.success !== false) reconcileTabActivityFromState(tab, response.data);
+    if (response?.success !== false) {
+      rememberTabState(tab, response.data);
+      reconcileTabActivityFromState(tab, response.data);
+    }
   } catch {
     // Ignore reconciliation failures; normal RPC events will still update activity.
   }
@@ -1359,8 +1712,10 @@ function updateTabActivityFromEvent(tab, event) {
       else markTabIdle(tab, timestamp);
       break;
     case "response":
-      if (event.command === "get_state" && event.success !== false) reconcileTabActivityFromState(tab, event.data, timestamp);
-      else if (!tab.activity) tab.activity = createTabActivity(timestamp);
+      if (event.command === "get_state" && event.success !== false) {
+        rememberTabState(tab, event.data);
+        reconcileTabActivityFromState(tab, event.data, timestamp);
+      } else if (!tab.activity) tab.activity = createTabActivity(timestamp);
       break;
     default:
       if (!tab.activity) tab.activity = createTabActivity(timestamp);
@@ -1378,24 +1733,27 @@ function attachRpcToTab(tab, rpc) {
   tab.rpcUnsubscribe?.();
   tab.rpc = rpc;
   tab.rpcUnsubscribe = rpc.onEvent((event) => {
-    const tabActivity = updateTabActivityFromEvent(tab, event);
-    const scopedEvent = { ...event, tabId: tab.id, tabTitle: tab.title, tabActivity };
+    updateTabActivityFromEvent(tab, event);
+    let scopedEvent = { ...event, tabId: tab.id, tabTitle: tab.title, tabActivity: tabActivitySnapshot(tab) };
     if (event?.type === "pi_process_exit" || event?.type === "pi_process_error") clearPendingExtensionUiRequests(tab);
     else trackPendingExtensionUiRequest(tab, scopedEvent);
+    scopedEvent = { ...scopedEvent, tabActivity: tabActivitySnapshot(tab), pendingExtensionUiRequestCount: pendingExtensionUiRequests(tab).length };
     recordEvent(scopedEvent);
     for (const client of tab.sseClients) sendSse(client, scopedEvent);
   });
 }
 
-async function createTab({ title, cwd } = {}) {
-  const tabIndex = nextTabIndex++;
+async function createTab({ id: requestedId, index, title, titleSource, conversationStarted, cwd, sessionFile } = {}) {
+  const tabIndex = Number.isInteger(index) && index > 0 ? index : nextTabIndex;
+  nextTabIndex = Math.max(nextTabIndex, tabIndex + 1);
   const explicitTitle = String(title || "").trim();
   const tabTitle = explicitTitle || defaultTabTitle(tabIndex);
   const titleIsExplicit = Boolean(explicitTitle || (options.name && tabIndex === 1));
-  const titleSource = titleIsExplicit ? "explicit" : "default";
+  const resolvedTitleSource = ["explicit", "auto", "default"].includes(titleSource) ? titleSource : titleIsExplicit ? "explicit" : "default";
   const tabCwd = cwd ? await resolveCwd(cwd, options.cwd) : options.cwd;
-  const id = randomUUID();
+  const id = requestedId && !tabs.has(requestedId) ? requestedId : randomUUID();
   const piArgs = buildPiArgsForTab(tabIndex, tabTitle);
+  if (sessionFile && !options.noSession) piArgs.push("--session", sessionFile);
   const piCommand = await resolvePiCommand(piArgs);
   const rpc = new PiRpcProcess({ ...piCommand, cwd: tabCwd });
   const createdAt = new Date().toISOString();
@@ -1403,10 +1761,12 @@ async function createTab({ title, cwd } = {}) {
     id,
     index: tabIndex,
     title: tabTitle,
-    titleSource,
-    conversationStarted: false,
+    titleSource: resolvedTitleSource,
+    conversationStarted: conversationStarted === true,
     cwd: tabCwd,
     createdAt,
+    sessionFile: options.noSession ? undefined : normalizedRestoreString(sessionFile, 4096),
+    lastState: null,
     activity: createTabActivity(createdAt),
     pendingExtensionUiRequests: new Map(),
     rpc: undefined,
@@ -1417,6 +1777,9 @@ async function createTab({ title, cwd } = {}) {
   attachRpcToTab(tab, rpc);
   tabs.set(id, tab);
   rpc.start();
+  if (sessionFile && !options.noSession) {
+    recordEvent({ type: "webui_tab_restored", tabId: tab.id, tabTitle: tab.title, cwd: tab.cwd });
+  }
   return tab;
 }
 
@@ -1432,6 +1795,7 @@ function tabMeta(tab) {
     titleSource: tab.titleSource || "default",
     conversationStarted: !!tab.conversationStarted,
     cwd: tab.cwd,
+    sessionFile: tabRestorableSessionFile(tab),
     createdAt: tab.createdAt,
     startedAt: tab.rpc.startedAt,
     pid: tab.rpc.child?.pid,
@@ -1445,6 +1809,56 @@ function tabMeta(tab) {
 
 function listTabs() {
   return [...tabs.values()].map(tabMeta);
+}
+
+function restorableTabDescriptor(tab, state = null) {
+  return normalizeRestoreTabDescriptor({
+    id: tab.id,
+    index: tab.index,
+    title: tab.title,
+    titleSource: tab.titleSource,
+    conversationStarted: tab.conversationStarted,
+    cwd: tab.cwd,
+    sessionFile: sessionFileFromState(state) || tabRestorableSessionFile(tab),
+  }, new Set());
+}
+
+function restorableTabKey(tab) {
+  if (tab.id) return `id:${tab.id}`;
+  if (tab.sessionFile) return `session:${tab.sessionFile}`;
+  return `tab:${tab.index || "?"}:${tab.title || ""}:${tab.cwd || ""}`;
+}
+
+function restorableTabSortIndex(tab) {
+  return Number.isInteger(tab.index) && tab.index > 0 ? tab.index : Number.MAX_SAFE_INTEGER;
+}
+
+function mergeRestorableTabDescriptors(...sources) {
+  const merged = [];
+  const seen = new Set();
+  for (const source of sources) {
+    for (const item of Array.isArray(source) ? source : []) {
+      const descriptor = normalizeRestoreTabDescriptor(item, new Set());
+      if (!descriptor) continue;
+      const key = restorableTabKey(descriptor);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(descriptor);
+    }
+  }
+  return merged
+    .sort((a, b) => restorableTabSortIndex(a) - restorableTabSortIndex(b) || String(a.title || "").localeCompare(String(b.title || "")))
+    .slice(0, RESTORE_TAB_LIMIT);
+}
+
+function rememberClosedRestorableTab(tab, state = null) {
+  const descriptor = restorableTabDescriptor(tab, state);
+  if (!descriptor) return;
+  const key = restorableTabKey(descriptor);
+  const existingIndex = closedRestorableTabs.findIndex((item) => restorableTabKey(item) === key);
+  if (existingIndex !== -1) closedRestorableTabs.splice(existingIndex, 1);
+  closedRestorableTabs.push(descriptor);
+  while (closedRestorableTabs.length > RESTORE_TAB_LIMIT) closedRestorableTabs.shift();
 }
 
 function broadcastTabEvent(tab, event) {
@@ -1508,6 +1922,7 @@ async function updateTabCwd(id, cwd) {
   oldRpc.stop();
 
   tab.cwd = nextCwd;
+  forgetTabState(tab);
   resetTabActivity(tab);
   clearPendingExtensionUiRequests(tab);
   const rpc = new PiRpcProcess({ ...piCommand, cwd: tab.cwd });
@@ -1525,6 +1940,7 @@ async function updateTabCwd(id, cwd) {
 async function restartTabRpc(tab, reason = "reload") {
   const state = await tab.rpc.send({ type: "get_state" });
   if (state.success === false) throw makeHttpError(400, state.error || "Unable to read Pi state before reload");
+  rememberTabState(tab, state.data);
   if (state.data?.isStreaming) throw makeHttpError(409, "Wait for the current response to finish before reloading.");
   if (state.data?.isCompacting) throw makeHttpError(409, "Wait for compaction to finish before reloading.");
 
@@ -1579,8 +1995,8 @@ function webuiHotkeysOutput() {
     "Web UI hotkeys:",
     "Enter: send on desktop; newline on mobile",
     "Ctrl/Cmd+Enter: send from textarea",
-    "Tab: accept slash-command suggestion",
-    "Arrow up/down: move through slash-command suggestions",
+    "Tab: accept slash-command or @path suggestion",
+    "Arrow up/down: move through slash-command or @path suggestions",
     "Escape: close actions, tabs, model picker, or mobile drawer",
     "Mobile: Send button submits; Return inserts a newline",
   ].join("\n");
@@ -1639,10 +2055,17 @@ async function handleNativeSlashCommand(tab, body) {
   }
 }
 
-function closeTab(id) {
+async function closeTab(id) {
   const tab = tabs.get(id);
   if (!tab) throw makeHttpError(404, `Unknown Pi tab: ${id}`);
   if (tabs.size <= 1) throw makeHttpError(400, "Cannot close the last Pi tab");
+
+  let restorableState = null;
+  if (!options.noSession) {
+    const stateResult = await safeRpcData(tab, { type: "get_state" }, STATUS_RPC_TIMEOUT_MS);
+    if (stateResult.ok) restorableState = stateResult.data;
+  }
+  rememberClosedRestorableTab(tab, restorableState);
 
   const closingEvent = { type: "webui_tab_closing", tabId: tab.id, tabTitle: tab.title };
   recordEvent(closingEvent);
@@ -1675,10 +2098,27 @@ function getRequestedTab(req, url, body = {}) {
   return tab;
 }
 
+async function createInitialTabs() {
+  if (!restoreTabs.length) return [await createTab()];
+
+  const created = [];
+  for (const descriptor of restoreTabs) {
+    try {
+      created.push(await createTab(descriptor));
+    } catch (error) {
+      console.warn(`failed to restore Web UI tab ${descriptor.title || descriptor.id || "unknown"}: ${sanitizeError(error)}`);
+    }
+  }
+
+  return created.length ? created : [await createTab()];
+}
+
 const serverStartedAt = new Date().toISOString();
-const initialTab = await createTab();
+const initialTabs = await createInitialTabs();
+const initialTab = initialTabs[0];
 let currentHost = options.host;
 let networkRebindInProgress = false;
+let networkRebindTargetHost = null;
 
 function localNetworkAddresses() {
   const addresses = [];
@@ -1693,10 +2133,14 @@ function localNetworkAddresses() {
 
 function networkStatus() {
   const open = !isLocalHost(currentHost);
+  const targetHost = networkRebindTargetHost || currentHost;
+  const opening = networkRebindInProgress && !isLocalHost(targetHost);
+  const closing = networkRebindInProgress && isLocalHost(targetHost);
   const networkUrls = open ? localNetworkAddresses().map((address) => `http://${address}:${options.port}/`) : [];
   return {
     open,
-    opening: networkRebindInProgress,
+    opening,
+    closing,
     host: currentHost,
     port: options.port,
     localUrl: `http://127.0.0.1:${options.port}/`,
@@ -1706,7 +2150,15 @@ function networkStatus() {
 
 function closeSseClientsForRebind(nextHost) {
   for (const tab of tabs.values()) {
-    const rebindEvent = { type: "webui_network_rebinding", tabId: tab.id, tabTitle: tab.title, host: nextHost, port: options.port };
+    const rebindEvent = {
+      type: "webui_network_rebinding",
+      tabId: tab.id,
+      tabTitle: tab.title,
+      host: nextHost,
+      port: options.port,
+      opening: !isLocalHost(nextHost),
+      closing: isLocalHost(nextHost),
+    };
     recordEvent(rebindEvent);
     for (const client of tab.sseClients) {
       sendSse(client, rebindEvent);
@@ -1722,10 +2174,18 @@ function closeServerListener() {
       resolve();
       return;
     }
+    const forceCloseTimer = setTimeout(() => {
+      // Rebinding is intentionally disruptive. Long-poll/SSE/keep-alive clients can
+      // otherwise keep server.close() pending and leave currentHost stuck on 0.0.0.0.
+      server.closeAllConnections?.();
+    }, NETWORK_REBIND_FORCE_CLOSE_MS);
+    forceCloseTimer.unref?.();
     server.close((error) => {
+      clearTimeout(forceCloseTimer);
       if (error) reject(error);
       else resolve();
     });
+    server.closeIdleConnections?.();
   });
 }
 
@@ -1754,6 +2214,7 @@ async function openToLocalNetwork() {
   if (!isLocalHost(currentHost) || networkRebindInProgress) return networkStatus();
 
   networkRebindInProgress = true;
+  networkRebindTargetHost = nextHost;
   closeSseClientsForRebind(nextHost);
   const previousHost = currentHost;
   try {
@@ -1774,6 +2235,37 @@ async function openToLocalNetwork() {
     throw error;
   } finally {
     networkRebindInProgress = false;
+    networkRebindTargetHost = null;
+  }
+}
+
+async function closeNetworkAccess() {
+  const nextHost = "127.0.0.1";
+  if (isLocalHost(currentHost) || networkRebindInProgress) return networkStatus();
+
+  networkRebindInProgress = true;
+  networkRebindTargetHost = nextHost;
+  closeSseClientsForRebind(nextHost);
+  const previousHost = currentHost;
+  try {
+    await closeServerListener();
+    await listenOn(nextHost);
+    currentHost = nextHost;
+    console.warn("Web UI network access closed; listening on localhost only.");
+    return networkStatus();
+  } catch (error) {
+    console.error("Failed to close Web UI network access:", sanitizeError(error));
+    if (!server.listening) {
+      try {
+        await listenOn(previousHost);
+      } catch (restoreError) {
+        console.error("Failed to restore Web UI listener:", sanitizeError(restoreError));
+      }
+    }
+    throw error;
+  } finally {
+    networkRebindInProgress = false;
+    networkRebindTargetHost = null;
   }
 }
 
@@ -1781,6 +2273,7 @@ async function safeRpcData(tab, command, timeoutMs = STATUS_RPC_TIMEOUT_MS) {
   try {
     const response = await tab.rpc.send(command, timeoutMs);
     if (response?.success === false) return { ok: false, error: response.error || `${command.type} failed` };
+    if (command?.type === "get_state") rememberTabState(tab, response?.data);
     return { ok: true, data: response?.data ?? null };
   } catch (error) {
     return { ok: false, error: sanitizeError(error) };
@@ -1803,9 +2296,10 @@ async function tabStatusDetails(tab) {
     getWorkspaceInfo(tab.cwd, tab.rpc.startedAt).then((data) => ({ ok: true, data })).catch((error) => ({ ok: false, error: sanitizeError(error) })),
   ]);
   const models = modelsResult.ok ? modelsResult.data?.models || [] : [];
+  const stateData = stateResult.ok ? stateResult.data : tab.lastState || null;
   return {
     ...tabMeta(tab),
-    state: stateResult.ok ? stateResult.data : null,
+    state: stateData,
     stateError: stateResult.ok ? undefined : stateResult.error,
     stats: statsResult.ok ? statsResult.data : null,
     statsError: statsResult.ok ? undefined : statsResult.error,
@@ -1823,6 +2317,7 @@ async function tabStatusDetails(tab) {
 async function webuiStatus({ detailed = false, eventLimit = 40 } = {}) {
   const tab = firstTab();
   const network = networkStatus();
+  const statusTabs = listTabs();
   const data = {
     online: true,
     webuiVersion: packageJson.version,
@@ -1836,11 +2331,15 @@ async function webuiStatus({ detailed = false, eventLimit = 40 } = {}) {
     network,
     piPid: tab?.rpc.child?.pid,
     piRunning: !!tab?.rpc.child && tab.rpc.child.exitCode === null,
-    tabs: listTabs(),
+    tabs: statusTabs,
+    restorableTabs: mergeRestorableTabDescriptors(statusTabs, closedRestorableTabs),
   };
 
   if (detailed) {
-    data.tabs = await Promise.all([...tabs.values()].map((item) => tabStatusDetails(item)));
+    const detailedTabs = await Promise.all([...tabs.values()].map((item) => tabStatusDetails(item)));
+    data.tabs = detailedTabs;
+    data.restorableTabs = mergeRestorableTabDescriptors(detailedTabs, closedRestorableTabs);
+    data.closedTabs = closedRestorableTabs.slice();
     data.events = latestEvents(eventLimit);
   }
 
@@ -1873,7 +2372,7 @@ const server = createServer(async (req, res) => {
 
     if (url.pathname.startsWith("/api/tabs/") && req.method === "DELETE") {
       const id = decodeURIComponent(url.pathname.slice("/api/tabs/".length));
-      closeTab(id);
+      await closeTab(id);
       sendJson(res, 200, { ok: true, data: { tabs: listTabs(), activeTabId: firstTab()?.id || null } });
       return;
     }
@@ -1919,6 +2418,7 @@ const server = createServer(async (req, res) => {
         cwd: status.cwd,
         network: status.network,
         tabs: status.tabs,
+        restorableTabs: status.restorableTabs,
       });
       return;
     }
@@ -1931,6 +2431,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === "/api/themes" && req.method === "GET") {
+      sendJson(res, 200, { ok: true, data: await readBundledThemes() });
+      return;
+    }
+
     if (url.pathname === "/api/network" && req.method === "GET") {
       sendJson(res, 200, { ok: true, data: networkStatus() });
       return;
@@ -1939,9 +2444,20 @@ const server = createServer(async (req, res) => {
     if (url.pathname === "/api/network/open" && req.method === "POST") {
       if (!isLocalAddress(req.socket.remoteAddress)) throw makeHttpError(403, "Opening to the network is only allowed from localhost");
       const before = networkStatus();
-      sendJson(res, 202, { ok: true, data: { ...before, opening: true } });
-      if (!before.open && !networkRebindInProgress) {
-        setTimeout(() => openToLocalNetwork().catch((error) => console.error("network open failed:", sanitizeError(error))), 20).unref();
+      const shouldOpen = !before.open && !networkRebindInProgress;
+      sendJson(res, 202, { ok: true, data: { ...before, opening: shouldOpen || before.opening, closing: before.closing } }, { connection: "close" });
+      if (shouldOpen) {
+        setTimeout(() => openToLocalNetwork().catch((error) => console.error("network open failed:", sanitizeError(error))), NETWORK_REBIND_DELAY_MS).unref();
+      }
+      return;
+    }
+
+    if (url.pathname === "/api/network/close" && req.method === "POST") {
+      const before = networkStatus();
+      const shouldClose = before.open && !networkRebindInProgress;
+      sendJson(res, 202, { ok: true, data: { ...before, opening: before.opening, closing: shouldClose || before.closing } }, { connection: "close" });
+      if (shouldClose) {
+        setTimeout(() => closeNetworkAccess().catch((error) => console.error("network close failed:", sanitizeError(error))), NETWORK_REBIND_DELAY_MS).unref();
       }
       return;
     }
@@ -1968,6 +2484,12 @@ const server = createServer(async (req, res) => {
         ok: true,
         data: await getDirectoryPickerData(url.searchParams.get("path"), tab.cwd),
       });
+      return;
+    }
+
+    if (url.pathname === "/api/path-suggestions" && req.method === "GET") {
+      const tab = getRequestedTab(req, url);
+      sendJson(res, 200, { ok: true, data: await getPathSuggestionData(tab, url.searchParams.get("query")) });
       return;
     }
 
@@ -2048,8 +2570,18 @@ const server = createServer(async (req, res) => {
       if (payload.type !== "extension_ui_response") payload.type = "extension_ui_response";
       if (!payload.id) throw new Error("id is required");
       await tab.rpc.writeRaw(payload);
-      resolvePendingExtensionUiRequest(tab, payload.id);
-      sendJson(res, 200, { ok: true });
+      const resolved = resolvePendingExtensionUiRequest(tab, payload.id);
+      if (resolved) {
+        broadcastTabEvent(tab, {
+          type: "webui_extension_ui_resolved",
+          tabId: tab.id,
+          tabTitle: tab.title,
+          id: String(payload.id),
+          pendingExtensionUiRequestCount: pendingExtensionUiRequests(tab).length,
+          tabActivity: tabActivitySnapshot(tab),
+        });
+      }
+      sendJson(res, 200, { ok: true, tab: tabMeta(tab) });
       return;
     }
 
@@ -2068,6 +2600,8 @@ const server = createServer(async (req, res) => {
         if (response.success === false && startsVisibleWork) markTabIdle(tab);
         if (response.success !== false && command.type === "new_session") {
           tab.conversationStarted = false;
+          forgetTabState(tab);
+          rememberTabState(tab, response.data);
           clearPendingExtensionUiRequests(tab);
         }
         sendJson(res, response.success === false ? 400 : 200, responseWithTab(response, tab));
@@ -2098,6 +2632,7 @@ server.listen(options.port, currentHost, () => {
   console.log(`Pi Web UI: http://${urlHost}:${options.port}/`);
   console.log(`Working directory: ${options.cwd}`);
   console.log(`Pi RPC: ${initialTab.rpc.displayCommand}`);
+  if (restoreTabs.length) console.log(`Restored Web UI tabs: ${initialTabs.length}`);
   if (!isLocalHost(currentHost)) {
     console.warn("WARNING: Web UI has no authentication. Only expose it on trusted networks.");
   }

@@ -11,18 +11,18 @@
     "purple": "#d699b6",
     "cyan": "#7fbbb3",
     "textSoft": "#d3c6aa",
-    "muted": "#b9a990",
-    "dim": "#9da39a",
+    "muted": "#859289",
+    "dim": "#7a8478",
     "comment": "#859289",
-    "borderMuted": "#4b565c",
-    "thinkingMin": "#6f7f79",
-    "bgSelect": "#3a4248",
+    "borderMuted": "#859289",
+    "thinkingMin": "#7a8478",
+    "bgSelect": "#343f44",
     "bgUser": "#2d353b",
     "bgPending": "#232a2e",
-    "bgSuccess": "#2b3b35",
-    "bgError": "#3d2b2d",
-    "bgCustom": "#343345",
-    "pageBg": "#1e2528"
+    "bgSuccess": "#425047",
+    "bgError": "#514045",
+    "bgCustom": "#4a444e",
+    "pageBg": "#232a2e"
   },
   "colors": {
     "accent": "accent",
@@ -70,7 +70,7 @@
     "syntaxOperator": "accent2",
     "syntaxPunctuation": "dim",
     "thinkingOff": "borderMuted",
-    "thinkingMinimal": "thinkingMin",
+    "thinkingMinimal": "#7a8478",
     "thinkingLow": "accent",
     "thinkingMedium": "accent2",
     "thinkingHigh": "purple",
@@ -78,8 +78,8 @@
     "bashMode": "green"
   },
   "export": {
-    "pageBg": "#1e2528",
+    "pageBg": "#232a2e",
     "cardBg": "#2d353b",
-    "infoBg": "#343345"
+    "infoBg": "#4a444e"
   }
 }

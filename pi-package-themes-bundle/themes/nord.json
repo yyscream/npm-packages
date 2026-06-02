@@ -12,17 +12,17 @@
     "cyan": "#8fbcbb",
     "textSoft": "#eceff4",
     "muted": "#d8dee9",
-    "dim": "#b7c3d4",
-    "comment": "#616e88",
+    "dim": "#4c566a",
+    "comment": "#4c566a",
     "borderMuted": "#4c566a",
     "thinkingMin": "#5e81ac",
     "bgSelect": "#3b4252",
     "bgUser": "#2e3440",
-    "bgPending": "#242933",
-    "bgSuccess": "#26342d",
-    "bgError": "#3a2830",
-    "bgCustom": "#342d3b",
-    "pageBg": "#1f242d"
+    "bgPending": "#2e3440",
+    "bgSuccess": "#3b4252",
+    "bgError": "#3b4252",
+    "bgCustom": "#3b4252",
+    "pageBg": "#2e3440"
   },
   "colors": {
     "accent": "accent",
@@ -60,7 +60,7 @@
     "toolDiffAdded": "green",
     "toolDiffRemoved": "red",
     "toolDiffContext": "muted",
-    "syntaxComment": "comment",
+    "syntaxComment": "#4c566a",
     "syntaxKeyword": "purple",
     "syntaxFunction": "accent",
     "syntaxVariable": "textSoft",
@@ -78,8 +78,8 @@
     "bashMode": "green"
   },
   "export": {
-    "pageBg": "#1f242d",
+    "pageBg": "#2e3440",
     "cardBg": "#2e3440",
-    "infoBg": "#342d3b"
+    "infoBg": "#3b4252"
   }
 }

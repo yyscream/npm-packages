@@ -49,7 +49,7 @@ Extension-bundled skills kept as direct Pi config includes instead of duplicate 
 ### `@firstpick/pi-package-webui`
 Pi Web UI companion package for Pi coding agent RPC mode.
 
-- Bundles the `pi-webui` CLI server and `/start-webui` Pi extension command
+- Bundles the `pi-webui` CLI server and `/webui-start` Pi extension command (`/start-webui` alias)
 - Starts `pi --mode rpc` and serves a no-build HTTP/SSE web app
 - Supports prompt, steer, follow-up, abort, new session, model/thinking controls, slash-command autocomplete, and guided git workflow
 - Binds to `127.0.0.1` by default; no authentication, so do not expose it to untrusted networks

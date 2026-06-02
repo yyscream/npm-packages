@@ -34,6 +34,17 @@ type ExistingWebui = {
   piPid?: number;
   network?: any;
   tabs?: any[];
+  restorableTabs?: any[];
+};
+
+type RestorableWebuiTab = {
+  id?: string;
+  index?: number;
+  title?: string;
+  titleSource?: string;
+  conversationStarted?: boolean;
+  cwd?: string;
+  sessionFile?: string;
 };
 
 type WebuiChild = ChildProcessByStdio<null, Readable, Readable>;
@@ -200,6 +211,88 @@ async function probeExistingWebui(url: string): Promise<ExistingWebui | null> {
   const body = result?.body;
   if (!result?.ok || body?.ok !== true || typeof body.webuiVersion !== "string") return null;
   return body;
+}
+
+function boundedString(value: unknown, maxLength: number): string | undefined {
+  const text = typeof value === "string" ? value.trim() : "";
+  return text ? text.slice(0, maxLength) : undefined;
+}
+
+function restorableTabsFromStatus(tabs: unknown, options: StartWebuiOptions): RestorableWebuiTab[] {
+  if (!Array.isArray(tabs)) return [];
+
+  const restored: RestorableWebuiTab[] = [];
+  const seenIds = new Set<string>();
+  for (const item of tabs) {
+    if (!item || typeof item !== "object") continue;
+    const tab = item as any;
+    const state = tab.state && typeof tab.state === "object" ? tab.state : {};
+    const id = boundedString(tab.id, 128);
+    const safeId = id && /^[A-Za-z0-9._:-]+$/.test(id) && !seenIds.has(id) ? id : undefined;
+    if (safeId) seenIds.add(safeId);
+
+    const restoreTab: RestorableWebuiTab = {
+      id: safeId,
+      title: boundedString(tab.title, 160),
+      titleSource: boundedString(tab.titleSource, 32),
+      cwd: boundedString(tab.cwd || tab.workspace?.cwd, 4096),
+    };
+
+    if (tab.conversationStarted === true) restoreTab.conversationStarted = true;
+    if (Number.isInteger(tab.index) && tab.index > 0) restoreTab.index = tab.index;
+    if (!options.noSession) restoreTab.sessionFile = boundedString(state.sessionFile || tab.sessionFile, 4096);
+
+    restored.push(restoreTab);
+    if (restored.length >= 30) break;
+  }
+  return restored;
+}
+
+function restorableTabKeys(tab: RestorableWebuiTab): string[] {
+  const keys: string[] = [];
+  if (tab.id) keys.push(`id:${tab.id}`);
+  if (tab.sessionFile) keys.push(`session:${tab.sessionFile}`);
+  const fallback = [tab.index || "", tab.cwd || "", tab.title || ""].join("\0");
+  if (fallback.replace(/\0/g, "")) keys.push(`tab:${fallback}`);
+  return keys;
+}
+
+function mergeRestorableTabDescriptor(current: RestorableWebuiTab, next: RestorableWebuiTab): RestorableWebuiTab {
+  const merged: RestorableWebuiTab = { ...current };
+  for (const [key, value] of Object.entries(next) as [keyof RestorableWebuiTab, RestorableWebuiTab[keyof RestorableWebuiTab]][]) {
+    if (value !== undefined && value !== "") (merged as any)[key] = value;
+  }
+  return merged;
+}
+
+function mergeRestorableTabsFromStatusSources(sources: unknown[], options: StartWebuiOptions): RestorableWebuiTab[] {
+  const merged: RestorableWebuiTab[] = [];
+  const keyToIndex = new Map<string, number>();
+
+  for (const source of sources) {
+    for (const tab of restorableTabsFromStatus(source, options)) {
+      const keys = restorableTabKeys(tab);
+      const existingIndex = keys.map((key) => keyToIndex.get(key)).find((index): index is number => index !== undefined);
+      if (existingIndex === undefined) {
+        if (merged.length >= 30) continue;
+        const index = merged.length;
+        merged.push(tab);
+        for (const key of keys) keyToIndex.set(key, index);
+      } else {
+        merged[existingIndex] = mergeRestorableTabDescriptor(merged[existingIndex], tab);
+        for (const key of restorableTabKeys(merged[existingIndex])) keyToIndex.set(key, existingIndex);
+      }
+    }
+  }
+
+  return merged.slice(0, 30);
+}
+
+async function fetchRestorableTabs(url: string, existing: ExistingWebui, options: StartWebuiOptions): Promise<RestorableWebuiTab[]> {
+  const baseUrl = url.replace(/\/$/, "");
+  const detailed = await fetchJsonWithTimeout(`${baseUrl}/api/webui-status?detailed=1&events=0`, {}, 7_000);
+  const statusData = detailed?.ok && detailed.body?.ok === true ? detailed.body.data : undefined;
+  return mergeRestorableTabsFromStatusSources([statusData?.restorableTabs, statusData?.tabs, existing.restorableTabs, existing.tabs], options);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -391,15 +484,18 @@ function waitForWebuiUrl(child: WebuiChild): Promise<string> {
   });
 }
 
-async function startWebui(options: StartWebuiOptions, ctx: ExtensionCommandContext): Promise<string> {
+async function startWebui(options: StartWebuiOptions, ctx: ExtensionCommandContext, restoreTabs: RestorableWebuiTab[] = []): Promise<string> {
   const args = [webuiBin, "--host", options.host, "--port", String(options.port), "--cwd", ctx.cwd];
   if (options.noSession) args.push("--no-session");
   if (options.name) args.push("--name", options.name);
   if (options.piArgs.length > 0) args.push("--", ...options.piArgs);
 
+  const env = { ...process.env };
+  if (restoreTabs.length > 0) env.PI_WEBUI_RESTORE_TABS = JSON.stringify(restoreTabs);
+
   const child = spawn(process.execPath, args, {
     cwd: ctx.cwd,
-    env: process.env,
+    env,
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
@@ -646,36 +742,47 @@ function statusUsage(): string {
 }
 
 export default function (pi: ExtensionAPI) {
+  const startWebuiHandler = async (args: string, ctx: ExtensionCommandContext) => {
+    let options: StartWebuiOptions;
+    try {
+      options = parseStartWebuiArgs(args);
+    } catch (error) {
+      ctx.ui.notify(`${error instanceof Error ? error.message : String(error)}\n${usage()}`, "error");
+      return;
+    }
+
+    const url = urlFor(options);
+    ctx.ui.setStatus("pi-webui", "starting webui…");
+    try {
+      const existing = await probeExistingWebui(url);
+      let restoreTabs: RestorableWebuiTab[] = [];
+      if (existing) {
+        ctx.ui.setStatus("pi-webui", "capturing existing webui tabs…");
+        restoreTabs = await fetchRestorableTabs(url, existing, options);
+        ctx.ui.setStatus("pi-webui", "restarting existing webui…");
+        await stopExistingWebui(url, options, existing);
+      }
+
+      const startedUrl = await startWebui(options, ctx, restoreTabs);
+      if (options.open) openDefaultBrowser(startedUrl);
+      const restoredTabsMessage = existing && restoreTabs.length > 0 ? `\nRestored ${restoreTabs.length} Web UI tab${restoreTabs.length === 1 ? "" : "s"}.` : "";
+      ctx.ui.notify(`${existing ? "Pi Web UI restarted" : "Pi Web UI started"}:\n${startedUrl}${restoredTabsMessage}`, "info");
+      ctx.ui.setStatus("pi-webui", startedUrl);
+      setTimeout(() => ctx.ui.setStatus("pi-webui", ""), 20_000).unref?.();
+    } catch (error) {
+      ctx.ui.setStatus("pi-webui", "");
+      ctx.ui.notify(`Failed to start Pi Web UI:\n${error instanceof Error ? error.message : String(error)}\n${usage()}`, "error");
+    }
+  };
+
   pi.registerCommand("webui-start", {
     description: "Start the local Pi browser Web UI and open it",
-    handler: async (args, ctx) => {
-      let options: StartWebuiOptions;
-      try {
-        options = parseStartWebuiArgs(args);
-      } catch (error) {
-        ctx.ui.notify(`${error instanceof Error ? error.message : String(error)}\n${usage()}`, "error");
-        return;
-      }
+    handler: startWebuiHandler,
+  });
 
-      const url = urlFor(options);
-      ctx.ui.setStatus("pi-webui", "starting webui…");
-      try {
-        const existing = await probeExistingWebui(url);
-        if (existing) {
-          ctx.ui.setStatus("pi-webui", "restarting existing webui…");
-          await stopExistingWebui(url, options, existing);
-        }
-
-        const startedUrl = await startWebui(options, ctx);
-        if (options.open) openDefaultBrowser(startedUrl);
-        ctx.ui.notify(`${existing ? "Pi Web UI restarted" : "Pi Web UI started"}:\n${startedUrl}`, "info");
-        ctx.ui.setStatus("pi-webui", startedUrl);
-        setTimeout(() => ctx.ui.setStatus("pi-webui", ""), 20_000).unref?.();
-      } catch (error) {
-        ctx.ui.setStatus("pi-webui", "");
-        ctx.ui.notify(`Failed to start Pi Web UI:\n${error instanceof Error ? error.message : String(error)}\n${usage()}`, "error");
-      }
-    },
+  pi.registerCommand("start-webui", {
+    description: "Alias for /webui-start",
+    handler: startWebuiHandler,
   });
 
   pi.registerCommand("webui-status", {

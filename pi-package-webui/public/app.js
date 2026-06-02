@@ -7,6 +7,7 @@ const elements = {
   newTabButton: $("#newTabButton"),
   statusBar: $("#statusBar"),
   widgetArea: $("#widgetArea"),
+  stickyUserPromptButton: $("#stickyUserPromptButton"),
   chat: $("#chat"),
   feedbackTray: $("#feedbackTray"),
   feedbackTraySummary: $("#feedbackTraySummary"),
@@ -37,6 +38,7 @@ const elements = {
   setModelButton: $("#setModelButton"),
   thinkingSelect: $("#thinkingSelect"),
   setThinkingButton: $("#setThinkingButton"),
+  themeSelect: $("#themeSelect"),
   networkStatus: $("#networkStatus"),
   openNetworkButton: $("#openNetworkButton"),
   toggleSidePanelButton: $("#toggleSidePanelButton"),
@@ -72,8 +74,18 @@ let tabActivities = new Map();
 let tabSeenCompletionSerials = new Map();
 let streamBubble = null;
 let streamText = null;
+let streamRawText = "";
+let streamThinkingBubble = null;
 let streamThinking = null;
-let streamThinkingDetails = null;
+let runIndicatorBubble = null;
+let runIndicatorText = null;
+let runIndicatorMeta = null;
+let runIndicatorTimer = null;
+let runIndicatorGraceCheckTimer = null;
+let runIndicatorLastStateCheckAt = 0;
+let runIndicatorLocallyActive = false;
+let runIndicatorStartedAt = null;
+let runIndicatorActivity = "Waiting for output or action…";
 let refreshMessagesTimer = null;
 let refreshStateTimer = null;
 let refreshFooterTimer = null;
@@ -85,17 +97,28 @@ let pathFastPicks = [];
 let pathFastPicksReady = false;
 let pathFastPicksLoadPromise = null;
 let mobileTabsExpanded = false;
+let openTerminalTabGroupKey = null;
 let availableCommands = [];
 let commandSuggestions = [];
+let pathSuggestions = [];
+let suggestionMode = "none";
 let commandSuggestIndex = 0;
+let pathSuggestRequestSerial = 0;
+let pathSuggestAbortController = null;
 let latestStats = null;
 let latestWorkspace = null;
 let latestNetwork = null;
 let latestMessages = [];
 let transientMessages = [];
+let lastUserPromptByTab = new Map();
 let actionFeedbackByTab = new Map();
 let actionFeedbackSendBusy = false;
+let blockedTabNotificationKeys = new Set();
+let blockedTabNotificationPermissionRequested = false;
+let blockedTabNotificationFallbackNoted = false;
 let availableModels = [];
+let availableThemes = [];
+let currentThemeName = "catppuccin-mocha";
 let footerScopedModels = [];
 let footerScopedModelPatterns = [];
 let footerScopedModelSource = "none";
@@ -114,13 +137,27 @@ const dialogQueue = [];
 const SIDE_PANEL_STORAGE_KEY = "pi-webui-side-panel-collapsed";
 const TAB_STORAGE_KEY = "pi-webui-active-tab";
 const PATH_FAST_PICKS_STORAGE_KEY = "pi-webui-path-fast-picks";
+const THEME_STORAGE_KEY = "pi-webui-theme";
+const LAST_USER_PROMPT_STORAGE_KEY = "pi-webui-last-user-prompts";
+const DEFAULT_THEME_NAME = "catppuccin-mocha";
 const MOBILE_VIEW_QUERY = "(max-width: 720px), (max-device-width: 720px), (pointer: coarse) and (hover: none)";
 const CHAT_BOTTOM_THRESHOLD_PX = 96;
+const STICKY_USER_PROMPT_PREVIEW_LIMIT = 220;
+const STICKY_USER_PROMPT_TOP_GAP_PX = 12;
 const CHAT_FOLLOW_SETTLE_DELAY_MS = 80;
 const CHAT_PROGRAMMATIC_SCROLL_GRACE_MS = 500;
 const CHAT_USER_SCROLL_INTENT_MS = 700;
+const RUN_INDICATOR_TICK_MS = 1000;
+const RUN_INDICATOR_START_GRACE_MS = 2500;
+const RUN_INDICATOR_STATE_RECHECK_MS = 5000;
+const TODO_PROGRESS_LINE_REGEX = /^\s*(?:(?:[-*]|\d+[.)])\s*)?\[(?: |x|X|-)\]\s+.+$/;
+const TODO_PROGRESS_PARTIAL_LINE_REGEX = /^\s*(?:(?:[-*]|\d+[.)])\s*)?\[(?: |x|X|-)?\]?\s*.*$/;
 const CHAT_SCROLL_KEYS = new Set(["ArrowDown", "ArrowUp", "End", "Home", "PageDown", "PageUp", " "]);
 const TAB_ACTIVITY_IDLE_RECONCILE_GRACE_MS = 1200;
+const TAB_GROUP_STATUS_PRIORITY = ["blocked", "done", "idle", "working"];
+const EXTENSION_UI_BLOCKING_METHODS = new Set(["select", "confirm", "input", "editor"]);
+const BLOCKED_TAB_NOTIFICATION_TAG_PREFIX = "pi-webui-blocked-tab";
+const BLOCKED_TAB_NOTIFICATION_ICON = "/icon-192.png";
 const mobileViewMedia = window.matchMedia?.(MOBILE_VIEW_QUERY) || null;
 const statusEntries = new Map();
 const widgets = new Map();
@@ -341,11 +378,12 @@ function scopedApiPath(path, tabId = activeTabId) {
   return `${url.pathname}${url.search}${url.hash}`;
 }
 
-async function api(path, { method = "GET", body, tabId = activeTabId, scoped = true } = {}) {
+async function api(path, { method = "GET", body, tabId = activeTabId, scoped = true, signal } = {}) {
   const response = await fetch(scoped ? scopedApiPath(path, tabId) : path, {
     method,
     headers: body === undefined ? undefined : { "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
+    signal,
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -355,6 +393,251 @@ async function api(path, { method = "GET", body, tabId = activeTabId, scoped = t
     throw error;
   }
   return data;
+}
+
+function storedThemeName() {
+  try {
+    return localStorage.getItem(THEME_STORAGE_KEY) || DEFAULT_THEME_NAME;
+  } catch {
+    return DEFAULT_THEME_NAME;
+  }
+}
+
+function storeThemeName(name) {
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, name);
+  } catch {
+    // Ignore storage failures; theme switching should still work for this page load.
+  }
+}
+
+function displayThemeName(name) {
+  return String(name || "")
+    .split(/[-_]+/)
+    .filter(Boolean)
+    .map((part) => part.length <= 3 ? part.toUpperCase() : `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+    .join(" ");
+}
+
+function resolveThemeValue(theme, value, fallback, seen = new Set()) {
+  const raw = String(value || "").trim();
+  if (!raw) return fallback;
+  if (/^(#|rgb\(|rgba\(|hsl\(|hsla\()/i.test(raw)) return raw;
+  if (seen.has(raw)) return fallback;
+  seen.add(raw);
+  return resolveThemeValue(theme, theme?.vars?.[raw] ?? theme?.colors?.[raw], fallback, seen);
+}
+
+function themeColor(theme, key, fallback) {
+  return resolveThemeValue(theme, theme?.colors?.[key] ?? theme?.vars?.[key], fallback);
+}
+
+function themeExportColor(theme, key, fallback) {
+  return resolveThemeValue(theme, theme?.export?.[key], fallback);
+}
+
+function hexToRgb(color) {
+  const raw = String(color || "").trim();
+  const match = raw.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+  if (!match) return null;
+  const hex = match[1].length === 3 ? match[1].split("").map((ch) => ch + ch).join("") : match[1];
+  return {
+    r: Number.parseInt(hex.slice(0, 2), 16),
+    g: Number.parseInt(hex.slice(2, 4), 16),
+    b: Number.parseInt(hex.slice(4, 6), 16),
+  };
+}
+
+function colorWithAlpha(color, alpha, fallback) {
+  const rgb = hexToRgb(color);
+  if (!rgb) return fallback;
+  return `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${alpha})`;
+}
+
+function rgbTriplet(color, fallback) {
+  const rgb = hexToRgb(color);
+  if (!rgb) return fallback;
+  return `${rgb.r}, ${rgb.g}, ${rgb.b}`;
+}
+
+function cssColorToRgb(color) {
+  const hex = hexToRgb(color);
+  if (hex) return hex;
+  const match = String(color || "").trim().match(/^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)/i);
+  if (!match) return null;
+  const [r, g, b] = match.slice(1, 4).map((value) => Math.min(255, Math.max(0, Number(value))));
+  if (![r, g, b].every(Number.isFinite)) return null;
+  return { r, g, b };
+}
+
+function mixRgb(left, right, amount) {
+  const t = Math.min(1, Math.max(0, amount));
+  return {
+    r: left.r + (right.r - left.r) * t,
+    g: left.g + (right.g - left.g) * t,
+    b: left.b + (right.b - left.b) * t,
+  };
+}
+
+function rgbColor(rgb) {
+  return `rgb(${Math.round(rgb.r)}, ${Math.round(rgb.g)}, ${Math.round(rgb.b)})`;
+}
+
+function rgbaColor(rgb, alpha) {
+  return `rgba(${Math.round(rgb.r)}, ${Math.round(rgb.g)}, ${Math.round(rgb.b)}, ${alpha})`;
+}
+
+function relativeLuminance(color) {
+  const rgb = hexToRgb(color);
+  if (!rgb) return 0;
+  const channel = (value) => {
+    const normalized = value / 255;
+    return normalized <= 0.03928 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * channel(rgb.r) + 0.7152 * channel(rgb.g) + 0.0722 * channel(rgb.b);
+}
+
+function applyTheme(theme, { persist = false, announce = false } = {}) {
+  if (!theme) return;
+  const root = document.documentElement;
+  const current = getComputedStyle(root);
+  const fallback = (name, value) => current.getPropertyValue(name).trim() || value;
+
+  const accent = themeColor(theme, "accent", fallback("--ctp-blue", "#89b4fa"));
+  const accent2 = themeColor(theme, "borderAccent", themeColor(theme, "accent2", fallback("--ctp-teal", "#94e2d5")));
+  const green = themeColor(theme, "success", fallback("--ctp-green", "#a6e3a1"));
+  const red = themeColor(theme, "error", fallback("--ctp-red", "#f38ba8"));
+  const yellow = themeColor(theme, "warning", fallback("--ctp-yellow", "#f9e2af"));
+  const text = themeColor(theme, "userMessageText", themeColor(theme, "text", fallback("--ctp-text", "#cdd6f4")));
+  const muted = themeColor(theme, "muted", fallback("--ctp-subtext", "#bac2de"));
+  const dim = themeColor(theme, "dim", fallback("--ctp-overlay", "#6c7086"));
+  const borderMuted = themeColor(theme, "borderMuted", dim);
+  const selectedBg = themeColor(theme, "selectedBg", fallback("--ctp-surface", "#313244"));
+  const cardBg = themeExportColor(theme, "cardBg", themeColor(theme, "userMessageBg", fallback("--ctp-base", "#1e1e2e")));
+  const pageBg = themeExportColor(theme, "pageBg", fallback("--ctp-crust", "#11111b"));
+  const infoBg = themeExportColor(theme, "infoBg", themeColor(theme, "customMessageBg", fallback("--ctp-mantle", "#181825")));
+  const pendingBg = themeColor(theme, "toolPendingBg", infoBg);
+  const pink = themeColor(theme, "mdHeading", themeColor(theme, "customMessageLabel", fallback("--ctp-pink", "#f5c2e7")));
+  const mauve = themeColor(theme, "customMessageLabel", themeColor(theme, "thinkingHigh", fallback("--ctp-mauve", "#cba6f7")));
+  const peach = themeColor(theme, "syntaxNumber", yellow);
+  const sky = themeColor(theme, "mdListBullet", accent2);
+  const sapphire = themeColor(theme, "thinkingLow", accent);
+  const lavender = themeColor(theme, "thinkingHigh", mauve);
+  const isLight = relativeLuminance(pageBg) > 0.62;
+  const panelAlpha = isLight ? 0.86 : 0.72;
+  const panel2Alpha = isLight ? 0.90 : 0.78;
+  const panel3Alpha = isLight ? 0.94 : 0.92;
+  const borderAlpha = isLight ? 0.34 : 0.22;
+
+  const vars = {
+    "--theme-color-scheme": isLight ? "light" : "dark",
+    "--ctp-rosewater": themeColor(theme, "customMessageText", text),
+    "--ctp-flamingo": pink,
+    "--ctp-pink": pink,
+    "--ctp-mauve": mauve,
+    "--ctp-red": red,
+    "--ctp-maroon": themeColor(theme, "toolDiffRemoved", red),
+    "--ctp-peach": peach,
+    "--ctp-yellow": yellow,
+    "--ctp-green": green,
+    "--ctp-teal": accent2,
+    "--ctp-sky": sky,
+    "--ctp-sapphire": sapphire,
+    "--ctp-blue": accent,
+    "--ctp-lavender": lavender,
+    "--ctp-text": text,
+    "--ctp-subtext": muted,
+    "--ctp-overlay": borderMuted,
+    "--ctp-surface": selectedBg,
+    "--ctp-base": cardBg,
+    "--ctp-mantle": pendingBg,
+    "--ctp-crust": pageBg,
+    "--ctp-text-rgb": rgbTriplet(text, "205, 214, 244"),
+    "--ctp-subtext-rgb": rgbTriplet(muted, "186, 194, 222"),
+    "--ctp-overlay-rgb": rgbTriplet(borderMuted, "108, 112, 134"),
+    "--ctp-surface-rgb": rgbTriplet(selectedBg, "49, 50, 68"),
+    "--ctp-base-rgb": rgbTriplet(cardBg, "30, 30, 46"),
+    "--ctp-mantle-rgb": rgbTriplet(pendingBg, "24, 24, 37"),
+    "--ctp-crust-rgb": rgbTriplet(pageBg, "17, 17, 27"),
+    "--bg": pageBg,
+    "--panel": colorWithAlpha(cardBg, panelAlpha, cardBg),
+    "--panel-2": colorWithAlpha(selectedBg, panel2Alpha, selectedBg),
+    "--panel-3": colorWithAlpha(pendingBg, panel3Alpha, pendingBg),
+    "--text": text,
+    "--muted": muted,
+    "--border": colorWithAlpha(lavender, borderAlpha, lavender),
+    "--accent": mauve,
+    "--accent-2": accent2,
+    "--accent-3": pink,
+    "--danger": red,
+    "--warning": yellow,
+    "--ok": green,
+    "--shadow": colorWithAlpha(isLight ? borderMuted : pageBg, isLight ? 0.24 : 0.78, isLight ? "rgba(108, 111, 133, 0.24)" : "rgba(17, 17, 27, 0.78)"),
+    "--glow-mauve": colorWithAlpha(mauve, isLight ? 0.24 : 0.42, mauve),
+    "--glow-blue": colorWithAlpha(accent, isLight ? 0.22 : 0.36, accent),
+    "--glow-pink": colorWithAlpha(pink, isLight ? 0.22 : 0.34, pink),
+    "--glow-teal": colorWithAlpha(accent2, isLight ? 0.20 : 0.26, accent2),
+    "--panel-gradient": `linear-gradient(145deg, ${colorWithAlpha(selectedBg, panel2Alpha, selectedBg)}, ${colorWithAlpha(pendingBg, panel3Alpha, pendingBg)} 52%, ${colorWithAlpha(pageBg, isLight ? 0.92 : 0.9, pageBg)})`,
+    "--neon-gradient": `linear-gradient(120deg, ${pink}, ${mauve} 32%, ${accent} 66%, ${accent2})`,
+    "--context-card-gradient": `linear-gradient(100deg, ${colorWithAlpha(green, isLight ? 0.48 : 0.62, green)} 0%, ${colorWithAlpha(yellow, isLight ? 0.50 : 0.66, yellow)} 36%, ${colorWithAlpha(accent, isLight ? 0.50 : 0.64, accent)} 62%, ${colorWithAlpha(red, isLight ? 0.62 : 0.78, red)} 100%)`,
+    "--background-glow-pink": colorWithAlpha(pink, isLight ? 0.16 : 0.34, pink),
+    "--background-glow-blue": colorWithAlpha(accent, isLight ? 0.15 : 0.32, accent),
+    "--background-glow-teal": colorWithAlpha(accent2, isLight ? 0.12 : 0.20, accent2),
+  };
+
+  for (const [name, value] of Object.entries(vars)) root.style.setProperty(name, value);
+  root.style.colorScheme = isLight ? "light" : "dark";
+  document.body.classList.toggle("theme-light", isLight);
+  document.body.classList.toggle("theme-dark", !isLight);
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", pageBg);
+  currentThemeName = theme.name;
+  if (elements.themeSelect && elements.themeSelect.value !== theme.name) elements.themeSelect.value = theme.name;
+  if (persist) storeThemeName(theme.name);
+  if (announce) addEvent(`theme changed to ${theme.label || displayThemeName(theme.name) || theme.name}`);
+}
+
+function renderThemeSelect({ unavailableLabel = "Theme bundle unavailable" } = {}) {
+  if (!elements.themeSelect) return;
+  elements.themeSelect.replaceChildren();
+  if (!availableThemes.length) {
+    const option = make("option", undefined, unavailableLabel);
+    option.value = "";
+    elements.themeSelect.append(option);
+    elements.themeSelect.disabled = true;
+    return;
+  }
+  elements.themeSelect.disabled = false;
+  for (const theme of availableThemes) {
+    const option = make("option", undefined, theme.label || displayThemeName(theme.name) || theme.name);
+    option.value = theme.name;
+    elements.themeSelect.append(option);
+  }
+  elements.themeSelect.value = currentThemeName;
+}
+
+function setThemeByName(name, options = {}) {
+  const theme = availableThemes.find((item) => item.name === name);
+  if (!theme) return;
+  applyTheme(theme, options);
+}
+
+async function initializeThemes() {
+  let response;
+  try {
+    response = await api("/api/themes", { scoped: false });
+  } catch (error) {
+    availableThemes = [];
+    const label = error.statusCode === 404 ? "Restart Web UI to load themes" : "Theme bundle unavailable";
+    renderThemeSelect({ unavailableLabel: label });
+    throw error;
+  }
+  availableThemes = Array.isArray(response.data?.themes) ? response.data.themes : [];
+  const stored = storedThemeName();
+  currentThemeName = availableThemes.some((theme) => theme.name === stored) ? stored : DEFAULT_THEME_NAME;
+  renderThemeSelect();
+  setThemeByName(currentThemeName, { persist: false });
+  if (!availableThemes.some((theme) => theme.name === currentThemeName) && availableThemes[0]) applyTheme(availableThemes[0], { persist: false });
+  if (!availableThemes.length) addEvent("theme bundle unavailable; using built-in default theme", "warn");
 }
 
 function activeTab() {
@@ -370,6 +653,32 @@ function normalizeTabActivity(activity = {}) {
     isWorking: status === "working",
     completionSerial: Number.isFinite(completionSerial) ? completionSerial : 0,
   };
+}
+
+function normalizePendingExtensionUiRequestCount(value) {
+  const count = Number(value);
+  return Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
+}
+
+function tabPendingBlockerCount(tab) {
+  return normalizePendingExtensionUiRequestCount(tab?.pendingExtensionUiRequestCount);
+}
+
+function setTabPendingBlockerCount(tabId, count) {
+  const tab = tabs.find((item) => item.id === tabId);
+  if (!tab) return false;
+  const previous = tabPendingBlockerCount(tab);
+  const next = normalizePendingExtensionUiRequestCount(count);
+  if (previous === next) return false;
+  tab.pendingExtensionUiRequestCount = next;
+  if (next === 0) clearBlockedTabNotificationKeys(tabId);
+  return true;
+}
+
+function decrementTabPendingBlockerCount(tabId) {
+  const tab = tabs.find((item) => item.id === tabId);
+  if (!tab) return false;
+  return setTabPendingBlockerCount(tabId, Math.max(0, tabPendingBlockerCount(tab) - 1));
 }
 
 function tabActivityStateChanged(previous, next) {
@@ -424,6 +733,15 @@ function activityForTab(tab) {
 
 function tabIndicator(tab) {
   const activity = activityForTab(tab);
+  const pendingBlockerCount = tabPendingBlockerCount(tab);
+  if (tab?.running && pendingBlockerCount > 0) {
+    return {
+      state: "blocked",
+      label: pendingBlockerCount === 1 ? "Blocked waiting for response" : `Blocked waiting on ${pendingBlockerCount} responses`,
+      meta: pendingBlockerCount === 1 ? "blocked" : `blocked · ${pendingBlockerCount}`,
+      glyph: "!",
+    };
+  }
   if (tab?.running && activity.isWorking) {
     return { state: "working", label: "Working", meta: "working", glyph: "●" };
   }
@@ -435,13 +753,17 @@ function tabIndicator(tab) {
 }
 
 function hasWorkingTab() {
-  return tabs.some((tab) => tabIndicator(tab).state === "working");
+  return tabs.some((tab) => ["working", "blocked"].includes(tabIndicator(tab).state));
 }
 
 function scheduleRefreshTabs(delay = 1500) {
   clearTimeout(refreshTabsTimer);
   refreshTabsTimer = setTimeout(() => {
     refreshTabsTimer = null;
+    if (openTerminalTabGroupKey) {
+      scheduleRefreshTabs(600);
+      return;
+    }
     refreshTabs().catch((error) => addEvent(error.message, "error"));
   }, delay);
 }
@@ -504,6 +826,10 @@ function syncActiveTabActivityFromState(state = currentState) {
   const tab = activeTab();
   if (!tab || !state || typeof state !== "object") return false;
   const activity = activityForTab(tab);
+  if (tabPendingBlockerCount(tab) > 0) {
+    if (!activity.isWorking) return markTabWorkingLocally(tab.id);
+    return false;
+  }
   if (stateHasVisibleWork(state)) {
     if (!activity.isWorking) return markTabWorkingLocally(tab.id);
     return false;
@@ -528,10 +854,22 @@ function markTabOutputSeen(tabId = activeTabId, { force = false } = {}) {
 }
 
 function ingestEventTabActivity(event) {
-  if (!event?.tabId || !event.tabActivity) return;
-  const previous = tabActivities.get(event.tabId);
-  const next = setTabActivity(event.tabId, event.tabActivity);
-  if (tabActivityStateChanged(previous, next)) renderTabs();
+  if (!event?.tabId) return;
+  const tab = tabs.find((item) => item.id === event.tabId);
+  let changed = false;
+  if (tab && event.tabTitle && tab.title !== event.tabTitle) {
+    tab.title = event.tabTitle;
+    changed = true;
+  }
+  if (Object.prototype.hasOwnProperty.call(event, "pendingExtensionUiRequestCount")) {
+    changed = setTabPendingBlockerCount(event.tabId, event.pendingExtensionUiRequestCount) || changed;
+  }
+  if (event.tabActivity) {
+    const previous = tabActivities.get(event.tabId);
+    const next = setTabActivity(event.tabId, event.tabActivity);
+    changed = tabActivityStateChanged(previous, next) || changed;
+  }
+  if (changed) renderTabs();
 }
 
 function rememberActiveTab() {
@@ -565,6 +903,21 @@ function restoreActiveDraft() {
   renderCommandSuggestions();
 }
 
+function focusPromptInput({ defer = false } = {}) {
+  const focus = () => {
+    if (!elements.promptInput || elements.dialog.open || elements.pathPickerDialog.open || document.visibilityState === "hidden") return;
+    try {
+      elements.promptInput.focus({ preventScroll: true });
+    } catch {
+      elements.promptInput.focus();
+    }
+    syncMobileChatToBottomForInput();
+    setTimeout(updateVisualViewportVars, 0);
+  };
+  if (defer) requestAnimationFrame(focus);
+  else focus();
+}
+
 function clearRefreshTimers() {
   clearTimeout(refreshMessagesTimer);
   clearTimeout(refreshStateTimer);
@@ -578,7 +931,7 @@ function cancelPendingDialogs() {
   const pending = activeDialog ? [activeDialog] : [];
   pending.push(...dialogQueue.splice(0));
   for (const request of pending) {
-    if (!request?.id || !["select", "confirm", "input", "editor"].includes(request.method)) continue;
+    if (!request?.id || !EXTENSION_UI_BLOCKING_METHODS.has(request.method)) continue;
     api("/api/extension-ui-response", {
       method: "POST",
       body: { type: "extension_ui_response", id: request.id, cancelled: true },
@@ -600,13 +953,17 @@ function resetActiveTabUi() {
   currentRunStartedAt = null;
   currentRunStreamChars = 0;
   latestTokPerSecond = null;
+  clearRunIndicatorActivity({ render: false });
   statusEntries.clear();
   widgets.clear();
   transientMessages = [];
   availableCommands = [];
   commandSuggestions = [];
+  pathSuggestions = [];
+  suggestionMode = "none";
   commandSuggestIndex = 0;
   resetStreamBubble();
+  removeRunIndicatorBubble();
   hideCommandSuggestions();
   cancelPendingDialogs();
   Object.assign(gitWorkflow, {
@@ -618,7 +975,7 @@ function resetActiveTabUi() {
     message: null,
     messageRequestedAt: 0,
   });
-  elements.chat.replaceChildren();
+  resetChatOutput();
   elements.stateDetails.replaceChildren();
   elements.eventLog.replaceChildren();
   elements.queueBox.textContent = "No queued messages.";
@@ -632,57 +989,228 @@ function resetActiveTabUi() {
   renderFeedbackTray();
 }
 
+function tabGroupStatusRank(state) {
+  const index = TAB_GROUP_STATUS_PRIORITY.indexOf(state);
+  return index === -1 ? TAB_GROUP_STATUS_PRIORITY.indexOf("idle") : index;
+}
+
+function tabGroupIndicator(groupTabs) {
+  let selected = null;
+  let selectedRank = Number.POSITIVE_INFINITY;
+  for (const tab of groupTabs) {
+    const indicator = tabIndicator(tab);
+    const rank = tabGroupStatusRank(indicator.state);
+    if (rank < selectedRank) {
+      selected = indicator;
+      selectedRank = rank;
+    }
+  }
+  return selected || { state: "idle", label: "Idle", meta: "idle", glyph: "○" };
+}
+
+function tabCwdGroupKey(tab) {
+  const cwd = String(tab?.cwd || "");
+  return cwd ? `cwd:${cwd}` : `tab:${tab?.id || "unknown"}`;
+}
+
+function tabCwdGroups() {
+  const groups = [];
+  const byKey = new Map();
+  for (const tab of tabs) {
+    const key = tabCwdGroupKey(tab);
+    let group = byKey.get(key);
+    if (!group) {
+      group = { key, cwd: tab.cwd || "", tabs: [] };
+      byKey.set(key, group);
+      groups.push(group);
+    }
+    group.tabs.push(tab);
+  }
+  return groups;
+}
+
+function tabGroupTitle(cwd, fallback = "cwd") {
+  const normalized = normalizeDisplayPath(cwd).replace(/\/+$/, "");
+  const leaf = normalized.split("/").filter(Boolean).pop() || normalized || fallback;
+  return leaf.length > 26 ? `…${leaf.slice(-25)}` : leaf;
+}
+
+function terminalTabMeta(tab, indicator) {
+  return tab.running ? `${indicator.meta} · pid ${tab.pid || "…"}` : "stopped";
+}
+
+function appendTerminalTabContent(button, { title, indicator, meta, count = null }) {
+  const titleRow = make("span", "terminal-tab-title-row");
+  const indicatorDot = make("span", "terminal-tab-activity-indicator");
+  indicatorDot.setAttribute("aria-hidden", "true");
+  titleRow.append(indicatorDot, make("span", "terminal-tab-title", title));
+  if (count !== null) titleRow.append(make("span", "terminal-tab-group-count", String(count)));
+  button.append(titleRow, make("span", "terminal-tab-meta", meta));
+}
+
+function renderTerminalTab(tab) {
+  const isActive = tab.id === activeTabId;
+  const indicator = tabIndicator(tab);
+  const wrapper = make("div", `terminal-tab activity-${indicator.state}${isActive ? " active" : ""}${tab.running ? "" : " stopped"}`);
+  const button = make("button", "terminal-tab-button");
+  button.type = "button";
+  button.setAttribute("role", "tab");
+  button.setAttribute("aria-selected", isActive ? "true" : "false");
+  button.setAttribute("aria-label", `${tab.title}: ${indicator.label}`);
+  button.title = `${tab.title} · ${indicator.label}${tab.running ? ` · pid ${tab.pid || "starting"}` : " · stopped"}`;
+  appendTerminalTabContent(button, { title: tab.title, indicator, meta: terminalTabMeta(tab, indicator) });
+  button.addEventListener("click", () => switchTab(tab.id));
+  wrapper.append(button);
+
+  if (tabs.length > 1) {
+    const close = make("button", "terminal-tab-close", "×");
+    close.type = "button";
+    close.title = `Close ${tab.title}`;
+    close.setAttribute("aria-label", `Close ${tab.title}`);
+    close.addEventListener("click", (event) => {
+      event.stopPropagation();
+      closeTerminalTab(tab.id);
+    });
+    wrapper.append(close);
+  }
+
+  return wrapper;
+}
+
+function renderTerminalTabGroupItem(tab) {
+  const isActive = tab.id === activeTabId;
+  const indicator = tabIndicator(tab);
+  const item = make("div", `terminal-tab-group-item activity-${indicator.state}${isActive ? " active" : ""}${tab.running ? "" : " stopped"}`);
+  const button = make("button", "terminal-tab-button terminal-tab-group-item-button");
+  button.type = "button";
+  button.setAttribute("role", "tab");
+  button.setAttribute("aria-selected", isActive ? "true" : "false");
+  button.setAttribute("aria-label", `${tab.title}: ${indicator.label}`);
+  button.title = `${tab.title} · ${indicator.label}${tab.running ? ` · pid ${tab.pid || "starting"}` : " · stopped"}`;
+  appendTerminalTabContent(button, { title: tab.title, indicator, meta: terminalTabMeta(tab, indicator) });
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    switchTab(tab.id);
+  });
+  item.append(button);
+
+  if (tabs.length > 1) {
+    const close = make("button", "terminal-tab-close terminal-tab-group-item-close", "×");
+    close.type = "button";
+    close.title = `Close ${tab.title}`;
+    close.setAttribute("aria-label", `Close ${tab.title}`);
+    close.addEventListener("click", (event) => {
+      event.stopPropagation();
+      closeTerminalTab(tab.id);
+    });
+    item.append(close);
+  }
+
+  return item;
+}
+
+function shouldRenderTerminalTabGroup(group, groupCount) {
+  return groupCount > 1 && group.tabs.length > 1 && Boolean(group.cwd);
+}
+
+function renderTerminalTabGroup(group) {
+  const groupTabs = group.tabs;
+  const activeGroupTab = groupTabs.find((tab) => tab.id === activeTabId) || groupTabs[0];
+  const isActive = groupTabs.some((tab) => tab.id === activeTabId);
+  const isStopped = groupTabs.every((tab) => !tab.running);
+  const indicator = tabGroupIndicator(groupTabs);
+  const title = tabGroupTitle(group.cwd, activeGroupTab?.title || "cwd");
+  const displayCwd = normalizeDisplayPath(group.cwd || title);
+  const wrapper = make("div", `terminal-tab terminal-tab-group activity-${indicator.state}${isActive ? " active" : ""}${isStopped ? " stopped" : ""}`);
+  wrapper.dataset.groupKey = group.key;
+  wrapper.addEventListener("pointerenter", () => setOpenTerminalTabGroup(group.key));
+  wrapper.addEventListener("pointerleave", () => clearOpenTerminalTabGroup(group.key));
+  wrapper.addEventListener("focusin", () => setOpenTerminalTabGroup(group.key));
+  wrapper.addEventListener("focusout", () => {
+    setTimeout(() => {
+      if (!wrapper.contains(document.activeElement)) clearOpenTerminalTabGroup(group.key);
+    }, 0);
+  });
+  const button = make("button", "terminal-tab-button terminal-tab-group-button");
+  button.type = "button";
+  button.setAttribute("role", "tab");
+  button.setAttribute("aria-selected", isActive ? "true" : "false");
+  button.setAttribute("aria-haspopup", "true");
+  button.setAttribute("aria-expanded", group.key === openTerminalTabGroupKey ? "true" : "false");
+  button.setAttribute("aria-label", `${title} group: ${groupTabs.length} tabs, ${indicator.label}. Active ${activeGroupTab?.title || "terminal"}`);
+  button.title = `${displayCwd} · ${groupTabs.length} tabs · ${indicator.label}`;
+  appendTerminalTabContent(button, { title, indicator, meta: `${indicator.meta} · ${groupTabs.length} tabs`, count: groupTabs.length });
+  button.addEventListener("click", () => switchTab(activeGroupTab.id));
+  wrapper.append(button);
+
+  const menu = make("div", "terminal-tab-group-menu");
+  menu.setAttribute("role", "group");
+  menu.setAttribute("aria-label", `${displayCwd} tabs`);
+  for (const tab of groupTabs) menu.append(renderTerminalTabGroupItem(tab));
+
+  const add = make("button", "terminal-tab-group-add", "+ Tab");
+  add.type = "button";
+  add.title = `Add tab in ${displayCwd}`;
+  add.setAttribute("aria-label", `Add tab in ${displayCwd}`);
+  add.addEventListener("click", (event) => {
+    event.stopPropagation();
+    createTerminalTab(group.cwd, { triggerButton: add });
+  });
+  menu.append(add);
+  wrapper.append(menu);
+  return wrapper;
+}
+
+function updateTerminalTabGroupOpenState() {
+  for (const group of elements.tabBar.querySelectorAll(".terminal-tab-group")) {
+    const open = Boolean(openTerminalTabGroupKey && group.dataset.groupKey === openTerminalTabGroupKey);
+    group.classList.toggle("menu-open", open);
+    group.querySelector(".terminal-tab-group-button")?.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+}
+
+function setOpenTerminalTabGroup(groupKey) {
+  if (!groupKey || openTerminalTabGroupKey === groupKey) return;
+  openTerminalTabGroupKey = groupKey;
+  updateTerminalTabGroupOpenState();
+}
+
+function clearOpenTerminalTabGroup(groupKey, { force = false } = {}) {
+  if (!openTerminalTabGroupKey || (!force && openTerminalTabGroupKey !== groupKey)) return;
+  openTerminalTabGroupKey = null;
+  updateTerminalTabGroupOpenState();
+  syncTabPolling();
+}
+
 function renderTabs() {
   const active = activeTab();
   const activeIndicator = active ? tabIndicator(active) : null;
   elements.terminalTabsToggleButton.textContent = active ? `${activeIndicator.glyph} ${active.title}${tabs.length > 1 ? ` · ${tabs.length}` : ""}` : "Tabs";
   elements.terminalTabsToggleButton.title = active ? `Show terminal tabs · active: ${active.title} · ${activeIndicator.label}` : "Show terminal tabs";
   elements.tabBar.replaceChildren();
-  for (const tab of tabs) {
-    const isActive = tab.id === activeTabId;
-    const indicator = tabIndicator(tab);
-    const wrapper = make("div", `terminal-tab activity-${indicator.state}${isActive ? " active" : ""}${tab.running ? "" : " stopped"}`);
-    const button = make("button", "terminal-tab-button");
-    const titleRow = make("span", "terminal-tab-title-row");
-    const indicatorDot = make("span", "terminal-tab-activity-indicator");
-    indicatorDot.setAttribute("aria-hidden", "true");
-    titleRow.append(indicatorDot, make("span", "terminal-tab-title", tab.title));
-    button.type = "button";
-    button.setAttribute("role", "tab");
-    button.setAttribute("aria-selected", isActive ? "true" : "false");
-    button.setAttribute("aria-label", `${tab.title}: ${indicator.label}`);
-    button.title = `${tab.title} · ${indicator.label}${tab.running ? ` · pid ${tab.pid || "starting"}` : " · stopped"}`;
-    button.append(
-      titleRow,
-      make("span", "terminal-tab-meta", tab.running ? `${indicator.meta} · pid ${tab.pid || "…"}` : "stopped"),
-    );
-    button.addEventListener("click", () => switchTab(tab.id));
-    wrapper.append(button);
-
-    if (tabs.length > 1) {
-      const close = make("button", "terminal-tab-close", "×");
-      close.type = "button";
-      close.title = `Close ${tab.title}`;
-      close.setAttribute("aria-label", `Close ${tab.title}`);
-      close.addEventListener("click", (event) => {
-        event.stopPropagation();
-        closeTerminalTab(tab.id);
-      });
-      wrapper.append(close);
+  const groups = tabCwdGroups();
+  const renderedGroupKeys = new Set(groups.filter((group) => shouldRenderTerminalTabGroup(group, groups.length)).map((group) => group.key));
+  if (openTerminalTabGroupKey && !renderedGroupKeys.has(openTerminalTabGroupKey)) openTerminalTabGroupKey = null;
+  for (const group of groups) {
+    if (shouldRenderTerminalTabGroup(group, groups.length)) {
+      elements.tabBar.append(renderTerminalTabGroup(group));
+    } else {
+      for (const tab of group.tabs) elements.tabBar.append(renderTerminalTab(tab));
     }
-
-    elements.tabBar.append(wrapper);
   }
   elements.tabBar.append(elements.newTabButton);
+  updateTerminalTabGroupOpenState();
   setMobileTabsExpanded(mobileTabsExpanded);
   updateDocumentTitle();
   syncTabPolling();
 }
 
 async function refreshTabs({ selectStored = false } = {}) {
+  const previousTabs = tabs;
   const response = await api("/api/tabs", { scoped: false });
   tabs = response.data?.tabs || [];
   syncTabMetadata(tabs);
+  syncBlockedTabNotificationsFromTabs(tabs, previousTabs);
   const stored = selectStored ? restoreStoredTabId() : null;
   if (!activeTabId || !tabs.some((tab) => tab.id === activeTabId)) {
     activeTabId = (stored && tabs.some((tab) => tab.id === stored) ? stored : tabs[0]?.id) || null;
@@ -694,6 +1222,7 @@ async function refreshTabs({ selectStored = false } = {}) {
 
 async function switchTab(tabId) {
   if (!tabId || tabId === activeTabId || !tabs.some((tab) => tab.id === tabId)) return;
+  clearOpenTerminalTabGroup(null, { force: true });
   setMobileTabsExpanded(false);
   footerModelPickerOpen = false;
   saveActiveDraft();
@@ -702,16 +1231,18 @@ async function switchTab(tabId) {
   resetActiveTabUi();
   renderTabs();
   restoreActiveDraft();
+  focusPromptInput({ defer: true });
   connectEvents();
   await refreshAll();
   markTabOutputSeen();
 }
 
-async function createTerminalTab() {
+async function createTerminalTab(cwd = activeTab()?.cwd, { triggerButton = elements.newTabButton } = {}) {
   setMobileTabsExpanded(false);
-  elements.newTabButton.disabled = true;
+  const disabledButtons = new Set([elements.newTabButton, triggerButton].filter(Boolean));
+  for (const button of disabledButtons) button.disabled = true;
   try {
-    const response = await api("/api/tabs", { method: "POST", body: { cwd: activeTab()?.cwd }, scoped: false });
+    const response = await api("/api/tabs", { method: "POST", body: { cwd: cwd || activeTab()?.cwd }, scoped: false });
     tabs = response.data?.tabs || tabs;
     syncTabMetadata(tabs);
     const tab = response.data?.tab;
@@ -723,7 +1254,7 @@ async function createTerminalTab() {
   } catch (error) {
     addEvent(error.message, "error");
   } finally {
-    elements.newTabButton.disabled = false;
+    for (const button of disabledButtons) button.disabled = false;
   }
 }
 
@@ -746,6 +1277,7 @@ async function closeTerminalTab(tabId) {
       resetActiveTabUi();
       renderTabs();
       restoreActiveDraft();
+      focusPromptInput({ defer: true });
       connectEvents();
       if (activeTabId) {
         await refreshAll();
@@ -764,6 +1296,7 @@ async function initializeTabs() {
   resetActiveTabUi();
   renderTabs();
   restoreActiveDraft();
+  focusPromptInput({ defer: true });
   connectEvents();
   if (activeTabId) {
     await refreshAll();
@@ -777,6 +1310,134 @@ function addEvent(message, level = "info") {
   line.textContent = `[${time}] ${message}`;
   elements.eventLog.prepend(line);
   while (elements.eventLog.children.length > 120) elements.eventLog.lastElementChild?.remove();
+}
+
+function blockedTabNotificationSupported() {
+  return "Notification" in window && window.isSecureContext;
+}
+
+function blockedTabNotificationPermission() {
+  if (!("Notification" in window)) return "unsupported";
+  return Notification.permission || "default";
+}
+
+async function ensureBlockedTabNotificationPermission() {
+  if (!blockedTabNotificationSupported()) return false;
+  if (Notification.permission === "granted") return true;
+  if (Notification.permission === "denied" || blockedTabNotificationPermissionRequested || typeof Notification.requestPermission !== "function") return false;
+
+  blockedTabNotificationPermissionRequested = true;
+  try {
+    const permission = await Notification.requestPermission();
+    if (permission === "granted") {
+      addEvent("browser notifications enabled for blocked tabs", "info");
+      return true;
+    }
+  } catch (error) {
+    addEvent(`blocked-tab notification permission request failed: ${error.message}`, "warn");
+  }
+  return false;
+}
+
+function noteBlockedTabNotificationFallback(reason) {
+  if (blockedTabNotificationFallbackNoted) return;
+  blockedTabNotificationFallbackNoted = true;
+  addEvent(`browser notifications unavailable for blocked tabs: ${reason}`, "warn");
+}
+
+function blockedTabNotificationDetail({ method, count } = {}) {
+  if (method) return `waiting for your ${method} response`;
+  if (count > 1) return `waiting for ${count} responses`;
+  return "waiting for your response";
+}
+
+function blockedTabNotificationKey(tabId, request) {
+  return request?.id ? `${tabId}:${request.id}` : `${tabId}:blocked`;
+}
+
+function clearBlockedTabNotificationKeys(tabId) {
+  if (!tabId) return;
+  const prefix = `${tabId}:`;
+  blockedTabNotificationKeys = new Set([...blockedTabNotificationKeys].filter((key) => !key.startsWith(prefix)));
+}
+
+async function showBlockedTabBrowserNotification({ tabId, title, body, method, count }) {
+  if (!blockedTabNotificationSupported()) {
+    noteBlockedTabNotificationFallback("requires HTTPS or localhost");
+    return false;
+  }
+  if (!(await ensureBlockedTabNotificationPermission())) {
+    const permission = blockedTabNotificationPermission();
+    noteBlockedTabNotificationFallback(permission === "denied" ? "permission denied" : "permission not granted");
+    return false;
+  }
+
+  const options = {
+    body,
+    tag: `${BLOCKED_TAB_NOTIFICATION_TAG_PREFIX}:${tabId}`,
+    renotify: true,
+    requireInteraction: true,
+    icon: BLOCKED_TAB_NOTIFICATION_ICON,
+    badge: BLOCKED_TAB_NOTIFICATION_ICON,
+    data: { tabId, method, count, url: location.href },
+  };
+
+  try {
+    let registration = null;
+    if ("serviceWorker" in navigator) {
+      registration = await Promise.race([navigator.serviceWorker.ready, delay(1200).then(() => null)]).catch(() => null);
+    }
+    if (registration?.showNotification) {
+      await registration.showNotification(title, options);
+      return true;
+    }
+
+    const notification = new Notification(title, options);
+    notification.onclick = () => {
+      window.focus();
+      if (tabId && tabId !== activeTabId) switchTab(tabId).catch((error) => addEvent(error.message, "error"));
+      notification.close();
+    };
+    return true;
+  } catch (error) {
+    noteBlockedTabNotificationFallback(error.message || "notification failed");
+    return false;
+  }
+}
+
+function notifyBlockedTab(tabOrId, { request = null, count } = {}) {
+  const tabId = typeof tabOrId === "string" ? tabOrId : tabOrId?.id || request?.tabId || activeTabId;
+  if (!tabId || request?.replayed) return;
+  const tab = typeof tabOrId === "object" && tabOrId !== null ? tabOrId : tabs.find((item) => item.id === tabId);
+  const key = blockedTabNotificationKey(tabId, request);
+  if (blockedTabNotificationKeys.has(key)) return;
+  blockedTabNotificationKeys.add(key);
+
+  const pendingCount = normalizePendingExtensionUiRequestCount(count ?? request?.pendingExtensionUiRequestCount ?? tabPendingBlockerCount(tab));
+  const method = request?.method && EXTENSION_UI_BLOCKING_METHODS.has(request.method) ? request.method : "";
+  const tabTitle = tab?.title || request?.tabTitle || "terminal";
+  const detail = blockedTabNotificationDetail({ method, count: pendingCount });
+  const title = "Pi needs your response";
+  const body = `${tabTitle} is blocked, ${detail}.`;
+  addEvent(`${tabTitle} blocked: ${detail}`, "warn");
+  showBlockedTabBrowserNotification({ tabId, title, body, method, count: pendingCount });
+}
+
+function syncBlockedTabNotificationsFromTabs(nextTabs = [], previousTabs = []) {
+  if (previousTabs.length === 0) return;
+  const previousCounts = new Map(previousTabs.filter((tab) => tab?.id).map((tab) => [tab.id, tabPendingBlockerCount(tab)]));
+  const liveIds = new Set();
+  for (const tab of nextTabs) {
+    if (!tab?.id) continue;
+    liveIds.add(tab.id);
+    const previousCount = previousCounts.get(tab.id) || 0;
+    const nextCount = tabPendingBlockerCount(tab);
+    if (previousCount === 0 && nextCount > 0) notifyBlockedTab(tab, { count: nextCount });
+    if (nextCount === 0) clearBlockedTabNotificationKeys(tab.id);
+  }
+  for (const tab of previousTabs) {
+    if (tab?.id && !liveIds.has(tab.id)) clearBlockedTabNotificationKeys(tab.id);
+  }
 }
 
 function formatDate(value) {
@@ -1009,6 +1670,41 @@ function footerMetric(icon, label, value, tone = "") {
   const node = make("span", `footer-metric ${tone}`.trim());
   node.append(make("span", "footer-metric-icon", icon), make("span", "footer-metric-label", label), make("span", "footer-metric-value", value));
   node.title = `${label}: ${value}`;
+  return node;
+}
+
+function contextUsageActiveColor(percent) {
+  const styles = getComputedStyle(document.documentElement);
+  const cssVar = (name, fallback) => styles.getPropertyValue(name).trim() || fallback;
+  const stops = [
+    { at: 0, color: cssVar("--ctp-green", "#a6e3a1") },
+    { at: 36, color: cssVar("--ctp-yellow", "#f9e2af") },
+    { at: 62, color: cssVar("--ctp-blue", "#89b4fa") },
+    { at: 100, color: cssVar("--ctp-red", "#f38ba8") },
+  ];
+  const value = Math.min(100, Math.max(0, Number(percent)));
+  const right = stops.find((stop) => value <= stop.at) || stops.at(-1);
+  const left = stops[Math.max(0, stops.indexOf(right) - 1)];
+  const leftRgb = cssColorToRgb(left.color);
+  const rightRgb = cssColorToRgb(right.color);
+  if (!leftRgb || !rightRgb || left.at === right.at) {
+    return { color: right.color, glow: right.color };
+  }
+  const mixed = mixRgb(leftRgb, rightRgb, (value - left.at) / (right.at - left.at));
+  return { color: rgbColor(mixed), glow: rgbaColor(mixed, 0.42) };
+}
+
+function applyFooterContextUsage(node, contextUsage) {
+  node.classList.add("footer-context-card");
+  const percent = Number(contextUsage?.percent);
+  if (Number.isFinite(percent)) {
+    const clampedPercent = Math.min(100, Math.max(0, percent));
+    const activeColor = contextUsageActiveColor(clampedPercent);
+    node.classList.add("has-context-usage");
+    node.style.setProperty("--context-usage", `${clampedPercent.toFixed(1)}%`);
+    node.style.setProperty("--context-active-color", activeColor.color);
+    node.style.setProperty("--context-active-glow", activeColor.glow);
+  }
   return node;
 }
 
@@ -1372,7 +2068,7 @@ function renderFooter() {
     footerMetric("π", "pi", piTokens === null ? "-- tok" : `~${formatTokenCount(piTokens)} tok`, "tone-mauve"),
     footerMetric("⚡", "speed", speedLabel, "tone-yellow"),
     footerMetric("💸", subscriptionSuffix(), formatCost(stats?.cost ?? 0), "tone-green"),
-    footerMetric("🧠", "context", contextLabel, "tone-teal"),
+    applyFooterContextUsage(footerMetric("🧠", "context", contextLabel, "tone-teal"), contextUsage),
   );
   const footerToggle = make("button", "footer-details-toggle", mobileFooterExpanded ? "Less" : "Details");
   footerToggle.type = "button";
@@ -1388,7 +2084,7 @@ function renderFooter() {
     footerMeta("git", branchLabel, "footer-branch"),
     footerMeta("changes", changeLabel, "footer-changes"),
     footerMeta("runtime", `⏱ ${runtime} · Agent`, "footer-runtime"),
-    footerMeta("context", contextLabel, "footer-context"),
+    applyFooterContextUsage(footerMeta("context", contextLabel, "footer-context"), contextUsage),
     footerMeta("model", modelLine, "footer-model", {
       onClick: () => setFooterModelPickerOpen(!footerModelPickerOpen),
       title: `Change scoped model: ${modelLine}`,
@@ -1487,6 +2183,28 @@ function isGuardrailDialogPrompt(prompt) {
   const plainTitle = stripAnsi(prompt.title || "");
   const plainMessage = prompt.plainMessage ?? stripAnsi(prompt.message || "");
   return /(?:dangerous|high-risk|protected).*(?:command|file)|safety rule|execute anyway\?/i.test(`${plainTitle}\n${plainMessage}`);
+}
+
+function stripTodoProgressLines(text, { streaming = false } = {}) {
+  let inFence = false;
+  const kept = [];
+  const raw = String(text || "");
+  const hasTrailingNewline = /\r?\n$/.test(raw);
+  const lines = raw.split(/\r?\n/);
+
+  lines.forEach((line, index) => {
+    const isUnfinishedTail = streaming && !hasTrailingNewline && index === lines.length - 1;
+    if (/^\s*```/.test(line)) {
+      inFence = !inFence;
+      kept.push(line);
+      return;
+    }
+    if (!inFence && TODO_PROGRESS_LINE_REGEX.test(line)) return;
+    if (!inFence && isUnfinishedTail && TODO_PROGRESS_PARTIAL_LINE_REGEX.test(line)) return;
+    kept.push(line);
+  });
+
+  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 function parseTodoProgressWidget(lines) {
@@ -1723,10 +2441,12 @@ async function cancelGitWorkflow() {
   const shouldAbortPi = gitWorkflow.step === "generating";
   gitWorkflow.runId += 1;
   setGitWorkflow({ step: "cancelled", busy: false, error: "", output: `${gitWorkflow.output || ""}${gitWorkflow.output ? "\n\n" : ""}Cancelled by user.` });
+  if (shouldAbortPi) setRunIndicatorActivity("Abort requested; checking whether Pi stopped…");
   await Promise.allSettled([
     api("/api/git-workflow/cancel", { method: "POST", body: {} }),
     shouldAbortPi ? api("/api/abort", { method: "POST", body: {} }) : Promise.resolve(),
   ]);
+  if (shouldAbortPi) scheduleAbortStateChecks();
 }
 
 async function runGitAdd() {
@@ -1756,6 +2476,7 @@ async function runGitMessagePrompt() {
     messageRequestedAt: requestedAt,
     output: "Sending /git-staged-msg to Pi.\n\nCancel will request Pi abort.",
   });
+  setRunIndicatorActivity("Sending /git-staged-msg to Pi…");
   try {
     await api("/api/prompt", { method: "POST", body: { message: "/git-staged-msg" } });
     if (!isCurrentGitWorkflowRun(runId)) return;
@@ -1767,7 +2488,10 @@ async function runGitMessagePrompt() {
       }
     }, 2500);
   } catch (error) {
-    if (isCurrentGitWorkflowRun(runId)) failGitWorkflow(error, "generate");
+    if (isCurrentGitWorkflowRun(runId)) {
+      clearRunIndicatorActivity();
+      failGitWorkflow(error, "generate");
+    }
   }
 }
 
@@ -2062,6 +2786,7 @@ async function submitQueuedActionFeedback() {
 
   actionFeedbackSendBusy = true;
   markTabWorkingLocally(tabId);
+  setRunIndicatorActivity("Sending action feedback to Pi…");
   renderFeedbackTray();
   try {
     await postQueuedFeedback(tabId, items);
@@ -2073,6 +2798,7 @@ async function submitQueuedActionFeedback() {
     scheduleRefreshFooter();
   } catch (error) {
     markTabIdleLocally(tabId);
+    clearRunIndicatorActivity();
     addEvent(error.message, "error");
     addTransientMessage({ role: "error", title: "feedback", content: error.message, level: "error" });
   } finally {
@@ -2120,17 +2846,261 @@ function renderContent(parent, content) {
 }
 
 function messageTitle(message) {
+  if (message.role === "assistant") return "Assistant";
   if (message.title) return message.title;
+  if (message.role === "thinking") return "thinking";
+  if (message.role === "toolCall") return `tool call: ${message.toolName || "unknown"}`;
+  if (message.role === "assistantEvent") return "assistant event";
   if (message.role === "toolResult") return `tool result: ${message.toolName || "unknown"}`;
   if (message.role === "bashExecution") return `bash: ${message.command || ""}`;
+  if (message.role === "compactionSummary") return "compaction summary";
   return message.role || "message";
+}
+
+function assistantThinkingText(part) {
+  if (!part || typeof part !== "object") return "";
+  if (part.type !== "thinking" && typeof part.thinking !== "string") return "";
+  if (typeof part.thinking === "string") return part.thinking;
+  return typeof part.content === "string" ? part.content : "";
+}
+
+function assistantToolCallName(part) {
+  return String(part?.name || part?.toolName || part?.toolCall?.name || "unknown");
+}
+
+function assistantToolCallArguments(part) {
+  return part?.arguments || part?.args || part?.input || part?.toolCall?.arguments || {};
+}
+
+function assistantFinalOutputPart(part) {
+  if (part === undefined || part === null) return null;
+  if (typeof part !== "object") {
+    const text = String(part);
+    return text.trim() ? { type: "text", text } : null;
+  }
+  if (part.type === "text") return typeof part.text === "string" && part.text.trim() ? part : null;
+  if (typeof part.text === "string") return part.text.trim() ? { ...part, type: "text", text: part.text } : null;
+  if (part.type === "image") return part;
+  if (typeof part.content === "string" && part.type !== "thinking" && part.type !== "toolCall" && typeof part.thinking !== "string") {
+    return part.content.trim() ? { type: "text", text: part.content } : null;
+  }
+  return null;
+}
+
+function assistantDisplayMessages(message) {
+  if (message?.role !== "assistant") return [message];
+  const base = { timestamp: message.timestamp };
+  const content = message.content;
+  if (typeof content === "string") {
+    return content.trim() ? [{ ...message, title: "Assistant" }] : [];
+  }
+  if (!Array.isArray(content)) {
+    return content === undefined || content === null ? [] : [{ ...message, title: "Assistant" }];
+  }
+
+  const displayMessages = [];
+  const finalParts = [];
+  for (const part of content) {
+    const isThinkingPart = part && typeof part === "object" && (part.type === "thinking" || typeof part.thinking === "string");
+    if (isThinkingPart) {
+      const thinking = assistantThinkingText(part) || "No thinking content was exposed by the provider.";
+      displayMessages.push({ ...base, role: "thinking", title: "thinking", content: thinking, thinking });
+      continue;
+    }
+    if (part?.type === "toolCall") {
+      const toolName = assistantToolCallName(part);
+      const args = assistantToolCallArguments(part);
+      displayMessages.push({ ...base, role: "toolCall", title: `tool call: ${toolName}`, toolName, arguments: args, content: args });
+      continue;
+    }
+    const finalPart = assistantFinalOutputPart(part);
+    if (finalPart) {
+      finalParts.push(finalPart);
+      continue;
+    }
+    if (part !== undefined && part !== null) {
+      displayMessages.push({ ...base, role: "assistantEvent", title: part?.type ? `assistant ${part.type}` : "assistant event", content: part });
+    }
+  }
+
+  if (finalParts.length > 0) {
+    displayMessages.push({ ...message, title: "Assistant", content: finalParts });
+  }
+  return displayMessages;
+}
+
+function stickyUserPromptPreviewText(text) {
+  const value = cleanStatusText(text);
+  if (!value) return "(empty prompt)";
+  if (value.length <= STICKY_USER_PROMPT_PREVIEW_LIMIT) return value;
+  return `${value.slice(0, STICKY_USER_PROMPT_PREVIEW_LIMIT - 1)}…`;
+}
+
+function messageUserPromptText(message) {
+  return cleanStatusText(textFromContent(message?.content));
+}
+
+function stickyUserPromptPreview(message) {
+  return stickyUserPromptPreviewText(messageUserPromptText(message));
+}
+
+function loadLastUserPromptCache() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LAST_USER_PROMPT_STORAGE_KEY) || "{}");
+    lastUserPromptByTab = new Map(Object.entries(raw).filter(([, entry]) => entry && typeof entry.text === "string"));
+  } catch {
+    lastUserPromptByTab = new Map();
+  }
+}
+
+function persistLastUserPromptCache() {
+  try {
+    localStorage.setItem(LAST_USER_PROMPT_STORAGE_KEY, JSON.stringify(Object.fromEntries([...lastUserPromptByTab.entries()].slice(-24))));
+  } catch {
+    // Ignore storage failures; the in-memory prompt cache still works for this page load.
+  }
+}
+
+function rememberLastUserPrompt(text, { tabId = activeTabId, messageIndex = null } = {}) {
+  if (!tabId) return null;
+  const cleanText = cleanStatusText(text);
+  if (!cleanText) return null;
+  const entry = {
+    text: cleanText,
+    preview: stickyUserPromptPreviewText(cleanText),
+    messageIndex: Number.isInteger(messageIndex) ? messageIndex : null,
+    updatedAt: Date.now(),
+  };
+  lastUserPromptByTab.set(tabId, entry);
+  persistLastUserPromptCache();
+  return entry;
+}
+
+function forgetLastUserPrompt(tabId = activeTabId) {
+  if (!tabId || !lastUserPromptByTab.delete(tabId)) return;
+  persistLastUserPromptCache();
+}
+
+function syncLastUserPromptFromMessages(messages = latestMessages) {
+  const lastUserIndex = (messages || []).findLastIndex((message) => message?.role === "user");
+  if (lastUserIndex >= 0) {
+    rememberLastUserPrompt(messageUserPromptText(messages[lastUserIndex]), { messageIndex: lastUserIndex });
+    return;
+  }
+  if (!(messages || []).some((message) => message?.role === "compactionSummary")) forgetLastUserPrompt();
+}
+
+function cachedLastUserPromptTarget() {
+  const entry = activeTabId ? lastUserPromptByTab.get(activeTabId) : null;
+  if (!entry?.text) return null;
+  const summaryNode = elements.chat.querySelector('.message.compactionSummary[data-message-index]');
+  return {
+    index: Number.isInteger(entry.messageIndex) ? entry.messageIndex : -1,
+    message: null,
+    node: summaryNode,
+    top: summaryNode ? chatScrollTopForNode(summaryNode) : 0,
+    preview: entry.preview || stickyUserPromptPreviewText(entry.text),
+    compacted: true,
+  };
+}
+
+function chatScrollTopForNode(node) {
+  if (!node) return 0;
+  const chatRect = elements.chat.getBoundingClientRect();
+  const nodeRect = node.getBoundingClientRect();
+  return elements.chat.scrollTop + nodeRect.top - chatRect.top;
+}
+
+function stickyUserPromptViewportGap() {
+  const button = elements.stickyUserPromptButton;
+  if (!button || button.hidden) return STICKY_USER_PROMPT_TOP_GAP_PX;
+  return Math.ceil(button.getBoundingClientRect().height) + STICKY_USER_PROMPT_TOP_GAP_PX;
+}
+
+function resetChatOutput() {
+  elements.chat.replaceChildren();
+  if (elements.stickyUserPromptButton) elements.chat.append(elements.stickyUserPromptButton);
+}
+
+function userPromptTargets() {
+  return [...elements.chat.querySelectorAll('.message[data-user-prompt="true"][data-message-index]')]
+    .map((node) => {
+      const index = Number(node.dataset.messageIndex);
+      if (!Number.isInteger(index)) return null;
+      const message = latestMessages[index];
+      if (!message) return null;
+      return { index, message, node, top: chatScrollTopForNode(node), preview: stickyUserPromptPreview(message) };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.index - b.index);
+}
+
+function findStickyUserPromptTarget(targets = userPromptTargets()) {
+  if (targets.length === 0) return cachedLastUserPromptTarget();
+  const viewportTop = elements.chat.scrollTop + stickyUserPromptViewportGap();
+  const previousPrompt = targets.filter((target) => target.top < viewportTop - STICKY_USER_PROMPT_TOP_GAP_PX).at(-1);
+  if (previousPrompt) return previousPrompt;
+
+  const latestPrompt = targets.at(-1);
+  const latestTopInView = latestPrompt.top - elements.chat.scrollTop;
+  const latestVisibleNearTop = latestTopInView >= 0 && latestTopInView <= Math.min(elements.chat.clientHeight * 0.55, 180);
+  if (targets.length === 1 && latestVisibleNearTop) return null;
+  return latestPrompt;
+}
+
+function updateStickyUserPromptButton() {
+  const button = elements.stickyUserPromptButton;
+  if (!button) return;
+  const targets = userPromptTargets();
+  const target = findStickyUserPromptTarget(targets);
+  if (!target) {
+    button.hidden = true;
+    button.removeAttribute("data-message-index");
+    button.removeAttribute("data-compacted");
+    button.replaceChildren();
+    return;
+  }
+
+  const ordinal = target.compacted ? 1 : targets.findIndex((item) => item.index === target.index) + 1;
+  const isLatest = target.compacted || ordinal === targets.length;
+  const label = target.compacted ? "Last user prompt (compacted)" : isLatest ? "Last user prompt" : "Previous user prompt";
+  const meta = target.compacted ? "summary ↑" : `${ordinal}/${targets.length} ↑`;
+  button.hidden = false;
+  button.dataset.compacted = target.compacted ? "true" : "false";
+  if (Number.isInteger(target.index) && target.index >= 0) button.dataset.messageIndex = String(target.index);
+  else button.removeAttribute("data-message-index");
+  button.title = target.compacted ? `Prompt was compacted; jump to compaction summary: ${target.preview}` : `Jump to ${label.toLowerCase()}: ${target.preview}`;
+  button.setAttribute("aria-label", target.compacted ? `Prompt was compacted; jump to compaction summary: ${target.preview}` : `Jump to ${label.toLowerCase()} (${ordinal} of ${targets.length}): ${target.preview}`);
+  button.replaceChildren(
+    make("span", "sticky-user-prompt-label", label),
+    make("span", "sticky-user-prompt-text", target.preview),
+    make("span", "sticky-user-prompt-meta", meta),
+  );
+}
+
+function jumpToStickyUserPrompt() {
+  const button = elements.stickyUserPromptButton;
+  const index = Number(button?.dataset.messageIndex);
+  let target = Number.isInteger(index) ? elements.chat.querySelector(`.message[data-user-prompt="true"][data-message-index="${index}"]`) : null;
+  if (!target && button?.dataset.compacted === "true") target = elements.chat.querySelector('.message.compactionSummary[data-message-index]');
+  if (!target) return;
+  autoFollowChat = false;
+  lastChatProgrammaticScrollAt = performance.now();
+  setChatScrollTopInstant(Math.max(0, chatScrollTopForNode(target) - stickyUserPromptViewportGap()));
+  updateJumpToLatestButton();
+  updateStickyUserPromptButton();
+  requestAnimationFrame(updateStickyUserPromptButton);
 }
 
 function appendMessage(message, { streaming = false, messageIndex = -1, transient = false } = {}) {
   const role = String(message.role || "message");
   const safeRole = role.replace(/[^a-z0-9_-]/gi, "");
   const bubble = make("article", `message ${safeRole}${message.level ? ` ${message.level}` : ""}${streaming ? " streaming" : ""}`);
-  const isCollapsibleOutput = !streaming && (message.role === "toolResult" || message.role === "bashExecution");
+  if (!transient && messageIndex >= 0) {
+    bubble.dataset.messageIndex = String(messageIndex);
+    if (role === "user") bubble.dataset.userPrompt = "true";
+  }
+  const isCollapsibleOutput = !streaming && (message.role === "toolResult" || message.role === "bashExecution" || message.role === "compactionSummary");
 
   const header = make(isCollapsibleOutput ? "summary" : "div", "message-header");
   header.append(make("span", "message-role", messageTitle(message)));
@@ -2139,9 +3109,17 @@ function appendMessage(message, { streaming = false, messageIndex = -1, transien
 
   if (message.role === "bashExecution") {
     appendText(body, `$ ${message.command || ""}\n\n${message.output || ""}`, "code-block");
+  } else if (message.role === "compactionSummary") {
+    appendText(body, message.summary || "Context was compacted.");
   } else if (message.role === "toolResult") {
     renderContent(body, message.content);
     if (message.isError) bubble.classList.add("error");
+  } else if (message.role === "thinking") {
+    appendText(body, message.thinking || textFromContent(message.content) || "No thinking content was exposed by the provider.", "thinking-text");
+  } else if (message.role === "toolCall") {
+    appendText(body, JSON.stringify(message.arguments ?? message.content ?? {}, null, 2), "code-block");
+  } else if (message.role === "assistantEvent") {
+    appendText(body, typeof message.content === "string" ? message.content : JSON.stringify(message.content ?? {}, null, 2), "code-block");
   } else {
     renderContent(body, message.content);
   }
@@ -2159,18 +3137,208 @@ function appendMessage(message, { streaming = false, messageIndex = -1, transien
   return { bubble, body };
 }
 
+function appendTranscriptMessage(message, { streaming = false, messageIndex = -1, transient = false } = {}) {
+  if (streaming || transient || message?.role !== "assistant") {
+    return appendMessage(message, { streaming, messageIndex, transient });
+  }
+
+  let finalOutput = null;
+  const displayMessages = assistantDisplayMessages(message);
+  displayMessages.forEach((displayMessage) => {
+    const created = appendMessage(displayMessage, {
+      streaming: false,
+      messageIndex: displayMessage.role === "assistant" ? messageIndex : -1,
+      transient: false,
+    });
+    if (displayMessage.role === "assistant") finalOutput = created;
+  });
+  return finalOutput;
+}
+
+function stateHasRunIndicatorActivity(state = currentState) {
+  return !!state?.isStreaming || !!state?.isCompacting;
+}
+
+function runIndicatorIsActive() {
+  return runIndicatorLocallyActive || stateHasRunIndicatorActivity(currentState);
+}
+
+function clearRunIndicatorGraceCheck() {
+  clearTimeout(runIndicatorGraceCheckTimer);
+  runIndicatorGraceCheckTimer = null;
+}
+
+function scheduleRunIndicatorGraceCheck() {
+  if (!runIndicatorLocallyActive || stateHasRunIndicatorActivity(currentState) || !runIndicatorStartedAt) return;
+  const elapsedMs = performance.now() - runIndicatorStartedAt;
+  const delayMs = Math.max(120, RUN_INDICATOR_START_GRACE_MS - elapsedMs + 120);
+  clearRunIndicatorGraceCheck();
+  runIndicatorGraceCheckTimer = setTimeout(() => {
+    runIndicatorGraceCheckTimer = null;
+    if (!runIndicatorLocallyActive || stateHasRunIndicatorActivity(currentState)) return;
+    runIndicatorLastStateCheckAt = performance.now();
+    refreshState().catch((error) => addEvent(error.message, "error"));
+  }, delayMs);
+}
+
+function maybeRefreshRunIndicatorState() {
+  if (!runIndicatorIsActive()) return;
+  const now = performance.now();
+  if (now - runIndicatorLastStateCheckAt < RUN_INDICATOR_STATE_RECHECK_MS) return;
+  runIndicatorLastStateCheckAt = now;
+  refreshState().catch((error) => addEvent(error.message, "error"));
+}
+
+function formatRunIndicatorElapsed() {
+  if (!runIndicatorStartedAt) return "live";
+  const elapsedSeconds = Math.max(0, Math.floor((performance.now() - runIndicatorStartedAt) / 1000));
+  const minutes = Math.floor(elapsedSeconds / 60);
+  const seconds = elapsedSeconds % 60;
+  return minutes > 0 ? `${minutes}m ${String(seconds).padStart(2, "0")}s` : `${seconds}s`;
+}
+
+function runIndicatorHeadline() {
+  if (currentState?.isCompacting && !currentState?.isStreaming) return "Pi is compacting context:";
+  return "Agent is still runing: ";
+}
+
+function runIndicatorShowsElapsed() {
+  return !/^Abort requested/i.test(runIndicatorActivity || "");
+}
+
+function runIndicatorDetail() {
+  if (runIndicatorActivity) return runIndicatorActivity;
+  if (currentState?.isCompacting && !currentState?.isStreaming) return "Compacting context…";
+  return "Waiting for output or action…";
+}
+
+function startRunIndicatorTicker() {
+  if (runIndicatorTimer) return;
+  runIndicatorTimer = setInterval(() => {
+    if (!runIndicatorIsActive()) {
+      removeRunIndicatorBubble();
+      return;
+    }
+    updateRunIndicatorBubble();
+    maybeRefreshRunIndicatorState();
+  }, RUN_INDICATOR_TICK_MS);
+}
+
+function stopRunIndicatorTicker() {
+  clearInterval(runIndicatorTimer);
+  runIndicatorTimer = null;
+}
+
+function ensureRunIndicatorBubble() {
+  if (runIndicatorBubble?.parentElement !== elements.chat) {
+    runIndicatorBubble = make("article", "message runIndicator run-indicator-message streaming");
+    runIndicatorBubble.setAttribute("aria-live", "polite");
+    runIndicatorBubble.setAttribute("aria-label", "Agent is still runing:");
+
+    const body = make("div", "message-body");
+    const row = make("div", "run-indicator-row");
+    const pulse = make("span", "run-indicator-pulse");
+    pulse.setAttribute("aria-hidden", "true");
+    runIndicatorText = make("span", "run-indicator-text");
+    runIndicatorMeta = make("span", "run-indicator-meta");
+    row.append(pulse, runIndicatorText, runIndicatorMeta);
+    body.append(row);
+    runIndicatorBubble.append(body);
+  }
+  if (elements.chat.lastElementChild !== runIndicatorBubble) elements.chat.append(runIndicatorBubble);
+}
+
+function updateRunIndicatorBubble() {
+  if (!runIndicatorIsActive()) return;
+  if (!runIndicatorStartedAt) runIndicatorStartedAt = performance.now();
+  ensureRunIndicatorBubble();
+  runIndicatorText.textContent = runIndicatorHeadline();
+  const detail = runIndicatorDetail();
+  runIndicatorMeta.textContent = runIndicatorShowsElapsed() ? `${detail} · run time ${formatRunIndicatorElapsed()}` : detail;
+}
+
+function removeRunIndicatorBubble() {
+  stopRunIndicatorTicker();
+  runIndicatorBubble?.remove();
+  runIndicatorBubble = null;
+  runIndicatorText = null;
+  runIndicatorMeta = null;
+}
+
+function renderRunIndicator({ scroll = false } = {}) {
+  if (!runIndicatorIsActive()) {
+    removeRunIndicatorBubble();
+    return;
+  }
+  const shouldFollow = scroll && (autoFollowChat || isChatNearBottom());
+  updateRunIndicatorBubble();
+  startRunIndicatorTicker();
+  if (shouldFollow) scrollChatToBottom();
+}
+
+function setRunIndicatorActivity(activity, { active = true, scroll = true } = {}) {
+  if (active) {
+    runIndicatorLocallyActive = true;
+    if (!runIndicatorStartedAt) runIndicatorStartedAt = performance.now();
+  }
+  runIndicatorActivity = activity || runIndicatorActivity || "Waiting for output or action…";
+  renderRunIndicator({ scroll });
+  if (active) scheduleRunIndicatorGraceCheck();
+}
+
+function clearRunIndicatorActivity({ render = true } = {}) {
+  clearRunIndicatorGraceCheck();
+  runIndicatorLastStateCheckAt = 0;
+  runIndicatorLocallyActive = false;
+  runIndicatorStartedAt = null;
+  runIndicatorActivity = "Waiting for output or action…";
+  if (render) renderRunIndicator();
+}
+
+function syncRunIndicatorFromState(state = currentState) {
+  if (stateHasRunIndicatorActivity(state)) {
+    clearRunIndicatorGraceCheck();
+    runIndicatorLocallyActive = true;
+    if (!runIndicatorStartedAt) runIndicatorStartedAt = performance.now();
+    if (state.isCompacting && !state.isStreaming && runIndicatorActivity === "Waiting for output or action…") {
+      runIndicatorActivity = "Compacting context…";
+    }
+    renderRunIndicator({ scroll: true });
+  } else if (runIndicatorLocallyActive && runIndicatorStartedAt && performance.now() - runIndicatorStartedAt < RUN_INDICATOR_START_GRACE_MS) {
+    renderRunIndicator({ scroll: true });
+    scheduleRunIndicatorGraceCheck();
+  } else if (runIndicatorLocallyActive) {
+    clearRunIndicatorActivity();
+  } else {
+    renderRunIndicator();
+  }
+}
+
+function runIndicatorToolName(name) {
+  return cleanStatusText(name || "tool") || "tool";
+}
+
+function scheduleAbortStateChecks() {
+  for (const delay of [250, 900, 1800, 3600]) {
+    setTimeout(() => refreshState().catch((error) => addEvent(error.message, "error")), delay);
+  }
+}
+
 function renderAllMessages({ preserveScroll = false } = {}) {
   const shouldFollow = !preserveScroll && (autoFollowChat || isChatNearBottom());
   const previousScrollTop = elements.chat.scrollTop;
-  elements.chat.replaceChildren();
-  latestMessages.forEach((message, index) => appendMessage(message, { messageIndex: index }));
-  transientMessages.forEach((message, index) => appendMessage(message, { messageIndex: index, transient: true }));
+  resetChatOutput();
+  latestMessages.forEach((message, index) => appendTranscriptMessage(message, { messageIndex: index }));
+  transientMessages.forEach((message, index) => appendTranscriptMessage(message, { messageIndex: index, transient: true }));
+  renderRunIndicator({ scroll: false });
+  updateStickyUserPromptButton();
   if (shouldFollow) scrollChatToBottom({ force: true });
   else {
     elements.chat.scrollTop = Math.min(previousScrollTop, elements.chat.scrollHeight);
     autoFollowChat = isChatNearBottom();
     updateJumpToLatestButton();
   }
+  updateStickyUserPromptButton();
 }
 
 function addTransientMessage({ role = "notice", title, content, level = "info" }) {
@@ -2215,11 +3383,13 @@ function applyChatFollowScroll() {
   chatFollowFrame = null;
   if (!autoFollowChat) {
     updateJumpToLatestButton();
+    updateStickyUserPromptButton();
     return;
   }
   lastChatProgrammaticScrollAt = performance.now();
   setChatScrollTopInstant(elements.chat.scrollHeight);
   updateJumpToLatestButton();
+  updateStickyUserPromptButton();
 }
 
 function scheduleChatFollowScroll() {
@@ -2235,12 +3405,14 @@ function scrollChatToBottom({ force = false } = {}) {
   if (force) autoFollowChat = true;
   if (!autoFollowChat) {
     updateJumpToLatestButton();
+    updateStickyUserPromptButton();
     return;
   }
   lastChatProgrammaticScrollAt = performance.now();
   setChatScrollTopInstant(elements.chat.scrollHeight);
   scheduleChatFollowScroll();
   updateJumpToLatestButton();
+  updateStickyUserPromptButton();
 }
 
 function syncAutoFollowFromChatScroll() {
@@ -2252,6 +3424,7 @@ function syncAutoFollowFromChatScroll() {
     scheduleChatFollowScroll();
   }
   updateJumpToLatestButton();
+  updateStickyUserPromptButton();
 }
 
 function jumpToLatest() {
@@ -2292,6 +3465,7 @@ function shouldSendPromptFromEnter(event) {
 
 function renderMessages(messages) {
   latestMessages = messages || [];
+  syncLastUserPromptFromMessages(latestMessages);
   renderAllMessages();
   renderFooter();
   renderFeedbackTray();
@@ -2299,68 +3473,129 @@ function renderMessages(messages) {
 
 function ensureStreamBubble() {
   if (streamBubble) return;
-  const created = appendMessage({ role: "assistant", timestamp: Date.now(), content: "" }, { streaming: true });
+  const created = appendMessage({ role: "assistant", title: "Assistant", timestamp: Date.now(), content: "" }, { streaming: true });
   streamBubble = created.bubble;
   streamText = appendText(created.body, "");
-  streamThinkingDetails = make("details", "thinking-block streaming-thinking");
-  streamThinkingDetails.hidden = true;
-  streamThinkingDetails.open = true;
-  streamThinkingDetails.append(make("summary", undefined, "thinking"));
-  streamThinking = appendText(streamThinkingDetails, "", "thinking-text");
-  created.body.prepend(streamThinkingDetails);
+  renderRunIndicator({ scroll: false });
+  scrollChatToBottom();
+}
+
+function ensureStreamingThinkingBubble() {
+  if (streamThinkingBubble) return;
+  const created = appendMessage({ role: "thinking", title: "thinking", timestamp: Date.now(), content: "" }, { streaming: true });
+  streamThinkingBubble = created.bubble;
+  streamThinking = appendText(created.body, "", "thinking-text");
+  renderRunIndicator({ scroll: false });
   scrollChatToBottom();
 }
 
 function showStreamingThinking(placeholder = "Thinking…") {
-  ensureStreamBubble();
-  streamThinkingDetails.hidden = false;
-  streamThinkingDetails.open = true;
+  ensureStreamingThinkingBubble();
   if (!streamThinking.textContent) streamThinking.textContent = placeholder;
 }
 
 function resetStreamBubble() {
   streamBubble = null;
   streamText = null;
+  streamRawText = "";
+  streamThinkingBubble = null;
   streamThinking = null;
-  streamThinkingDetails = null;
 }
 
 function thinkingDeltaText(update) {
   return update.delta || update.thinking || update.content || "";
 }
 
+function assistantStreamingMessage(event) {
+  if (event?.message?.role === "assistant") return event.message;
+  const partial = event?.assistantMessageEvent?.partial;
+  return partial?.role === "assistant" ? partial : null;
+}
+
+function assistantTextFromMessage(message) {
+  const content = message?.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return null;
+  const parts = content
+    .filter((part) => part && typeof part === "object" && part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text);
+  return parts.length ? parts.join("\n\n") : "";
+}
+
+function assistantThinkingTextFromMessage(message) {
+  const content = message?.content;
+  if (!Array.isArray(content)) return null;
+  const parts = content
+    .filter((part) => part && typeof part === "object" && (part.type === "thinking" || typeof part.thinking === "string"))
+    .map((part) => assistantThinkingText(part))
+    .filter((text) => text.trim());
+  return parts.length ? parts.join("\n\n") : "";
+}
+
+function setStreamingThinkingText(text) {
+  showStreamingThinking("");
+  streamThinking.textContent = text;
+}
+
+function syncStreamingThinkingFromMessage(event, { placeholder = "" } = {}) {
+  const text = assistantThinkingTextFromMessage(assistantStreamingMessage(event));
+  if (text === null) return false;
+  if (text || placeholder || streamThinkingBubble) setStreamingThinkingText(text || placeholder);
+  return true;
+}
+
 function handleMessageUpdate(event) {
   const update = event.assistantMessageEvent || {};
-  ensureStreamBubble();
   if (update.type === "thinking_start") {
-    showStreamingThinking();
+    setRunIndicatorActivity("Thinking…", { scroll: false });
+    syncStreamingThinkingFromMessage(event, { placeholder: "Thinking…" });
     scrollChatToBottom();
   } else if (update.type === "thinking_delta") {
     const delta = thinkingDeltaText(update);
     currentRunStreamChars += delta.length;
-    showStreamingThinking("");
-    if (streamThinking.textContent === "Thinking…") streamThinking.textContent = "";
-    streamThinking.textContent += delta;
+    setRunIndicatorActivity("Thinking…", { scroll: false });
+    const synced = syncStreamingThinkingFromMessage(event);
+    if (!synced || (!streamThinking?.textContent && delta)) {
+      showStreamingThinking("");
+      if (streamThinking.textContent === "Thinking…") streamThinking.textContent = "";
+      streamThinking.textContent += delta;
+    }
     renderFooter();
     scrollChatToBottom();
   } else if (update.type === "thinking_end") {
-    const finalThinking = thinkingDeltaText(update);
-    if (finalThinking && (!streamThinking.textContent || streamThinking.textContent === "Thinking…")) {
-      showStreamingThinking("");
-      streamThinking.textContent = finalThinking;
-    }
-    streamThinkingDetails?.classList.add("complete");
-  } else if (update.type === "text_delta") {
-    const delta = update.delta || "";
+    const finalThinking = assistantThinkingTextFromMessage(assistantStreamingMessage(event)) || thinkingDeltaText(update);
+    if (finalThinking) setStreamingThinkingText(finalThinking);
+    streamThinkingBubble?.classList.add("complete");
+    setRunIndicatorActivity("Finished thinking; waiting for the next output or action…", { scroll: false });
+  } else if (update.type === "text_delta" || update.type === "text_end") {
+    const delta = update.type === "text_delta" ? update.delta || "" : "";
     currentRunStreamChars += delta.length;
-    streamText.textContent += delta;
+    const partialText = assistantTextFromMessage(assistantStreamingMessage(event));
+    if (typeof partialText === "string") streamRawText = partialText;
+    else if (update.type === "text_end" && typeof update.content === "string") streamRawText = update.content;
+    else streamRawText += delta;
+    const assistantText = stripTodoProgressLines(streamRawText, { streaming: true });
+    setRunIndicatorActivity("Writing response…", { scroll: false });
+    if (assistantText) {
+      ensureStreamBubble();
+      streamText.textContent = assistantText;
+    } else if (streamBubble) {
+      streamBubble.remove();
+      streamBubble = null;
+      streamText = null;
+      renderRunIndicator({ scroll: false });
+    }
     renderFooter();
     scrollChatToBottom();
   } else if (update.type === "toolcall_start") {
+    const name = runIndicatorToolName(update.name || update.toolName || update.toolCall?.name);
+    setRunIndicatorActivity(`Preparing tool call: ${name}…`);
     addEvent(`tool call started in assistant message`, "info");
   } else if (update.type === "error") {
-    streamBubble.classList.add("error");
-    appendText(streamBubble.querySelector(".message-body"), update.reason || update.errorMessage || "assistant error", "code-block");
+    setRunIndicatorActivity("Assistant stream reported an error…");
+    appendMessage({ role: "error", title: "assistant error", timestamp: Date.now(), content: update.reason || update.errorMessage || "assistant error", level: "error" }, { streaming: true });
+    renderRunIndicator({ scroll: false });
+    scrollChatToBottom();
   }
 }
 
@@ -2368,6 +3603,7 @@ async function refreshState() {
   const response = await api("/api/state");
   currentState = response.data || null;
   syncActiveTabActivityFromState(currentState);
+  syncRunIndicatorFromState(currentState);
   renderStatus();
 }
 
@@ -2401,15 +3637,31 @@ function renderNetworkStatus() {
   const network = latestNetwork;
   const open = !!network?.open;
   const opening = !!network?.opening;
+  const closing = !!network?.closing;
+  const rebinding = opening || closing;
   const localUrl = network?.localUrl || `${window.location.origin}/`;
   const networkUrls = Array.isArray(network?.networkUrls) ? network.networkUrls : [];
-  elements.networkStatus.className = `network-status ${opening ? "opening" : open ? "open" : "closed"}`;
-  elements.networkStatus.title = open
-    ? `Reachable on local network${networkUrls.length ? `:\n${networkUrls.join("\n")}` : " (no LAN address detected)"}`
-    : "Only reachable from this machine";
+  elements.networkStatus.className = `network-status ${opening ? "opening" : closing ? "closing" : open ? "open" : "closed"}`;
+  elements.networkStatus.title = closing
+    ? "Closing network access and returning to local-only"
+    : open
+      ? `Reachable on local network${networkUrls.length ? `:\n${networkUrls.join("\n")}` : " (no LAN address detected)"}`
+      : "Only reachable from this machine";
 
-  const heading = make("div", "network-status-heading", opening ? "Opening to local network…" : open ? "Open to local network" : "Closed · local only");
-  const detail = make("div", "network-status-detail", open ? "Use one of these URLs from a trusted device:" : "Only this machine can connect until you open the network listener.");
+  const heading = make(
+    "div",
+    "network-status-heading",
+    opening ? "Opening to local network…" : closing ? "Closing network access…" : open ? "Open to local network" : "Closed · local only",
+  );
+  const detail = make(
+    "div",
+    "network-status-detail",
+    closing
+      ? "Rebinding to local-only access. Network clients will disconnect."
+      : open
+        ? "Use one of these URLs from a trusted device:"
+        : "Only this machine can connect until you open the network listener.",
+  );
   const list = make("div", "network-url-list");
 
   const addUrl = (label, url) => {
@@ -2431,8 +3683,8 @@ function renderNetworkStatus() {
   }
 
   elements.networkStatus.replaceChildren(heading, detail, list);
-  elements.openNetworkButton.disabled = opening || open;
-  elements.openNetworkButton.textContent = opening ? "Opening…" : open ? "Network open" : "Open to network";
+  elements.openNetworkButton.disabled = rebinding;
+  elements.openNetworkButton.textContent = opening ? "Opening…" : closing ? "Closing…" : open ? "Close for network" : "Open to network";
 }
 
 async function refreshNetworkStatus() {
@@ -2518,6 +3770,25 @@ function commandSourceLabel(command) {
   return [command.source, command.location].filter(Boolean).join(" · ") || "command";
 }
 
+function normalizePathSuggestions(suggestions) {
+  const seen = new Set();
+  return (suggestions || [])
+    .map((suggestion) => {
+      const path = String(suggestion.path || "").trim();
+      return {
+        path,
+        label: String(suggestion.label || path).trim(),
+        description: String(suggestion.description || path).trim(),
+        type: suggestion.type === "directory" || path.endsWith("/") ? "directory" : "file",
+      };
+    })
+    .filter((suggestion) => {
+      if (!suggestion.path || seen.has(suggestion.path)) return false;
+      seen.add(suggestion.path);
+      return true;
+    });
+}
+
 function getCommandTrigger() {
   const input = elements.promptInput;
   const cursor = input.selectionStart ?? input.value.length;
@@ -2534,6 +3805,25 @@ function getCommandTrigger() {
     end: cursor,
     query,
   };
+}
+
+function getPathTrigger() {
+  const input = elements.promptInput;
+  const cursor = input.selectionStart ?? input.value.length;
+  const selectionEnd = input.selectionEnd ?? cursor;
+  if (cursor !== selectionEnd) return null;
+
+  const beforeCursor = input.value.slice(0, cursor);
+  const quotedMatch = beforeCursor.match(/(^|[\s(])@"([^"]*)$/);
+  if (quotedMatch) {
+    const query = quotedMatch[2] || "";
+    return { start: cursor - query.length - 2, end: cursor, query, quoted: true };
+  }
+
+  const match = beforeCursor.match(/(^|[\s(])@([^\s"']*)$/);
+  if (!match) return null;
+  const query = match[2] || "";
+  return { start: cursor - query.length - 1, end: cursor, query, quoted: false };
 }
 
 function scoreCommandSuggestion(command, query) {
@@ -2557,16 +3847,34 @@ function getCommandMatches(query) {
     .map((item) => item.command);
 }
 
+function activeSuggestionCount() {
+  return suggestionMode === "path" ? pathSuggestions.length : commandSuggestions.length;
+}
+
+function abortPathSuggestionRequest() {
+  pathSuggestAbortController?.abort();
+  pathSuggestAbortController = null;
+}
+
+function cancelPathSuggestionRequest() {
+  pathSuggestRequestSerial++;
+  abortPathSuggestionRequest();
+}
+
 function hideCommandSuggestions() {
+  cancelPathSuggestionRequest();
   elements.commandSuggest.hidden = true;
   elements.commandSuggest.replaceChildren();
   commandSuggestions = [];
+  pathSuggestions = [];
+  suggestionMode = "none";
   commandSuggestIndex = 0;
 }
 
 function setActiveCommandSuggestion(index) {
-  if (!commandSuggestions.length) return;
-  commandSuggestIndex = (index + commandSuggestions.length) % commandSuggestions.length;
+  const count = activeSuggestionCount();
+  if (!count) return;
+  commandSuggestIndex = (index + count) % count;
   const items = [...elements.commandSuggest.querySelectorAll(".command-suggest-item")];
   for (const [itemIndex, item] of items.entries()) {
     const active = itemIndex === commandSuggestIndex;
@@ -2576,13 +3884,9 @@ function setActiveCommandSuggestion(index) {
   }
 }
 
-function renderCommandSuggestions({ keepIndex = false } = {}) {
-  const trigger = getCommandTrigger();
-  if (!trigger || document.activeElement !== elements.promptInput || availableCommands.length === 0) {
-    hideCommandSuggestions();
-    return;
-  }
-
+function renderCommandSuggestionItems(trigger, { keepIndex = false } = {}) {
+  suggestionMode = "command";
+  pathSuggestions = [];
   commandSuggestions = getCommandMatches(trigger.query);
   elements.commandSuggest.replaceChildren();
 
@@ -2612,7 +3916,98 @@ function renderCommandSuggestions({ keepIndex = false } = {}) {
   setActiveCommandSuggestion(keepIndex ? commandSuggestIndex : 0);
 }
 
+function pathSuggestionIsDirectory(suggestion) {
+  return suggestion.type === "directory" || suggestion.path.endsWith("/");
+}
+
+function formatPathReference(pathText, forceQuoted = false) {
+  const normalized = String(pathText || "").replace(/\\/g, "/");
+  if (!forceQuoted && !/[\s"']/.test(normalized)) return `@${normalized}`;
+  return `@"${normalized.replace(/(["\\])/g, "\\$1")}"`;
+}
+
+function renderPathSuggestionItems(trigger, { keepIndex = false } = {}) {
+  suggestionMode = "path";
+  commandSuggestions = [];
+  elements.commandSuggest.replaceChildren();
+
+  if (pathSuggestions.length === 0) {
+    elements.commandSuggest.append(make("div", "command-suggest-empty", `No path matches @${trigger.query}`));
+    elements.commandSuggest.hidden = false;
+    return;
+  }
+
+  for (const [index, suggestion] of pathSuggestions.entries()) {
+    const isDirectory = pathSuggestionIsDirectory(suggestion);
+    const item = make("button", `command-suggest-item path-suggest-item ${isDirectory ? "directory" : "file"}`);
+    item.type = "button";
+    item.setAttribute("role", "option");
+    item.addEventListener("mousedown", (event) => event.preventDefault());
+    item.addEventListener("mouseenter", () => setActiveCommandSuggestion(index));
+    item.addEventListener("click", () => insertPathSuggestion(index));
+
+    item.append(
+      make("span", "command-suggest-name path-suggest-name", `@${suggestion.path}`),
+      make("span", "command-suggest-desc", suggestion.description || suggestion.path),
+      make("span", "command-suggest-source", isDirectory ? "directory" : "file"),
+    );
+    elements.commandSuggest.append(item);
+  }
+
+  elements.commandSuggest.hidden = false;
+  setActiveCommandSuggestion(keepIndex ? commandSuggestIndex : 0);
+}
+
+async function renderPathSuggestions(trigger, { keepIndex = false } = {}) {
+  abortPathSuggestionRequest();
+  const requestSerial = ++pathSuggestRequestSerial;
+  const controller = new AbortController();
+  pathSuggestAbortController = controller;
+  suggestionMode = "path";
+  commandSuggestions = [];
+  pathSuggestions = [];
+  elements.commandSuggest.replaceChildren(make("div", "command-suggest-empty", "Finding paths…"));
+  elements.commandSuggest.hidden = false;
+
+  try {
+    const response = await api(`/api/path-suggestions?query=${encodeURIComponent(trigger.query)}`, { signal: controller.signal });
+    if (requestSerial !== pathSuggestRequestSerial || document.activeElement !== elements.promptInput) return;
+    pathSuggestions = normalizePathSuggestions(response.data?.suggestions || []);
+    renderPathSuggestionItems(trigger, { keepIndex });
+  } catch (error) {
+    if (error?.name === "AbortError" || requestSerial !== pathSuggestRequestSerial) return;
+    pathSuggestions = [];
+    elements.commandSuggest.replaceChildren(make("div", "command-suggest-empty", `Path suggestions unavailable: ${error.message}`));
+    elements.commandSuggest.hidden = false;
+  } finally {
+    if (requestSerial === pathSuggestRequestSerial) pathSuggestAbortController = null;
+  }
+}
+
+function renderCommandSuggestions({ keepIndex = false } = {}) {
+  if (document.activeElement !== elements.promptInput) {
+    hideCommandSuggestions();
+    return;
+  }
+
+  const pathTrigger = getPathTrigger();
+  if (pathTrigger) {
+    renderPathSuggestions(pathTrigger, { keepIndex });
+    return;
+  }
+
+  cancelPathSuggestionRequest();
+  const trigger = getCommandTrigger();
+  if (!trigger || availableCommands.length === 0) {
+    hideCommandSuggestions();
+    return;
+  }
+
+  renderCommandSuggestionItems(trigger, { keepIndex });
+}
+
 function insertCommandSuggestion(index = commandSuggestIndex) {
+  if (suggestionMode === "path") return insertPathSuggestion(index);
   const command = commandSuggestions[index];
   const trigger = getCommandTrigger();
   if (!command || !trigger) return false;
@@ -2632,6 +4027,37 @@ function insertCommandSuggestion(index = commandSuggestIndex) {
   input.setSelectionRange(cursor, cursor);
   input.focus();
   hideCommandSuggestions();
+  return true;
+}
+
+function insertPathSuggestion(index = commandSuggestIndex) {
+  const suggestion = pathSuggestions[index];
+  const trigger = getPathTrigger();
+  if (!suggestion || !trigger) return false;
+
+  const input = elements.promptInput;
+  const value = input.value;
+  let tokenEnd = trigger.end;
+  if (trigger.quoted) {
+    while (tokenEnd < value.length && value[tokenEnd] !== '"') tokenEnd++;
+    if (value[tokenEnd] === '"') tokenEnd++;
+  } else {
+    while (tokenEnd < value.length && !/\s/.test(value[tokenEnd])) tokenEnd++;
+  }
+
+  const isDirectory = pathSuggestionIsDirectory(suggestion);
+  const reference = formatPathReference(suggestion.path, trigger.quoted);
+  const suffix = value.slice(tokenEnd);
+  const separator = isDirectory || (suffix && /^\s/.test(suffix)) ? "" : " ";
+  input.value = `${value.slice(0, trigger.start)}${reference}${separator}${suffix}`;
+
+  const cursorOffset = isDirectory && reference.endsWith('"') ? reference.length - 1 : reference.length + separator.length;
+  const cursor = trigger.start + cursorOffset;
+  input.setSelectionRange(cursor, cursor);
+  input.focus();
+  resizePromptInput();
+  if (isDirectory) renderCommandSuggestions();
+  else hideCommandSuggestions();
   return true;
 }
 
@@ -2669,19 +4095,24 @@ async function refreshAll() {
 }
 
 async function openToNetwork() {
-  if (latestNetwork?.open) return;
+  if (latestNetwork?.open) {
+    await closeNetworkAccess();
+    return;
+  }
   if (!confirm("Open Pi Web UI to your local network?\n\nThe Web UI has no authentication and can control Pi/tools. Only do this on a trusted LAN.")) return;
 
   elements.openNetworkButton.disabled = true;
   elements.openNetworkButton.textContent = "Opening…";
   try {
-    await api("/api/network/open", { method: "POST", body: {}, scoped: false });
+    await api("/api/network/open", { method: "POST", scoped: false });
+    latestNetwork = { ...(latestNetwork || {}), opening: true, closing: false };
+    renderNetworkStatus();
     addEvent("opening webui to local network", "warn");
     for (let attempt = 0; attempt < 20; attempt++) {
       await delay(350);
       try {
         await refreshNetworkStatus();
-        if (latestNetwork?.open) {
+        if (latestNetwork?.open && !latestNetwork?.opening) {
           const url = latestNetwork.networkUrls?.[0];
           addEvent(`webui open to local network${url ? `: ${url}` : ""}`, "warn");
           return;
@@ -2698,6 +4129,45 @@ async function openToNetwork() {
   }
 }
 
+async function closeNetworkAccess() {
+  if (!latestNetwork?.open) return;
+  if (!confirm("Close Pi Web UI network access?\n\nThe local browser can keep using the UI, but LAN clients will disconnect.")) return;
+
+  elements.openNetworkButton.disabled = true;
+  elements.openNetworkButton.textContent = "Closing…";
+  try {
+    await api("/api/network/close", { method: "POST", scoped: false });
+    latestNetwork = { ...(latestNetwork || {}), opening: false, closing: true };
+    renderNetworkStatus();
+    addEvent("closing webui network access", "warn");
+    let refreshFailed = false;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      await delay(350);
+      try {
+        await refreshNetworkStatus();
+        if (!latestNetwork?.open && !latestNetwork?.closing) {
+          addEvent("webui closed to local-only access", "warn");
+          return;
+        }
+      } catch {
+        refreshFailed = true;
+        // Remote tabs will lose access after the listener returns to localhost.
+      }
+    }
+    if (refreshFailed) {
+      latestNetwork = { ...(latestNetwork || {}), open: false, opening: false, closing: false, networkUrls: [] };
+      renderNetworkStatus();
+      addEvent("webui network access closed; reconnect from this machine if this tab loses access", "warn");
+      return;
+    }
+    addEvent("network close requested, but the server still reports network access open", "warn");
+  } catch (error) {
+    addEvent(error.message, "error");
+  } finally {
+    renderNetworkStatus();
+  }
+}
+
 async function sendPrompt(kind = "prompt", explicitMessage) {
   const usesPromptInput = explicitMessage === undefined;
   const rawMessage = usesPromptInput ? elements.promptInput.value : explicitMessage;
@@ -2706,10 +4176,14 @@ async function sendPrompt(kind = "prompt", explicitMessage) {
 
   const targetTabId = activeTabId;
   const startsRun = kind === "prompt" && !currentState?.isStreaming;
+  if (kind === "prompt" && !message.startsWith("/")) rememberLastUserPrompt(message, { tabId: targetTabId });
   autoFollowChat = true;
   updateJumpToLatestButton();
   setComposerActionsOpen(false);
-  if (startsRun) markTabWorkingLocally(targetTabId);
+  if (startsRun) {
+    markTabWorkingLocally(targetTabId);
+    setRunIndicatorActivity("Sending prompt to Pi…");
+  }
 
   try {
     let response;
@@ -2723,7 +4197,15 @@ async function sendPrompt(kind = "prompt", explicitMessage) {
       response = await api("/api/prompt", { method: "POST", body, tabId: targetTabId });
     }
     applyResponseTab(response);
-    if (startsRun && response?.command === "native_slash_command") markTabIdleLocally(targetTabId);
+    if (response?.command === "native_slash_command" && /^\/new(?:\s|$)/.test(message)) forgetLastUserPrompt(targetTabId);
+    if (startsRun && response?.command === "native_slash_command") {
+      markTabIdleLocally(targetTabId);
+      clearRunIndicatorActivity();
+    } else if (kind === "steer" && currentState?.isStreaming) {
+      setRunIndicatorActivity("Steering sent; waiting for the next output or action…");
+    } else if (kind === "follow-up" && currentState?.isStreaming) {
+      setRunIndicatorActivity("Follow-up queued; current agent run is still active…");
+    }
     if (response?.command === "native_slash_command" && response.data?.copyText) {
       try {
         await navigator.clipboard.writeText(response.data.copyText);
@@ -2742,7 +4224,10 @@ async function sendPrompt(kind = "prompt", explicitMessage) {
     hideCommandSuggestions();
     scheduleRefreshState();
   } catch (error) {
-    if (startsRun) markTabIdleLocally(targetTabId);
+    if (startsRun) {
+      markTabIdleLocally(targetTabId);
+      clearRunIndicatorActivity();
+    }
     addEvent(error.message, "error");
     addTransientMessage({ role: "error", title: message.startsWith("/") ? message.split(/\s+/, 1)[0] : "error", content: error.message, level: "error" });
   }
@@ -2801,7 +4286,13 @@ function handleExtensionUiRequest(request) {
     case "input":
     case "editor":
       if (hasQueuedDialogRequest(request.id)) return;
+      if (request.pendingExtensionUiRequestCount === undefined) {
+        const tab = tabs.find((item) => item.id === request.tabId);
+        if (setTabPendingBlockerCount(request.tabId, Math.max(1, tabPendingBlockerCount(tab) + 1))) renderTabs();
+      }
+      if (!request.replayed) notifyBlockedTab(request.tabId, { request, count: request.pendingExtensionUiRequestCount });
       if (request.replayed) addEvent(`recovered pending ${request.method} request`, "warn");
+      setRunIndicatorActivity(`Waiting for your ${request.method} response…`);
       dialogQueue.push(request);
       showNextDialog();
       return;
@@ -2813,12 +4304,14 @@ function handleExtensionUiRequest(request) {
 async function sendDialogResponse(payload) {
   const { tabId = activeTabId, ...body } = payload;
   try {
-    await api("/api/extension-ui-response", { method: "POST", body, tabId });
+    const response = await api("/api/extension-ui-response", { method: "POST", body, tabId });
+    if (!applyResponseTab(response) && decrementTabPendingBlockerCount(tabId)) renderTabs();
   } catch (error) {
     addEvent(error.message, "error");
   } finally {
     if (elements.dialog.open) elements.dialog.close();
     activeDialog = null;
+    if (runIndicatorIsActive()) setRunIndicatorActivity("Continuing after your response…");
     showNextDialog();
   }
 }
@@ -2921,17 +4414,29 @@ function handleEvent(event) {
       refreshTabs().catch((error) => addEvent(error.message, "error"));
       scheduleRefreshFooter();
       break;
-    case "webui_network_rebinding":
-      addEvent(`webui network listener rebinding on ${event.host}:${event.port}; event stream will reconnect`, "warn");
-      latestNetwork = { ...(latestNetwork || {}), opening: true };
+    case "webui_network_rebinding": {
+      const closing = !!event.closing;
+      const opening = event.opening === undefined ? !closing : !!event.opening;
+      addEvent(
+        closing
+          ? `webui network listener closing to ${event.host}:${event.port}; event stream will reconnect or disconnect`
+          : `webui network listener rebinding on ${event.host}:${event.port}; event stream will reconnect`,
+        "warn",
+      );
+      latestNetwork = { ...(latestNetwork || {}), opening, closing };
       renderNetworkStatus();
       break;
+    }
     case "pi_process_exit":
       addEvent(`pi rpc exited (${event.code ?? event.signal ?? "unknown"})`, "error");
+      currentRunStartedAt = null;
+      clearRunIndicatorActivity();
       refreshTabs().catch((error) => addEvent(error.message, "error"));
       break;
     case "pi_process_error":
       addEvent(event.error || "pi rpc process error", "error");
+      currentRunStartedAt = null;
+      clearRunIndicatorActivity();
       refreshTabs().catch((error) => addEvent(error.message, "error"));
       break;
     case "pi_stderr":
@@ -2946,6 +4451,7 @@ function handleEvent(event) {
       currentRunStreamChars = 0;
       latestTokPerSecond = null;
       if (currentState) currentState = { ...currentState, isStreaming: true };
+      setRunIndicatorActivity("Agent run started; waiting for first output or action…");
       addEvent("agent started");
       scheduleRefreshState();
       renderFooter();
@@ -2955,6 +4461,7 @@ function handleEvent(event) {
       addEvent("agent finished");
       currentRunStartedAt = null;
       if (currentState) currentState = { ...currentState, isStreaming: false };
+      clearRunIndicatorActivity();
       markTabOutputSeen();
       scheduleRefreshState();
       scheduleRefreshMessages();
@@ -2965,7 +4472,10 @@ function handleEvent(event) {
       }
       break;
     case "message_start":
-      if (event.message?.role === "assistant") resetStreamBubble();
+      if (event.message?.role === "assistant") {
+        resetStreamBubble();
+        setRunIndicatorActivity("Starting assistant message…", { scroll: false });
+      }
       break;
     case "message_update":
       handleMessageUpdate(event);
@@ -2976,23 +4486,30 @@ function handleEvent(event) {
         const outputTokens = Number(event.message?.usage?.output ?? 0) || Math.max(1, Math.round(currentRunStreamChars / 4));
         latestTokPerSecond = outputTokens / elapsedSeconds;
       }
+      if (runIndicatorIsActive()) setRunIndicatorActivity("Assistant message finished; waiting for the next step…", { scroll: false });
       scheduleRefreshMessages();
       scheduleRefreshState();
       scheduleRefreshFooter();
       break;
     case "tool_execution_start":
+      setRunIndicatorActivity(`Running tool: ${runIndicatorToolName(event.toolName)}…`);
       addEvent(`tool ${event.toolName} started`);
       break;
     case "tool_execution_end":
+      setRunIndicatorActivity(`Tool ${runIndicatorToolName(event.toolName)} ${event.isError ? "failed" : "finished"}; waiting for the agent's next step…`);
       addEvent(`tool ${event.toolName} ${event.isError ? "failed" : "finished"}`, event.isError ? "error" : "info");
       scheduleRefreshMessages();
       scheduleRefreshFooter();
       break;
     case "compaction_start":
+      if (currentState) currentState = { ...currentState, isCompacting: true };
+      setRunIndicatorActivity(`Compacting context${event.reason ? ` (${event.reason})` : ""}…`);
       addEvent(`compaction started (${event.reason})`);
       break;
     case "compaction_end":
+      if (currentState) currentState = { ...currentState, isCompacting: false };
       addEvent(`compaction ${event.aborted ? "aborted" : "finished"}`);
+      if (!currentState?.isStreaming) clearRunIndicatorActivity();
       markTabOutputSeen();
       scheduleRefreshMessages();
       break;
@@ -3004,8 +4521,10 @@ function handleEvent(event) {
       else if (event.command === "get_state" && event.tabId === activeTabId) {
         currentState = event.data || currentState;
         syncActiveTabActivityFromState(currentState);
+        syncRunIndicatorFromState(currentState);
         renderStatus();
       } else if (["set_model", "set_thinking_level", "new_session", "compact"].includes(event.command)) {
+        if (event.command === "new_session") forgetLastUserPrompt(event.tabId || activeTabId);
         scheduleRefreshState();
         scheduleRefreshMessages();
         scheduleRefreshFooter();
@@ -3043,7 +4562,7 @@ elements.followUpButton.addEventListener("click", () => sendPromptFromModeButton
 elements.terminalTabsToggleButton.addEventListener("click", () => {
   setMobileTabsExpanded(!document.body.classList.contains("mobile-tabs-expanded"));
 });
-elements.newTabButton.addEventListener("click", createTerminalTab);
+elements.newTabButton.addEventListener("click", () => createTerminalTab());
 elements.gitWorkflowButton.addEventListener("click", () => {
   setComposerActionsOpen(false);
   startGitWorkflow();
@@ -3051,7 +4570,9 @@ elements.gitWorkflowButton.addEventListener("click", () => {
 elements.gitWorkflowCancelButton.addEventListener("click", cancelGitWorkflow);
 elements.abortButton.addEventListener("click", async () => {
   try {
+    if (runIndicatorIsActive()) setRunIndicatorActivity("Abort requested; checking whether Pi stopped…");
     await api("/api/abort", { method: "POST", body: {} });
+    scheduleAbortStateChecks();
   } catch (error) {
     addEvent(error.message, "error");
   }
@@ -3062,7 +4583,9 @@ elements.newSessionButton.addEventListener("click", async () => {
   try {
     const response = await api("/api/new-session", { method: "POST", body: {} });
     applyResponseTab(response);
+    forgetLastUserPrompt(activeTabId);
     await refreshAll();
+    focusPromptInput({ defer: true });
   } catch (error) {
     addEvent(error.message, "error");
   }
@@ -3072,12 +4595,15 @@ elements.compactButton.addEventListener("click", async () => {
   try {
     elements.compactButton.disabled = true;
     elements.compactButton.textContent = "Compacting…";
+    setRunIndicatorActivity("Requesting context compaction…");
+    scrollChatToBottom({ force: true });
     addEvent("manual compaction requested");
     await api("/api/compact", { method: "POST", body: {} });
     scheduleRefreshState();
     scheduleRefreshMessages(600);
     scheduleRefreshFooter(600);
   } catch (error) {
+    clearRunIndicatorActivity();
     addEvent(error.message, "error");
   } finally {
     elements.compactButton.disabled = !!currentState?.isCompacting;
@@ -3102,6 +4628,7 @@ elements.setThinkingButton.addEventListener("click", async () => {
     addEvent(error.message, "error");
   }
 });
+elements.themeSelect.addEventListener("change", () => setThemeByName(elements.themeSelect.value, { persist: true, announce: true }));
 elements.openNetworkButton.addEventListener("click", openToNetwork);
 elements.toggleSidePanelButton.addEventListener("click", () => {
   setSidePanelCollapsed(true);
@@ -3112,6 +4639,7 @@ elements.sidePanelExpandButton.addEventListener("click", () => {
 elements.sidePanelBackdrop.addEventListener("click", () => {
   setSidePanelCollapsed(true);
 });
+elements.stickyUserPromptButton?.addEventListener("click", jumpToStickyUserPrompt);
 elements.jumpToLatestButton.addEventListener("click", jumpToLatest);
 elements.chat.addEventListener("wheel", noteChatUserScrollIntent, { passive: true });
 elements.chat.addEventListener("touchmove", noteChatUserScrollIntent, { passive: true });
@@ -3121,8 +4649,12 @@ elements.chat.addEventListener("keydown", (event) => {
 elements.chat.addEventListener("scroll", () => {
   syncAutoFollowFromChatScroll();
   markTabOutputSeen();
+  updateStickyUserPromptButton();
 }, { passive: true });
 document.addEventListener("pointerdown", (event) => {
+  if (openTerminalTabGroupKey && !event.target?.closest?.(".terminal-tab-group")) {
+    clearOpenTerminalTabGroup(openTerminalTabGroupKey);
+  }
   if (document.body.classList.contains("composer-actions-open") && !elements.composer.contains(event.target)) {
     setComposerActionsOpen(false);
   }
@@ -3131,6 +4663,11 @@ document.addEventListener("pointerdown", (event) => {
   }
   if (footerModelPickerOpen && !elements.statusBar.contains(event.target)) {
     setFooterModelPickerOpen(false);
+  }
+}, { passive: true });
+document.addEventListener("pointermove", (event) => {
+  if (openTerminalTabGroupKey && !event.target?.closest?.(".terminal-tab-group")) {
+    clearOpenTerminalTabGroup(openTerminalTabGroupKey);
   }
 }, { passive: true });
 window.addEventListener("keydown", (event) => {
@@ -3182,7 +4719,7 @@ elements.promptInput.addEventListener("keydown", (event) => {
       setActiveCommandSuggestion(commandSuggestIndex - 1);
       return;
     }
-    if (event.key === "Tab" && commandSuggestions.length > 0) {
+    if (event.key === "Tab" && activeSuggestionCount() > 0) {
       event.preventDefault();
       insertCommandSuggestion();
       return;
@@ -3219,8 +4756,11 @@ elements.promptInput.addEventListener("blur", () => {
 });
 
 resizePromptInput();
+focusPromptInput({ defer: true });
 updateComposerModeButtons();
+loadLastUserPromptCache();
 installViewportHandlers();
+initializeThemes().catch((error) => addEvent(`failed to load themes: ${error.message}`, "warn"));
 initializeFastPicks().catch((error) => addEvent(`failed to initialize path fast picks: ${error.message}`, "error"));
 restoreSidePanelState();
 bindMobileViewChanges();

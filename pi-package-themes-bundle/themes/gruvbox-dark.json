@@ -19,9 +19,9 @@
     "bgSelect": "#3c3836",
     "bgUser": "#282828",
     "bgPending": "#1d2021",
-    "bgSuccess": "#263322",
-    "bgError": "#3c2421",
-    "bgCustom": "#332b36",
+    "bgSuccess": "#3c3836",
+    "bgError": "#3c3836",
+    "bgCustom": "#3c3836",
     "pageBg": "#1d2021"
   },
   "colors": {
@@ -80,6 +80,6 @@
   "export": {
     "pageBg": "#1d2021",
     "cardBg": "#282828",
-    "infoBg": "#332b36"
+    "infoBg": "#3c3836"
   }
 }

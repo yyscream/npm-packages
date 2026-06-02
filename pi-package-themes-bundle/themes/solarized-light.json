@@ -14,15 +14,15 @@
     "muted": "#586e75",
     "dim": "#657b83",
     "comment": "#93a1a1",
-    "borderMuted": "#eee8d5",
+    "borderMuted": "#93a1a1",
     "thinkingMin": "#839496",
     "bgSelect": "#eee8d5",
     "bgUser": "#fdf6e3",
-    "bgPending": "#f5edda",
-    "bgSuccess": "#eef1d5",
-    "bgError": "#f4ded8",
-    "bgCustom": "#e9e7f4",
-    "pageBg": "#fffaf0"
+    "bgPending": "#eee8d5",
+    "bgSuccess": "#eee8d5",
+    "bgError": "#eee8d5",
+    "bgCustom": "#eee8d5",
+    "pageBg": "#eee8d5"
   },
   "colors": {
     "accent": "accent",
@@ -78,8 +78,8 @@
     "bashMode": "green"
   },
   "export": {
-    "pageBg": "#fffaf0",
+    "pageBg": "#eee8d5",
     "cardBg": "#fdf6e3",
-    "infoBg": "#e9e7f4"
+    "infoBg": "#eee8d5"
   }
 }

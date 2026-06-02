@@ -11,7 +11,9 @@
     "themes",
     "catppuccin",
     "dracula",
-    "tokyo-night"
+    "tokyo-night",
+    "matrix",
+    "crimson"
   ],
   "pi": {
     "themes": [

@@ -4,18 +4,20 @@ Firstpick's custom theme bundle for the Pi coding agent.
 
 ## What it does
 
-- Adds fourteen custom themes to Pi's theme discovery.
+- Adds sixteen custom themes to Pi's theme discovery.
 - Packages themes through `pi.themes: ["./themes"]` for npm installation.
-- Includes dark and light terminal palettes based on Catppuccin, Dracula, Tokyo Night, Gruvbox, Nord, Rosé Pine, One Dark, Solarized, and Everforest.
+- Includes dark and light terminal palettes based on Catppuccin, Dracula, Tokyo Night, Gruvbox, Nord, Rosé Pine, One Dark, Solarized, and Everforest, plus Matrix-inspired and dark crimson custom palettes.
 
 ## Included themes
 
 - `catppuccin-latte`
 - `catppuccin-mocha`
+- `crimson-noir`
 - `dracula`
 - `everforest-dark`
 - `gruvbox-dark`
 - `gruvbox-light`
+- `matrix`
 - `nord`
 - `one-dark`
 - `rose-pine`
