@@ -65,6 +65,8 @@ let currentState = null;
 let tabs = [];
 let activeTabId = null;
 let tabDrafts = new Map();
+let tabActivities = new Map();
+let tabSeenCompletionSerials = new Map();
 let streamBubble = null;
 let streamText = null;
 let streamThinking = null;
@@ -72,6 +74,7 @@ let streamThinkingDetails = null;
 let refreshMessagesTimer = null;
 let refreshStateTimer = null;
 let refreshFooterTimer = null;
+let refreshTabsTimer = null;
 let eventSource = null;
 let activeDialog = null;
 let pathPickerState = null;
@@ -335,6 +338,127 @@ function activeTab() {
   return tabs.find((tab) => tab.id === activeTabId) || null;
 }
 
+function normalizeTabActivity(activity = {}) {
+  const status = activity.status === "working" || activity.isWorking ? "working" : activity.status === "done" ? "done" : "idle";
+  const completionSerial = Number(activity.completionSerial);
+  return {
+    ...activity,
+    status,
+    isWorking: status === "working",
+    completionSerial: Number.isFinite(completionSerial) ? completionSerial : 0,
+  };
+}
+
+function tabActivityStateChanged(previous, next) {
+  return !previous || previous.status !== next.status || previous.isWorking !== next.isWorking || previous.completionSerial !== next.completionSerial;
+}
+
+function setTabActivity(tabId, activity = {}) {
+  if (!tabId) return null;
+  const previous = tabActivities.get(tabId);
+  const normalized = normalizeTabActivity(activity);
+  tabActivities.set(tabId, normalized);
+  if (!tabSeenCompletionSerials.has(tabId) || (previous && normalized.completionSerial < previous.completionSerial)) {
+    tabSeenCompletionSerials.set(tabId, normalized.completionSerial);
+  }
+  return normalized;
+}
+
+function syncTabMetadata(nextTabs = []) {
+  const liveIds = new Set();
+  for (const tab of nextTabs) {
+    if (!tab?.id) continue;
+    liveIds.add(tab.id);
+    setTabActivity(tab.id, tab.activity);
+  }
+  for (const tabId of tabActivities.keys()) {
+    if (!liveIds.has(tabId)) {
+      tabActivities.delete(tabId);
+      tabSeenCompletionSerials.delete(tabId);
+    }
+  }
+}
+
+function activityForTab(tab) {
+  if (!tab?.id) return normalizeTabActivity();
+  return tabActivities.get(tab.id) || setTabActivity(tab.id, tab.activity) || normalizeTabActivity();
+}
+
+function tabIndicator(tab) {
+  const activity = activityForTab(tab);
+  if (tab?.running && activity.isWorking) {
+    return { state: "working", label: "Working", meta: "working", glyph: "●" };
+  }
+  const seenSerial = tabSeenCompletionSerials.get(tab?.id) ?? activity.completionSerial;
+  if (tab?.running && activity.completionSerial > seenSerial) {
+    return { state: "done", label: "Work done", meta: "done", glyph: "◆" };
+  }
+  return { state: "idle", label: tab?.running ? "Idle" : "Stopped", meta: tab?.running ? "idle" : "stopped", glyph: "○" };
+}
+
+function hasWorkingTab() {
+  return tabs.some((tab) => tabIndicator(tab).state === "working");
+}
+
+function scheduleRefreshTabs(delay = 1500) {
+  clearTimeout(refreshTabsTimer);
+  refreshTabsTimer = setTimeout(() => {
+    refreshTabsTimer = null;
+    refreshTabs().catch((error) => addEvent(error.message, "error"));
+  }, delay);
+}
+
+function syncTabPolling() {
+  if (hasWorkingTab()) {
+    if (!refreshTabsTimer) scheduleRefreshTabs();
+  } else {
+    clearTimeout(refreshTabsTimer);
+    refreshTabsTimer = null;
+  }
+}
+
+function markTabWorkingLocally(tabId = activeTabId) {
+  const tab = tabs.find((item) => item.id === tabId);
+  if (!tab) return false;
+  const previous = activityForTab(tab);
+  const next = normalizeTabActivity({ ...previous, status: "working", isWorking: true });
+  tabActivities.set(tabId, next);
+  if (tabActivityStateChanged(previous, next)) renderTabs();
+  return true;
+}
+
+function markTabIdleLocally(tabId = activeTabId) {
+  const tab = tabs.find((item) => item.id === tabId);
+  if (!tab) return false;
+  const previous = activityForTab(tab);
+  const next = normalizeTabActivity({ ...previous, status: "idle", isWorking: false });
+  tabActivities.set(tabId, next);
+  if (tabActivityStateChanged(previous, next)) renderTabs();
+  return true;
+}
+
+function markTabOutputSeen(tabId = activeTabId, { force = false } = {}) {
+  if (!tabId) return false;
+  const tab = tabs.find((item) => item.id === tabId);
+  if (!tab) return false;
+  const activity = activityForTab(tab);
+  if (activity.isWorking) return false;
+  if (!force && tabId === activeTabId && !(autoFollowChat || isChatNearBottom())) return false;
+  const completionSerial = activity.completionSerial || 0;
+  const previousSerial = tabSeenCompletionSerials.get(tabId) ?? 0;
+  if (previousSerial >= completionSerial) return false;
+  tabSeenCompletionSerials.set(tabId, completionSerial);
+  renderTabs();
+  return true;
+}
+
+function ingestEventTabActivity(event) {
+  if (!event?.tabId || !event.tabActivity) return;
+  const previous = tabActivities.get(event.tabId);
+  const next = setTabActivity(event.tabId, event.tabActivity);
+  if (tabActivityStateChanged(previous, next)) renderTabs();
+}
+
 function rememberActiveTab() {
   try {
     if (activeTabId) localStorage.setItem(TAB_STORAGE_KEY, activeTabId);
@@ -434,20 +558,27 @@ function resetActiveTabUi() {
 
 function renderTabs() {
   const active = activeTab();
-  elements.terminalTabsToggleButton.textContent = active ? `${active.title}${tabs.length > 1 ? ` · ${tabs.length}` : ""}` : "Tabs";
-  elements.terminalTabsToggleButton.title = active ? `Show terminal tabs · active: ${active.title}` : "Show terminal tabs";
+  const activeIndicator = active ? tabIndicator(active) : null;
+  elements.terminalTabsToggleButton.textContent = active ? `${activeIndicator.glyph} ${active.title}${tabs.length > 1 ? ` · ${tabs.length}` : ""}` : "Tabs";
+  elements.terminalTabsToggleButton.title = active ? `Show terminal tabs · active: ${active.title} · ${activeIndicator.label}` : "Show terminal tabs";
   elements.tabBar.replaceChildren();
   for (const tab of tabs) {
     const isActive = tab.id === activeTabId;
-    const wrapper = make("div", `terminal-tab${isActive ? " active" : ""}${tab.running ? "" : " stopped"}`);
+    const indicator = tabIndicator(tab);
+    const wrapper = make("div", `terminal-tab activity-${indicator.state}${isActive ? " active" : ""}${tab.running ? "" : " stopped"}`);
     const button = make("button", "terminal-tab-button");
+    const titleRow = make("span", "terminal-tab-title-row");
+    const indicatorDot = make("span", "terminal-tab-activity-indicator");
+    indicatorDot.setAttribute("aria-hidden", "true");
+    titleRow.append(indicatorDot, make("span", "terminal-tab-title", tab.title));
     button.type = "button";
     button.setAttribute("role", "tab");
     button.setAttribute("aria-selected", isActive ? "true" : "false");
-    button.title = `${tab.title}${tab.running ? ` · pid ${tab.pid || "starting"}` : " · stopped"}`;
+    button.setAttribute("aria-label", `${tab.title}: ${indicator.label}`);
+    button.title = `${tab.title} · ${indicator.label}${tab.running ? ` · pid ${tab.pid || "starting"}` : " · stopped"}`;
     button.append(
-      make("span", "terminal-tab-title", tab.title),
-      make("span", "terminal-tab-meta", tab.running ? `pid ${tab.pid || "…"}` : "stopped"),
+      titleRow,
+      make("span", "terminal-tab-meta", tab.running ? `${indicator.meta} · pid ${tab.pid || "…"}` : "stopped"),
     );
     button.addEventListener("click", () => switchTab(tab.id));
     wrapper.append(button);
@@ -469,11 +600,13 @@ function renderTabs() {
   elements.tabBar.append(elements.newTabButton);
   setMobileTabsExpanded(mobileTabsExpanded);
   updateDocumentTitle();
+  syncTabPolling();
 }
 
 async function refreshTabs({ selectStored = false } = {}) {
   const response = await api("/api/tabs", { scoped: false });
   tabs = response.data?.tabs || [];
+  syncTabMetadata(tabs);
   const stored = selectStored ? restoreStoredTabId() : null;
   if (!activeTabId || !tabs.some((tab) => tab.id === activeTabId)) {
     activeTabId = (stored && tabs.some((tab) => tab.id === stored) ? stored : tabs[0]?.id) || null;
@@ -495,6 +628,7 @@ async function switchTab(tabId) {
   restoreActiveDraft();
   connectEvents();
   await refreshAll();
+  markTabOutputSeen();
 }
 
 async function createTerminalTab() {
@@ -503,6 +637,7 @@ async function createTerminalTab() {
   try {
     const response = await api("/api/tabs", { method: "POST", body: { cwd: activeTab()?.cwd }, scoped: false });
     tabs = response.data?.tabs || tabs;
+    syncTabMetadata(tabs);
     const tab = response.data?.tab;
     renderTabs();
     if (tab?.id) {
@@ -527,6 +662,7 @@ async function closeTerminalTab(tabId) {
     if (wasActive) eventSource?.close();
     const response = await api(`/api/tabs/${encodeURIComponent(tabId)}`, { method: "DELETE", scoped: false });
     tabs = response.data?.tabs || tabs.filter((item) => item.id !== tabId);
+    syncTabMetadata(tabs);
     tabDrafts.delete(tabId);
     if (wasActive) {
       activeTabId = (fallbackTabId && tabs.some((item) => item.id === fallbackTabId) ? fallbackTabId : tabs[0]?.id) || null;
@@ -535,7 +671,10 @@ async function closeTerminalTab(tabId) {
       renderTabs();
       restoreActiveDraft();
       connectEvents();
-      if (activeTabId) await refreshAll();
+      if (activeTabId) {
+        await refreshAll();
+        markTabOutputSeen();
+      }
     } else {
       renderTabs();
     }
@@ -550,7 +689,10 @@ async function initializeTabs() {
   renderTabs();
   restoreActiveDraft();
   connectEvents();
-  if (activeTabId) await refreshAll();
+  if (activeTabId) {
+    await refreshAll();
+    markTabOutputSeen();
+  }
 }
 
 function addEvent(message, level = "info") {
@@ -568,7 +710,7 @@ function formatDate(value) {
 }
 
 function stripAnsi(text) {
-  return String(text ?? "").replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "");
+  return String(text ?? "").replace(/(?:\x1B|\u241B)(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "");
 }
 
 function cleanStatusText(value) {
@@ -991,6 +1133,7 @@ async function changeActiveTabCwd() {
   try {
     const response = await api(`/api/tabs/${encodeURIComponent(tab.id)}`, { method: "PATCH", body: { cwd }, scoped: false });
     tabs = response.data?.tabs || tabs;
+    syncTabMetadata(tabs);
     activeTabId = response.data?.tab?.id || activeTabId;
     resetActiveTabUi();
     renderTabs();
@@ -1111,10 +1254,6 @@ function renderStatus() {
   elements.compactButton.textContent = state?.isCompacting ? "Compacting…" : "Compact";
   syncModelSelectToState();
   renderFooter();
-}
-
-function stripAnsi(text) {
-  return String(text || "").replace(/(?:\x1B|\u241B)(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "");
 }
 
 function normalizeDialogText(text) {
@@ -1638,6 +1777,7 @@ function scrollChatToBottom({ force = false } = {}) {
 
 function jumpToLatest() {
   scrollChatToBottom({ force: true });
+  markTabOutputSeen(activeTabId, { force: true });
 }
 
 function syncMobileChatToBottomForInput() {
@@ -1834,6 +1974,7 @@ async function refreshMessages() {
   latestMessages = response.data?.messages || [];
   resetStreamBubble();
   renderMessages(latestMessages);
+  markTabOutputSeen();
   renderFooter();
 }
 
@@ -2074,21 +2215,25 @@ async function sendPrompt(kind = "prompt") {
   const message = elements.promptInput.value.trim();
   if (!message) return;
 
+  const targetTabId = activeTabId;
+  const startsRun = kind === "prompt" && !currentState?.isStreaming;
   autoFollowChat = true;
   updateJumpToLatestButton();
   setComposerActionsOpen(false);
+  if (startsRun) markTabWorkingLocally(targetTabId);
 
   try {
     let response;
     if (kind === "steer") {
-      response = await api("/api/steer", { method: "POST", body: { message } });
+      response = await api("/api/steer", { method: "POST", body: { message }, tabId: targetTabId });
     } else if (kind === "follow-up") {
-      response = await api("/api/follow-up", { method: "POST", body: { message } });
+      response = await api("/api/follow-up", { method: "POST", body: { message }, tabId: targetTabId });
     } else {
       const body = { message };
       if (currentState?.isStreaming) body.streamingBehavior = elements.busyBehavior.value || "followUp";
-      response = await api("/api/prompt", { method: "POST", body });
+      response = await api("/api/prompt", { method: "POST", body, tabId: targetTabId });
     }
+    if (startsRun && response?.command === "native_slash_command") markTabIdleLocally(targetTabId);
     if (response?.command === "native_slash_command" && response.data?.copyText) {
       try {
         await navigator.clipboard.writeText(response.data.copyText);
@@ -2105,6 +2250,7 @@ async function sendPrompt(kind = "prompt") {
     hideCommandSuggestions();
     scheduleRefreshState();
   } catch (error) {
+    if (startsRun) markTabIdleLocally(targetTabId);
     addEvent(error.message, "error");
     addTransientMessage({ role: "error", title: message.startsWith("/") ? message.split(/\s+/, 1)[0] : "error", content: error.message, level: "error" });
   }
@@ -2226,6 +2372,7 @@ function showNextDialog() {
 }
 
 function handleEvent(event) {
+  ingestEventTabActivity(event);
   switch (event.type) {
     case "webui_connected":
       addEvent(`connected to ${event.tabTitle || "terminal"} for ${event.cwd}`);
@@ -2284,6 +2431,7 @@ function handleEvent(event) {
     case "agent_end":
       addEvent("agent finished");
       currentRunStartedAt = null;
+      markTabOutputSeen();
       scheduleRefreshState();
       scheduleRefreshMessages();
       scheduleRefreshFooter();
@@ -2320,6 +2468,7 @@ function handleEvent(event) {
       break;
     case "compaction_end":
       addEvent(`compaction ${event.aborted ? "aborted" : "finished"}`);
+      markTabOutputSeen();
       scheduleRefreshMessages();
       break;
     case "extension_ui_request":
@@ -2436,6 +2585,7 @@ elements.jumpToLatestButton.addEventListener("click", jumpToLatest);
 elements.chat.addEventListener("scroll", () => {
   autoFollowChat = isChatNearBottom();
   updateJumpToLatestButton();
+  markTabOutputSeen();
 }, { passive: true });
 document.addEventListener("pointerdown", (event) => {
   if (document.body.classList.contains("composer-actions-open") && !elements.composer.contains(event.target)) {

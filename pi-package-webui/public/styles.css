@@ -602,6 +602,14 @@ body.side-panel-collapsed .terminal-tabs-shell {
   opacity: 0.72;
   border-color: rgba(243, 139, 168, 0.28);
 }
+.terminal-tab.activity-working {
+  border-color: rgba(249, 226, 175, 0.56);
+  box-shadow: 0 0 1rem rgba(249, 226, 175, 0.14), inset 0 1px 0 rgba(255,255,255,0.045);
+}
+.terminal-tab.activity-done {
+  border-color: rgba(166, 227, 161, 0.52);
+  box-shadow: 0 0 1rem rgba(166, 227, 161, 0.16), inset 0 1px 0 rgba(255,255,255,0.045);
+}
 .terminal-tab-button,
 .terminal-tab-close,
 .terminal-new-tab-button {
@@ -620,6 +628,37 @@ body.side-panel-collapsed .terminal-tabs-shell {
   padding: 0.38rem 0.66rem;
   text-align: left;
 }
+.terminal-tab-title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.38rem;
+  min-width: 0;
+}
+.terminal-tab-activity-indicator {
+  flex: 0 0 0.58rem;
+  width: 0.58rem;
+  height: 0.58rem;
+  border-radius: 999px;
+  background: rgba(186, 194, 222, 0.38);
+  box-shadow: 0 0 0 1px rgba(255,255,255,0.08), 0 0 0.45rem rgba(186, 194, 222, 0.10);
+}
+.terminal-tab.activity-working .terminal-tab-activity-indicator {
+  background: var(--ctp-yellow);
+  box-shadow: 0 0 0 1px rgba(249, 226, 175, 0.34), 0 0 0.8rem rgba(249, 226, 175, 0.52);
+  animation: terminal-tab-working-pulse 1.15s ease-in-out infinite;
+}
+.terminal-tab.activity-done .terminal-tab-activity-indicator {
+  background: var(--ctp-green);
+  box-shadow: 0 0 0 1px rgba(166, 227, 161, 0.34), 0 0 0.8rem rgba(166, 227, 161, 0.48);
+}
+.terminal-tab.stopped .terminal-tab-activity-indicator {
+  background: var(--ctp-red);
+  box-shadow: 0 0 0 1px rgba(243, 139, 168, 0.28), 0 0 0.6rem rgba(243, 139, 168, 0.24);
+}
+@keyframes terminal-tab-working-pulse {
+  0%, 100% { transform: scale(0.86); opacity: 0.68; }
+  50% { transform: scale(1.08); opacity: 1; }
+}
 .terminal-tab-button:hover,
 .terminal-tab-close:hover,
 .terminal-new-tab-button:hover {
@@ -633,6 +672,7 @@ body.side-panel-collapsed .terminal-tabs-shell {
   white-space: nowrap;
 }
 .terminal-tab-title {
+  flex: 1 1 auto;
   color: var(--ctp-text);
   font-size: 0.84rem;
   font-weight: 900;
@@ -647,6 +687,8 @@ body.side-panel-collapsed .terminal-tabs-shell {
   color: var(--ctp-teal);
   text-shadow: 0 0 0.8rem var(--glow-teal);
 }
+.terminal-tab.activity-working .terminal-tab-meta { color: rgba(249, 226, 175, 0.82); }
+.terminal-tab.activity-done .terminal-tab-meta { color: rgba(166, 227, 161, 0.82); }
 .terminal-tab-close {
   flex: 0 0 2.1rem;
   color: rgba(186, 194, 222, 0.72);

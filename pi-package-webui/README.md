@@ -50,6 +50,7 @@ pi-webui --cwd /path/to/project
 
 - Browser chat with Pi over RPC
 - Isolated terminal tabs: each Web UI tab starts its own separate `pi --mode rpc` subprocess, event stream, session state, and prompt draft
+- Per-tab activity indicators for idle, working, and completed unseen work
 - Live assistant text streaming, including streamed thinking blocks when exposed by the provider
 - Prompt, steer, follow-up, abort, new session, and manual compact controls
 - Busy-session behavior selector for follow-up vs steer

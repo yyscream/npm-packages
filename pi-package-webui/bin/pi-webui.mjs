@@ -991,6 +991,79 @@ async function resolvePiCommand(piArgs) {
 const tabs = new Map();
 let nextTabIndex = 1;
 
+function createTabActivity(now = new Date().toISOString()) {
+  return {
+    status: "idle",
+    isWorking: false,
+    completionSerial: 0,
+    lastChangedAt: now,
+    lastStartedAt: null,
+    lastCompletedAt: null,
+  };
+}
+
+function resetTabActivity(tab) {
+  tab.activity = createTabActivity();
+}
+
+function tabActivitySnapshot(tab) {
+  return { ...(tab.activity || createTabActivity(tab.createdAt)) };
+}
+
+function markTabWorking(tab, timestamp = new Date().toISOString()) {
+  const activity = tab.activity || createTabActivity(timestamp);
+  activity.status = "working";
+  activity.isWorking = true;
+  activity.lastStartedAt = timestamp;
+  activity.lastChangedAt = timestamp;
+  tab.activity = activity;
+}
+
+function markTabDone(tab, timestamp = new Date().toISOString()) {
+  const activity = tab.activity || createTabActivity(timestamp);
+  activity.status = "done";
+  activity.isWorking = false;
+  activity.completionSerial = (Number(activity.completionSerial) || 0) + 1;
+  activity.lastCompletedAt = timestamp;
+  activity.lastChangedAt = timestamp;
+  tab.activity = activity;
+}
+
+function markTabIdle(tab, timestamp = new Date().toISOString()) {
+  const activity = tab.activity || createTabActivity(timestamp);
+  activity.status = "idle";
+  activity.isWorking = false;
+  activity.lastChangedAt = timestamp;
+  tab.activity = activity;
+}
+
+function commandStartsVisibleWork(command) {
+  return command?.type === "compact" || (command?.type === "prompt" && !command.streamingBehavior);
+}
+
+function updateTabActivityFromEvent(tab, event) {
+  const timestamp = new Date().toISOString();
+  switch (event?.type) {
+    case "agent_start":
+    case "compaction_start":
+      markTabWorking(tab, timestamp);
+      break;
+    case "agent_end":
+    case "compaction_end":
+      markTabDone(tab, timestamp);
+      break;
+    case "pi_process_exit":
+    case "pi_process_error":
+      if (tab.activity?.isWorking) markTabDone(tab, timestamp);
+      else markTabIdle(tab, timestamp);
+      break;
+    default:
+      if (!tab.activity) tab.activity = createTabActivity(timestamp);
+      break;
+  }
+  return tabActivitySnapshot(tab);
+}
+
 function defaultTabTitle(tabIndex) {
   if (options.name) return tabIndex === 1 ? options.name : `${options.name} ${tabIndex}`;
   return `Terminal ${tabIndex}`;
@@ -1000,7 +1073,8 @@ function attachRpcToTab(tab, rpc) {
   tab.rpcUnsubscribe?.();
   tab.rpc = rpc;
   tab.rpcUnsubscribe = rpc.onEvent((event) => {
-    const scopedEvent = { ...event, tabId: tab.id, tabTitle: tab.title };
+    const tabActivity = updateTabActivityFromEvent(tab, event);
+    const scopedEvent = { ...event, tabId: tab.id, tabTitle: tab.title, tabActivity };
     recordEvent(scopedEvent);
     for (const client of tab.sseClients) sendSse(client, scopedEvent);
   });
@@ -1014,12 +1088,14 @@ async function createTab({ title, cwd } = {}) {
   const piArgs = buildPiArgsForTab(tabIndex, tabTitle);
   const piCommand = await resolvePiCommand(piArgs);
   const rpc = new PiRpcProcess({ ...piCommand, cwd: tabCwd });
+  const createdAt = new Date().toISOString();
   const tab = {
     id,
     index: tabIndex,
     title: tabTitle,
     cwd: tabCwd,
-    createdAt: new Date().toISOString(),
+    createdAt,
+    activity: createTabActivity(createdAt),
     rpc: undefined,
     rpcUnsubscribe: undefined,
     sseClients: new Set(),
@@ -1047,6 +1123,7 @@ function tabMeta(tab) {
     running: !!tab.rpc.child && tab.rpc.child.exitCode === null,
     command: tab.rpc.displayCommand,
     clientCount: tab.sseClients.size,
+    activity: tabActivitySnapshot(tab),
   };
 }
 
@@ -1075,11 +1152,12 @@ async function updateTabCwd(id, cwd) {
   oldRpc.stop();
 
   tab.cwd = nextCwd;
+  resetTabActivity(tab);
   const rpc = new PiRpcProcess({ ...piCommand, cwd: tab.cwd });
   attachRpcToTab(tab, rpc);
   rpc.start();
 
-  const changedEvent = { type: "webui_cwd_changed", tabId: tab.id, tabTitle: tab.title, cwd: tab.cwd, pid: tab.rpc.child?.pid };
+  const changedEvent = { type: "webui_cwd_changed", tabId: tab.id, tabTitle: tab.title, cwd: tab.cwd, pid: tab.rpc.child?.pid, tabActivity: tabActivitySnapshot(tab) };
   recordEvent(changedEvent);
   for (const client of tab.sseClients) {
     sendSse(client, changedEvent);
@@ -1105,11 +1183,12 @@ async function restartTabRpc(tab, reason = "reload") {
   tab.rpcUnsubscribe = undefined;
   oldRpc.stop();
 
+  resetTabActivity(tab);
   const rpc = new PiRpcProcess({ ...piCommand, cwd: tab.cwd });
   attachRpcToTab(tab, rpc);
   rpc.start();
 
-  const reloadedEvent = { type: "webui_tab_reloaded", tabId: tab.id, tabTitle: tab.title, cwd: tab.cwd, pid: tab.rpc.child?.pid, reason, sessionFile: state.data?.sessionFile };
+  const reloadedEvent = { type: "webui_tab_reloaded", tabId: tab.id, tabTitle: tab.title, cwd: tab.cwd, pid: tab.rpc.child?.pid, reason, sessionFile: state.data?.sessionFile, tabActivity: tabActivitySnapshot(tab) };
   recordEvent(reloadedEvent);
   for (const client of tab.sseClients) sendSse(client, reloadedEvent);
   return tab;
@@ -1454,6 +1533,7 @@ const server = createServer(async (req, res) => {
         pid: tab.rpc.child?.pid,
         cwd: tab.cwd,
         startedAt: tab.rpc.startedAt,
+        tabActivity: tabActivitySnapshot(tab),
       });
       const keepAlive = setInterval(() => res.write(": keepalive\n\n"), 15000);
       req.on("close", () => {
@@ -1559,7 +1639,9 @@ const server = createServer(async (req, res) => {
         return;
       }
       const command = commandFromPost(url.pathname, body);
+      if (commandStartsVisibleWork(command)) markTabWorking(tab);
       const response = await tab.rpc.send(command);
+      if (response.success === false && commandStartsVisibleWork(command)) markTabIdle(tab);
       sendJson(res, response.success === false ? 400 : 200, response);
       return;
     }
@@ -1598,7 +1680,9 @@ const server = createServer(async (req, res) => {
       const command = commandFromPost(url.pathname, body);
       if (command) {
         const tab = getRequestedTab(req, url, body);
+        if (commandStartsVisibleWork(command)) markTabWorking(tab);
         const response = await tab.rpc.send(command);
+        if (response.success === false && commandStartsVisibleWork(command)) markTabIdle(tab);
         sendJson(res, response.success === false ? 400 : 200, response);
         return;
       }

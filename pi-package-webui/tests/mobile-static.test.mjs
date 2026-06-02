@@ -56,6 +56,9 @@ assert.match(css, /\.composer-actions-panel[\s\S]*?bottom:\s*calc\(100% \+ 0\.42
 assert.match(css, /body\.composer-actions-open \.composer-actions-panel \{ display: grid; \}/, "composer actions panel should only open when toggled");
 assert.match(css, /\.terminal-tabs-toggle-button \{ display: none; \}/, "terminal tab toggle should be hidden outside mobile CSS");
 assert.match(css, /body\.mobile-tabs-expanded \.terminal-tabs \{ display: flex; \}/, "mobile tabs should expand only when toggled");
+assert.match(css, /\.terminal-tab-activity-indicator/, "terminal tabs should expose per-tab agent activity indicators");
+assert.match(css, /\.terminal-tab\.activity-working[\s\S]*?terminal-tab-working-pulse/, "working tab indicators should be visibly animated");
+assert.match(css, /\.terminal-tab\.activity-done/, "completed unseen work should have a distinct tab style");
 assert.match(css, /\.terminal-tabs[\s\S]*?position:\s*absolute/, "expanded mobile tabs should overlay instead of consuming transcript space");
 assert.match(css, /body\.mobile-keyboard-open \.terminal-tabs-shell,[\s\S]*?body\.mobile-keyboard-open \.widget-area,[\s\S]*?body\.mobile-keyboard-open \.statusbar/, "mobile keyboard mode should hide header, widgets, and footer");
 assert.match(css, /body\.mobile-keyboard-open \.composer-actions-button,[\s\S]*?body\.mobile-keyboard-open #steerButton,[\s\S]*?body\.mobile-keyboard-open #followUpButton/, "mobile keyboard mode should hide secondary composer buttons");
@@ -107,6 +110,9 @@ assert.match(app, /maxVisualViewportHeight - viewportHeight > 120/, "keyboard mo
 assert.match(app, /jumpToLatestButton/, "jump-to-latest button should be wired in JS");
 assert.match(app, /function setComposerActionsOpen\(/, "mobile composer actions panel should be JS-toggleable");
 assert.match(app, /function setMobileTabsExpanded\(/, "mobile tab strip should be JS-toggleable");
+assert.match(app, /let tabSeenCompletionSerials = new Map\(\)/, "frontend should track which tab completions have been seen");
+assert.match(app, /function tabIndicator\(tab\)/, "frontend should derive idle, working, and work-done tab indicator states");
+assert.match(app, /function markTabOutputSeen\(/, "frontend should clear work-done indicators once output is seen");
 assert.match(app, /terminalTabsToggleButton\.addEventListener\("click"/, "terminal tabs trigger should be wired in JS");
 assert.match(app, /composerActionsButton\.addEventListener\("click"/, "composer actions trigger should be wired in JS");
 assert.match(app, /function setMobileFooterExpanded\(/, "mobile footer should have an expandable details state");
@@ -144,6 +150,8 @@ assert.ok(icon512.length > icon192.length, "PWA 512px icon should be present and
 assert.match(server, /const NATIVE_SLASH_COMMANDS = \[/, "server should define Pi native slash commands for autocomplete");
 assert.match(server, /\{ name: "reload", description: "Reload keybindings, extensions, skills, prompts, and themes" \}/, "native /reload should be advertised for autocomplete");
 assert.match(server, /function parseSlashCommand\(message\)/, "server should parse native slash commands before prompt forwarding");
+assert.match(server, /function createTabActivity\(/, "server should track per-tab activity for idle, working, and completed work");
+assert.match(server, /tabActivity: tabActivitySnapshot\(tab\)/, "server should expose tab activity over tab metadata and events");
 assert.match(server, /async function handleNativeSlashCommand\(tab, body\)/, "server should intercept supported native slash commands");
 assert.match(server, /if \(state\.data\?\.sessionFile && !options\.noSession\) piArgs\.push\("--session", state\.data\.sessionFile\)/, "native /reload should resume the same session file when restarting the RPC tab");
 assert.match(server, /case "reload": \{[\s\S]*?restartTabRpc\(tab, "slash-command"\)/, "native /reload should restart the active RPC tab");
