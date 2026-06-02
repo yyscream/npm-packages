@@ -8,6 +8,9 @@ const elements = {
   statusBar: $("#statusBar"),
   widgetArea: $("#widgetArea"),
   chat: $("#chat"),
+  feedbackTray: $("#feedbackTray"),
+  feedbackTraySummary: $("#feedbackTraySummary"),
+  sendFeedbackButton: $("#sendFeedbackButton"),
   jumpToLatestButton: $("#jumpToLatestButton"),
   composer: $("#composer"),
   composerRow: $(".composer-row"),
@@ -90,11 +93,17 @@ let latestWorkspace = null;
 let latestNetwork = null;
 let latestMessages = [];
 let transientMessages = [];
+let actionFeedbackByTab = new Map();
+let actionFeedbackSendBusy = false;
 let availableModels = [];
 let footerScopedModels = [];
 let footerScopedModelPatterns = [];
 let footerScopedModelSource = "none";
 let autoFollowChat = true;
+let chatFollowFrame = null;
+let chatFollowSettleTimer = null;
+let lastChatProgrammaticScrollAt = 0;
+let chatUserScrollIntentUntil = 0;
 let mobileFooterExpanded = false;
 let footerModelPickerOpen = false;
 let maxVisualViewportHeight = 0;
@@ -107,6 +116,11 @@ const TAB_STORAGE_KEY = "pi-webui-active-tab";
 const PATH_FAST_PICKS_STORAGE_KEY = "pi-webui-path-fast-picks";
 const MOBILE_VIEW_QUERY = "(max-width: 720px), (max-device-width: 720px), (pointer: coarse) and (hover: none)";
 const CHAT_BOTTOM_THRESHOLD_PX = 96;
+const CHAT_FOLLOW_SETTLE_DELAY_MS = 80;
+const CHAT_PROGRAMMATIC_SCROLL_GRACE_MS = 500;
+const CHAT_USER_SCROLL_INTENT_MS = 700;
+const CHAT_SCROLL_KEYS = new Set(["ArrowDown", "ArrowUp", "End", "Home", "PageDown", "PageUp", " "]);
+const TAB_ACTIVITY_IDLE_RECONCILE_GRACE_MS = 1200;
 const mobileViewMedia = window.matchMedia?.(MOBILE_VIEW_QUERY) || null;
 const statusEntries = new Map();
 const widgets = new Map();
@@ -121,6 +135,12 @@ const gitWorkflow = {
   messageRequestedAt: 0,
 };
 const GIT_WORKFLOW_STEPS = ["Stage", "Message", "Commit", "Push"];
+const ACTION_FEEDBACK_REACTIONS = {
+  up: { icon: "👍", label: "Good job", title: "Good job!" },
+  down: { icon: "👎", label: "Avoid this", title: "Avoid this" },
+  question: { icon: "?", label: "Explain this", title: "Explain this in the final output" },
+};
+const ACTION_FEEDBACK_SNIPPET_LIMIT = 1200;
 const GIT_WORKFLOW_ACTIVE_INDEX = {
   add: 0,
   generate: 1,
@@ -329,7 +349,10 @@ async function api(path, { method = "GET", body, tabId = activeTabId, scoped = t
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(data.error || data.message || JSON.stringify(data));
+    const error = new Error(data.error || data.message || JSON.stringify(data));
+    error.statusCode = response.status;
+    error.data = data;
+    throw error;
   }
   return data;
 }
@@ -375,8 +398,23 @@ function syncTabMetadata(nextTabs = []) {
     if (!liveIds.has(tabId)) {
       tabActivities.delete(tabId);
       tabSeenCompletionSerials.delete(tabId);
+      actionFeedbackByTab.delete(tabId);
     }
   }
+}
+
+function applyTabMetadata(tab) {
+  if (!tab?.id) return false;
+  const index = tabs.findIndex((item) => item.id === tab.id);
+  if (index === -1) tabs.push(tab);
+  else tabs[index] = { ...tabs[index], ...tab };
+  if (tab.activity) setTabActivity(tab.id, tab.activity);
+  renderTabs();
+  return true;
+}
+
+function applyResponseTab(response) {
+  return applyTabMetadata(response?.tab || response?.data?.tab);
 }
 
 function activityForTab(tab) {
@@ -435,6 +473,43 @@ function markTabIdleLocally(tabId = activeTabId) {
   tabActivities.set(tabId, next);
   if (tabActivityStateChanged(previous, next)) renderTabs();
   return true;
+}
+
+function markTabDoneLocally(tabId = activeTabId) {
+  const tab = tabs.find((item) => item.id === tabId);
+  if (!tab) return false;
+  const previous = activityForTab(tab);
+  const next = normalizeTabActivity({
+    ...previous,
+    status: "done",
+    isWorking: false,
+    completionSerial: (Number(previous.completionSerial) || 0) + 1,
+    lastCompletedAt: new Date().toISOString(),
+  });
+  tabActivities.set(tabId, next);
+  if (tabActivityStateChanged(previous, next)) renderTabs();
+  return true;
+}
+
+function tabActivityRecentlyStarted(activity, nowMs = Date.now()) {
+  const startedMs = Date.parse(activity?.lastStartedAt || activity?.lastChangedAt || "");
+  return Number.isFinite(startedMs) && nowMs - startedMs < TAB_ACTIVITY_IDLE_RECONCILE_GRACE_MS;
+}
+
+function stateHasVisibleWork(state) {
+  return !!state?.isStreaming || !!state?.isCompacting || Number(state?.pendingMessageCount || 0) > 0;
+}
+
+function syncActiveTabActivityFromState(state = currentState) {
+  const tab = activeTab();
+  if (!tab || !state || typeof state !== "object") return false;
+  const activity = activityForTab(tab);
+  if (stateHasVisibleWork(state)) {
+    if (!activity.isWorking) return markTabWorkingLocally(tab.id);
+    return false;
+  }
+  if (activity.isWorking && !tabActivityRecentlyStarted(activity)) return markTabDoneLocally(tab.id);
+  return false;
 }
 
 function markTabOutputSeen(tabId = activeTabId, { force = false } = {}) {
@@ -554,6 +629,7 @@ function resetActiveTabUi() {
   renderWidgets();
   renderGitWorkflow();
   renderFooter();
+  renderFeedbackTray();
 }
 
 function renderTabs() {
@@ -711,6 +787,125 @@ function formatDate(value) {
 
 function stripAnsi(text) {
   return String(text ?? "").replace(/(?:\x1B|\u241B)(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "");
+}
+
+const ANSI_16_COLORS = [
+  "#000000",
+  "#800000",
+  "#008000",
+  "#808000",
+  "#000080",
+  "#800080",
+  "#008080",
+  "#c0c0c0",
+  "#808080",
+  "#ff0000",
+  "#00ff00",
+  "#ffff00",
+  "#0000ff",
+  "#ff00ff",
+  "#00ffff",
+  "#ffffff",
+];
+
+function ansi256ToHex(index) {
+  const n = Number(index);
+  if (!Number.isInteger(n) || n < 0 || n > 255) return "";
+  if (n < 16) return ANSI_16_COLORS[n];
+  if (n < 232) {
+    const cubeIndex = n - 16;
+    const r = Math.floor(cubeIndex / 36);
+    const g = Math.floor((cubeIndex % 36) / 6);
+    const b = cubeIndex % 6;
+    const toHex = (value) => (value === 0 ? 0 : 55 + value * 40).toString(16).padStart(2, "0");
+    return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+  }
+  const gray = 8 + (n - 232) * 10;
+  const grayHex = gray.toString(16).padStart(2, "0");
+  return `#${grayHex}${grayHex}${grayHex}`;
+}
+
+function applyAnsiSgr(codes, state) {
+  const values = codes.length ? codes : [0];
+  for (let i = 0; i < values.length; i += 1) {
+    const code = Number(values[i] || 0);
+    if (code === 0) {
+      state.color = "";
+      state.backgroundColor = "";
+      state.fontWeight = "";
+      state.fontStyle = "";
+      state.textDecoration = "";
+    } else if (code === 1) {
+      state.fontWeight = "700";
+    } else if (code === 3) {
+      state.fontStyle = "italic";
+    } else if (code === 4) {
+      state.textDecoration = "underline";
+    } else if (code === 22) {
+      state.fontWeight = "";
+    } else if (code === 23) {
+      state.fontStyle = "";
+    } else if (code === 24) {
+      state.textDecoration = "";
+    } else if (code === 39) {
+      state.color = "";
+    } else if (code === 49) {
+      state.backgroundColor = "";
+    } else if (code >= 30 && code <= 37) {
+      state.color = ANSI_16_COLORS[code - 30];
+    } else if (code >= 90 && code <= 97) {
+      state.color = ANSI_16_COLORS[code - 90 + 8];
+    } else if (code >= 40 && code <= 47) {
+      state.backgroundColor = ANSI_16_COLORS[code - 40];
+    } else if (code >= 100 && code <= 107) {
+      state.backgroundColor = ANSI_16_COLORS[code - 100 + 8];
+    } else if ((code === 38 || code === 48) && Number(values[i + 1]) === 2) {
+      const r = Number(values[i + 2]);
+      const g = Number(values[i + 3]);
+      const b = Number(values[i + 4]);
+      if ([r, g, b].every((value) => Number.isInteger(value) && value >= 0 && value <= 255)) {
+        state[code === 38 ? "color" : "backgroundColor"] = `rgb(${r}, ${g}, ${b})`;
+      }
+      i += 4;
+    } else if ((code === 38 || code === 48) && Number(values[i + 1]) === 5) {
+      const color = ansi256ToHex(values[i + 2]);
+      if (color) state[code === 38 ? "color" : "backgroundColor"] = color;
+      i += 2;
+    }
+  }
+}
+
+function appendAnsiSegment(parent, text, state) {
+  const value = stripAnsi(text);
+  if (!value) return;
+  if (!state.color && !state.backgroundColor && !state.fontWeight && !state.fontStyle && !state.textDecoration) {
+    parent.append(document.createTextNode(value));
+    return;
+  }
+  const span = make("span", "ansi-segment");
+  span.textContent = value;
+  if (state.color) span.style.color = state.color;
+  if (state.backgroundColor) span.style.backgroundColor = state.backgroundColor;
+  if (state.fontWeight) span.style.fontWeight = state.fontWeight;
+  if (state.fontStyle) span.style.fontStyle = state.fontStyle;
+  if (state.textDecoration) span.style.textDecoration = state.textDecoration;
+  parent.append(span);
+}
+
+function renderAnsiText(parent, text) {
+  parent.replaceChildren();
+  const raw = String(text ?? "");
+  const pattern = /(?:\x1B|\u241B)\[([0-9;]*)m/g;
+  const state = { color: "", backgroundColor: "", fontWeight: "", fontStyle: "", textDecoration: "" };
+  let lastIndex = 0;
+  let match;
+  while ((match = pattern.exec(raw))) {
+    appendAnsiSegment(parent, raw.slice(lastIndex, match.index), state);
+    const codes = match[1].split(";").filter((part) => part !== "").map((part) => Number(part));
+    applyAnsiSgr(codes, state);
+    lastIndex = pattern.lastIndex;
+  }
+  appendAnsiSegment(parent, raw.slice(lastIndex), state);
 }
 
 function cleanStatusText(value) {
@@ -1254,36 +1449,44 @@ function renderStatus() {
   elements.compactButton.textContent = state?.isCompacting ? "Compacting…" : "Compact";
   syncModelSelectToState();
   renderFooter();
+  renderFeedbackTray();
 }
 
-function normalizeDialogText(text) {
-  return stripAnsi(text).replace(/\r\n?/g, "\n");
+function normalizeDialogText(text, { preserveAnsi = false } = {}) {
+  const normalized = String(text ?? "").replace(/\r\n?/g, "\n");
+  return preserveAnsi ? normalized : stripAnsi(normalized);
 }
 
 function normalizeDialogPrompt(request) {
-  const rawTitle = normalizeDialogText(request.title || "Pi request");
-  const rawMessage = normalizeDialogText(request.message || request.placeholder || "");
+  const rawTitle = normalizeDialogText(request.title || "Pi request", { preserveAnsi: true });
+  const rawMessage = normalizeDialogText(request.message || request.placeholder || "", { preserveAnsi: true });
 
   if (rawTitle.includes("\n")) {
     const lines = rawTitle.split("\n");
-    const titleIndex = lines.findIndex((line) => line.trim());
+    const titleIndex = lines.findIndex((line) => stripAnsi(line).trim());
     if (titleIndex !== -1) {
       const titleBody = lines.slice(titleIndex + 1).join("\n").replace(/^\n+/, "").trimEnd();
+      const message = [titleBody, rawMessage.trimEnd()].filter((part) => stripAnsi(part).trim()).join("\n\n");
       return {
-        title: lines[titleIndex].trim(),
-        message: [titleBody, rawMessage.trimEnd()].filter(Boolean).join("\n\n"),
+        title: stripAnsi(lines[titleIndex]).trim(),
+        message,
+        plainMessage: stripAnsi(message),
       };
     }
   }
 
+  const message = rawMessage.trimEnd();
   return {
-    title: rawTitle.trim() || "Pi request",
-    message: rawMessage.trimEnd(),
+    title: stripAnsi(rawTitle).trim() || "Pi request",
+    message,
+    plainMessage: stripAnsi(message),
   };
 }
 
 function isGuardrailDialogPrompt(prompt) {
-  return /(?:dangerous|high-risk|protected).*(?:command|file)|safety rule|execute anyway\?/i.test(`${prompt.title}\n${prompt.message}`);
+  const plainTitle = stripAnsi(prompt.title || "");
+  const plainMessage = prompt.plainMessage ?? stripAnsi(prompt.message || "");
+  return /(?:dangerous|high-risk|protected).*(?:command|file)|safety rule|execute anyway\?/i.test(`${plainTitle}\n${plainMessage}`);
 }
 
 function parseTodoProgressWidget(lines) {
@@ -1653,6 +1856,231 @@ function appendImage(parent, part) {
   parent.append(wrapper);
 }
 
+function isActionFeedbackMessage(message) {
+  return message?.role === "assistant" || message?.role === "toolResult" || message?.role === "bashExecution";
+}
+
+function truncateActionFeedbackText(text, limit = ACTION_FEEDBACK_SNIPPET_LIMIT) {
+  const value = String(text || "").trim();
+  if (value.length <= limit) return value;
+  return `${value.slice(0, limit - 1)}…`;
+}
+
+function actionFeedbackKey(message, messageIndex) {
+  return [
+    activeTabId || "tab",
+    messageIndex,
+    message?.role || "message",
+    message?.toolName || "",
+    message?.command || "",
+    message?.timestamp || "",
+  ].join("|");
+}
+
+function actionFeedbackSummary(message) {
+  if (message?.role === "assistant") {
+    return { kind: "final output", title: message.title || "final output", snippet: truncateActionFeedbackText(textFromContent(message?.content)) };
+  }
+  const title = messageTitle(message);
+  if (message?.role === "bashExecution") {
+    return {
+      kind: "action",
+      title,
+      snippet: truncateActionFeedbackText(`$ ${message.command || ""}\n\n${message.output || ""}`),
+    };
+  }
+  return { kind: "action", title, snippet: truncateActionFeedbackText(textFromContent(message?.content)) };
+}
+
+function feedbackMapForTab(tabId = activeTabId) {
+  if (!tabId) return new Map();
+  let map = actionFeedbackByTab.get(tabId);
+  if (!map) {
+    map = new Map();
+    actionFeedbackByTab.set(tabId, map);
+  }
+  return map;
+}
+
+function queuedActionFeedback(tabId = activeTabId) {
+  const map = actionFeedbackByTab.get(tabId);
+  return map ? [...map.values()].sort((a, b) => a.messageIndex - b.messageIndex) : [];
+}
+
+function actionFeedbackSteerMessage(item) {
+  const comment = item.comment ? `\nUser comment: ${item.comment}` : "";
+  const snippet = item.snippet ? `\nAction excerpt:\n${item.snippet}` : "";
+  const target = item.kind || "action";
+  if (item.reaction === "up") return `Direct feedback: 👍 Good job! Keep this kind of ${target}.\nTarget (${target}): ${item.title}${snippet}`;
+  if (item.reaction === "down") return `Direct feedback: 👎 Avoid or reconsider this ${target} and similar future patterns.\nTarget (${target}): ${item.title}${comment}${snippet}`;
+  return `Direct feedback: ? Please explain this ${target} in detail in your final output.\nTarget (${target}): ${item.title}${snippet}`;
+}
+
+async function sendLiveActionFeedback(item) {
+  if (!isRunActive()) return;
+  await api("/api/steer", { method: "POST", body: { message: actionFeedbackSteerMessage(item) }, tabId: item.tabId });
+  addEvent(`sent ${ACTION_FEEDBACK_REACTIONS[item.reaction]?.icon || "feedback"} action feedback as live steering`);
+}
+
+function setActionFeedback(message, messageIndex, reaction) {
+  const tabId = activeTabId;
+  if (!tabId || !ACTION_FEEDBACK_REACTIONS[reaction]) return;
+  const key = actionFeedbackKey(message, messageIndex);
+  const map = feedbackMapForTab(tabId);
+  const existing = map.get(key);
+  let comment = existing?.comment || "";
+  if (reaction === "down") {
+    const nextComment = window.prompt("Optional comment for Pi about what to avoid:", comment);
+    if (nextComment === null) return;
+    comment = nextComment.trim();
+  }
+  const summary = actionFeedbackSummary(message);
+  const item = {
+    key,
+    tabId,
+    messageIndex,
+    reaction,
+    comment,
+    kind: summary.kind,
+    title: summary.title,
+    snippet: summary.snippet,
+    createdAt: new Date().toISOString(),
+  };
+  map.set(key, item);
+  renderAllMessages({ preserveScroll: true });
+  renderFeedbackTray();
+  if (isRunActive()) sendLiveActionFeedback(item).catch((error) => addEvent(error.message, "error"));
+  else addEvent("feedback queued; send it after the agent has finished to create a LEARNING");
+}
+
+function serializeActionFeedback(item) {
+  return {
+    reaction: item.reaction,
+    comment: item.comment,
+    kind: item.kind,
+    title: item.title,
+    snippet: item.snippet,
+    messageIndex: item.messageIndex,
+    createdAt: item.createdAt,
+  };
+}
+
+function feedbackReactionLabel(reaction) {
+  if (reaction === "up") return "👍 thumbs up — Good job; repeat this pattern when appropriate.";
+  if (reaction === "down") return "👎 thumbs down — avoid or reconsider this target/pattern; prioritize the user comment.";
+  return "? question mark — explain this target in detail in the final output.";
+}
+
+function formatActionFeedbackLearningPrompt(items) {
+  const lines = [
+    "The user submitted direct feedback on specific Web UI action or final-output cards from your last run.",
+    "Use it to steer future behavior and create or update a concise LEARNING note from this feedback.",
+    "Reaction semantics:",
+    "- 👍 thumbs up: treat as 'Good job!' and reinforce the action/pattern.",
+    "- 👎 thumbs down: avoid or reconsider this target/pattern; include any user comment.",
+    "- ? question mark: explain the target in detail in your final output.",
+    "",
+    "Feedback items:",
+  ];
+  items.forEach((item, index) => {
+    lines.push(
+      `${index + 1}. ${feedbackReactionLabel(item.reaction)}`,
+      `   Target (${item.kind || "action"}): ${item.title}`,
+      item.comment ? `   User comment: ${item.comment}` : undefined,
+      item.snippet ? `   Target excerpt:\n${item.snippet.split(/\r?\n/).map((line) => `     ${line}`).join("\n")}` : undefined,
+    );
+  });
+  lines.push(
+    "",
+    "After processing this feedback, report which LEARNING was created or updated. If any item used '?', include the requested detailed explanation in the final response.",
+  );
+  return lines.filter((line) => line !== undefined).join("\n");
+}
+
+function isMissingActionFeedbackEndpoint(error) {
+  return error?.statusCode === 404 || /not found/i.test(error?.message || "");
+}
+
+async function postQueuedFeedback(tabId, items) {
+  const feedback = items.map(serializeActionFeedback);
+  try {
+    await api("/api/action-feedback", { method: "POST", body: { feedback }, tabId });
+  } catch (error) {
+    if (!isMissingActionFeedbackEndpoint(error)) throw error;
+    addEvent("/api/action-feedback not found; falling back to a normal prompt. Restart Web UI to use the dedicated endpoint.", "warn");
+    await api("/api/prompt", { method: "POST", body: { message: formatActionFeedbackLearningPrompt(feedback) }, tabId });
+  }
+}
+
+function renderActionFeedbackControls(bubble, message, messageIndex) {
+  if (!isActionFeedbackMessage(message) || messageIndex < 0) return;
+  const key = actionFeedbackKey(message, messageIndex);
+  const selected = actionFeedbackByTab.get(activeTabId)?.get(key)?.reaction;
+  const controls = make("div", "action-feedback-controls");
+  controls.setAttribute("aria-label", message?.role === "assistant" ? "Final output feedback" : "Action feedback");
+  for (const [reaction, meta] of Object.entries(ACTION_FEEDBACK_REACTIONS)) {
+    const button = make("button", `action-feedback-button feedback-${reaction}${selected === reaction ? " active" : ""}`, meta.icon);
+    button.type = "button";
+    button.title = meta.title;
+    button.setAttribute("aria-label", meta.title);
+    button.setAttribute("aria-pressed", selected === reaction ? "true" : "false");
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setActionFeedback(message, messageIndex, reaction);
+    });
+    controls.append(button);
+  }
+  bubble.classList.add("has-action-feedback");
+  bubble.append(controls);
+}
+
+function renderFeedbackTray() {
+  const items = queuedActionFeedback();
+  const hasItems = items.length > 0;
+  elements.feedbackTray.hidden = !hasItems;
+  if (!hasItems) return;
+  const questions = items.filter((item) => item.reaction === "question").length;
+  const downs = items.filter((item) => item.reaction === "down").length;
+  const ups = items.filter((item) => item.reaction === "up").length;
+  const parts = [ups ? `${ups} 👍` : "", downs ? `${downs} 👎` : "", questions ? `${questions} ?` : ""].filter(Boolean).join(" · ");
+  elements.feedbackTraySummary.textContent = `${items.length} action reaction${items.length === 1 ? "" : "s"} queued${parts ? ` (${parts})` : ""}.`;
+  const runActive = isRunActive();
+  elements.sendFeedbackButton.disabled = actionFeedbackSendBusy || runActive;
+  elements.sendFeedbackButton.textContent = actionFeedbackSendBusy ? "Sending…" : runActive ? "Send after finish" : "Send & create LEARNING";
+}
+
+async function submitQueuedActionFeedback() {
+  const tabId = activeTabId;
+  const items = queuedActionFeedback(tabId);
+  if (!tabId || items.length === 0 || actionFeedbackSendBusy) return;
+  if (isRunActive()) {
+    addEvent("wait for the agent to finish before sending queued action feedback", "warn");
+    renderFeedbackTray();
+    return;
+  }
+
+  actionFeedbackSendBusy = true;
+  markTabWorkingLocally(tabId);
+  renderFeedbackTray();
+  try {
+    await postQueuedFeedback(tabId, items);
+    actionFeedbackByTab.get(tabId)?.clear();
+    renderAllMessages({ preserveScroll: true });
+    addEvent("feedback sent; Pi will create a LEARNING");
+    scheduleRefreshState();
+    scheduleRefreshMessages();
+    scheduleRefreshFooter();
+  } catch (error) {
+    markTabIdleLocally(tabId);
+    addEvent(error.message, "error");
+    addTransientMessage({ role: "error", title: "feedback", content: error.message, level: "error" });
+  } finally {
+    actionFeedbackSendBusy = false;
+    renderFeedbackTray();
+  }
+}
+
 function renderContent(parent, content) {
   if (content === undefined || content === null) return;
   if (typeof content === "string") {
@@ -1698,7 +2126,7 @@ function messageTitle(message) {
   return message.role || "message";
 }
 
-function appendMessage(message, { streaming = false } = {}) {
+function appendMessage(message, { streaming = false, messageIndex = -1, transient = false } = {}) {
   const role = String(message.role || "message");
   const safeRole = role.replace(/[^a-z0-9_-]/gi, "");
   const bubble = make("article", `message ${safeRole}${message.level ? ` ${message.level}` : ""}${streaming ? " streaming" : ""}`);
@@ -1726,6 +2154,7 @@ function appendMessage(message, { streaming = false } = {}) {
   } else {
     bubble.append(header, body);
   }
+  if (!streaming && !transient) renderActionFeedbackControls(bubble, message, messageIndex);
   elements.chat.append(bubble);
   return { bubble, body };
 }
@@ -1734,8 +2163,8 @@ function renderAllMessages({ preserveScroll = false } = {}) {
   const shouldFollow = !preserveScroll && (autoFollowChat || isChatNearBottom());
   const previousScrollTop = elements.chat.scrollTop;
   elements.chat.replaceChildren();
-  for (const message of latestMessages) appendMessage(message);
-  for (const message of transientMessages) appendMessage(message);
+  latestMessages.forEach((message, index) => appendMessage(message, { messageIndex: index }));
+  transientMessages.forEach((message, index) => appendMessage(message, { messageIndex: index, transient: true }));
   if (shouldFollow) scrollChatToBottom({ force: true });
   else {
     elements.chat.scrollTop = Math.min(previousScrollTop, elements.chat.scrollHeight);
@@ -1765,13 +2194,63 @@ function updateJumpToLatestButton() {
   elements.jumpToLatestButton.hidden = autoFollowChat || isChatNearBottom();
 }
 
-function scrollChatToBottom({ force = false } = {}) {
-  if (!force && !autoFollowChat) {
+function noteChatUserScrollIntent(event) {
+  if (event?.type === "wheel" && event.deltaY >= 0 && autoFollowChat) return;
+  chatUserScrollIntentUntil = performance.now() + CHAT_USER_SCROLL_INTENT_MS;
+}
+
+function isChatUserScrollIntentActive() {
+  return performance.now() <= chatUserScrollIntentUntil;
+}
+
+function setChatScrollTopInstant(top) {
+  const previousBehavior = elements.chat.style.scrollBehavior;
+  elements.chat.style.scrollBehavior = "auto";
+  elements.chat.scrollTop = top;
+  if (previousBehavior) elements.chat.style.scrollBehavior = previousBehavior;
+  else elements.chat.style.removeProperty("scroll-behavior");
+}
+
+function applyChatFollowScroll() {
+  chatFollowFrame = null;
+  if (!autoFollowChat) {
     updateJumpToLatestButton();
     return;
   }
-  elements.chat.scrollTop = elements.chat.scrollHeight;
-  autoFollowChat = true;
+  lastChatProgrammaticScrollAt = performance.now();
+  setChatScrollTopInstant(elements.chat.scrollHeight);
+  updateJumpToLatestButton();
+}
+
+function scheduleChatFollowScroll() {
+  if (chatFollowFrame === null) chatFollowFrame = requestAnimationFrame(applyChatFollowScroll);
+  clearTimeout(chatFollowSettleTimer);
+  chatFollowSettleTimer = setTimeout(() => {
+    chatFollowSettleTimer = null;
+    applyChatFollowScroll();
+  }, CHAT_FOLLOW_SETTLE_DELAY_MS);
+}
+
+function scrollChatToBottom({ force = false } = {}) {
+  if (force) autoFollowChat = true;
+  if (!autoFollowChat) {
+    updateJumpToLatestButton();
+    return;
+  }
+  lastChatProgrammaticScrollAt = performance.now();
+  setChatScrollTopInstant(elements.chat.scrollHeight);
+  scheduleChatFollowScroll();
+  updateJumpToLatestButton();
+}
+
+function syncAutoFollowFromChatScroll() {
+  const nearBottom = isChatNearBottom();
+  const recentProgrammaticScroll = performance.now() - lastChatProgrammaticScrollAt <= CHAT_PROGRAMMATIC_SCROLL_GRACE_MS;
+  if (nearBottom || isChatUserScrollIntentActive() || !autoFollowChat || !recentProgrammaticScroll) {
+    autoFollowChat = nearBottom;
+  } else {
+    scheduleChatFollowScroll();
+  }
   updateJumpToLatestButton();
 }
 
@@ -1815,6 +2294,7 @@ function renderMessages(messages) {
   latestMessages = messages || [];
   renderAllMessages();
   renderFooter();
+  renderFeedbackTray();
 }
 
 function ensureStreamBubble() {
@@ -1887,6 +2367,7 @@ function handleMessageUpdate(event) {
 async function refreshState() {
   const response = await api("/api/state");
   currentState = response.data || null;
+  syncActiveTabActivityFromState(currentState);
   renderStatus();
 }
 
@@ -2002,6 +2483,7 @@ async function refreshModels() {
   }
   syncModelSelectToState();
   renderFooter();
+  renderFeedbackTray();
 }
 
 function syncModelSelectToState() {
@@ -2165,7 +2647,12 @@ async function refreshCommands() {
   }
   elements.commandsBox.classList.remove("muted");
   for (const command of availableCommands.slice(0, 80)) {
-    const item = make("div", "command-item");
+    const item = make("button", "command-item");
+    item.type = "button";
+    item.title = `Send /${command.name}`;
+    item.setAttribute("aria-label", `Send /${command.name}${command.description ? `: ${command.description}` : ""}`);
+    item.addEventListener("click", () => sendPrompt("prompt", `/${command.name}`));
+
     const code = make("code", undefined, `/${command.name}`);
     item.append(code);
     if (command.description) item.append(document.createTextNode(` — ${command.description}`));
@@ -2211,8 +2698,10 @@ async function openToNetwork() {
   }
 }
 
-async function sendPrompt(kind = "prompt") {
-  const message = elements.promptInput.value.trim();
+async function sendPrompt(kind = "prompt", explicitMessage) {
+  const usesPromptInput = explicitMessage === undefined;
+  const rawMessage = usesPromptInput ? elements.promptInput.value : explicitMessage;
+  const message = String(rawMessage || "").trim();
   if (!message) return;
 
   const targetTabId = activeTabId;
@@ -2233,6 +2722,7 @@ async function sendPrompt(kind = "prompt") {
       if (currentState?.isStreaming) body.streamingBehavior = elements.busyBehavior.value || "followUp";
       response = await api("/api/prompt", { method: "POST", body, tabId: targetTabId });
     }
+    applyResponseTab(response);
     if (startsRun && response?.command === "native_slash_command") markTabIdleLocally(targetTabId);
     if (response?.command === "native_slash_command" && response.data?.copyText) {
       try {
@@ -2245,14 +2735,35 @@ async function sendPrompt(kind = "prompt") {
     if (response?.command === "native_slash_command" && response.data?.message) {
       addTransientMessage({ role: "native", title: message.split(/\s+/, 1)[0], content: response.data.message, level: response.data.level || "info" });
     }
-    elements.promptInput.value = "";
-    resizePromptInput();
+    if (usesPromptInput) {
+      elements.promptInput.value = "";
+      resizePromptInput();
+    }
     hideCommandSuggestions();
     scheduleRefreshState();
   } catch (error) {
     if (startsRun) markTabIdleLocally(targetTabId);
     addEvent(error.message, "error");
     addTransientMessage({ role: "error", title: message.startsWith("/") ? message.split(/\s+/, 1)[0] : "error", content: error.message, level: "error" });
+  }
+}
+
+function hasQueuedDialogRequest(id) {
+  if (!id) return false;
+  const key = String(id);
+  return String(activeDialog?.id || "") === key || dialogQueue.some((request) => String(request?.id || "") === key);
+}
+
+function removeQueuedDialogRequests(ids = []) {
+  const idSet = new Set(ids.map((id) => String(id)).filter(Boolean));
+  if (idSet.size === 0) return;
+  for (let i = dialogQueue.length - 1; i >= 0; i -= 1) {
+    if (idSet.has(String(dialogQueue[i]?.id || ""))) dialogQueue.splice(i, 1);
+  }
+  if (activeDialog && idSet.has(String(activeDialog.id || ""))) {
+    if (elements.dialog.open) elements.dialog.close();
+    activeDialog = null;
+    showNextDialog();
   }
 }
 
@@ -2289,6 +2800,8 @@ function handleExtensionUiRequest(request) {
     case "confirm":
     case "input":
     case "editor":
+      if (hasQueuedDialogRequest(request.id)) return;
+      if (request.replayed) addEvent(`recovered pending ${request.method} request`, "warn");
       dialogQueue.push(request);
       showNextDialog();
       return;
@@ -2304,7 +2817,7 @@ async function sendDialogResponse(payload) {
   } catch (error) {
     addEvent(error.message, "error");
   } finally {
-    elements.dialog.close();
+    if (elements.dialog.open) elements.dialog.close();
     activeDialog = null;
     showNextDialog();
   }
@@ -2327,8 +2840,8 @@ function showNextDialog() {
   const isGuardrailDialog = isGuardrailDialogPrompt(prompt);
   elements.dialog.classList.toggle("guardrail-dialog", isGuardrailDialog);
   elements.dialogTitle.textContent = prompt.title;
-  elements.dialogMessage.textContent = prompt.message;
-  elements.dialogMessage.hidden = !prompt.message;
+  renderAnsiText(elements.dialogMessage, prompt.message);
+  elements.dialogMessage.hidden = !prompt.plainMessage;
   elements.dialogBody.replaceChildren();
   elements.dialogActions.replaceChildren();
 
@@ -2378,6 +2891,10 @@ function handleEvent(event) {
       addEvent(`connected to ${event.tabTitle || "terminal"} for ${event.cwd}`);
       refreshTabs().catch((error) => addEvent(error.message, "error"));
       break;
+    case "webui_tab_renamed":
+      applyTabMetadata(event.tab || { id: event.tabId, title: event.tabTitle, activity: event.tabActivity });
+      addEvent(`${event.previousTabTitle || "terminal"} renamed to ${event.tabTitle || "terminal"}`);
+      break;
     case "pi_process_start":
       addEvent(`started pi rpc pid ${event.pid}`);
       refreshTabs().catch((error) => addEvent(error.message, "error"));
@@ -2394,6 +2911,10 @@ function handleEvent(event) {
       addTransientMessage({ role: "native", title: "/reload", content: `${event.tabTitle || "terminal"} reloaded. Keybindings, extensions, skills, prompts, and themes were refreshed by restarting the RPC tab${event.sessionFile ? ` and resuming ${event.sessionFile}` : ""}.`, level: "info" });
       refreshTabs().catch((error) => addEvent(error.message, "error"));
       setTimeout(() => refreshAll().catch((error) => addEvent(error.message, "error")), 500);
+      break;
+    case "webui_extension_ui_cancelled":
+      removeQueuedDialogRequests(event.ids || []);
+      addEvent(`cancelled ${event.ids?.length || 0} pending extension UI request(s)`, "warn");
       break;
     case "webui_cwd_changed":
       addEvent(`${event.tabTitle || "terminal"} cwd changed to ${event.cwd}`);
@@ -2424,17 +2945,21 @@ function handleEvent(event) {
       currentRunStartedAt = performance.now();
       currentRunStreamChars = 0;
       latestTokPerSecond = null;
+      if (currentState) currentState = { ...currentState, isStreaming: true };
       addEvent("agent started");
       scheduleRefreshState();
       renderFooter();
+      renderFeedbackTray();
       break;
     case "agent_end":
       addEvent("agent finished");
       currentRunStartedAt = null;
+      if (currentState) currentState = { ...currentState, isStreaming: false };
       markTabOutputSeen();
       scheduleRefreshState();
       scheduleRefreshMessages();
       scheduleRefreshFooter();
+      renderFeedbackTray();
       if (gitWorkflow.active && gitWorkflow.step === "generating") {
         loadGitWorkflowMessage({ requireFresh: true, retries: 3 });
       }
@@ -2476,7 +3001,11 @@ function handleEvent(event) {
       break;
     case "response":
       if (event.success === false) addEvent(`${event.command} failed: ${event.error || "unknown error"}`, "error");
-      else if (["set_model", "set_thinking_level", "new_session", "compact"].includes(event.command)) {
+      else if (event.command === "get_state" && event.tabId === activeTabId) {
+        currentState = event.data || currentState;
+        syncActiveTabActivityFromState(currentState);
+        renderStatus();
+      } else if (["set_model", "set_thinking_level", "new_session", "compact"].includes(event.command)) {
         scheduleRefreshState();
         scheduleRefreshMessages();
         scheduleRefreshFooter();
@@ -2501,6 +3030,7 @@ function connectEvents() {
   eventSource.onerror = () => addEvent("event stream disconnected; browser will retry", "warn");
 }
 
+elements.sendFeedbackButton.addEventListener("click", () => submitQueuedActionFeedback());
 elements.composer.addEventListener("submit", (event) => {
   event.preventDefault();
   sendPrompt("prompt");
@@ -2530,7 +3060,8 @@ elements.newSessionButton.addEventListener("click", async () => {
   setComposerActionsOpen(false);
   if (!confirm("Start a new Pi session?")) return;
   try {
-    await api("/api/new-session", { method: "POST", body: {} });
+    const response = await api("/api/new-session", { method: "POST", body: {} });
+    applyResponseTab(response);
     await refreshAll();
   } catch (error) {
     addEvent(error.message, "error");
@@ -2582,9 +3113,13 @@ elements.sidePanelBackdrop.addEventListener("click", () => {
   setSidePanelCollapsed(true);
 });
 elements.jumpToLatestButton.addEventListener("click", jumpToLatest);
+elements.chat.addEventListener("wheel", noteChatUserScrollIntent, { passive: true });
+elements.chat.addEventListener("touchmove", noteChatUserScrollIntent, { passive: true });
+elements.chat.addEventListener("keydown", (event) => {
+  if (CHAT_SCROLL_KEYS.has(event.key)) noteChatUserScrollIntent(event);
+}, { passive: true });
 elements.chat.addEventListener("scroll", () => {
-  autoFollowChat = isChatNearBottom();
-  updateJumpToLatestButton();
+  syncAutoFollowFromChatScroll();
   markTabOutputSeen();
 }, { passive: true });
 document.addEventListener("pointerdown", (event) => {

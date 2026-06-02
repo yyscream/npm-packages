@@ -18,8 +18,48 @@ const DEFAULT_PORT = 31415;
 const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 const BODY_LIMIT_BYTES = 1024 * 1024;
 const EVENT_HISTORY_LIMIT = 200;
+const EXTENSION_UI_BLOCKING_METHODS = new Set(["select", "confirm", "input", "editor"]);
 const STATUS_RPC_TIMEOUT_MS = 1_800;
 const FAST_PICK_LIMIT = 30;
+const AUTO_TAB_TITLE_MAX_LENGTH = 44;
+const AUTO_TAB_TITLE_WORD_LIMIT = 8;
+const AUTO_TAB_TITLE_STOP_WORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "are",
+  "as",
+  "at",
+  "be",
+  "best",
+  "by",
+  "for",
+  "from",
+  "how",
+  "in",
+  "is",
+  "it",
+  "its",
+  "me",
+  "my",
+  "of",
+  "on",
+  "or",
+  "please",
+  "s",
+  "should",
+  "that",
+  "the",
+  "this",
+  "to",
+  "way",
+  "what",
+  "whats",
+  "when",
+  "with",
+  "you",
+  "your",
+]);
 
 const MIME_TYPES = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -386,6 +426,81 @@ function rpcSuccess(command, data = {}) {
   return { type: "response", command, success: true, data };
 }
 
+const ACTION_FEEDBACK_REACTIONS = new Set(["up", "down", "question"]);
+
+function trimFeedbackField(value, maxLength) {
+  const text = String(value || "").trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
+function normalizeActionFeedbackItems(body) {
+  const rawItems = Array.isArray(body?.feedback) ? body.feedback : Array.isArray(body?.items) ? body.items : [];
+  if (rawItems.length === 0) throw new Error("feedback is required");
+  if (rawItems.length > 20) throw new Error("feedback is limited to 20 reactions per submission");
+  return rawItems.map((item, index) => {
+    const reaction = String(item?.reaction || "").trim();
+    if (!ACTION_FEEDBACK_REACTIONS.has(reaction)) throw new Error(`Invalid feedback reaction at item ${index + 1}`);
+    return {
+      reaction,
+      comment: trimFeedbackField(item?.comment, 800),
+      kind: trimFeedbackField(item?.kind || "action", 80),
+      title: trimFeedbackField(item?.title || `item ${index + 1}`, 240),
+      snippet: trimFeedbackField(item?.snippet, 2000),
+      messageIndex: Number.isFinite(Number(item?.messageIndex)) ? Number(item.messageIndex) : index,
+      createdAt: trimFeedbackField(item?.createdAt, 80),
+    };
+  });
+}
+
+function actionFeedbackReactionLabel(reaction) {
+  if (reaction === "up") return "👍 thumbs up — Good job; repeat this pattern when appropriate.";
+  if (reaction === "down") return "👎 thumbs down — avoid or reconsider this target/pattern; prioritize the user comment.";
+  return "? question mark — explain this target in detail in the final output.";
+}
+
+function formatActionFeedbackLearningPrompt(items) {
+  const lines = [
+    "The user submitted direct feedback on specific Web UI action or final-output cards from your last run.",
+    "Use it to steer future behavior and create or update a concise LEARNING note from this feedback.",
+    "Reaction semantics:",
+    "- 👍 thumbs up: treat as 'Good job!' and reinforce the action/pattern.",
+    "- 👎 thumbs down: avoid or reconsider this target/pattern; include any user comment.",
+    "- ? question mark: explain the target in detail in your final output.",
+    "",
+    "Feedback items:",
+  ];
+
+  items.forEach((item, index) => {
+    lines.push(
+      `${index + 1}. ${actionFeedbackReactionLabel(item.reaction)}`,
+      `   Target (${item.kind}): ${item.title}`,
+      item.comment ? `   User comment: ${item.comment}` : undefined,
+      item.snippet ? `   Action excerpt:\n${item.snippet.split(/\r?\n/).map((line) => `     ${line}`).join("\n")}` : undefined,
+    );
+  });
+
+  lines.push(
+    "",
+    "After processing this feedback, report which LEARNING was created or updated. If any item used '?', include the requested detailed explanation in the final response.",
+  );
+  return lines.filter((line) => line !== undefined).join("\n");
+}
+
+async function handleActionFeedback(tab, body) {
+  const feedbackItems = normalizeActionFeedbackItems(body);
+  const state = await tab.rpc.send({ type: "get_state" });
+  if (state.success === false) return state;
+  if (state.data?.isStreaming || state.data?.isCompacting) {
+    throw makeHttpError(409, "Wait for the current agent run or compaction to finish before sending feedback.");
+  }
+
+  const command = { type: "prompt", message: formatActionFeedbackLearningPrompt(feedbackItems) };
+  markTabWorking(tab);
+  const response = await tab.rpc.send(command);
+  if (response.success === false) markTabIdle(tab);
+  return response;
+}
+
 function parseSlashCommand(message) {
   const text = String(message || "").trim();
   if (!text.startsWith("/") || text.includes("\n")) return undefined;
@@ -394,6 +509,54 @@ function parseSlashCommand(message) {
   const name = match[1].toLowerCase();
   if (!NATIVE_SLASH_COMMAND_NAMES.has(name)) return undefined;
   return { name, args: (match[2] || "").trim(), text };
+}
+
+function truncateTabTitle(title, maxLength = AUTO_TAB_TITLE_MAX_LENGTH) {
+  const text = String(title || "").replace(/\s+/g, " ").trim();
+  if (!maxLength || text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(1, maxLength - 1)).trimEnd()}…`;
+}
+
+function titleCaseTabTitle(title) {
+  return title ? `${title.charAt(0).toUpperCase()}${title.slice(1)}` : "";
+}
+
+function generatedTabTitleFromPrompt(message) {
+  const line = String(message || "")
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .find((item) => item && !item.startsWith("```"));
+  if (!line) return "";
+
+  const cleaned = line
+    .replace(/https?:\/\/\S+/gi, "link")
+    .replace(/^\/+/, "")
+    .replace(/[-_]+/g, " ")
+    .replace(/[`*_~#>{}\[\]()<>'"“”‘’,;:!?]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^(?:please\s+)?(?:can|could|would)\s+you\s+/i, "")
+    .replace(/^(?:please\s+)?(?:help\s+me\s+|i\s+(?:need|want)\s+(?:you\s+to\s+)?)/i, "")
+    .replace(/^(?:for|in|on)\s+the\s+/i, "");
+  if (!cleaned) return "";
+
+  const words = cleaned.split(/\s+/).map((word) => word.replace(/^[^\w]+|[^\w]+$/g, "")).filter(Boolean);
+  const meaningfulWords = words.filter((word) => !AUTO_TAB_TITLE_STOP_WORDS.has(word.toLowerCase()));
+  const selectedWords = (meaningfulWords.length >= 3 ? meaningfulWords : words).slice(0, AUTO_TAB_TITLE_WORD_LIMIT);
+  return truncateTabTitle(titleCaseTabTitle(selectedWords.join(" ")));
+}
+
+function uniqueTabTitle(title, currentTab, maxLength = AUTO_TAB_TITLE_MAX_LENGTH) {
+  const base = truncateTabTitle(title, maxLength);
+  if (!base) return "";
+  const existing = new Set([...tabs.values()].filter((tab) => tab.id !== currentTab?.id).map((tab) => tab.title));
+  if (!existing.has(base)) return base;
+  for (let suffix = 2; suffix < 100; suffix++) {
+    const suffixText = ` ${suffix}`;
+    const candidate = `${truncateTabTitle(base, Math.max(1, maxLength - suffixText.length))}${suffixText}`;
+    if (!existing.has(candidate)) return candidate;
+  }
+  return `${truncateTabTitle(base, Math.max(1, maxLength - 4))} ${currentTab?.index || 1}`;
 }
 
 const eventHistory = [];
@@ -408,7 +571,7 @@ function statusEventSummary(event) {
     timestamp: new Date().toISOString(),
     type: String(event?.type || "event"),
   };
-  for (const key of ["tabId", "tabTitle", "pid", "cwd", "code", "signal", "command", "queueLength", "pendingMessageCount"]) {
+  for (const key of ["id", "tabId", "tabTitle", "previousTabTitle", "titleSource", "pid", "cwd", "code", "signal", "command", "method", "replayed", "queueLength", "pendingMessageCount", "pendingExtensionUiRequestCount"]) {
     if (event?.[key] !== undefined) summary[key] = event[key];
   }
   if (event?.assistantMessageEvent?.type) summary.updateType = event.assistantMessageEvent.type;
@@ -990,6 +1153,9 @@ async function resolvePiCommand(piArgs) {
 
 const tabs = new Map();
 let nextTabIndex = 1;
+const TAB_ACTIVITY_IDLE_RECONCILE_GRACE_MS = 1200;
+const TAB_ACTIVITY_STATE_RECONCILE_INTERVAL_MS = 2500;
+const TAB_ACTIVITY_STATE_RECONCILE_TIMEOUT_MS = 1200;
 
 function createTabActivity(now = new Date().toISOString()) {
   return {
@@ -1008,6 +1174,96 @@ function resetTabActivity(tab) {
 
 function tabActivitySnapshot(tab) {
   return { ...(tab.activity || createTabActivity(tab.createdAt)) };
+}
+
+function pendingExtensionUiMap(tab) {
+  if (!tab.pendingExtensionUiRequests) tab.pendingExtensionUiRequests = new Map();
+  return tab.pendingExtensionUiRequests;
+}
+
+function isPendingExtensionUiRequest(event) {
+  return event?.type === "extension_ui_request" && EXTENSION_UI_BLOCKING_METHODS.has(event.method) && event.id;
+}
+
+function pruneExpiredPendingExtensionUiRequests(tab, nowMs = Date.now()) {
+  const pending = tab?.pendingExtensionUiRequests;
+  if (!pending) return;
+  for (const [id, request] of pending) {
+    const expiresAtMs = Date.parse(request.expiresAt || "");
+    if (Number.isFinite(expiresAtMs) && expiresAtMs <= nowMs) pending.delete(id);
+  }
+}
+
+function pendingExtensionUiRequests(tab) {
+  pruneExpiredPendingExtensionUiRequests(tab);
+  return [...(tab?.pendingExtensionUiRequests?.values() || [])];
+}
+
+function pendingExtensionUiRequestSummaries(tab) {
+  return pendingExtensionUiRequests(tab).map((request) => ({
+    id: request.id,
+    method: request.method,
+    title: truncateStatusText(request.title || request.placeholder || "", 120),
+    message: request.message ? truncateStatusText(request.message, 180) : undefined,
+    receivedAt: request.receivedAt,
+    expiresAt: request.expiresAt,
+  }));
+}
+
+function trackPendingExtensionUiRequest(tab, event) {
+  if (!isPendingExtensionUiRequest(event)) return;
+  const receivedAt = new Date().toISOString();
+  const timeoutMs = Number(event.timeout);
+  const expiresAt = Number.isFinite(timeoutMs) && timeoutMs > 0 ? new Date(Date.parse(receivedAt) + timeoutMs + 1000).toISOString() : undefined;
+  pendingExtensionUiMap(tab).set(String(event.id), { ...event, receivedAt, expiresAt });
+}
+
+function resolvePendingExtensionUiRequest(tab, id) {
+  if (!id) return false;
+  return !!tab?.pendingExtensionUiRequests?.delete(String(id));
+}
+
+function clearPendingExtensionUiRequests(tab) {
+  tab?.pendingExtensionUiRequests?.clear();
+}
+
+function replayPendingExtensionUiRequests(tab, res) {
+  const pending = pendingExtensionUiRequests(tab);
+  for (const request of pending) {
+    sendSse(res, {
+      ...request,
+      type: "extension_ui_request",
+      replayed: true,
+      tabId: tab.id,
+      tabTitle: tab.title,
+      pendingExtensionUiRequestCount: pending.length,
+      tabActivity: tabActivitySnapshot(tab),
+    });
+  }
+}
+
+async function cancelPendingExtensionUiRequests(tab) {
+  const pending = pendingExtensionUiRequests(tab);
+  if (!pending.length) return 0;
+  const ids = [];
+  for (const request of pending) {
+    ids.push(String(request.id));
+    try {
+      await tab.rpc.writeRaw({ type: "extension_ui_response", id: request.id, cancelled: true });
+    } catch {
+      // Abort should remain best-effort even if the RPC process already exited.
+    }
+    resolvePendingExtensionUiRequest(tab, request.id);
+  }
+  broadcastTabEvent(tab, {
+    type: "webui_extension_ui_cancelled",
+    tabId: tab.id,
+    tabTitle: tab.title,
+    ids,
+    pendingExtensionUiRequestCount: pendingExtensionUiRequests(tab).length,
+    tabActivity: tabActivitySnapshot(tab),
+  });
+  return ids.length;
 }
 
 function markTabWorking(tab, timestamp = new Date().toISOString()) {
@@ -1041,6 +1297,51 @@ function commandStartsVisibleWork(command) {
   return command?.type === "compact" || (command?.type === "prompt" && !command.streamingBehavior);
 }
 
+function commandStartsConversation(command) {
+  return command?.type === "prompt" && !command.streamingBehavior;
+}
+
+function stateHasVisibleWork(state) {
+  return !!state?.isStreaming || !!state?.isCompacting || Number(state?.pendingMessageCount || 0) > 0;
+}
+
+function activityRecentlyStarted(activity, nowMs = Date.now()) {
+  const startedMs = Date.parse(activity?.lastStartedAt || activity?.lastChangedAt || "");
+  return Number.isFinite(startedMs) && nowMs - startedMs < TAB_ACTIVITY_IDLE_RECONCILE_GRACE_MS;
+}
+
+function reconcileTabActivityFromState(tab, state, timestamp = new Date().toISOString()) {
+  if (!tab) return createTabActivity(timestamp);
+  if (!state || typeof state !== "object") return tabActivitySnapshot(tab);
+  if (stateHasVisibleWork(state)) {
+    if (!tab.activity?.isWorking) markTabWorking(tab, timestamp);
+    return tabActivitySnapshot(tab);
+  }
+  if (tab.activity?.isWorking && !activityRecentlyStarted(tab.activity)) {
+    markTabDone(tab, timestamp);
+  }
+  return tabActivitySnapshot(tab);
+}
+
+async function reconcileWorkingTabActivity(tab) {
+  if (!tab?.activity?.isWorking) return;
+  if (activityRecentlyStarted(tab.activity)) return;
+  const now = Date.now();
+  if (now - (tab.activityStateReconcileAt || 0) < TAB_ACTIVITY_STATE_RECONCILE_INTERVAL_MS) return;
+  tab.activityStateReconcileAt = now;
+  try {
+    const response = await tab.rpc.send({ type: "get_state" }, TAB_ACTIVITY_STATE_RECONCILE_TIMEOUT_MS);
+    if (response?.success !== false) reconcileTabActivityFromState(tab, response.data);
+  } catch {
+    // Ignore reconciliation failures; normal RPC events will still update activity.
+  }
+}
+
+async function listTabsWithReconciledActivity() {
+  await Promise.all([...tabs.values()].map(reconcileWorkingTabActivity));
+  return listTabs();
+}
+
 function updateTabActivityFromEvent(tab, event) {
   const timestamp = new Date().toISOString();
   switch (event?.type) {
@@ -1056,6 +1357,10 @@ function updateTabActivityFromEvent(tab, event) {
     case "pi_process_error":
       if (tab.activity?.isWorking) markTabDone(tab, timestamp);
       else markTabIdle(tab, timestamp);
+      break;
+    case "response":
+      if (event.command === "get_state" && event.success !== false) reconcileTabActivityFromState(tab, event.data, timestamp);
+      else if (!tab.activity) tab.activity = createTabActivity(timestamp);
       break;
     default:
       if (!tab.activity) tab.activity = createTabActivity(timestamp);
@@ -1075,6 +1380,8 @@ function attachRpcToTab(tab, rpc) {
   tab.rpcUnsubscribe = rpc.onEvent((event) => {
     const tabActivity = updateTabActivityFromEvent(tab, event);
     const scopedEvent = { ...event, tabId: tab.id, tabTitle: tab.title, tabActivity };
+    if (event?.type === "pi_process_exit" || event?.type === "pi_process_error") clearPendingExtensionUiRequests(tab);
+    else trackPendingExtensionUiRequest(tab, scopedEvent);
     recordEvent(scopedEvent);
     for (const client of tab.sseClients) sendSse(client, scopedEvent);
   });
@@ -1082,7 +1389,10 @@ function attachRpcToTab(tab, rpc) {
 
 async function createTab({ title, cwd } = {}) {
   const tabIndex = nextTabIndex++;
-  const tabTitle = String(title || "").trim() || defaultTabTitle(tabIndex);
+  const explicitTitle = String(title || "").trim();
+  const tabTitle = explicitTitle || defaultTabTitle(tabIndex);
+  const titleIsExplicit = Boolean(explicitTitle || (options.name && tabIndex === 1));
+  const titleSource = titleIsExplicit ? "explicit" : "default";
   const tabCwd = cwd ? await resolveCwd(cwd, options.cwd) : options.cwd;
   const id = randomUUID();
   const piArgs = buildPiArgsForTab(tabIndex, tabTitle);
@@ -1093,9 +1403,12 @@ async function createTab({ title, cwd } = {}) {
     id,
     index: tabIndex,
     title: tabTitle,
+    titleSource,
+    conversationStarted: false,
     cwd: tabCwd,
     createdAt,
     activity: createTabActivity(createdAt),
+    pendingExtensionUiRequests: new Map(),
     rpc: undefined,
     rpcUnsubscribe: undefined,
     sseClients: new Set(),
@@ -1116,6 +1429,8 @@ function tabMeta(tab) {
     id: tab.id,
     index: tab.index,
     title: tab.title,
+    titleSource: tab.titleSource || "default",
+    conversationStarted: !!tab.conversationStarted,
     cwd: tab.cwd,
     createdAt: tab.createdAt,
     startedAt: tab.rpc.startedAt,
@@ -1123,12 +1438,53 @@ function tabMeta(tab) {
     running: !!tab.rpc.child && tab.rpc.child.exitCode === null,
     command: tab.rpc.displayCommand,
     clientCount: tab.sseClients.size,
+    pendingExtensionUiRequestCount: pendingExtensionUiRequests(tab).length,
     activity: tabActivitySnapshot(tab),
   };
 }
 
 function listTabs() {
   return [...tabs.values()].map(tabMeta);
+}
+
+function broadcastTabEvent(tab, event) {
+  recordEvent(event);
+  for (const client of tab.sseClients) sendSse(client, event);
+}
+
+function renameTab(tab, title, { source = "explicit", maxLength, unique = source === "auto" } = {}) {
+  if (!tab) return false;
+  const rawTitle = maxLength ? truncateTabTitle(title, maxLength) : String(title || "").replace(/\s+/g, " ").trim();
+  const nextTitle = unique ? uniqueTabTitle(rawTitle, tab, maxLength || AUTO_TAB_TITLE_MAX_LENGTH) : rawTitle;
+  if (!nextTitle) return false;
+
+  const previousTitle = tab.title;
+  tab.title = nextTitle;
+  tab.titleSource = source;
+  if (previousTitle === nextTitle) return false;
+
+  broadcastTabEvent(tab, {
+    type: "webui_tab_renamed",
+    tabId: tab.id,
+    tabTitle: tab.title,
+    previousTabTitle: previousTitle,
+    titleSource: source,
+    tab: tabMeta(tab),
+    tabActivity: tabActivitySnapshot(tab),
+  });
+  return true;
+}
+
+function maybeNameTabForConversation(tab, command) {
+  if (!tab || !commandStartsConversation(command) || tab.conversationStarted || tab.titleSource === "explicit") return false;
+  tab.conversationStarted = true;
+  const title = generatedTabTitleFromPrompt(command.message) || `Conversation ${tab.index}`;
+  return renameTab(tab, title, { source: "auto", maxLength: AUTO_TAB_TITLE_MAX_LENGTH });
+}
+
+function responseWithTab(response, tab) {
+  if (!response || typeof response !== "object") return response;
+  return { ...response, tab: tabMeta(tab) };
 }
 
 async function updateTabCwd(id, cwd) {
@@ -1153,6 +1509,7 @@ async function updateTabCwd(id, cwd) {
 
   tab.cwd = nextCwd;
   resetTabActivity(tab);
+  clearPendingExtensionUiRequests(tab);
   const rpc = new PiRpcProcess({ ...piCommand, cwd: tab.cwd });
   attachRpcToTab(tab, rpc);
   rpc.start();
@@ -1184,6 +1541,7 @@ async function restartTabRpc(tab, reason = "reload") {
   oldRpc.stop();
 
   resetTabActivity(tab);
+  clearPendingExtensionUiRequests(tab);
   const rpc = new PiRpcProcess({ ...piCommand, cwd: tab.cwd });
   attachRpcToTab(tab, rpc);
   rpc.start();
@@ -1239,7 +1597,9 @@ async function handleNativeSlashCommand(tab, body) {
     }
     case "new": {
       const response = await tab.rpc.send({ type: "new_session" });
-      return response.success === false ? response : rpcSuccess("native_slash_command", { command: "new", message: "Started a new session.", result: response.data });
+      if (response.success === false) return response;
+      tab.conversationStarted = false;
+      return rpcSuccess("native_slash_command", { command: "new", tab: tabMeta(tab), message: "Started a new session.", result: response.data });
     }
     case "compact": {
       const response = await tab.rpc.send(parsed.args ? { type: "compact", customInstructions: parsed.args } : { type: "compact" });
@@ -1248,7 +1608,9 @@ async function handleNativeSlashCommand(tab, body) {
     case "name": {
       if (!parsed.args) throw makeHttpError(400, "Usage: /name <session name>");
       const response = await tab.rpc.send({ type: "set_session_name", name: parsed.args });
-      return response.success === false ? response : rpcSuccess("native_slash_command", { command: "name", message: `Session name set to: ${parsed.args}` });
+      if (response.success === false) return response;
+      renameTab(tab, parsed.args, { source: "explicit" });
+      return rpcSuccess("native_slash_command", { command: "name", tab: tabMeta(tab), message: `Session and tab name set to: ${tab.title}` });
     }
     case "session": {
       const [state, stats] = await Promise.all([
@@ -1449,6 +1811,7 @@ async function tabStatusDetails(tab) {
     statsError: statsResult.ok ? undefined : statsResult.error,
     workspace: workspaceResult.ok ? workspaceResult.data : null,
     workspaceError: workspaceResult.ok ? undefined : workspaceResult.error,
+    pendingExtensionUiRequests: pendingExtensionUiRequestSummaries(tab),
     models: {
       count: models.length,
       providers: providerList(models),
@@ -1489,7 +1852,7 @@ const server = createServer(async (req, res) => {
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
 
     if (url.pathname === "/api/tabs" && req.method === "GET") {
-      sendJson(res, 200, { ok: true, data: { tabs: listTabs() } });
+      sendJson(res, 200, { ok: true, data: { tabs: await listTabsWithReconciledActivity() } });
       return;
     }
 
@@ -1534,7 +1897,9 @@ const server = createServer(async (req, res) => {
         cwd: tab.cwd,
         startedAt: tab.rpc.startedAt,
         tabActivity: tabActivitySnapshot(tab),
+        pendingExtensionUiRequestCount: pendingExtensionUiRequests(tab).length,
       });
+      replayPendingExtensionUiRequests(tab, res);
       const keepAlive = setInterval(() => res.write(": keepalive\n\n"), 15000);
       req.on("close", () => {
         clearInterval(keepAlive);
@@ -1630,19 +1995,31 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === "/api/action-feedback" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const tab = getRequestedTab(req, url, body);
+      const response = await handleActionFeedback(tab, body);
+      sendJson(res, response.success === false ? 400 : 200, response);
+      return;
+    }
+
     if (url.pathname === "/api/prompt" && req.method === "POST") {
       const body = await readJsonBody(req);
       const tab = getRequestedTab(req, url, body);
       const nativeResponse = await handleNativeSlashCommand(tab, body);
       if (nativeResponse) {
-        sendJson(res, nativeResponse.success === false ? 400 : 200, nativeResponse);
+        sendJson(res, nativeResponse.success === false ? 400 : 200, responseWithTab(nativeResponse, tab));
         return;
       }
       const command = commandFromPost(url.pathname, body);
-      if (commandStartsVisibleWork(command)) markTabWorking(tab);
+      const startsVisibleWork = commandStartsVisibleWork(command);
+      if (startsVisibleWork) {
+        maybeNameTabForConversation(tab, command);
+        markTabWorking(tab);
+      }
       const response = await tab.rpc.send(command);
-      if (response.success === false && commandStartsVisibleWork(command)) markTabIdle(tab);
-      sendJson(res, response.success === false ? 400 : 200, response);
+      if (response.success === false && startsVisibleWork) markTabIdle(tab);
+      sendJson(res, response.success === false ? 400 : 200, responseWithTab(response, tab));
       return;
     }
 
@@ -1671,6 +2048,7 @@ const server = createServer(async (req, res) => {
       if (payload.type !== "extension_ui_response") payload.type = "extension_ui_response";
       if (!payload.id) throw new Error("id is required");
       await tab.rpc.writeRaw(payload);
+      resolvePendingExtensionUiRequest(tab, payload.id);
       sendJson(res, 200, { ok: true });
       return;
     }
@@ -1680,10 +2058,19 @@ const server = createServer(async (req, res) => {
       const command = commandFromPost(url.pathname, body);
       if (command) {
         const tab = getRequestedTab(req, url, body);
-        if (commandStartsVisibleWork(command)) markTabWorking(tab);
+        if (command.type === "abort") await cancelPendingExtensionUiRequests(tab);
+        const startsVisibleWork = commandStartsVisibleWork(command);
+        if (startsVisibleWork) {
+          maybeNameTabForConversation(tab, command);
+          markTabWorking(tab);
+        }
         const response = await tab.rpc.send(command);
-        if (response.success === false && commandStartsVisibleWork(command)) markTabIdle(tab);
-        sendJson(res, response.success === false ? 400 : 200, response);
+        if (response.success === false && startsVisibleWork) markTabIdle(tab);
+        if (response.success !== false && command.type === "new_session") {
+          tab.conversationStarted = false;
+          clearPendingExtensionUiRequests(tab);
+        }
+        sendJson(res, response.success === false ? 400 : 200, responseWithTab(response, tab));
         return;
       }
     }

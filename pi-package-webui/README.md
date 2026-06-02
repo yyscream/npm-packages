@@ -50,6 +50,7 @@ pi-webui --cwd /path/to/project
 
 - Browser chat with Pi over RPC
 - Isolated terminal tabs: each Web UI tab starts its own separate `pi --mode rpc` subprocess, event stream, session state, and prompt draft
+- Automatic tab naming from the first prompt on default-named tabs, plus `/name <title>` to manually sync the Pi session and browser tab name
 - Per-tab activity indicators for idle, working, and completed unseen work
 - Live assistant text streaming, including streamed thinking blocks when exposed by the provider
 - Prompt, steer, follow-up, abort, new session, and manual compact controls
@@ -61,6 +62,7 @@ pi-webui --cwd /path/to/project
 - Pi-style footer with token, cache, estimated Pi-context tokens, speed, cost, context usage, clickable per-tab cwd picker with server-persisted fast picks, git branch, changes, runtime, model, and thinking level
 - Guided Git workflow: `git add .`, ask Pi to run `/git-staged-msg`, preview short/long messages, commit with the selected message, and `git push`
 - Basic rendering for user, assistant, tool result, bash execution, and thinking messages
+- Feedback reactions (`👍`, `👎`, `?`) on final assistant output plus tool/bash action cards, with queued post-run submission that asks Pi to create/update a LEARNING
 - Basic extension UI bridge for `notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`, `select`, `confirm`, `input`, and `editor`
 - Cyberpunk/Catppuccin-inspired theme
 - PWA metadata, icons, and service worker for install-to-home-screen support when served from a secure context
@@ -173,13 +175,14 @@ pi --mode rpc [--no-session] [--name <name>] [...extra Pi args]
 The local server exposes:
 
 - static files from `public/`
-- `GET /api/tabs`, `POST /api/tabs`, `PATCH /api/tabs/:id`, and `DELETE /api/tabs/:id` for isolated Web UI terminal tabs and per-tab cwd changes
+- `GET /api/tabs`, `POST /api/tabs`, `PATCH /api/tabs/:id`, and `DELETE /api/tabs/:id` for isolated Web UI terminal tabs and per-tab cwd changes; default-named tabs are auto-renamed from the first conversation prompt
 - `GET /api/directories?tab=<tabId>&path=<path>` for the browser cwd picker
 - `GET /api/path-fast-picks` and `POST /api/path-fast-picks` for cwd picker fast picks persisted across browser tabs, Pi terminal tabs, and Web UI server restarts
 - `GET /api/network` and localhost-only `POST /api/network/open` for local-network exposure status/control
 - `GET /api/webui-status?detailed=1` for slash-command status reporting
 - `POST /api/shutdown` for localhost-only graceful restarts from `/webui-start`
 - HTTP endpoints for prompt/session/model/thinking/compact/git actions; tab-scoped calls use `?tab=<tabId>`
+- `POST /api/action-feedback?tab=<tabId>` to turn queued action/final-output reactions into a Pi prompt that creates/updates a LEARNING after the run is idle
 - `/api/events?tab=<tabId>` as a per-tab Server-Sent Events stream for Pi RPC events
 - `/api/extension-ui-response?tab=<tabId>` for browser responses to extension UI prompts
 
