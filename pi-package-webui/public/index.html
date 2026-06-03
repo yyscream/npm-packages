@@ -29,6 +29,7 @@
           <div id="tabBar" class="terminal-tabs" role="tablist" aria-label="Pi terminal tabs">
             <button id="newTabButton" class="terminal-new-tab-button" type="button" title="Start a separate isolated Pi terminal">+ Tab</button>
           </div>
+          <button id="closeAllTabsButton" class="terminal-close-all-button" type="button" title="Close all terminal tabs">Close all Tabs</button>
         </header>
         <div id="widgetArea" class="widget-area"></div>
         <div id="chat" class="chat" aria-live="polite">
@@ -133,54 +134,110 @@
           </button>
         </div>
         <div class="side-panel-body">
-          <h2>Controls</h2>
-          <div class="side-panel-controls">
-            <div class="control-field">
-              <label for="modelSelect">Model</label>
-              <select id="modelSelect" title="Model"></select>
-              <button id="setModelButton" type="button">Set model</button>
+          <section class="side-panel-section" data-side-panel-section="controls">
+            <h2>
+              <button id="sidePanelSectionToggleControls" class="side-panel-section-toggle" type="button" aria-expanded="true" aria-controls="sidePanelSectionControls" aria-label="Collapse Controls section" title="Collapse Controls section" data-side-panel-section-toggle="controls">
+                <span class="side-panel-section-label">Controls</span>
+                <span class="side-panel-section-chevron" aria-hidden="true">›</span>
+              </button>
+            </h2>
+            <div id="sidePanelSectionControls" class="side-panel-section-content">
+              <div class="side-panel-controls">
+                <div class="control-field">
+                  <label for="modelSelect">Model</label>
+                  <select id="modelSelect" title="Model"></select>
+                  <button id="setModelButton" type="button">Set model</button>
+                </div>
+                <div class="control-field">
+                  <label for="thinkingSelect">Thinking</label>
+                  <select id="thinkingSelect" title="Thinking level">
+                    <option value="off">off</option>
+                    <option value="minimal">minimal</option>
+                    <option value="low">low</option>
+                    <option value="medium">medium</option>
+                    <option value="high">high</option>
+                    <option value="xhigh">xhigh</option>
+                  </select>
+                  <button id="setThinkingButton" type="button">Set thinking</button>
+                </div>
+                <div class="control-field">
+                  <label for="themeSelect">Theme</label>
+                  <select id="themeSelect" title="Theme"></select>
+                </div>
+                <div class="control-field network-control-field">
+                  <label>Network</label>
+                  <div id="networkStatus" class="network-status closed">Local only</div>
+                  <button id="openNetworkButton" type="button">Open to network</button>
+                </div>
+                <div class="control-field notification-control-field">
+                  <span class="control-label">Notifications</span>
+                  <label class="toggle-control" for="agentDoneNotificationsToggle">
+                    <input id="agentDoneNotificationsToggle" type="checkbox" />
+                    <span>
+                      <span class="toggle-control-label">Agent done notifications</span>
+                      <span id="agentDoneNotificationsStatus" class="toggle-control-hint">Off</span>
+                    </span>
+                  </label>
+                </div>
+                <button id="abortButton" type="button" class="danger">Abort</button>
+              </div>
             </div>
-            <div class="control-field">
-              <label for="thinkingSelect">Thinking</label>
-              <select id="thinkingSelect" title="Thinking level">
-                <option value="off">off</option>
-                <option value="minimal">minimal</option>
-                <option value="low">low</option>
-                <option value="medium">medium</option>
-                <option value="high">high</option>
-                <option value="xhigh">xhigh</option>
-              </select>
-              <button id="setThinkingButton" type="button">Set thinking</button>
+          </section>
+          <section class="side-panel-section" data-side-panel-section="optional-features">
+            <h2>
+              <button id="sidePanelSectionToggleOptionalFeatures" class="side-panel-section-toggle" type="button" aria-expanded="true" aria-controls="sidePanelSectionOptionalFeatures" aria-label="Collapse Optional features section" title="Collapse Optional features section" data-side-panel-section-toggle="optional-features">
+                <span class="side-panel-section-label">Optional features</span>
+                <span class="side-panel-section-chevron" aria-hidden="true">›</span>
+              </button>
+            </h2>
+            <div id="sidePanelSectionOptionalFeatures" class="side-panel-section-content">
+              <div id="optionalFeaturesBox" class="optional-features-box muted">Checking optional features…</div>
             </div>
-            <div class="control-field">
-              <label for="themeSelect">Theme</label>
-              <select id="themeSelect" title="Theme"></select>
+          </section>
+          <section class="side-panel-section" data-side-panel-section="session">
+            <h2>
+              <button id="sidePanelSectionToggleSession" class="side-panel-section-toggle" type="button" aria-expanded="true" aria-controls="sidePanelSectionSession" aria-label="Collapse Session section" title="Collapse Session section" data-side-panel-section-toggle="session">
+                <span class="side-panel-section-label">Session</span>
+                <span class="side-panel-section-chevron" aria-hidden="true">›</span>
+              </button>
+            </h2>
+            <div id="sidePanelSectionSession" class="side-panel-section-content">
+              <dl id="stateDetails" class="details"></dl>
             </div>
-            <div class="control-field network-control-field">
-              <label>Network</label>
-              <div id="networkStatus" class="network-status closed">Local only</div>
-              <button id="openNetworkButton" type="button">Open to network</button>
+          </section>
+          <section class="side-panel-section" data-side-panel-section="queue">
+            <h2>
+              <button id="sidePanelSectionToggleQueue" class="side-panel-section-toggle" type="button" aria-expanded="true" aria-controls="sidePanelSectionQueue" aria-label="Collapse Queue section" title="Collapse Queue section" data-side-panel-section-toggle="queue">
+                <span class="side-panel-section-label">Queue</span>
+                <span class="side-panel-section-chevron" aria-hidden="true">›</span>
+              </button>
+            </h2>
+            <div id="sidePanelSectionQueue" class="side-panel-section-content">
+              <div id="queueBox" class="queue-box muted">No queued messages.</div>
             </div>
-            <div class="control-field notification-control-field">
-              <span class="control-label">Notifications</span>
-              <label class="toggle-control" for="agentDoneNotificationsToggle">
-                <input id="agentDoneNotificationsToggle" type="checkbox" />
-                <span>
-                  <span class="toggle-control-label">Agent done notifications</span>
-                  <span id="agentDoneNotificationsStatus" class="toggle-control-hint">Off</span>
-                </span>
-              </label>
+          </section>
+          <section class="side-panel-section" data-side-panel-section="commands">
+            <h2>
+              <button id="sidePanelSectionToggleCommands" class="side-panel-section-toggle" type="button" aria-expanded="true" aria-controls="sidePanelSectionCommands" aria-label="Collapse Commands section" title="Collapse Commands section" data-side-panel-section-toggle="commands">
+                <span class="side-panel-section-label">Commands</span>
+                <span class="side-panel-section-chevron" aria-hidden="true">›</span>
+              </button>
+            </h2>
+            <div id="sidePanelSectionCommands" class="side-panel-section-content">
+              <div id="commandsBox" class="commands-box muted">Loading…</div>
             </div>
-            <button id="abortButton" type="button" class="danger">Abort</button>
-          </div>
-          <h2>Session</h2>
-          <dl id="stateDetails" class="details"></dl>
-          <h2>Queue</h2>
-          <div id="queueBox" class="queue-box muted">No queued messages.</div>
-          <h2>Commands</h2>
-          <div id="commandsBox" class="commands-box muted">Loading…</div>
-          <h2>Events</h2>
-          <div id="eventLog" class="event-log"></div>
+          </section>
+          <section class="side-panel-section" data-side-panel-section="events">
+            <h2>
+              <button id="sidePanelSectionToggleEvents" class="side-panel-section-toggle" type="button" aria-expanded="true" aria-controls="sidePanelSectionEvents" aria-label="Collapse Events section" title="Collapse Events section" data-side-panel-section-toggle="events">
+                <span class="side-panel-section-label">Events</span>
+                <span class="side-panel-section-chevron" aria-hidden="true">›</span>
+              </button>
+            </h2>
+            <div id="sidePanelSectionEvents" class="side-panel-section-content">
+              <div id="eventLog" class="event-log"></div>
+            </div>
+          </section>
         </div>
       </aside>
     </main>

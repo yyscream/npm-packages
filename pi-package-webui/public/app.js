@@ -5,6 +5,7 @@ const elements = {
   tabBar: $("#tabBar"),
   terminalTabsToggleButton: $("#terminalTabsToggleButton"),
   newTabButton: $("#newTabButton"),
+  closeAllTabsButton: $("#closeAllTabsButton"),
   statusBar: $("#statusBar"),
   widgetArea: $("#widgetArea"),
   stickyUserPromptButton: $("#stickyUserPromptButton"),
@@ -47,6 +48,7 @@ const elements = {
   openNetworkButton: $("#openNetworkButton"),
   agentDoneNotificationsToggle: $("#agentDoneNotificationsToggle"),
   agentDoneNotificationsStatus: $("#agentDoneNotificationsStatus"),
+  optionalFeaturesBox: $("#optionalFeaturesBox"),
   toggleSidePanelButton: $("#toggleSidePanelButton"),
   sidePanelExpandButton: $("#sidePanelExpandButton"),
   sidePanelBackdrop: $("#sidePanelBackdrop"),
@@ -83,6 +85,8 @@ let streamText = null;
 let streamRawText = "";
 let streamBubbleVisibleSince = 0;
 let streamBubbleHideTimer = null;
+let streamTextRenderTimer = null;
+let streamToolCallSeen = false;
 let streamThinkingBubble = null;
 let streamThinking = null;
 let runIndicatorBubble = null;
@@ -120,6 +124,8 @@ let latestWorkspace = null;
 let latestNetwork = null;
 let latestMessages = [];
 let transientMessages = [];
+let actionEntrySeenKeysByTab = new Map();
+let actionEntryAnimationPrimedTabs = new Set();
 let lastUserPromptByTab = new Map();
 let actionFeedbackByTab = new Map();
 let actionFeedbackSendBusy = false;
@@ -150,10 +156,12 @@ let currentRunStreamChars = 0;
 let latestTokPerSecond = null;
 const dialogQueue = [];
 const SIDE_PANEL_STORAGE_KEY = "pi-webui-side-panel-collapsed";
+const SIDE_PANEL_SECTION_STORAGE_KEY = "pi-webui-side-panel-sections-collapsed";
 const TAB_STORAGE_KEY = "pi-webui-active-tab";
 const PATH_FAST_PICKS_STORAGE_KEY = "pi-webui-path-fast-picks";
 const AGENT_DONE_NOTIFICATIONS_STORAGE_KEY = "pi-webui-agent-done-notifications";
 const THEME_STORAGE_KEY = "pi-webui-theme";
+const OPTIONAL_FEATURES_STORAGE_KEY = "pi-webui-optional-features-disabled";
 const LAST_USER_PROMPT_STORAGE_KEY = "pi-webui-last-user-prompts";
 const DEFAULT_THEME_NAME = "catppuccin-mocha";
 const MOBILE_VIEW_QUERY = "(max-width: 720px), (max-device-width: 720px), (pointer: coarse) and (hover: none)";
@@ -167,6 +175,7 @@ const RUN_INDICATOR_TICK_MS = 1000;
 const RUN_INDICATOR_START_GRACE_MS = 2500;
 const RUN_INDICATOR_STATE_RECHECK_MS = 5000;
 const STREAM_OUTPUT_HIDE_DELAY_MS = 300;
+const STREAM_OUTPUT_TOOLCALL_GUARD_MS = 220;
 const STREAM_OUTPUT_MIN_VISIBLE_MS = 900;
 const TODO_PROGRESS_LINE_REGEX = /^\s*(?:(?:[-*]|\d+[.)])\s*)?\[(?: |x|X|-)\]\s+.+$/;
 const TODO_PROGRESS_PARTIAL_LINE_REGEX = /^\s*(?:(?:[-*]|\d+[.)])\s*)?\[(?: |x|X|-)?\]?\s*.*$/;
@@ -180,6 +189,79 @@ const BLOCKED_TAB_NOTIFICATION_ICON = "/icon-192.png";
 const mobileViewMedia = window.matchMedia?.(MOBILE_VIEW_QUERY) || null;
 const statusEntries = new Map();
 const widgets = new Map();
+// Optional feature detection intentionally checks loaded Pi capabilities (RPC-visible
+// commands and live widget events), not npm package folders. This keeps local dev
+// symlinks and independently installed packages working.
+const optionalFeatureAvailability = {
+  gitWorkflow: false,
+  releaseNpm: false,
+  releaseAur: false,
+  statsCommand: false,
+  gitFooterStatus: false,
+  todoProgressWidget: false,
+  themeBundle: false,
+};
+const OPTIONAL_FEATURES = [
+  {
+    id: "gitWorkflow",
+    label: "Guided Git workflow",
+    packageName: "@firstpick/pi-prompts-git-pr",
+    capabilityLabel: "/git-staged-msg",
+    description: "Generate staged commit messages for the guided Git workflow.",
+  },
+  {
+    id: "releaseNpm",
+    label: "NPM Release",
+    packageName: "@firstpick/pi-extension-release-npm",
+    capabilityLabel: "/release-npm",
+    description: "Publish menu action and live npm release widgets.",
+  },
+  {
+    id: "releaseAur",
+    label: "AUR Release",
+    packageName: "@firstpick/pi-extension-release-aur",
+    capabilityLabel: "/release-aur",
+    description: "Publish menu action, setup helpers, skills, and AUR release widgets.",
+  },
+  {
+    id: "todoProgressWidget",
+    label: "Todo progress widget",
+    packageName: "@firstpick/pi-extension-todo-progress",
+    capabilityLabel: "/todo-progress-status or todo-progress widget event",
+    description: "Styled live checklist rendering for assistant todo updates.",
+  },
+  {
+    id: "gitFooterStatus",
+    label: "Git footer status",
+    packageName: "@firstpick/pi-extension-git-footer-status",
+    capabilityLabel: "/git-footer-refresh or git-footer status event",
+    description: "Enhanced Pi footer/status telemetry when loaded by Pi.",
+  },
+  {
+    id: "statsCommand",
+    label: "Stats command",
+    packageName: "@firstpick/pi-extension-stats",
+    capabilityLabel: "/stats",
+    description: "Token and cost usage analytics commands.",
+  },
+  {
+    id: "themeBundle",
+    label: "Theme bundle",
+    packageName: "@firstpick/pi-themes-bundle",
+    capabilityLabel: "/api/themes returned themes",
+    description: "Additional browser theme-picker and Pi theme resources.",
+  },
+];
+const OPTIONAL_FEATURE_BY_ID = new Map(OPTIONAL_FEATURES.map((feature) => [feature.id, feature]));
+const OPTIONAL_COMMAND_FEATURES = new Map([
+  ["git-staged-msg", "gitWorkflow"],
+  ["release-npm", "releaseNpm"],
+  ["release-aur", "releaseAur"],
+  ["stats", "statsCommand"],
+  ["git-footer-refresh", "gitFooterStatus"],
+  ["todo-progress-status", "todoProgressWidget"],
+]);
+const optionalFeatureInstallInProgress = new Set();
 const gitWorkflow = {
   active: false,
   step: "idle",
@@ -229,6 +311,63 @@ function readStoredSidePanelCollapsed() {
     return stored === null ? null : stored === "1";
   } catch {
     return null;
+  }
+}
+
+function sidePanelSectionRecords() {
+  return Array.from(elements.sidePanel.querySelectorAll("[data-side-panel-section]"))
+    .map((section) => {
+      const id = section.dataset.sidePanelSection || "";
+      const button = section.querySelector("[data-side-panel-section-toggle]");
+      const contentId = button?.getAttribute("aria-controls") || "";
+      const content = contentId ? document.getElementById(contentId) : null;
+      return { id, section, button, content };
+    })
+    .filter((record) => record.id && record.button && record.content);
+}
+
+function readStoredSidePanelSectionCollapsedIds() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SIDE_PANEL_SECTION_STORAGE_KEY) || "[]");
+    return new Set(Array.isArray(parsed) ? parsed.filter((value) => typeof value === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function persistSidePanelSectionState() {
+  try {
+    const collapsed = sidePanelSectionRecords()
+      .filter(({ section }) => section.classList.contains("collapsed"))
+      .map(({ id }) => id);
+    localStorage.setItem(SIDE_PANEL_SECTION_STORAGE_KEY, JSON.stringify(collapsed));
+  } catch {
+    // Ignore storage failures; section toggles should still work for this page load.
+  }
+}
+
+function setSidePanelSectionCollapsed(record, collapsed, { persist = true } = {}) {
+  const label = record.button.querySelector(".side-panel-section-label")?.textContent?.trim() || "side panel";
+  record.section.classList.toggle("collapsed", collapsed);
+  record.content.hidden = collapsed;
+  record.button.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  record.button.setAttribute("aria-label", `${collapsed ? "Expand" : "Collapse"} ${label} section`);
+  record.button.setAttribute("title", `${collapsed ? "Expand" : "Collapse"} ${label} section`);
+  if (persist) persistSidePanelSectionState();
+}
+
+function restoreSidePanelSectionState() {
+  const collapsedIds = readStoredSidePanelSectionCollapsedIds();
+  for (const record of sidePanelSectionRecords()) {
+    setSidePanelSectionCollapsed(record, collapsedIds.has(record.id), { persist: false });
+  }
+}
+
+function bindSidePanelSectionToggles() {
+  for (const record of sidePanelSectionRecords()) {
+    record.button.addEventListener("click", () => {
+      setSidePanelSectionCollapsed(record, !record.section.classList.contains("collapsed"));
+    });
   }
 }
 
@@ -497,6 +636,49 @@ function storeThemeName(name) {
   }
 }
 
+function loadDisabledOptionalFeatures() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(OPTIONAL_FEATURES_STORAGE_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed.filter((id) => OPTIONAL_FEATURE_BY_ID.has(id)) : [];
+  } catch {
+    return [];
+  }
+}
+
+let disabledOptionalFeatures = new Set(loadDisabledOptionalFeatures());
+
+function storeDisabledOptionalFeatures() {
+  try {
+    localStorage.setItem(OPTIONAL_FEATURES_STORAGE_KEY, JSON.stringify([...disabledOptionalFeatures].sort()));
+  } catch {
+    // Optional feature toggles should still work for this page load.
+  }
+}
+
+function isOptionalFeatureDetected(featureId) {
+  return optionalFeatureAvailability[featureId] === true;
+}
+
+function isOptionalFeatureDisabled(featureId) {
+  return disabledOptionalFeatures.has(featureId);
+}
+
+function isOptionalFeatureEnabled(featureId) {
+  return isOptionalFeatureDetected(featureId) && !isOptionalFeatureDisabled(featureId);
+}
+
+function setOptionalFeatureDisabled(featureId, disabled) {
+  if (!OPTIONAL_FEATURE_BY_ID.has(featureId)) return;
+  if (disabled) disabledOptionalFeatures.add(featureId);
+  else disabledOptionalFeatures.delete(featureId);
+  storeDisabledOptionalFeatures();
+  renderOptionalFeatureControls();
+  renderThemeSelect();
+  renderWidgets();
+  renderStatus();
+  refreshCommands().catch((error) => addEvent(error.message || String(error), "error"));
+}
+
 function displayThemeName(name) {
   return String(name || "")
     .split(/[-_]+/)
@@ -685,6 +867,13 @@ function applyTheme(theme, { persist = false, announce = false } = {}) {
 function renderThemeSelect({ unavailableLabel = "Theme bundle unavailable" } = {}) {
   if (!elements.themeSelect) return;
   elements.themeSelect.replaceChildren();
+  if (isOptionalFeatureDisabled("themeBundle")) {
+    const option = make("option", undefined, "Theme feature disabled");
+    option.value = "";
+    elements.themeSelect.append(option);
+    elements.themeSelect.disabled = true;
+    return;
+  }
   if (!availableThemes.length) {
     const option = make("option", undefined, unavailableLabel);
     option.value = "";
@@ -702,6 +891,7 @@ function renderThemeSelect({ unavailableLabel = "Theme bundle unavailable" } = {
 }
 
 function setThemeByName(name, options = {}) {
+  if (!isOptionalFeatureEnabled("themeBundle")) return;
   const theme = availableThemes.find((item) => item.name === name);
   if (!theme) return;
   applyTheme(theme, options);
@@ -713,16 +903,20 @@ async function initializeThemes() {
     response = await api("/api/themes", { scoped: false });
   } catch (error) {
     availableThemes = [];
+    optionalFeatureAvailability.themeBundle = false;
+    renderOptionalFeatureControls();
     const label = error.statusCode === 404 ? "Restart Web UI to load themes" : "Theme bundle unavailable";
     renderThemeSelect({ unavailableLabel: label });
     throw error;
   }
   availableThemes = Array.isArray(response.data?.themes) ? response.data.themes : [];
+  optionalFeatureAvailability.themeBundle = availableThemes.length > 0;
+  renderOptionalFeatureControls();
   const stored = storedThemeName();
   currentThemeName = availableThemes.some((theme) => theme.name === stored) ? stored : DEFAULT_THEME_NAME;
   renderThemeSelect();
   setThemeByName(currentThemeName, { persist: false });
-  if (!availableThemes.some((theme) => theme.name === currentThemeName) && availableThemes[0]) applyTheme(availableThemes[0], { persist: false });
+  if (isOptionalFeatureEnabled("themeBundle") && !availableThemes.some((theme) => theme.name === currentThemeName) && availableThemes[0]) applyTheme(availableThemes[0], { persist: false });
   if (!availableThemes.length) addEvent("theme bundle unavailable; using built-in default theme", "warn");
 }
 
@@ -1044,6 +1238,7 @@ function resetActiveTabUi() {
   widgets.clear();
   transientMessages = [];
   availableCommands = [];
+  resetOptionalFeatureAvailability();
   commandSuggestions = [];
   pathSuggestions = [];
   suggestionMode = "none";
@@ -1199,7 +1394,7 @@ function shouldRenderTerminalTabGroup(group, groupCount) {
   return groupCount > 1 && group.tabs.length > 1 && Boolean(group.cwd);
 }
 
-function renderTerminalTabGroup(group) {
+function renderTerminalTabGroup(group, groupCount = 1) {
   const groupTabs = group.tabs;
   const activeGroupTab = groupTabs.find((tab) => tab.id === activeTabId) || groupTabs[0];
   const isActive = groupTabs.some((tab) => tab.id === activeTabId);
@@ -1228,6 +1423,18 @@ function renderTerminalTabGroup(group) {
   appendTerminalTabContent(button, { title, indicator, meta: `${indicator.meta} · ${groupTabs.length} tabs`, count: groupTabs.length });
   button.addEventListener("click", () => switchTab(activeGroupTab.id));
   wrapper.append(button);
+
+  if (groupCount > 1) {
+    const close = make("button", "terminal-tab-close terminal-tab-group-close", "×");
+    close.type = "button";
+    close.title = `Close ${displayCwd} group`;
+    close.setAttribute("aria-label", `Close ${displayCwd} group`);
+    close.addEventListener("click", (event) => {
+      event.stopPropagation();
+      closeTerminalTabGroup(group);
+    });
+    wrapper.append(close);
+  }
 
   const menu = make("div", "terminal-tab-group-menu");
   menu.setAttribute("role", "group");
@@ -1279,12 +1486,13 @@ function renderTabs() {
   if (openTerminalTabGroupKey && !renderedGroupKeys.has(openTerminalTabGroupKey)) openTerminalTabGroupKey = null;
   for (const group of groups) {
     if (shouldRenderTerminalTabGroup(group, groups.length)) {
-      elements.tabBar.append(renderTerminalTabGroup(group));
+      elements.tabBar.append(renderTerminalTabGroup(group, groups.length));
     } else {
       for (const tab of group.tabs) elements.tabBar.append(renderTerminalTab(tab));
     }
   }
   elements.tabBar.append(elements.newTabButton);
+  elements.closeAllTabsButton.disabled = tabs.length === 0;
   updateTerminalTabGroupOpenState();
   setMobileTabsExpanded(mobileTabsExpanded);
   updateDocumentTitle();
@@ -1345,21 +1553,58 @@ async function createTerminalTab(cwd = activeTab()?.cwd, { triggerButton = eleme
   }
 }
 
-async function closeTerminalTab(tabId) {
-  const tab = tabs.find((item) => item.id === tabId);
-  if (!tab || tabs.length <= 1) return;
-  if (!confirm(`Close ${tab.title}? This terminates its isolated Pi process.`)) return;
+function tabHasActiveAgent(tab) {
+  const activity = activityForTab(tab);
+  const indicator = tabIndicator(tab);
+  return !!activity.isWorking || indicator.state === "working" || indicator.state === "blocked";
+}
 
-  const wasActive = tabId === activeTabId;
-  const fallbackTabId = tabs.find((item) => item.id !== tabId)?.id || null;
+function confirmCloseTerminalTabs(targetTabs, label) {
+  const count = targetTabs.length;
+  const noun = count === 1 ? "tab" : "tabs";
+  const activeAgentTabs = targetTabs.filter(tabHasActiveAgent);
+  const tabList = targetTabs.map((tab) => `- ${tab.title}`).join("\n");
+  const activeList = activeAgentTabs.map((tab) => `- ${tab.title} (${tabIndicator(tab).label})`).join("\n");
+  const base = [
+    `Close ${label || `${count} terminal ${noun}`}?`,
+    "",
+    `This terminates ${count === 1 ? "its isolated Pi process" : "their isolated Pi processes"}.`,
+    count > 1 ? `\nTabs to close:\n${tabList}` : "",
+  ].filter(Boolean).join("\n");
+  const warning = activeAgentTabs.length
+    ? [
+        `WARNING: ${activeAgentTabs.length} ${activeAgentTabs.length === 1 ? "tab has an agent" : "tabs have agents"} still running or waiting for input:`,
+        activeList,
+        "",
+        base,
+        "",
+        "Close anyway?",
+      ].join("\n")
+    : base;
+  return confirm(warning);
+}
+
+async function closeTerminalTabs(tabIds, { label = "selected terminal tabs" } = {}) {
+  const targetIds = [...new Set(tabIds.filter(Boolean))];
+  const targetTabs = targetIds.map((id) => tabs.find((item) => item.id === id)).filter(Boolean);
+  if (!targetTabs.length) return;
+  if (!confirmCloseTerminalTabs(targetTabs, label)) return;
+
+  const closedActiveTab = targetTabs.some((tab) => tab.id === activeTabId);
+  const fallbackTabId = tabs.find((item) => !targetIds.includes(item.id))?.id || null;
   try {
-    if (wasActive) eventSource?.close();
-    const response = await api(`/api/tabs/${encodeURIComponent(tabId)}`, { method: "DELETE", scoped: false });
-    tabs = response.data?.tabs || tabs.filter((item) => item.id !== tabId);
+    if (closedActiveTab) eventSource?.close();
+    const response = await api("/api/tabs/close", { method: "POST", body: { ids: targetIds }, scoped: false });
+    const closedIds = response.data?.closedIds || targetIds;
+    tabs = response.data?.tabs || tabs.filter((item) => !closedIds.includes(item.id));
     syncTabMetadata(tabs);
-    tabDrafts.delete(tabId);
-    if (wasActive) {
-      activeTabId = (fallbackTabId && tabs.some((item) => item.id === fallbackTabId) ? fallbackTabId : tabs[0]?.id) || null;
+    for (const id of closedIds) tabDrafts.delete(id);
+    clearOpenTerminalTabGroup(null, { force: true });
+
+    if (closedActiveTab || !tabs.some((item) => item.id === activeTabId)) {
+      activeTabId = (response.data?.activeTabId && tabs.some((item) => item.id === response.data.activeTabId)
+        ? response.data.activeTabId
+        : (fallbackTabId && tabs.some((item) => item.id === fallbackTabId) ? fallbackTabId : tabs[0]?.id)) || null;
       rememberActiveTab();
       resetActiveTabUi();
       renderTabs();
@@ -1373,9 +1618,25 @@ async function closeTerminalTab(tabId) {
     } else {
       renderTabs();
     }
+    addEvent(`closed ${closedIds.length || targetTabs.length} terminal ${closedIds.length === 1 ? "tab" : "tabs"}`, "warn");
   } catch (error) {
     addEvent(error.message, "error");
   }
+}
+
+async function closeTerminalTab(tabId) {
+  const tab = tabs.find((item) => item.id === tabId);
+  if (!tab) return;
+  await closeTerminalTabs([tabId], { label: tab.title });
+}
+
+async function closeTerminalTabGroup(group) {
+  const title = tabGroupTitle(group.cwd, group.tabs[0]?.title || "cwd");
+  await closeTerminalTabs(group.tabs.map((tab) => tab.id), { label: `${title} group` });
+}
+
+async function closeAllTerminalTabs() {
+  await closeTerminalTabs(tabs.map((tab) => tab.id), { label: "all terminal tabs" });
 }
 
 async function initializeTabs() {
@@ -1791,6 +2052,7 @@ function formatStatusEntry(key, value) {
   const cleanKey = cleanStatusText(key);
   const cleanValue = cleanStatusText(value);
   if (!cleanValue) return "";
+  if (cleanKey === "git-footer" && !isOptionalFeatureEnabled("gitFooterStatus")) return "";
   if (cleanKey === "plan-mode") return `Plan: ${cleanValue}`;
   if (cleanKey === "extension") return cleanValue;
   return `${cleanKey}: ${cleanValue}`;
@@ -2435,6 +2697,7 @@ function renderReleaseDialogMessage(parent, text) {
 }
 
 function stripTodoProgressLines(text, { streaming = false } = {}) {
+  if (!isOptionalFeatureEnabled("todoProgressWidget")) return String(text || "");
   let inFence = false;
   const kept = [];
   const raw = String(text || "");
@@ -2576,6 +2839,7 @@ function releaseNpmActionButton(label, command, className = "") {
 }
 
 function renderReleaseNpmOutputWidget() {
+  if (!isOptionalFeatureEnabled("releaseNpm")) return null;
   const outputLines = getWidgetLines("release-npm:output");
   const footerLines = getWidgetLines("release-npm:footer");
   if (outputLines.length === 0 && footerLines.length === 0) return null;
@@ -2613,6 +2877,7 @@ function renderReleaseNpmOutputWidget() {
 }
 
 function renderReleaseNpmLogWidget() {
+  if (!isOptionalFeatureEnabled("releaseNpm")) return null;
   const lines = getWidgetLines("release-npm:logs");
   if (lines.length === 0) return null;
 
@@ -2640,6 +2905,7 @@ function renderReleaseNpmLogWidget() {
 }
 
 function renderReleaseAurOutputWidget() {
+  if (!isOptionalFeatureEnabled("releaseAur")) return null;
   const outputLines = getWidgetLines("release-aur:output");
   const footerLines = getWidgetLines("release-aur:footer");
   if (outputLines.length === 0 && footerLines.length === 0) return null;
@@ -2677,6 +2943,7 @@ function renderReleaseAurOutputWidget() {
 }
 
 function renderReleaseAurLogWidget() {
+  if (!isOptionalFeatureEnabled("releaseAur")) return null;
   const lines = getWidgetLines("release-aur:logs");
   if (lines.length === 0) return null;
 
@@ -2714,11 +2981,12 @@ function renderWidgets() {
   const releaseAurLog = renderReleaseAurLogWidget();
   if (releaseAurLog) elements.widgetArea.append(releaseAurLog);
 
-  const releaseWidgetKeys = new Set(["release-npm:output", "release-npm:footer", "release-npm:logs", "release-aur:output", "release-aur:footer", "release-aur:logs"]);
   for (const [key, value] of widgets) {
-    if (releaseWidgetKeys.has(key)) continue;
+    const widgetFeatureId = optionalFeatureWidgetFeatureId(key);
+    if (widgetFeatureId && !isOptionalFeatureEnabled(widgetFeatureId)) continue;
+    if (widgetFeatureId && key !== "todo-progress") continue;
     const lines = Array.isArray(value.widgetLines) ? value.widgetLines : [];
-    const specialized = key === "todo-progress" ? renderTodoProgressWidget(key, lines) : null;
+    const specialized = key === "todo-progress" && isOptionalFeatureEnabled("todoProgressWidget") ? renderTodoProgressWidget(key, lines) : null;
     if (specialized) {
       elements.widgetArea.append(specialized);
       continue;
@@ -2866,6 +3134,11 @@ function failGitWorkflow(error, step = gitWorkflow.step) {
 }
 
 function startGitWorkflow() {
+  if (!isOptionalFeatureEnabled("gitWorkflow")) {
+    addEvent(commandUnavailableMessage("git-staged-msg"), "warn");
+    refreshCommands().catch((error) => addEvent(error.message || String(error), "error"));
+    return;
+  }
   if (gitWorkflow.active && !["done", "cancelled", "error"].includes(gitWorkflow.step) && !confirm("Restart the active git workflow?")) return;
   gitWorkflow.runId += 1;
   setGitWorkflow({
@@ -3306,6 +3579,14 @@ function assistantThinkingText(part) {
   return typeof part.content === "string" ? part.content : "";
 }
 
+function isAssistantToolCallPart(part) {
+  return !!(part && typeof part === "object" && (part.type === "toolCall" || part.toolCall));
+}
+
+function assistantHasToolCallAfter(content, index) {
+  return Array.isArray(content) && content.slice(index + 1).some(isAssistantToolCallPart);
+}
+
 function assistantToolCallName(part) {
   return String(part?.name || part?.toolName || part?.toolCall?.name || "unknown");
 }
@@ -3342,14 +3623,15 @@ function assistantDisplayMessages(message) {
 
   const displayMessages = [];
   const finalParts = [];
-  for (const part of content) {
+  for (let index = 0; index < content.length; index += 1) {
+    const part = content[index];
     const isThinkingPart = part && typeof part === "object" && (part.type === "thinking" || typeof part.thinking === "string");
     if (isThinkingPart) {
       const thinking = assistantThinkingText(part) || "No thinking content was exposed by the provider.";
       displayMessages.push({ ...base, role: "thinking", title: "thinking", content: thinking, thinking });
       continue;
     }
-    if (part?.type === "toolCall") {
+    if (isAssistantToolCallPart(part)) {
       const toolName = assistantToolCallName(part);
       const args = assistantToolCallArguments(part);
       displayMessages.push({ ...base, role: "toolCall", title: `tool call: ${toolName}`, toolName, arguments: args, content: args });
@@ -3357,7 +3639,7 @@ function assistantDisplayMessages(message) {
     }
     const finalPart = assistantFinalOutputPart(part);
     if (finalPart) {
-      finalParts.push(finalPart);
+      if (!assistantHasToolCallAfter(content, index)) finalParts.push(finalPart);
       continue;
     }
     if (part !== undefined && part !== null) {
@@ -3520,6 +3802,15 @@ function updateStickyUserPromptButton() {
   );
 }
 
+function toolResultPreviewText(message, lineLimit = 10) {
+  const text = textFromContent(message?.content).replace(/\s+$/g, "");
+  if (!text) return "(empty tool result)";
+  const lines = text.split(/\r?\n/);
+  const preview = lines.slice(0, lineLimit).join("\n");
+  const remaining = Math.max(0, lines.length - lineLimit);
+  return remaining > 0 ? `${preview}\n… ${remaining} more line${remaining === 1 ? "" : "s"}; expand for full output` : preview;
+}
+
 function jumpToStickyUserPrompt() {
   const button = elements.stickyUserPromptButton;
   const index = Number(button?.dataset.messageIndex);
@@ -3534,10 +3825,10 @@ function jumpToStickyUserPrompt() {
   requestAnimationFrame(updateStickyUserPromptButton);
 }
 
-function appendMessage(message, { streaming = false, messageIndex = -1, transient = false } = {}) {
+function appendMessage(message, { streaming = false, messageIndex = -1, transient = false, animateEntry = false } = {}) {
   const role = String(message.role || "message");
   const safeRole = role.replace(/[^a-z0-9_-]/gi, "");
-  const bubble = make("article", `message ${safeRole}${message.level ? ` ${message.level}` : ""}${streaming ? " streaming" : ""}`);
+  const bubble = make("article", `message ${safeRole}${message.level ? ` ${message.level}` : ""}${streaming ? " streaming" : ""}${animateEntry ? " action-enter" : ""}`);
   if (!transient && messageIndex >= 0) {
     bubble.dataset.messageIndex = String(messageIndex);
     if (role === "user") bubble.dataset.userPrompt = "true";
@@ -3557,7 +3848,8 @@ function appendMessage(message, { streaming = false, messageIndex = -1, transien
     renderContent(body, message.content);
     if (message.isError) bubble.classList.add("error");
   } else if (message.role === "thinking") {
-    appendText(body, message.thinking || textFromContent(message.content) || "No thinking content was exposed by the provider.", "thinking-text");
+    const thinkingText = message.thinking || textFromContent(message.content);
+    if (thinkingText || !streaming) appendText(body, thinkingText || "No thinking content was exposed by the provider.", "thinking-text");
   } else if (message.role === "toolCall") {
     appendText(body, JSON.stringify(message.arguments ?? message.content ?? {}, null, 2), "code-block");
   } else if (message.role === "assistantEvent") {
@@ -3571,6 +3863,11 @@ function appendMessage(message, { streaming = false, messageIndex = -1, transien
     if (message.isError) details.open = true;
     details.append(header, body);
     bubble.append(details);
+    if (message.role === "toolResult" && !message.isError) {
+      const preview = make("div", "tool-result-preview");
+      appendText(preview, toolResultPreviewText(message, 10), "code-block tool-result-preview-text");
+      bubble.append(preview);
+    }
   } else {
     bubble.append(header, body);
   }
@@ -3579,9 +3876,9 @@ function appendMessage(message, { streaming = false, messageIndex = -1, transien
   return { bubble, body };
 }
 
-function appendTranscriptMessage(message, { streaming = false, messageIndex = -1, transient = false } = {}) {
+function appendTranscriptMessage(message, { streaming = false, messageIndex = -1, transient = false, animateEntry = false } = {}) {
   if (streaming || transient || message?.role !== "assistant") {
-    return appendMessage(message, { streaming, messageIndex, transient });
+    return appendMessage(message, { streaming, messageIndex, transient, animateEntry });
   }
 
   let finalOutput = null;
@@ -3591,6 +3888,7 @@ function appendTranscriptMessage(message, { streaming = false, messageIndex = -1
       streaming: false,
       messageIndex: displayMessage.role === "assistant" ? messageIndex : -1,
       transient: false,
+      animateEntry: animateEntry && isActionTranscriptMessage(displayMessage),
     });
     if (displayMessage.role === "assistant") finalOutput = created;
   });
@@ -3641,7 +3939,7 @@ function formatRunIndicatorElapsed() {
 
 function runIndicatorHeadline() {
   if (currentState?.isCompacting && !currentState?.isStreaming) return "Pi is compacting context:";
-  return "Agent is still runing: ";
+  return "Agent is running: ";
 }
 
 function runIndicatorShowsElapsed() {
@@ -3675,7 +3973,7 @@ function ensureRunIndicatorBubble() {
   if (runIndicatorBubble?.parentElement !== elements.chat) {
     runIndicatorBubble = make("article", "message runIndicator run-indicator-message streaming");
     runIndicatorBubble.setAttribute("aria-live", "polite");
-    runIndicatorBubble.setAttribute("aria-label", "Agent is still runing:");
+    runIndicatorBubble.setAttribute("aria-label", "Agent is running:");
 
     const body = make("div", "message-body");
     const row = make("div", "run-indicator-row");
@@ -3773,6 +4071,56 @@ function messageTimestampMs(message) {
   return Number.isFinite(time) ? time : 0;
 }
 
+function isActionTranscriptMessage(message) {
+  return ["assistantEvent", "bashExecution", "toolCall", "toolResult"].includes(message?.role);
+}
+
+function assistantMessageHasActionContent(message) {
+  return message?.role === "assistant" && Array.isArray(message.content) && message.content.some(isAssistantToolCallPart);
+}
+
+function isActionEntryItem(item) {
+  return isActionTranscriptMessage(item?.message) || assistantMessageHasActionContent(item?.message);
+}
+
+function actionEntrySeenKeys(tabId = activeTabId) {
+  if (!tabId) return new Set();
+  let keys = actionEntrySeenKeysByTab.get(tabId);
+  if (!keys) {
+    keys = new Set();
+    actionEntrySeenKeysByTab.set(tabId, keys);
+  }
+  return keys;
+}
+
+function actionEntryKey(item) {
+  const message = item?.message || {};
+  return [
+    item?.transient ? "transient" : "message",
+    item?.messageIndex ?? -1,
+    message.role || "message",
+    message.toolName || "",
+    message.command || "",
+    message.title || "",
+    message.timestamp || "",
+    textFromContent(message.content).slice(0, 240),
+  ].join("|");
+}
+
+function shouldAnimateActionEntry(item) {
+  if (!activeTabId || !actionEntryAnimationPrimedTabs.has(activeTabId) || !isActionEntryItem(item)) return false;
+  return !actionEntrySeenKeys(activeTabId).has(actionEntryKey(item));
+}
+
+function rememberActionEntries(items) {
+  if (!activeTabId) return;
+  const keys = actionEntrySeenKeys(activeTabId);
+  for (const item of items) {
+    if (isActionEntryItem(item)) keys.add(actionEntryKey(item));
+  }
+  actionEntryAnimationPrimedTabs.add(activeTabId);
+}
+
 function orderedTranscriptItems() {
   const items = [];
   latestMessages.forEach((message, index) => {
@@ -3788,9 +4136,15 @@ function renderAllMessages({ preserveScroll = false } = {}) {
   const shouldFollow = !preserveScroll && (autoFollowChat || isChatNearBottom());
   const previousScrollTop = elements.chat.scrollTop;
   resetChatOutput();
-  for (const item of orderedTranscriptItems()) {
-    appendTranscriptMessage(item.message, { messageIndex: item.messageIndex, transient: item.transient });
+  const transcriptItems = orderedTranscriptItems();
+  for (const item of transcriptItems) {
+    appendTranscriptMessage(item.message, {
+      messageIndex: item.messageIndex,
+      transient: item.transient,
+      animateEntry: shouldAnimateActionEntry(item),
+    });
   }
+  rememberActionEntries(transcriptItems);
   renderRunIndicator({ scroll: false });
   updateStickyUserPromptButton();
   if (shouldFollow) scrollChatToBottom({ force: true });
@@ -3940,9 +4294,189 @@ function setPublishMenuOpen(open) {
   elements.publishButton.parentElement?.classList.toggle("open", publishMenuOpen);
 }
 
+function optionalFeatureIdForCommand(name) {
+  if (OPTIONAL_COMMAND_FEATURES.has(name)) return OPTIONAL_COMMAND_FEATURES.get(name);
+  if (name === "release-toggle" || name === "release-abort" || name === "release-npm-logs") return "releaseNpm";
+  if (name === "release-aur" || name.startsWith("release-aur-")) return "releaseAur";
+  if (name === "stats" || name.startsWith("stats-") || name === "calibrate") return "statsCommand";
+  return null;
+}
+
+function isCommandVisible(command) {
+  const featureId = optionalFeatureIdForCommand(command.name);
+  return !featureId || isOptionalFeatureEnabled(featureId);
+}
+
+function visibleCommands() {
+  return availableCommands.filter(isCommandVisible);
+}
+
+function hasAvailableCommand(name) {
+  return availableCommands.some((command) => command.name === name);
+}
+
+function optionalFeatureUnavailableMessage(featureId) {
+  const feature = OPTIONAL_FEATURE_BY_ID.get(featureId);
+  if (!feature) return "Optional feature unavailable.";
+  if (isOptionalFeatureDisabled(featureId)) return `${feature.label} is disabled in the Web UI optional-features panel.`;
+  return `${feature.label} unavailable: ${feature.capabilityLabel} is not loaded. Install or enable ${feature.packageName}.`;
+}
+
+function setOptionalControlState(button, available, unavailableTitle) {
+  if (!button) return;
+  if (!button.dataset.defaultTitle) button.dataset.defaultTitle = button.getAttribute("title") || "";
+  button.disabled = !available;
+  button.setAttribute("aria-disabled", available ? "false" : "true");
+  button.classList.toggle("feature-unavailable", !available);
+  button.setAttribute("title", available ? button.dataset.defaultTitle : unavailableTitle);
+}
+
+function resetOptionalFeatureAvailability() {
+  for (const key of Object.keys(optionalFeatureAvailability)) optionalFeatureAvailability[key] = false;
+  optionalFeatureAvailability.themeBundle = availableThemes.length > 0;
+  renderOptionalFeatureControls();
+}
+
+function updateOptionalFeatureAvailability() {
+  optionalFeatureAvailability.gitWorkflow = hasAvailableCommand("git-staged-msg");
+  optionalFeatureAvailability.releaseNpm = hasAvailableCommand("release-npm");
+  optionalFeatureAvailability.releaseAur = hasAvailableCommand("release-aur");
+  optionalFeatureAvailability.statsCommand = hasAvailableCommand("stats");
+  optionalFeatureAvailability.gitFooterStatus = hasAvailableCommand("git-footer-refresh") || optionalFeatureAvailability.gitFooterStatus || statusEntries.has("git-footer");
+  optionalFeatureAvailability.todoProgressWidget = hasAvailableCommand("todo-progress-status") || optionalFeatureAvailability.todoProgressWidget || widgets.has("todo-progress");
+  optionalFeatureAvailability.themeBundle = availableThemes.length > 0;
+  renderOptionalFeatureControls();
+}
+
+function optionalFeatureStatus(featureId) {
+  const detected = isOptionalFeatureDetected(featureId);
+  const disabled = isOptionalFeatureDisabled(featureId);
+  if (detected && !disabled) return { label: "Enabled", className: "enabled", detail: "Detected and enabled in Web UI" };
+  if (detected && disabled) return { label: "Disabled", className: "disabled", detail: "Detected, but disabled in Web UI" };
+  return { label: "Install needed", className: "missing", detail: "Not detected in the active Pi tab" };
+}
+
+function optionalFeatureWidgetFeatureId(key) {
+  if (key.startsWith("release-npm:")) return "releaseNpm";
+  if (key.startsWith("release-aur:")) return "releaseAur";
+  if (key === "todo-progress") return "todoProgressWidget";
+  return null;
+}
+
+function renderOptionalFeaturePanel() {
+  if (!elements.optionalFeaturesBox) return;
+  elements.optionalFeaturesBox.replaceChildren();
+  elements.optionalFeaturesBox.classList.remove("muted");
+
+  for (const feature of OPTIONAL_FEATURES) {
+    const detected = isOptionalFeatureDetected(feature.id);
+    const enabled = isOptionalFeatureEnabled(feature.id);
+    const installing = optionalFeatureInstallInProgress.has(feature.id);
+    const status = optionalFeatureStatus(feature.id);
+    const row = make("div", `optional-feature-row ${status.className}`);
+
+    const main = make("div", "optional-feature-main");
+    const title = make("div", "optional-feature-title");
+    title.append(make("strong", undefined, feature.label), make("span", `optional-feature-pill ${status.className}`, status.label));
+    const detail = make("div", "optional-feature-detail", `${status.detail} · checks ${feature.capabilityLabel}`);
+    const description = make("div", "optional-feature-description", feature.description);
+    const packageLine = make("code", "optional-feature-package", feature.packageName);
+    main.append(title, detail, description, packageLine);
+
+    const action = make("button", "optional-feature-action");
+    action.type = "button";
+    action.disabled = installing;
+    if (installing) {
+      action.textContent = "Installing…";
+    } else if (detected) {
+      action.textContent = enabled ? "Disable" : "Enable";
+      action.addEventListener("click", () => setOptionalFeatureDisabled(feature.id, enabled));
+    } else {
+      action.textContent = "Install…";
+      action.classList.add("install");
+      action.addEventListener("click", () => installOptionalFeature(feature.id));
+    }
+
+    row.append(main, action);
+    elements.optionalFeaturesBox.append(row);
+  }
+}
+
+function renderOptionalFeatureControls() {
+  setOptionalControlState(
+    elements.gitWorkflowButton,
+    isOptionalFeatureEnabled("gitWorkflow"),
+    optionalFeatureUnavailableMessage("gitWorkflow"),
+  );
+
+  elements.releaseNpmButton.hidden = !isOptionalFeatureEnabled("releaseNpm");
+  elements.releaseAurButton.hidden = !isOptionalFeatureEnabled("releaseAur");
+  const hasPublishWorkflow = isOptionalFeatureEnabled("releaseNpm") || isOptionalFeatureEnabled("releaseAur");
+  const publishContainer = elements.publishButton.parentElement;
+  if (publishContainer) publishContainer.hidden = !hasPublishWorkflow;
+  setOptionalControlState(
+    elements.publishButton,
+    hasPublishWorkflow,
+    "Publish workflows unavailable: enable/install NPM Release and/or AUR Release in Optional features.",
+  );
+  if (!hasPublishWorkflow && publishMenuOpen) setPublishMenuOpen(false);
+
+  renderOptionalFeaturePanel();
+}
+
+function commandUnavailableMessage(commandName) {
+  const featureId = optionalFeatureIdForCommand(commandName);
+  if (featureId) return optionalFeatureUnavailableMessage(featureId);
+  return `Command unavailable: /${commandName} is not loaded in the active Pi tab.`;
+}
+
+async function installOptionalFeature(featureId) {
+  const feature = OPTIONAL_FEATURE_BY_ID.get(featureId);
+  if (!feature || optionalFeatureInstallInProgress.has(featureId)) return;
+
+  const warning = [
+    `Install optional feature: ${feature.label}?`,
+    "",
+    `This will run npm install for ${feature.packageName} in the Web UI package install root.`,
+    "It can download code from npm and modify the local Pi/Web UI npm installation.",
+    "If this feature is already installed but disabled in Pi settings, cancel and enable it there instead.",
+    "",
+    "Continue?",
+  ].join("\n");
+  if (!confirm(warning)) return;
+
+  optionalFeatureInstallInProgress.add(featureId);
+  renderOptionalFeatureControls();
+  addEvent(`installing optional feature ${feature.label} (${feature.packageName})…`, "warn");
+  try {
+    const response = await api("/api/optional-feature-install", { method: "POST", body: { featureId }, scoped: false });
+    disabledOptionalFeatures.delete(featureId);
+    storeDisabledOptionalFeatures();
+    addEvent(response.data?.message || `installed ${feature.packageName}`, "info");
+    if (confirm(`${feature.label} install finished. Reload the active Pi tab now to enable newly loaded resources?`)) {
+      sendPrompt("prompt", "/reload");
+    } else {
+      await Promise.allSettled([refreshCommands(), initializeThemes()]);
+      renderOptionalFeatureControls();
+    }
+  } catch (error) {
+    addEvent(error.message || String(error), "error");
+  } finally {
+    optionalFeatureInstallInProgress.delete(featureId);
+    renderOptionalFeatureControls();
+  }
+}
+
 function runPublishWorkflow(command) {
   setComposerActionsOpen(false);
   setPublishMenuOpen(false);
+  const commandName = String(command || "").replace(/^\//, "").split(/\s+/)[0];
+  const featureId = OPTIONAL_COMMAND_FEATURES.get(commandName);
+  if ((featureId && !isOptionalFeatureEnabled(featureId)) || !hasAvailableCommand(commandName)) {
+    addEvent(commandUnavailableMessage(commandName), "warn");
+    refreshCommands().catch((error) => addEvent(error.message || String(error), "error"));
+    return;
+  }
   sendPrompt("prompt", command);
 }
 
@@ -3965,7 +4499,13 @@ function cancelStreamBubbleHide() {
   streamBubbleHideTimer = null;
 }
 
+function cancelStreamingAssistantTextRender() {
+  clearTimeout(streamTextRenderTimer);
+  streamTextRenderTimer = null;
+}
+
 function removeStreamBubble() {
+  cancelStreamingAssistantTextRender();
   cancelStreamBubbleHide();
   streamBubble?.remove();
   streamBubble = null;
@@ -3984,6 +4524,29 @@ function scheduleStreamBubbleHide() {
     if (stripTodoProgressLines(streamRawText, { streaming: true }) || !streamBubble) return;
     removeStreamBubble();
   }, delayMs);
+}
+
+function renderStreamingAssistantText() {
+  const assistantText = stripTodoProgressLines(streamRawText, { streaming: true });
+  if (assistantText) {
+    ensureStreamBubble();
+    streamText.textContent = assistantText;
+  } else {
+    scheduleStreamBubbleHide();
+  }
+}
+
+function scheduleStreamingAssistantTextRender() {
+  if (streamTextRenderTimer) return;
+  streamTextRenderTimer = setTimeout(() => {
+    streamTextRenderTimer = null;
+    renderStreamingAssistantText();
+  }, STREAM_OUTPUT_TOOLCALL_GUARD_MS);
+}
+
+function suppressStreamingAssistantTextBeforeToolCall() {
+  streamRawText = "";
+  removeStreamBubble();
 }
 
 function ensureStreamBubble() {
@@ -4012,11 +4575,13 @@ function showStreamingThinking(placeholder = "Thinking…") {
 }
 
 function resetStreamBubble() {
+  cancelStreamingAssistantTextRender();
   cancelStreamBubbleHide();
   streamBubble = null;
   streamText = null;
   streamRawText = "";
   streamBubbleVisibleSince = 0;
+  streamToolCallSeen = false;
   streamThinkingBubble = null;
   streamThinking = null;
 }
@@ -4035,9 +4600,13 @@ function assistantTextFromMessage(message) {
   const content = message?.content;
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return null;
-  const parts = content
-    .filter((part) => part && typeof part === "object" && part.type === "text" && typeof part.text === "string")
-    .map((part) => part.text);
+  const parts = [];
+  for (let index = 0; index < content.length; index += 1) {
+    const part = content[index];
+    if (part && typeof part === "object" && part.type === "text" && typeof part.text === "string" && !assistantHasToolCallAfter(content, index)) {
+      parts.push(part.text);
+    }
+  }
   return parts.length ? parts.join("\n\n") : "";
 }
 
@@ -4093,17 +4662,14 @@ function handleMessageUpdate(event) {
     if (typeof partialText === "string") streamRawText = partialText;
     else if (update.type === "text_end" && typeof update.content === "string") streamRawText = update.content;
     else streamRawText += delta;
-    const assistantText = stripTodoProgressLines(streamRawText, { streaming: true });
     setRunIndicatorActivity("Writing response…", { scroll: false });
-    if (assistantText) {
-      ensureStreamBubble();
-      streamText.textContent = assistantText;
-    } else {
-      scheduleStreamBubbleHide();
-    }
+    if (streamToolCallSeen || streamBubble) renderStreamingAssistantText();
+    else scheduleStreamingAssistantTextRender();
     renderFooter();
     scrollChatToBottom();
   } else if (update.type === "toolcall_start") {
+    streamToolCallSeen = true;
+    suppressStreamingAssistantTextBeforeToolCall();
     const name = runIndicatorToolName(update.name || update.toolName || update.toolCall?.name);
     setRunIndicatorActivity(`Preparing tool call: ${name}…`);
     addEvent(`tool call started in assistant message`, "info");
@@ -4355,7 +4921,7 @@ function scoreCommandSuggestion(command, query) {
 }
 
 function getCommandMatches(query) {
-  return availableCommands
+  return visibleCommands()
     .map((command) => ({ command, score: scoreCommandSuggestion(command, query) }))
     .filter((item) => Number.isFinite(item.score))
     .sort((a, b) => a.score - b.score || a.command.name.localeCompare(b.command.name))
@@ -4622,6 +5188,7 @@ function insertPathSuggestion(index = commandSuggestIndex) {
 async function refreshCommands() {
   const response = await api("/api/commands");
   availableCommands = normalizeCommands(response.data?.commands || []);
+  updateOptionalFeatureAvailability();
   elements.commandsBox.replaceChildren();
   if (!availableCommands.length) {
     elements.commandsBox.textContent = "No RPC-visible commands.";
@@ -4629,8 +5196,15 @@ async function refreshCommands() {
     hideCommandSuggestions();
     return;
   }
+  const commandsToShow = visibleCommands();
+  if (!commandsToShow.length) {
+    elements.commandsBox.textContent = "No enabled commands visible. Re-enable optional features to show their commands.";
+    elements.commandsBox.classList.add("muted");
+    hideCommandSuggestions();
+    return;
+  }
   elements.commandsBox.classList.remove("muted");
-  for (const command of availableCommands.slice(0, 80)) {
+  for (const command of commandsToShow.slice(0, 80)) {
     const item = make("button", "command-item");
     item.type = "button";
     item.title = `Send /${command.name}`;
@@ -4823,11 +5397,13 @@ function handleExtensionUiRequest(request) {
     case "setStatus":
       if (request.statusText) statusEntries.set(request.statusKey || "extension", request.statusText);
       else statusEntries.delete(request.statusKey || "extension");
+      updateOptionalFeatureAvailability();
       renderStatus();
       return;
     case "setWidget":
       if (Array.isArray(request.widgetLines)) widgets.set(request.widgetKey || request.id, request);
       else widgets.delete(request.widgetKey || request.id);
+      updateOptionalFeatureAvailability();
       renderWidgets();
       return;
     case "setTitle":
@@ -4967,6 +5543,11 @@ function handleEvent(event) {
     case "webui_tab_reloaded":
       addEvent(`${event.tabTitle || "terminal"} reloaded`);
       addTransientMessage({ role: "native", title: "/reload", content: `${event.tabTitle || "terminal"} reloaded. Keybindings, extensions, skills, prompts, and themes were refreshed by restarting the RPC tab${event.sessionFile ? ` and resuming ${event.sessionFile}` : ""}.`, level: "info" });
+      statusEntries.clear();
+      widgets.clear();
+      resetOptionalFeatureAvailability();
+      renderStatus();
+      renderWidgets();
       refreshTabs().catch((error) => addEvent(error.message, "error"));
       setTimeout(() => refreshAll().catch((error) => addEvent(error.message, "error")), 500);
       break;
@@ -5129,6 +5710,7 @@ elements.terminalTabsToggleButton.addEventListener("click", () => {
   setMobileTabsExpanded(!document.body.classList.contains("mobile-tabs-expanded"));
 });
 elements.newTabButton.addEventListener("click", () => createTerminalTab());
+elements.closeAllTabsButton.addEventListener("click", () => closeAllTerminalTabs());
 elements.gitWorkflowButton.addEventListener("click", () => {
   setComposerActionsOpen(false);
   startGitWorkflow();
@@ -5358,11 +5940,14 @@ elements.promptInput.addEventListener("blur", () => {
 resizePromptInput();
 focusPromptInput({ defer: true });
 updateComposerModeButtons();
+updateOptionalFeatureAvailability();
 loadLastUserPromptCache();
 installViewportHandlers();
 initializeThemes().catch((error) => addEvent(`failed to load themes: ${error.message}`, "warn"));
 initializeFastPicks().catch((error) => addEvent(`failed to initialize path fast picks: ${error.message}`, "error"));
 restoreAgentDoneNotificationsSetting();
+restoreSidePanelSectionState();
+bindSidePanelSectionToggles();
 restoreSidePanelState();
 bindMobileViewChanges();
 registerPwaServiceWorker();

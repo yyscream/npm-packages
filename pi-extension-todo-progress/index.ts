@@ -159,5 +159,12 @@ export default function todoProgress(pi: ExtensionAPI) {
   pi.registerShortcut("ctrl+alt+j", { description: "Todo scroll down", handler: async (ctx) => { state.offset = Math.min(Math.max(0, state.items.length - MAX_ROWS), state.offset + 1); render(ctx, state); } });
   pi.registerShortcut("ctrl+alt+k", { description: "Todo scroll up", handler: async (ctx) => { state.offset = Math.max(0, state.offset - 1); render(ctx, state); } });
 
+  pi.registerCommand("todo-progress-status", {
+    description: "Show todo-progress widget extension status",
+    handler: async (_args, ctx) => {
+      ctx.ui.notify(`todo-progress loaded · visible ${state.visible ? "yes" : "no"} · items ${state.items.length}`, "info");
+    },
+  });
+
   pi.on("session_start", async (_event, ctx) => clear(ctx, state));
 }

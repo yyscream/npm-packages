@@ -184,6 +184,22 @@ json_get() {
   node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));const v=(function(){return ${expr}})();if(v===undefined||v===null){process.exit(2)};if(typeof v==='object')console.log(JSON.stringify(v));else console.log(String(v));" "$file" 2>/dev/null
 }
 
+is_optional_node_module_resource() {
+  local pkg_json="$1"
+  local resource_path="$2"
+  [[ "$resource_path" == node_modules/* ]] || return 1
+  node -e '
+    const fs = require("fs");
+    const pkg = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    const resource = process.argv[2];
+    if (!resource.startsWith("node_modules/")) process.exit(1);
+    const rest = resource.slice("node_modules/".length);
+    const parts = rest.split("/").filter(Boolean);
+    const dependency = rest.startsWith("@") ? `${parts[0]}/${parts[1]}` : parts[0];
+    process.exit(pkg.optionalDependencies && Object.prototype.hasOwnProperty.call(pkg.optionalDependencies, dependency) ? 0 : 1);
+  ' "$pkg_json" "$resource_path" 2>/dev/null
+}
+
 check_auth() {
   local client="$1"
   local dir="$2"
@@ -418,6 +434,8 @@ for pkg_dir in "${PACKAGE_DIRS[@]}"; do
       else
         if [[ -e "$pkg_dir/$resource_clean" ]]; then
           print_check "$(ok)" "$resource_type entry exists: $resource_path"
+        elif is_optional_node_module_resource "$pkg_json" "$resource_clean"; then
+          print_check "$(warn)" "$resource_type optional dependency entry not installed in source workspace: $resource_path"
         else
           print_check "$(fail)" "$resource_type entry missing: $resource_path"
           pkg_fail=1

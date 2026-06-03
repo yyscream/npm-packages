@@ -20,6 +20,15 @@ const [pkgRaw, html, css, app, server, extension, readme, manifestRaw, serviceWo
 ]);
 const pkg = JSON.parse(pkgRaw);
 const manifest = JSON.parse(manifestRaw);
+const companionDependencies = {
+  "@firstpick/pi-extension-git-footer-status": "^0.2.1",
+  "@firstpick/pi-extension-release-aur": "^0.1.3",
+  "@firstpick/pi-extension-release-npm": "^0.3.3",
+  "@firstpick/pi-extension-stats": "^0.2.0",
+  "@firstpick/pi-extension-todo-progress": "^0.1.7",
+  "@firstpick/pi-prompts-git-pr": "^0.1.0",
+  "@firstpick/pi-themes-bundle": "^0.1.1",
+};
 
 assert.match(html, /viewport-fit=cover/, "viewport should opt into safe-area-aware full-screen layout");
 assert.match(html, /interactive-widget=resizes-content/, "viewport should request keyboard-driven content resizing where supported");
@@ -27,11 +36,17 @@ assert.match(html, /<meta name="theme-color" content="#11111b" \/>/, "PWA should
 assert.match(html, /<link rel="manifest" href="\/manifest\.webmanifest" \/>/, "PWA should expose a web app manifest");
 assert.match(html, /<link rel="apple-touch-icon" href="\/apple-touch-icon\.png" \/>/, "PWA should expose the conventional iOS home-screen icon path");
 assert.match(html, /id="terminalTabsToggleButton"/, "mobile should expose a compact terminal-tabs toggle");
+assert.match(html, /id="closeAllTabsButton"[\s\S]*?>Close all Tabs<\/button>/, "tab header should expose a top-right close-all tabs action");
 assert.match(html, /id="sidePanelBackdrop"/, "mobile side panel needs an overlay/backdrop close target");
 assert.match(html, /id="themeSelect"/, "side panel should expose a theme selector");
 assert.match(html, /<label for="themeSelect">Theme<\/label>/, "theme selector should be labeled in side-panel controls");
 assert.match(html, /id="agentDoneNotificationsToggle"/, "side panel should expose an agent-done notifications toggle");
 assert.match(html, /id="agentDoneNotificationsStatus"/, "agent-done notifications toggle should expose status text");
+assert.match(html, /id="optionalFeaturesBox"/, "side panel should expose optional feature status and controls");
+assert.match(html, /data-side-panel-section="controls"/, "side panel controls should live in a collapsible section");
+assert.match(html, /data-side-panel-section="commands"/, "side panel commands should live in a collapsible section");
+assert.match(html, /class="side-panel-section-toggle"[^>]*aria-controls="sidePanelSectionControls"/, "side panel section toggles should target their content panels");
+assert.match(html, /class="side-panel-section-label">Events<\/span>/, "side panel events should expose a section toggle label");
 assert.match(html, /id="jumpToLatestButton"/, "chat should expose a jump-to-latest control for non-forced streaming");
 assert.match(html, /id="stickyUserPromptButton"/, "chat should expose a fixed last-user-prompt jump control");
 assert.match(html, /id="feedbackTray"/, "chat should expose a queued action-feedback tray");
@@ -54,6 +69,7 @@ assert.ok(
 
 assert.match(css, /--visual-viewport-height:\s*100dvh/, "CSS should define a visual viewport height fallback");
 assert.match(css, /color-scheme:\s*var\(--theme-color-scheme\)/, "CSS should allow JS-selected themes to update browser color-scheme");
+assert.match(css, /font-size:\s*80%/, "Web UI should render at 80% base scale for denser layout");
 assert.match(css, /--background-glow-pink/, "CSS should expose theme-controlled page glow colors");
 assert.match(css, /height:\s*var\(--visual-viewport-height, 100dvh\)/, "layout should consume visual viewport height");
 assert.match(css, /button, select, input \{ min-height: 44px; \}/, "base controls should meet 44px touch-target height");
@@ -63,9 +79,18 @@ assert.match(css, /#promptInput \{[\s\S]*?overflow-y:\s*hidden/, "prompt input s
 assert.match(css, /\.sticky-user-prompt-button \{[\s\S]*?grid-template-columns:\s*auto minmax\(0, 1fr\) auto/, "last-user-prompt jump control should render as a fixed transcript header");
 assert.match(css, /\.message\.extension,[\s\S]*?\.message\.native/, "extension and native command output should have visible transcript styling");
 assert.match(css, /\.message\.run-indicator-message \{[\s\S]*?border-color/, "active agent runs should render a visible transcript indicator card");
+assert.match(css, /\.message\.action-enter \{[\s\S]*?action-card-slide-in/, "new action cards should subtly slide in from the bottom");
+assert.match(css, /@keyframes action-card-slide-in \{[\s\S]*?translateY\(0\.42rem\)/, "action-card entry animation should start below the final position");
 assert.match(css, /\.message\.thinking,\n\.message\.toolCall,\n\.message\.assistantEvent/, "thinking and assistant events should have non-assistant transcript card styling");
 assert.match(css, /\.message\.toolResult, \.message\.bashExecution, \.message\.compactionSummary/, "compaction summaries should render as compact collapsible transcript cards");
+assert.match(css, /\.tool-result-preview \{[\s\S]*?padding:/, "collapsed tool results should show a preview area by default");
+assert.match(css, /\.message-collapse\[open\] \+ \.tool-result-preview \{[\s\S]*?display:\s*none/, "tool result preview should hide when full output is expanded");
 assert.match(css, /\.run-indicator-pulse \{[\s\S]*?animation:\s*run-indicator-pulse/, "active agent run indicator should have an animated pulse");
+assert.match(css, /\.optional-features-box \{[\s\S]*?display:\s*grid/, "optional features should render as a side-panel feature list");
+assert.match(css, /\.side-panel-section-toggle \{[\s\S]*?justify-content:\s*space-between/, "side panel section toggles should align labels and chevrons");
+assert.match(css, /\.side-panel-section\.collapsed \.side-panel-section-content,\n\.side-panel-section-content\[hidden\] \{\n\s+display:\s*none;/, "collapsed side panel section content should be hidden");
+assert.match(css, /\.side-panel-section:not\(\.collapsed\) \.side-panel-section-chevron/, "expanded side panel sections should rotate the chevron");
+assert.match(css, /\.optional-feature-pill\.enabled/, "optional features should visually distinguish enabled state");
 assert.match(css, /\.todo-widget \{[\s\S]*?display:\s*grid/, "todo-progress widget should render as a styled checklist card");
 assert.match(css, /\.todo-widget-item\.partial \.todo-widget-marker/, "todo-progress partial items should have distinct styling");
 assert.match(css, /\.todo-widget-item\.done \.todo-widget-text[\s\S]*?text-decoration:\s*line-through/, "todo-progress completed items should be visually crossed out");
@@ -95,6 +120,8 @@ assert.match(css, /\.composer-actions-panel > \.composer-publish-menu[\s\S]*?gri
 assert.match(css, /\.composer-actions-panel[\s\S]*?bottom:\s*calc\(100% \+ 0\.42rem\)/, "mobile composer actions should open as an above-composer sheet");
 assert.match(css, /body\.composer-actions-open \.composer-actions-panel \{ display: grid; \}/, "composer actions panel should only open when toggled");
 assert.match(css, /\.terminal-tabs-toggle-button \{ display: none; \}/, "terminal tab toggle should be hidden outside mobile CSS");
+assert.match(css, /\.terminal-close-all-button \{[\s\S]*?color:\s*var\(--ctp-red\)/, "close-all tabs action should render as a top-right destructive tab action");
+assert.match(css, /\.terminal-tab-group-close \{[\s\S]*?border-left-color/, "terminal tab groups should style their close button distinctly");
 assert.match(css, /body\.mobile-tabs-expanded \.terminal-tabs \{ display: flex; \}/, "mobile tabs should expand only when toggled");
 assert.match(css, /\.terminal-tab-activity-indicator/, "terminal tabs should expose per-tab agent activity indicators");
 assert.match(css, /\.terminal-tab-group-item \{[\s\S]*?background:\s*var\(--ctp-crust\)/, "grouped terminal tab items should use opaque backgrounds");
@@ -132,6 +159,7 @@ assert.match(css, /\.release-dialog-danger \{ color: var\(--ctp-red\); \}/, "rel
 
 assert.match(app, /const MOBILE_VIEW_QUERY = "\(max-width: 720px\), \(max-device-width: 720px\), \(pointer: coarse\) and \(hover: none\)"/, "mobile detection should include phones that report desktop-like layout widths");
 assert.match(app, /const THEME_STORAGE_KEY = "pi-webui-theme"/, "theme selection should be persisted in browser storage");
+assert.match(app, /const SIDE_PANEL_SECTION_STORAGE_KEY = "pi-webui-side-panel-sections-collapsed"/, "side-panel section collapse state should be persisted in browser storage");
 assert.match(app, /const AGENT_DONE_NOTIFICATIONS_STORAGE_KEY = "pi-webui-agent-done-notifications"/, "agent-done notification preference should be persisted in browser storage");
 assert.match(app, /async function initializeThemes\(\)/, "frontend should initialize bundled themes");
 assert.match(app, /api\("\/api\/themes", \{ scoped: false \}\)/, "theme loading should use the unscoped themes endpoint");
@@ -177,31 +205,52 @@ assert.match(app, /function hasQueuedDialogRequest\(id\)/, "frontend should dedu
 assert.match(app, /if \(request\.replayed\) addEvent\(`recovered pending \$\{request\.method\} request`, "warn"\)/, "frontend should surface replayed extension UI blockers");
 assert.match(app, /case "webui_extension_ui_cancelled":/, "frontend should close dialogs cancelled by backend abort handling");
 assert.match(app, /function parseTodoProgressWidget\(lines\)/, "todo-progress widgets should be parsed from extension widget lines");
+assert.match(app, /Optional feature detection intentionally checks loaded Pi capabilities/, "optional Web UI features should be detected through loaded capabilities, not package folders");
+assert.match(app, /function resetOptionalFeatureAvailability\(\)/, "optional feature state should reset across active-tab and reload boundaries");
+assert.match(app, /function renderOptionalFeaturePanel\(\)/, "side panel should render optional feature installed/enabled state");
+assert.match(app, /function setSidePanelSectionCollapsed\(record, collapsed/, "side panel sections should have explicit collapse/expand behavior");
+assert.match(app, /restoreSidePanelSectionState\(\);\nbindSidePanelSectionToggles\(\);/, "side panel section state should restore before toggles are bound");
+assert.match(app, /OPTIONAL_FEATURES_STORAGE_KEY/, "optional feature disable toggles should persist in browser storage");
+assert.match(app, /function installOptionalFeature\(featureId\)/, "optional features should expose an install action");
+assert.match(app, /api\("\/api\/optional-feature-install"/, "optional feature install action should call the backend installer endpoint");
+assert.match(app, /function updateOptionalFeatureAvailability\(\)[\s\S]*hasAvailableCommand\("git-staged-msg"\)[\s\S]*hasAvailableCommand\("release-npm"\)[\s\S]*hasAvailableCommand\("release-aur"\)[\s\S]*hasAvailableCommand\("todo-progress-status"\)/, "optional feature detection should call RPC-visible commands directly");
+assert.match(app, /if \(!isOptionalFeatureEnabled\("todoProgressWidget"\)\) return String\(text \|\| ""\)/, "todo progress line stripping should only run when the todo feature is detected and enabled");
+assert.match(app, /case "webui_tab_reloaded":[\s\S]*resetOptionalFeatureAvailability\(\)/, "optional feature state should reset when the RPC tab reloads resources");
+assert.match(app, /function runPublishWorkflow\(command\)[\s\S]*hasAvailableCommand\(commandName\)/, "publish workflow launch should guard on loaded slash commands");
+assert.match(app, /if \(!isOptionalFeatureEnabled\("gitWorkflow"\)\)/, "guided git workflow should guard on enabled /git-staged-msg feature");
 assert.match(app, /function renderReleaseNpmOutputWidget\(\)/, "release-npm live output should use a specialized Web UI renderer");
 assert.match(app, /function renderReleaseAurOutputWidget\(\)/, "release-aur live output should use a specialized Web UI renderer");
 assert.match(app, /releaseNpmActionButton\("Abort", "\/release-abort", "danger"\)/, "release-npm Web UI output should expose an abort action");
 assert.match(app, /releaseNpmActionButton\("Abort", "\/release-aur abort", "danger"\)/, "release-aur Web UI output should expose an abort action");
-assert.match(app, /key === "todo-progress" \? renderTodoProgressWidget\(key, lines\) : null/, "todo-progress should use the specialized widget renderer");
+assert.match(app, /key === "todo-progress" && isOptionalFeatureEnabled\("todoProgressWidget"\) \? renderTodoProgressWidget\(key, lines\) : null/, "todo-progress should use the specialized widget renderer only when enabled");
 assert.match(app, /let transientMessages = \[\]/, "frontend should keep transient Web UI/extension output messages");
 assert.match(app, /function orderedTranscriptItems\(\)/, "frontend should merge persisted and transient messages chronologically");
 assert.match(app, /items\.sort\(\(a, b\) => a\.timestampMs - b\.timestampMs \|\| a\.order - b\.order\)/, "transient extension output should not pin itself below newer persisted messages");
 assert.match(app, /const ACTION_FEEDBACK_REACTIONS = \{/, "frontend should define direct feedback reactions");
 assert.match(app, /message\?\.role === "assistant" \|\| message\?\.role === "toolResult" \|\| message\?\.role === "bashExecution"/, "frontend should allow reactions on final assistant output as well as actions");
 assert.match(app, /function renderActionFeedbackControls\(/, "frontend should render per-message reaction controls");
+assert.match(app, /function toolResultPreviewText\(message, lineLimit = 10\)/, "tool results should derive a ten-line collapsed preview");
+assert.match(app, /appendText\(preview, toolResultPreviewText\(message, 10\), "code-block tool-result-preview-text"\)/, "collapsed tool results should render the first ten preview lines by default");
 assert.match(app, /function assistantDisplayMessages\(message\)/, "assistant history should split thinking and tool-call parts out of the final Assistant output card");
+assert.match(app, /function assistantHasToolCallAfter\(content, index\)/, "assistant text that precedes a tool call should be detectable and suppressible");
+assert.match(app, /if \(!assistantHasToolCallAfter\(content, index\)\) finalParts\.push\(finalPart\);/, "assistant history should not render pre-tool-call assistant text as final output");
 assert.match(app, /return content\.trim\(\) \? \[\{ \.\.\.message, title: "Assistant" \}\] : \[\]/, "assistant messages with stripped empty text should not render empty Assistant cards");
 assert.match(app, /part\.type === "text"\) return typeof part\.text === "string" && part\.text\.trim\(\) \? part : null/, "empty assistant text parts should be filtered after todo/widget extraction");
 assert.match(app, /displayMessage\.role === "assistant" \? messageIndex : -1/, "only final Assistant output cards should keep the assistant message index for feedback");
 assert.match(app, /function ensureStreamingThinkingBubble\(\)/, "live thinking should render in a dedicated non-assistant streaming card");
+assert.match(app, /if \(thinkingText \|\| !streaming\) appendText\(body, thinkingText \|\| "No thinking content was exposed by the provider\.", "thinking-text"\);/, "empty live thinking cards should not render the no-thinking fallback before deltas arrive");
 assert.match(app, /function assistantStreamingMessage\(event\)/, "live streaming should read the authoritative partial assistant message from RPC events like the TUI");
 assert.match(app, /assistantThinkingTextFromMessage\(assistantStreamingMessage\(event\)\) \|\| thinkingDeltaText\(update\)/, "live thinking end should replace deltas with the final partial-message thinking content");
 assert.match(app, /if \(typeof partialText === "string"\) streamRawText = partialText;/, "live assistant text should synchronize from partial messages instead of relying only on deltas");
 assert.match(app, /const TODO_PROGRESS_LINE_REGEX = /, "frontend should recognize live todo progress lines that will be moved into the todo widget");
 assert.match(app, /function stripTodoProgressLines\(text, \{ streaming = false \} = \{\}\)/, "live Assistant output should strip todo-progress lines before rendering final-output text");
-assert.match(app, /streamRawText \+= delta;[\s\S]*?const assistantText = stripTodoProgressLines\(streamRawText, \{ streaming: true \}\)/, "streamed Assistant text should classify from accumulated output without flashing partial todo-progress lines");
+assert.match(app, /function renderStreamingAssistantText\(\)[\s\S]*?const assistantText = stripTodoProgressLines\(streamRawText, \{ streaming: true \}\)/, "streamed Assistant text should classify from accumulated output without flashing partial todo-progress lines");
 assert.match(app, /const STREAM_OUTPUT_HIDE_DELAY_MS = 300/, "stream output hiding should be debounced to prevent rapid flicker");
+assert.match(app, /const STREAM_OUTPUT_TOOLCALL_GUARD_MS = 220/, "live assistant text should be briefly guarded so pre-tool-call text can be suppressed");
 assert.match(app, /function scheduleStreamBubbleHide\([\s\S]*?STREAM_OUTPUT_MIN_VISIBLE_MS/, "stream output cards should observe a minimum visible duration before hiding");
 assert.match(app, /if \(assistantText\) \{[\s\S]*?streamText\.textContent = assistantText;[\s\S]*?\} else \{\n\s+scheduleStreamBubbleHide\(\);/, "empty filtered stream output should schedule hide instead of immediately removing the card");
+assert.match(app, /if \(streamToolCallSeen \|\| streamBubble\) renderStreamingAssistantText\(\);\n\s+else scheduleStreamingAssistantTextRender\(\);/, "live assistant text should wait briefly before showing unless it is already visible or follows a tool call");
+assert.match(app, /streamToolCallSeen = true;\n\s+suppressStreamingAssistantTextBeforeToolCall\(\);/, "tool-call starts should remove pending assistant text from the live transcript");
 assert.match(app, /const created = appendMessage\(\{ role: "assistant", title: "Assistant"/, "live Assistant cards should be created only for final output text");
 assert.match(app, /api\("\/api\/action-feedback", \{ method: "POST"/, "queued action feedback should post to the server after the run is idle");
 assert.match(app, /function postQueuedFeedback\(tabId, items\)/, "queued feedback should have a backward-compatible submit path");
@@ -210,7 +259,7 @@ assert.match(app, /actionFeedbackSteerMessage\(item\)/, "live action feedback sh
 assert.match(app, /function addTransientMessage\(\{ role = "notice"/, "frontend should render transient command output into the transcript");
 assert.match(app, /addTransientMessage\(\{ role: "extension", title: "extension output"/, "extension notify output should appear in the transcript, not only the event log");
 assert.match(app, /function renderRunIndicator\(/, "frontend should render a transcript-level active agent indicator");
-assert.match(app, /return "Agent is still runing: ";/, "active agent indicator should use the requested headline wording");
+assert.match(app, /return "Agent is running: ";/, "active agent indicator should use the requested headline wording");
 assert.doesNotMatch(app, /"agent running"/, "active agent indicator should not render a separate title/header label");
 assert.doesNotMatch(app, /runIndicatorTimestamp/, "active agent indicator should not render a separate live timestamp header");
 assert.match(app, /runIndicatorBubble = make\("article", "message runIndicator run-indicator-message streaming"\)/, "active agent indicator should use a dedicated streaming transcript card");
@@ -278,7 +327,11 @@ assert.match(app, /function updateTerminalTabGroupOpenState\(\)/, "frontend shou
 assert.match(app, /wrapper\.addEventListener\("pointerenter", \(\) => setOpenTerminalTabGroup\(group\.key\)\)/, "terminal tab groups should mark themselves open while hovered");
 assert.match(app, /if \(openTerminalTabGroupKey\) \{\n\s+scheduleRefreshTabs\(600\);/, "tab polling should defer full tab refreshes while a group menu is open");
 assert.match(app, /function shouldRenderTerminalTabGroup\(group, groupCount\) \{\n\s+return groupCount > 1 && group\.tabs\.length > 1 && Boolean\(group\.cwd\);\n\}/, "terminal tabs should only collapse cwd groups when multiple groups are available");
-assert.match(app, /const groups = tabCwdGroups\(\);[\s\S]*?for \(const group of groups\) \{\n\s+if \(shouldRenderTerminalTabGroup\(group, groups\.length\)\)[\s\S]*?for \(const tab of group\.tabs\) elements\.tabBar\.append\(renderTerminalTab\(tab\)\);/, "terminal tabs should render every tab ungrouped when grouping is skipped");
+assert.match(app, /function closeTerminalTabGroup\(group\)[\s\S]*?closeTerminalTabs\(group\.tabs\.map\(\(tab\) => tab\.id\)/, "terminal tab groups should be closable as a batch");
+assert.match(app, /function closeAllTerminalTabs\(\)[\s\S]*?closeTerminalTabs\(tabs\.map\(\(tab\) => tab\.id\)/, "tab header should close all terminal tabs as a batch");
+assert.match(app, /WARNING: \$\{activeAgentTabs\.length\}[\s\S]*?still running or waiting for input/, "tab close confirmations should warn when agents are still running");
+assert.match(app, /elements\.closeAllTabsButton\.addEventListener\("click", \(\) => closeAllTerminalTabs\(\)\)/, "close-all tabs button should be wired in JS");
+assert.match(app, /const groups = tabCwdGroups\(\);[\s\S]*?for \(const group of groups\) \{\n\s+if \(shouldRenderTerminalTabGroup\(group, groups\.length\)\)[\s\S]*?renderTerminalTabGroup\(group, groups\.length\)[\s\S]*?for \(const tab of group\.tabs\) elements\.tabBar\.append\(renderTerminalTab\(tab\)\);/, "terminal tabs should render groups with group count and ungrouped tabs when grouping is skipped");
 assert.match(app, /let tabSeenCompletionSerials = new Map\(\)/, "frontend should track which tab completions have been seen");
 assert.match(app, /function tabIndicator\(tab\)/, "frontend should derive idle, working, blocked, and work-done tab indicator states");
 assert.match(app, /pendingBlockerCount > 0[\s\S]*?state: "blocked"/, "frontend should show blocked tabs when extension UI blockers are pending");
@@ -327,7 +380,7 @@ assert.equal(manifest.start_url, "/", "PWA manifest should start at the web UI r
 assert.ok(manifest.icons?.some((icon) => icon.src === "/apple-touch-icon.png" && icon.sizes === "180x180"), "PWA manifest should include a conventional 180px apple touch icon");
 assert.ok(manifest.icons?.some((icon) => icon.src === "/icon-192.png" && icon.sizes === "192x192"), "PWA manifest should include a 192px icon");
 assert.ok(manifest.icons?.some((icon) => icon.src === "/icon-512.png" && icon.sizes === "512x512"), "PWA manifest should include a 512px icon");
-assert.match(serviceWorker, /const CACHE_NAME = "pi-webui-pwa-v10"/, "PWA service worker should define an app-shell cache");
+assert.match(serviceWorker, /const CACHE_NAME = "pi-webui-pwa-v12"/, "PWA service worker should define an app-shell cache");
 assert.match(serviceWorker, /self\.addEventListener\("notificationclick"/, "PWA service worker should focus Web UI when blocked-tab notifications are clicked");
 assert.match(serviceWorker, /event\.notification\.data\?\.url/, "blocked-tab notifications should carry a URL for service-worker click handling");
 assert.match(serviceWorker, /"\/apple-touch-icon\.png"/, "PWA service worker should cache the apple touch icon");
@@ -364,8 +417,11 @@ assert.match(server, /async function handleNativeSlashCommand\(tab, body\)/, "se
 assert.match(server, /const restoreTabs = readRestoreTabsFromEnv\(\)/, "server should accept restart tab restore descriptors from the launcher environment");
 assert.match(server, /delete process\.env\.PI_WEBUI_RESTORE_TABS/, "server should avoid leaking restore descriptors into spawned Pi RPC processes");
 assert.match(server, /if \(sessionFile && !options\.noSession\) piArgs\.push\("--session", sessionFile\)/, "restored tabs should resume previous session files");
+assert.doesNotMatch(server, /args\.push\("--name"/, "Web UI tab titles should not be forwarded as Pi CLI --name flags because older bundled Pi CLIs reject them");
 assert.match(server, /const closedRestorableTabs = \[\]/, "server should remember recently closed tabs for slash-command restarts");
 assert.match(server, /async function closeTab\(id\)[\s\S]*?rememberClosedRestorableTab\(tab, restorableState\)/, "closing a tab should capture its restorable session before stopping RPC");
+assert.match(server, /async function closeTabs\(ids\)[\s\S]*?if \(targetTabs\.length >= tabs\.size\) \{\n\s+await createTab/, "bulk tab close should create a replacement before closing every current tab");
+assert.match(server, /url\.pathname === "\/api\/tabs\/close" && req\.method === "POST"[\s\S]*?closedIds: closed\.map\(\(tab\) => tab\.id\)/, "server should expose a bulk close-tabs endpoint");
 assert.match(server, /function rememberTabState\(tab, state\)/, "server should cache last-known tab state for restart-safe session restoration");
 assert.match(server, /sessionFile: tabRestorableSessionFile\(tab\)/, "tab metadata should expose cached session files for health/status restore descriptors");
 assert.match(server, /restorableTabs: mergeRestorableTabDescriptors\(statusTabs, closedRestorableTabs\)/, "status should expose open plus recently closed restorable tabs");
@@ -376,7 +432,8 @@ assert.match(extension, /api\/webui-status\?detailed=1&events=0/, "launcher shou
 assert.match(extension, /function mergeRestorableTabsFromStatusSources\(sources: unknown\[\], options: StartWebuiOptions\)/, "launcher should merge all available restore sources instead of trusting only the first one");
 assert.match(extension, /statusData\?\.restorableTabs, statusData\?\.tabs, existing\.restorableTabs, existing\.tabs/, "launcher should combine detailed, health, open, and closed restore descriptors");
 assert.match(extension, /env\.PI_WEBUI_RESTORE_TABS = JSON\.stringify\(restoreTabs\)/, "launcher should pass restorable tabs to the new detached server");
-assert.match(extension, /pi\.registerCommand\("start-webui"/, "extension should expose /start-webui as an alias for users who invoke that command name");
+assert.match(extension, /pi\.registerCommand\("webui-start"/, "extension should expose the canonical /webui-start command");
+assert.doesNotMatch(extension, /pi\.registerCommand\("start-webui"/, "extension should not expose the older /start-webui alias");
 assert.match(server, /if \(state\.data\?\.sessionFile && !options\.noSession\) piArgs\.push\("--session", state\.data\.sessionFile\)/, "native /reload should resume the same session file when restarting the RPC tab");
 assert.match(server, /case "reload": \{[\s\S]*?restartTabRpc\(tab, "slash-command"\)/, "native /reload should restart the active RPC tab");
 assert.match(server, /message: "Reloaded keybindings, extensions, skills, prompts, and themes\."/, "native /reload should return visible command output");
@@ -387,6 +444,8 @@ assert.match(server, /case "session": \{[\s\S]*?formatSessionOutput\(tab, state\
 assert.match(server, /case "copy": \{[\s\S]*?get_last_assistant_text[\s\S]*?copyText: text/, "native /copy should return text for browser clipboard handling");
 assert.match(server, /case "hotkeys": \{[\s\S]*?webuiHotkeysOutput\(\)/, "native /hotkeys should return Web UI hotkey output");
 assert.match(server, /url\.pathname === "\/api\/commands" && req\.method === "GET"[\s\S]*?getCommandData\(tab\)/, "GET /api/commands should merge native and RPC-visible commands");
+assert.match(server, /function safeRpcResponse\(tab, command/, "server should provide stopped-RPC fallbacks for refresh endpoints");
+assert.match(server, /function primeTabRpc\(tab\)/, "server should prime new terminal RPC state before returning created tabs");
 assert.match(server, /specific Web UI action or final-output cards/, "server feedback-learning prompt should cover final outputs as well as actions");
 assert.match(server, /function formatActionFeedbackLearningPrompt\(items\)/, "server should convert feedback into a LEARNING prompt");
 assert.match(server, /url\.pathname === "\/api\/action-feedback" && req\.method === "POST"[\s\S]*?handleActionFeedback\(tab, body\)/, "POST /api/action-feedback should trigger the feedback-learning prompt");
@@ -399,7 +458,11 @@ assert.match(server, /url\.pathname === "\/api\/path-suggestions" && req\.method
 assert.match(server, /url\.pathname === "\/api\/path-fast-picks" && req\.method === "GET"/, "server should expose GET /api/path-fast-picks");
 assert.match(server, /url\.pathname === "\/api\/path-fast-picks" && req\.method === "POST"/, "server should expose POST /api/path-fast-picks");
 assert.match(server, /url\.pathname === "\/api\/scoped-models" && req\.method === "GET"/, "server should expose GET /api/scoped-models");
-assert.match(server, /@firstpick\/pi-themes-bundle/, "server should discover themes from the bundled theme package");
+assert.match(server, /@firstpick\/pi-themes-bundle/, "server should discover themes from the optional theme package");
+assert.match(server, /const OPTIONAL_FEATURE_PACKAGES = new Map/, "server should whitelist optional feature packages for install actions");
+assert.match(server, /function installOptionalFeaturePackage\(featureId\)/, "server should provide optional feature package installation helper");
+assert.match(server, /url\.pathname === "\/api\/optional-feature-install" && req\.method === "POST"/, "server should expose optional feature install endpoint");
+assert.match(server, /Installing optional Web UI features is only allowed from localhost/, "optional feature install endpoint should be localhost-only");
 assert.match(server, /url\.pathname === "\/api\/themes" && req\.method === "GET"/, "server should expose GET /api/themes");
 assert.match(server, /readBundledThemes\(\)/, "server should read bundled theme JSON files for the browser");
 assert.match(server, /"apple-touch-icon\.png", "icon-192\.png"/, "server should serve the conventional apple touch icon path");
@@ -415,13 +478,42 @@ assert.match(readme, /Feedback reactions \(`👍`, `👎`, `\?`\) on final assis
 assert.match(readme, /POST \/api\/action-feedback\?tab=<tabId>/, "README should document the action-feedback endpoint");
 assert.match(readme, /`@` file\/path references with live suggestions/, "README should describe @ file/path reference autocomplete");
 assert.match(readme, /GET \/api\/path-suggestions\?tab=<tabId>&query=<path>/, "README should document the path-suggestions endpoint");
+assert.match(readme, /POST \/api\/optional-feature-install/, "README should document optional feature install endpoint");
 assert.match(readme, /server-persisted fast picks/, "README should describe server-persisted fast picks");
 assert.match(readme, /browser notifications when a tab needs an extension UI response and an optional side-panel toggle for agent-done notifications/, "README should describe blocked-tab and agent-done notifications");
 assert.match(readme, /blocked-tab browser notifications, and optional agent-done notifications require browser service-worker\/notification support/, "README should document notification requirements");
-assert.match(readme, /Side-panel theme picker backed by the bundled `@firstpick\/pi-themes-bundle` themes/, "README should describe bundled theme selection");
+assert.match(readme, /Side-panel theme picker backed by optional `@firstpick\/pi-themes-bundle` themes when loaded/, "README should describe optional theme selection");
+assert.match(readme, /## Optional companion packages/, "README should document optional Web UI companion packages");
+assert.match(readme, /checks loaded Pi capabilities directly through RPC-visible commands and live widget events/, "README should document capability-based startup checks");
+assert.match(readme, /side panel shows each optional feature as enabled, disabled, or install-needed/, "README should document optional feature side-panel controls");
+assert.match(readme, /Installing a missing feature is an explicit, warned action/, "README should document optional feature install warning behavior");
 
 assert.equal(pkg.scripts?.test, "node tests/mobile-static.test.mjs", "package test script should run the mobile static harness");
-assert.equal(pkg.dependencies?.["@firstpick/pi-themes-bundle"], "^0.1.0", "webui package should depend on the bundled theme package");
+for (const [name, range] of Object.entries(companionDependencies)) {
+  assert.equal(pkg.optionalDependencies?.[name], range, `webui package should optionally depend on ${name}`);
+  assert.equal(pkg.dependencies?.[name], undefined, `webui package should not require optional companion ${name}`);
+}
+assert.equal(pkg.bundledDependencies, undefined, "webui optional companion packages should not be bundled into the tarball");
+for (const extensionPath of [
+  "../pi-extension-git-footer-status/index.ts",
+  "../pi-extension-release-aur/index.ts",
+  "../pi-extension-release-npm/index.ts",
+  "../pi-extension-stats/index.ts",
+  "../pi-extension-todo-progress/index.ts",
+  "node_modules/@firstpick/pi-extension-git-footer-status/index.ts",
+  "node_modules/@firstpick/pi-extension-release-aur/index.ts",
+  "node_modules/@firstpick/pi-extension-release-npm/index.ts",
+  "node_modules/@firstpick/pi-extension-stats/index.ts",
+  "node_modules/@firstpick/pi-extension-todo-progress/index.ts",
+]) {
+  assert.ok(pkg.pi?.extensions?.includes(extensionPath), `webui Pi manifest should load ${extensionPath} when present`);
+}
+assert.ok(pkg.pi?.skills?.includes("../pi-extension-release-aur/skills"), "webui Pi manifest should load release-aur sibling skills when present");
+assert.ok(pkg.pi?.skills?.includes("node_modules/@firstpick/pi-extension-release-aur/skills"), "webui Pi manifest should load release-aur nested skills when present");
+assert.ok(pkg.pi?.prompts?.includes("../pi-package-prompts-git-pr/prompts"), "webui Pi manifest should load guided-git sibling prompts when present");
+assert.ok(pkg.pi?.prompts?.includes("node_modules/@firstpick/pi-prompts-git-pr/prompts"), "webui Pi manifest should load guided-git nested prompts when present");
+assert.ok(pkg.pi?.themes?.includes("../pi-package-themes-bundle/themes"), "webui Pi manifest should load sibling bundled themes when present");
+assert.ok(pkg.pi?.themes?.includes("node_modules/@firstpick/pi-themes-bundle/themes"), "webui Pi manifest should load nested bundled themes when present");
 assert.ok(pkg.scripts?.check?.includes("node --check public/app.js"), "check script should syntax-check app.js");
 assert.ok(pkg.scripts?.check?.includes("node tests/mobile-static.test.mjs"), "check script should include mobile static assertions");
 

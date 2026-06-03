@@ -11,6 +11,8 @@ const webuiBin = path.join(packageRoot, "bin", "pi-webui.mjs");
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 31415;
 const START_TIMEOUT_MS = 12_000;
+const START_TIMEOUT_PER_RESTORED_TAB_MS = 4_000;
+const START_TIMEOUT_MAX_MS = 60_000;
 
 type WebuiAddress = {
   host: string;
@@ -449,7 +451,12 @@ function terminateFailedChild(child: WebuiChild): void {
   child.stderr.destroy();
 }
 
-function waitForWebuiUrl(child: WebuiChild): Promise<string> {
+function startupTimeoutMs(restoreTabCount: number): number {
+  const extraTabs = Math.max(0, restoreTabCount - 1);
+  return Math.min(START_TIMEOUT_MAX_MS, START_TIMEOUT_MS + extraTabs * START_TIMEOUT_PER_RESTORED_TAB_MS);
+}
+
+function waitForWebuiUrl(child: WebuiChild, timeoutMs = START_TIMEOUT_MS): Promise<string> {
   return new Promise((resolve, reject) => {
     let settled = false;
     let output = "";
@@ -472,8 +479,8 @@ function waitForWebuiUrl(child: WebuiChild): Promise<string> {
     };
 
     const timeout = setTimeout(() => {
-      finish(new Error(`Timed out waiting for Pi Web UI to start. Output:\n${output.trim() || "(no output)"}`));
-    }, START_TIMEOUT_MS);
+      finish(new Error(`Timed out after ${Math.round(timeoutMs / 1000)}s waiting for Pi Web UI to start. Output:\n${output.trim() || "(no output)"}`));
+    }, timeoutMs);
 
     child.stdout.on("data", inspect);
     child.stderr.on("data", inspect);
@@ -501,7 +508,7 @@ async function startWebui(options: StartWebuiOptions, ctx: ExtensionCommandConte
     windowsHide: true,
   });
 
-  return waitForWebuiUrl(child);
+  return waitForWebuiUrl(child, startupTimeoutMs(restoreTabs.length));
 }
 
 type WebuiStatusFetchResult = {
@@ -777,11 +784,6 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("webui-start", {
     description: "Start the local Pi browser Web UI and open it",
-    handler: startWebuiHandler,
-  });
-
-  pi.registerCommand("start-webui", {
-    description: "Alias for /webui-start",
     handler: startWebuiHandler,
   });
 

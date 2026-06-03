@@ -104,6 +104,15 @@ const NATIVE_SLASH_COMMANDS = [
   { name: "quit", description: "Quit Pi" },
 ].map((command) => ({ ...command, source: "native", location: "Pi" }));
 const NATIVE_SLASH_COMMAND_NAMES = new Set(NATIVE_SLASH_COMMANDS.map((command) => command.name));
+const OPTIONAL_FEATURE_PACKAGES = new Map([
+  ["gitWorkflow", "@firstpick/pi-prompts-git-pr"],
+  ["releaseNpm", "@firstpick/pi-extension-release-npm"],
+  ["releaseAur", "@firstpick/pi-extension-release-aur"],
+  ["todoProgressWidget", "@firstpick/pi-extension-todo-progress"],
+  ["gitFooterStatus", "@firstpick/pi-extension-git-footer-status"],
+  ["statsCommand", "@firstpick/pi-extension-stats"],
+  ["themeBundle", "@firstpick/pi-themes-bundle"],
+]);
 
 function usage() {
   console.log(`pi-webui ${packageJson.version}
@@ -119,7 +128,7 @@ Options:
   --cwd <path>        Working directory for the Pi session (default: current dir)
   --pi <command>      Pi executable to spawn (default: bundled dependency, then "pi")
   --no-session        Start Pi RPC with --no-session
-  --name <name>       Initial Pi session name
+  --name <name>       Initial Web UI tab display name
   -h, --help          Show this help
   -v, --version       Print version
 
@@ -232,6 +241,10 @@ function sanitizeError(error) {
   return error.stack || error.message || String(error);
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 class PiRpcProcess {
   constructor({ command, args, displayCommand, cwd }) {
     this.command = command;
@@ -272,6 +285,10 @@ class PiRpcProcess {
     });
 
     this.emit({ type: "pi_process_start", pid: this.child.pid, cwd: this.cwd, command: this.displayCommand, args: this.args });
+  }
+
+  isRunning() {
+    return !!this.child && this.child.exitCode === null && !this.child.killed;
   }
 
   onEvent(listener) {
@@ -344,7 +361,7 @@ class PiRpcProcess {
   }
 
   send(command, timeoutMs = REQUEST_TIMEOUT_MS) {
-    if (!this.child || !this.child.stdin || this.child.exitCode !== null) {
+    if (!this.isRunning() || !this.child?.stdin) {
       return Promise.reject(new Error("Pi RPC process is not running"));
     }
 
@@ -367,7 +384,7 @@ class PiRpcProcess {
   }
 
   async writeRaw(command) {
-    if (!this.child || !this.child.stdin || this.child.exitCode !== null) {
+    if (!this.isRunning() || !this.child?.stdin) {
       throw new Error("Pi RPC process is not running");
     }
 
@@ -634,6 +651,49 @@ function runCommand(command, args, { cwd, timeoutMs = 2000, maxOutputLength = 20
   });
 }
 
+function optionalDependencyInstallRoot() {
+  const parts = packageRoot.split(path.sep);
+  const nodeModulesIndex = parts.lastIndexOf("node_modules");
+  if (nodeModulesIndex >= 0) {
+    const root = parts.slice(0, nodeModulesIndex).join(path.sep);
+    return root || path.parse(packageRoot).root;
+  }
+  return packageRoot;
+}
+
+function formatCommandForDisplay(command, args) {
+  return [command, ...args].map((part) => (/\s/.test(part) ? JSON.stringify(part) : part)).join(" ");
+}
+
+async function installOptionalFeaturePackage(featureId) {
+  const packageName = OPTIONAL_FEATURE_PACKAGES.get(featureId);
+  if (!packageName) throw makeHttpError(400, `Unknown optional feature: ${featureId}`);
+
+  const installRoot = optionalDependencyInstallRoot();
+  const npmCommand = process.env.PI_WEBUI_NPM_BIN || "npm";
+  const args = ["install", "--prefix", installRoot, packageName];
+  const result = await runCommand(npmCommand, args, {
+    cwd: installRoot,
+    timeoutMs: 5 * 60 * 1000,
+    maxOutputLength: 80000,
+  });
+  const command = formatCommandForDisplay(npmCommand, args);
+  const ok = result.exitCode === 0 && !result.timedOut && !result.error;
+  if (!ok) {
+    const details = [result.error, result.timedOut ? "timed out" : undefined, result.stderr?.trim(), result.stdout?.trim()].filter(Boolean).join("\n");
+    throw makeHttpError(500, `Optional feature install failed: ${command}${details ? `\n${details}` : ""}`);
+  }
+  return {
+    featureId,
+    packageName,
+    installRoot,
+    command,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    message: `Installed optional feature package ${packageName}. Reload the active Pi tab to load new resources.`,
+  };
+}
+
 function displayPath(cwd) {
   const normalized = cwd.replace(/\\/g, "/");
   const home = (process.env.USERPROFILE || process.env.HOME || "").replace(/\\/g, "/");
@@ -809,9 +869,9 @@ function resolveScopedModelsFromPatterns(patterns, models) {
 async function getScopedModelData(tab) {
   const { patterns, source } = await configuredScopedModelPatterns(tab.cwd);
   if (!patterns.length) return { models: [], patterns, source };
-  const response = await tab.rpc.send({ type: "get_available_models" });
+  const response = await safeRpcResponse(tab, { type: "get_available_models" });
   if (response.success === false) throw makeHttpError(400, response.error || "failed to load available models");
-  return { models: resolveScopedModelsFromPatterns(patterns, response.data?.models || []), patterns, source };
+  return { models: resolveScopedModelsFromPatterns(patterns, response.data?.models || []), patterns, source, rpcRunning: response.rpcRunning !== false };
 }
 
 function pathPickerRoots(activeCwd, viewedCwd) {
@@ -1449,9 +1509,9 @@ function buildPiArgsForTab(tabIndex, title) {
   const args = ["--mode", "rpc"];
   if (options.noSession) args.push("--no-session");
 
-  const sessionName = tabIndex === 1 ? options.name : title;
-  if (sessionName) args.push("--name", sessionName);
-
+  // Keep tab naming inside Web UI metadata. Some bundled Pi CLI versions do not
+  // support --name, and passing Web UI-generated tab titles through to child
+  // RPC processes makes every tab after the first exit immediately.
   args.push(...options.piArgs);
   return args;
 }
@@ -1729,6 +1789,18 @@ function defaultTabTitle(tabIndex) {
   return `Terminal ${tabIndex}`;
 }
 
+async function primeTabRpc(tab) {
+  try {
+    const response = await tab.rpc.send({ type: "get_state" }, 1500);
+    if (response.success !== false) {
+      rememberTabState(tab, response.data);
+      reconcileTabActivityFromState(tab, response.data);
+    }
+  } catch (error) {
+    if (!/Timed out waiting for RPC response/i.test(sanitizeError(error))) throw error;
+  }
+}
+
 function attachRpcToTab(tab, rpc) {
   tab.rpcUnsubscribe?.();
   tab.rpc = rpc;
@@ -1777,6 +1849,15 @@ async function createTab({ id: requestedId, index, title, titleSource, conversat
   attachRpcToTab(tab, rpc);
   tabs.set(id, tab);
   rpc.start();
+  try {
+    await primeTabRpc(tab);
+  } catch (error) {
+    if (!tab.rpc.isRunning()) {
+      tab.rpcUnsubscribe?.();
+      tabs.delete(id);
+      throw new Error(`Pi RPC process failed while starting ${tabTitle}: ${sanitizeError(error)}`);
+    }
+  }
   if (sessionFile && !options.noSession) {
     recordEvent({ type: "webui_tab_restored", tabId: tab.id, tabTitle: tab.title, cwd: tab.cwd });
   }
@@ -1799,7 +1880,7 @@ function tabMeta(tab) {
     createdAt: tab.createdAt,
     startedAt: tab.rpc.startedAt,
     pid: tab.rpc.child?.pid,
-    running: !!tab.rpc.child && tab.rpc.child.exitCode === null,
+    running: tab.rpc.isRunning(),
     command: tab.rpc.displayCommand,
     clientCount: tab.sseClients.size,
     pendingExtensionUiRequestCount: pendingExtensionUiRequests(tab).length,
@@ -1968,10 +2049,67 @@ async function restartTabRpc(tab, reason = "reload") {
   return tab;
 }
 
+function rpcUnavailableMessage(tab) {
+  return `Pi RPC process for ${tab?.title || "terminal"} is not running`;
+}
+
+function fallbackRpcResponse(tab, command, error) {
+  const message = sanitizeError(error) || rpcUnavailableMessage(tab);
+  const base = { type: "response", command: command.type, success: true, rpcRunning: false, error: message };
+  switch (command.type) {
+    case "get_state":
+      return {
+        ...base,
+        data: {
+          model: null,
+          thinkingLevel: "off",
+          isStreaming: false,
+          isCompacting: false,
+          steeringMode: "one-at-a-time",
+          followUpMode: "one-at-a-time",
+          sessionFile: tab?.sessionFile,
+          sessionId: tab?.id,
+          sessionName: tab?.title,
+          autoCompactionEnabled: false,
+          messageCount: 0,
+          pendingMessageCount: 0,
+          rpcRunning: false,
+          rpcError: message,
+        },
+      };
+    case "get_messages":
+      return { ...base, data: { messages: [] } };
+    case "get_available_models":
+      return { ...base, data: { models: [] } };
+    case "get_session_stats":
+      return { ...base, data: null };
+    case "get_last_assistant_text":
+      return { ...base, data: { text: "" } };
+    default:
+      return { ...base, success: false, error: message };
+  }
+}
+
+async function safeRpcResponse(tab, command, timeoutMs = REQUEST_TIMEOUT_MS) {
+  try {
+    return await tab.rpc.send(command, timeoutMs);
+  } catch (error) {
+    const message = sanitizeError(error);
+    if (/Pi RPC process is not running/i.test(message)) return fallbackRpcResponse(tab, command, error);
+    throw error;
+  }
+}
+
 async function getCommandData(tab) {
-  const response = await tab.rpc.send({ type: "get_commands" });
-  if (response.success === false) throw makeHttpError(400, response.error || "failed to load commands");
-  return { commands: [...NATIVE_SLASH_COMMANDS, ...(response.data?.commands || [])] };
+  try {
+    const response = await tab.rpc.send({ type: "get_commands" });
+    if (response.success === false) throw makeHttpError(400, response.error || "failed to load commands");
+    return { commands: [...NATIVE_SLASH_COMMANDS, ...(response.data?.commands || [])], rpcRunning: true };
+  } catch (error) {
+    const message = sanitizeError(error);
+    if (!/Pi RPC process is not running/i.test(message)) throw error;
+    return { commands: [...NATIVE_SLASH_COMMANDS], rpcRunning: false, error: message };
+  }
 }
 
 function formatSessionOutput(tab, state, stats) {
@@ -2078,6 +2216,23 @@ async function closeTab(id) {
   tab.rpc.stop();
   tabs.delete(id);
   return tab;
+}
+
+async function closeTabs(ids) {
+  const uniqueIds = [...new Set((Array.isArray(ids) ? ids : []).map((id) => String(id || "").trim()).filter(Boolean))];
+  const targetTabs = uniqueIds.map((id) => tabs.get(id)).filter(Boolean);
+  if (!targetTabs.length) return [];
+
+  if (targetTabs.length >= tabs.size) {
+    await createTab({ cwd: targetTabs[0]?.cwd || options.cwd });
+  }
+
+  const closed = [];
+  for (const tab of targetTabs) {
+    if (!tabs.has(tab.id)) continue;
+    closed.push(await closeTab(tab.id));
+  }
+  return closed;
 }
 
 function requestedTabId(req, url, body) {
@@ -2362,6 +2517,13 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === "/api/tabs/close" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const closed = await closeTabs(body.ids || body.tabIds || []);
+      sendJson(res, 200, { ok: true, data: { closedIds: closed.map((tab) => tab.id), tabs: listTabs(), activeTabId: firstTab()?.id || null } });
+      return;
+    }
+
     if (url.pathname.startsWith("/api/tabs/") && req.method === "PATCH") {
       const id = decodeURIComponent(url.pathname.slice("/api/tabs/".length));
       const body = await readJsonBody(req);
@@ -2511,6 +2673,14 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === "/api/optional-feature-install" && req.method === "POST") {
+      if (!isLocalAddress(req.socket.remoteAddress)) throw makeHttpError(403, "Installing optional Web UI features is only allowed from localhost");
+      const body = await readJsonBody(req);
+      const data = await installOptionalFeaturePackage(String(body.featureId || ""));
+      sendJson(res, 200, { ok: true, data });
+      return;
+    }
+
     if (url.pathname === "/api/commands" && req.method === "GET") {
       const tab = getRequestedTab(req, url);
       sendJson(res, 200, { type: "response", command: "get_commands", success: true, data: await getCommandData(tab) });
@@ -2558,7 +2728,7 @@ const server = createServer(async (req, res) => {
     const getCommand = req.method === "GET" ? commandFromGet(url.pathname) : undefined;
     if (getCommand) {
       const tab = getRequestedTab(req, url);
-      const response = await tab.rpc.send(getCommand);
+      const response = await safeRpcResponse(tab, getCommand);
       sendJson(res, response.success === false ? 400 : 200, response);
       return;
     }
