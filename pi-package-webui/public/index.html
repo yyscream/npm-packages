@@ -55,10 +55,22 @@
           <div id="gitWorkflowActions" class="git-workflow-actions"></div>
         </section>
         <form id="composer" class="composer">
-          <textarea id="promptInput" rows="1" enterkeyhint="enter" placeholder="Ask Pi…" autofocus></textarea>
+          <div class="composer-input-row">
+            <textarea id="promptInput" rows="1" enterkeyhint="enter" placeholder="Ask Pi…" autofocus></textarea>
+            <button
+              id="attachButton"
+              class="composer-icon-button composer-attach-button"
+              type="button"
+              title="Attach files"
+              aria-label="Attach images, videos, documents, audio, or other files"
+              data-tooltip="Attach files:&#10;• Click to choose images, videos, audio, PDFs, docs, text/code, or other files.&#10;• Paste images/docs from the clipboard.&#10;• Drag and drop files onto the composer."
+            ><svg class="composer-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M21.44 11.05 12.25 20.24a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.82-2.82l8.48-8.49" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+            <input id="attachmentInput" class="attachment-input" type="file" multiple accept="image/*,video/*,audio/*,text/*,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/json,application/xml,.md,.markdown,.csv,.ts,.tsx,.js,.jsx,.mjs,.cjs,.py,.rs,.go,.java,.c,.cpp,.h,.hpp,.sh,.bash,.zsh,.fish,.yaml,.yml,.toml,.ini,.log" />
+          </div>
           <div id="commandSuggest" class="command-suggest" role="listbox" aria-label="Command and path suggestions" hidden></div>
+          <div id="attachmentTray" class="attachment-tray" aria-live="polite" hidden></div>
           <div class="composer-row">
-            <button id="composerActionsButton" class="composer-actions-button" type="button" aria-controls="composerActionsPanel" aria-expanded="false">Actions</button>
+            <button id="composerActionsButton" class="composer-actions-button" type="button" aria-controls="composerActionsPanel" aria-expanded="false" title="Open session, workflow, and follow-up actions">Actions</button>
             <div id="composerActionsPanel" class="composer-actions-panel" aria-label="Composer actions">
               <label>
                 Busy prompt behavior
@@ -71,23 +83,24 @@
               <button id="compactButton" class="composer-compact-button" type="button" title="Compact the current Pi session context">Compact</button>
               <button
                 id="gitWorkflowButton"
-                class="composer-git-button"
+                class="composer-icon-button composer-git-button"
                 type="button"
-                title="Guided Git workflow: git add ., /git-staged-msg, preview messages, commit short/long, git push. Cancel is available at each step."
+                title="Guided Git workflow"
                 aria-label="Start guided Git workflow: git add dot, run git-staged-msg, preview messages, commit short or long, then git push. Cancel is available at each step."
-                data-tooltip="Guided Git workflow:&#10;1. Run git add .&#10;2. Run /git-staged-msg&#10;3. Preview short + long messages&#10;4. Commit with short or long message&#10;5. Run git push&#10;Cancel is available at each step."
-              >Git workflow</button>
+                data-tooltip="GitHub workflow:&#10;1. Run git add .&#10;2. Run /git-staged-msg&#10;3. Preview short + long messages&#10;4. Commit with short or long message&#10;5. Run git push&#10;Cancel is available at each step."
+              ><svg class="composer-icon composer-icon-github" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg></button>
               <div class="composer-publish-menu">
                 <button
                   id="publishButton"
-                  class="composer-publish-button"
+                  class="composer-icon-button composer-publish-button"
                   type="button"
                   title="Choose a publish workflow"
                   aria-label="Open publish workflows"
                   aria-haspopup="menu"
                   aria-expanded="false"
                   aria-controls="publishMenu"
-                >Publish</button>
+                  data-tooltip="Publish workflows: choose an npm or AUR release flow."
+                ><svg class="composer-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 16V4m0 0 5 5m-5-5-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 16v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
                 <div id="publishMenu" class="composer-publish-menu-panel" role="menu" aria-label="Publish workflows">
                   <button id="releaseNpmButton" class="composer-publish-menu-item" type="button" role="menuitem" data-command="/release-npm">
                     <span>NPM Release</span>
@@ -113,7 +126,8 @@
               aria-label="Follow-up: type your message first, then tap this button to send it as a follow-up."
               data-tooltip="Follow-up usage:&#10;1. Type your message in the textarea.&#10;2. Tap Follow-up to send it as a follow-up.&#10;Use for extra context or the next request."
             >Follow-up</button>
-            <button id="sendButton" type="submit" class="primary">Send</button>
+            <button id="abortButton" class="composer-abort-button danger" type="button" title="Abort the active Pi run (Esc or hold)" aria-label="Abort the active Pi run (Esc or hold)" hidden disabled>Abort</button>
+            <button id="sendButton" type="submit" class="primary" title="Send prompt">Send</button>
           </div>
         </form>
       </section>
@@ -160,9 +174,28 @@
                   </select>
                   <button id="setThinkingButton" type="button">Set thinking</button>
                 </div>
+                <div class="control-field thinking-visibility-control-field">
+                  <span class="control-label">Output</span>
+                  <label class="toggle-control" for="thinkingVisibilityToggle">
+                    <input id="thinkingVisibilityToggle" type="checkbox" checked />
+                    <span>
+                      <span class="toggle-control-label">Show thinking output</span>
+                      <span id="thinkingVisibilityStatus" class="toggle-control-hint">Visible</span>
+                    </span>
+                  </label>
+                </div>
                 <div class="control-field">
                   <label for="themeSelect">Theme</label>
                   <select id="themeSelect" title="Theme"></select>
+                </div>
+                <div class="control-field background-control-field">
+                  <label for="backgroundInput">Background</label>
+                  <input id="backgroundInput" class="background-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
+                  <div class="background-control-row">
+                    <button id="backgroundChooseButton" type="button">Change background</button>
+                    <button id="backgroundClearButton" class="background-clear-button" type="button" aria-label="Remove custom background" title="Remove custom background" hidden>×</button>
+                  </div>
+                  <div id="backgroundStatus" class="background-status muted">Theme default</div>
                 </div>
                 <div class="control-field network-control-field">
                   <label>Network</label>
@@ -179,7 +212,6 @@
                     </span>
                   </label>
                 </div>
-                <button id="abortButton" type="button" class="danger">Abort</button>
               </div>
             </div>
           </section>
@@ -266,6 +298,17 @@
           <button id="pathPickerCancelButton" type="button">Cancel</button>
           <button id="pathPickerChooseButton" type="button" class="primary">Use this directory</button>
         </menu>
+      </form>
+    </dialog>
+
+    <dialog id="nativeCommandDialog" class="extension-dialog native-command-dialog">
+      <form method="dialog">
+        <h2 id="nativeCommandTitle">Pi command</h2>
+        <p id="nativeCommandMessage" class="muted"></p>
+        <input id="nativeCommandSearch" class="dialog-input native-command-search" type="search" placeholder="Filter choices…" autocomplete="off" hidden />
+        <div id="nativeCommandBody" class="native-command-body"></div>
+        <p id="nativeCommandError" class="path-picker-error" hidden></p>
+        <menu id="nativeCommandActions"></menu>
       </form>
     </dialog>
 

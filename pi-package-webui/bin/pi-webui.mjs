@@ -4,10 +4,11 @@ import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { access, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
-import { homedir, networkInterfaces } from "node:os";
+import { homedir, networkInterfaces, tmpdir } from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -19,6 +20,14 @@ const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 31415;
 const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 const BODY_LIMIT_BYTES = 1024 * 1024;
+const PROMPT_BODY_LIMIT_BYTES = 24 * 1024 * 1024;
+const UPLOAD_BODY_LIMIT_BYTES = 96 * 1024 * 1024;
+const ATTACHMENT_UPLOAD_MAX_FILES = 12;
+const ATTACHMENT_UPLOAD_MAX_FILE_BYTES = 64 * 1024 * 1024;
+const ATTACHMENT_UPLOAD_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
+const INLINE_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+const INLINE_IMAGE_TOTAL_MAX_BYTES = 16 * 1024 * 1024;
+const RPC_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const EVENT_HISTORY_LIMIT = 200;
 const EXTENSION_UI_BLOCKING_METHODS = new Set(["select", "confirm", "input", "editor"]);
 const STATUS_RPC_TIMEOUT_MS = 1_800;
@@ -29,6 +38,8 @@ const PATH_SUGGESTION_SCAN_LIMIT = 5000;
 const PATH_SUGGESTION_MAX_OUTPUT_LENGTH = 300000;
 const PATH_SUGGESTION_EXCLUDED_DIRS = new Set([".git", "node_modules"]);
 const RESTORE_TAB_LIMIT = 30;
+const SESSION_SELECTOR_LIMIT = 200;
+const TREE_SELECTOR_TEXT_LIMIT = 260;
 const NETWORK_REBIND_DELAY_MS = 100;
 const NETWORK_REBIND_FORCE_CLOSE_MS = 750;
 const AUTO_TAB_TITLE_MAX_LENGTH = 44;
@@ -77,6 +88,7 @@ const MIME_TYPES = new Map([
   [".css", "text/css; charset=utf-8"],
   [".svg", "image/svg+xml"],
   [".png", "image/png"],
+  [".webp", "image/webp"],
   [".webmanifest", "application/manifest+json; charset=utf-8"],
 ]);
 
@@ -432,12 +444,24 @@ function sendError(res, statusCode, error) {
   sendJson(res, statusCode, { ok: false, error: sanitizeError(error) });
 }
 
-async function readJsonBody(req) {
+function formatBytes(bytes) {
+  const value = Number(bytes) || 0;
+  if (value < 1024) return `${value} B`;
+  const units = ["KB", "MB", "GB"];
+  let scaled = value / 1024;
+  for (const unit of units) {
+    if (scaled < 1024 || unit === units[units.length - 1]) return `${scaled.toFixed(scaled >= 10 ? 1 : 2)} ${unit}`;
+    scaled /= 1024;
+  }
+  return `${value} B`;
+}
+
+async function readJsonBody(req, { limitBytes = BODY_LIMIT_BYTES } = {}) {
   const chunks = [];
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > BODY_LIMIT_BYTES) throw new Error("Request body too large");
+    if (size > limitBytes) throw makeHttpError(413, `Request body too large (limit ${formatBytes(limitBytes)})`);
     chunks.push(chunk);
   }
   if (chunks.length === 0) return {};
@@ -1359,7 +1383,7 @@ async function readBundledThemes() {
 function normalizeStaticPath(urlPath) {
   if (urlPath === "/") return "index.html";
   const name = urlPath.startsWith("/") ? urlPath.slice(1) : urlPath;
-  if (!["index.html", "app.js", "styles.css", "favicon.svg", "apple-touch-icon.png", "icon-192.png", "icon-512.png", "manifest.webmanifest", "service-worker.js"].includes(name)) return undefined;
+  if (!["index.html", "app.js", "styles.css", "favicon.svg", "apple-touch-icon.png", "icon-192.png", "icon-512.png", "catppuccin-mocha-background.png", "matrix-background.webp", "manifest.webmanifest", "service-worker.js"].includes(name)) return undefined;
   return name;
 }
 
@@ -1380,6 +1404,97 @@ async function serveStatic(req, res, url) {
   return true;
 }
 
+function requestBodyLimitForPath(pathname) {
+  if (pathname === "/api/attachments") return UPLOAD_BODY_LIMIT_BYTES;
+  if (["/api/prompt", "/api/steer", "/api/follow-up"].includes(pathname)) return PROMPT_BODY_LIMIT_BYTES;
+  return BODY_LIMIT_BYTES;
+}
+
+function sanitizeUploadFileName(name) {
+  const base = path.basename(String(name || "attachment").replace(/\0/g, ""));
+  const safe = base.replace(/[^A-Za-z0-9._ -]+/g, "_").replace(/\s+/g, " ").trim().slice(0, 180);
+  return safe && safe !== "." && safe !== ".." ? safe : "attachment";
+}
+
+function normalizeMimeType(value) {
+  const mimeType = String(value || "application/octet-stream").split(";", 1)[0].trim().toLowerCase();
+  return mimeType || "application/octet-stream";
+}
+
+function stripDataUrlPrefix(data) {
+  const text = String(data || "").trim();
+  if (!text.toLowerCase().startsWith("data:")) return text;
+  const comma = text.indexOf(",");
+  return comma === -1 ? text : text.slice(comma + 1);
+}
+
+function decodeAttachmentData(data) {
+  const base64 = stripDataUrlPrefix(data).replace(/\s+/g, "");
+  if (!base64) throw new Error("attachment data is required");
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(base64)) throw new Error("attachment data must be base64 encoded");
+  return Buffer.from(base64, "base64");
+}
+
+async function saveUploadedAttachments(body) {
+  const rawFiles = Array.isArray(body?.files) ? body.files : [];
+  if (rawFiles.length === 0) throw new Error("files are required");
+  if (rawFiles.length > ATTACHMENT_UPLOAD_MAX_FILES) throw new Error(`attachments are limited to ${ATTACHMENT_UPLOAD_MAX_FILES} files`);
+
+  const decoded = [];
+  let totalBytes = 0;
+  for (const [index, file] of rawFiles.entries()) {
+    const buffer = decodeAttachmentData(file?.data);
+    if (buffer.length === 0) throw new Error(`attachment ${index + 1} is empty`);
+    if (buffer.length > ATTACHMENT_UPLOAD_MAX_FILE_BYTES) throw new Error(`attachment ${index + 1} exceeds ${formatBytes(ATTACHMENT_UPLOAD_MAX_FILE_BYTES)}`);
+    totalBytes += buffer.length;
+    if (totalBytes > ATTACHMENT_UPLOAD_MAX_TOTAL_BYTES) throw new Error(`attachments exceed ${formatBytes(ATTACHMENT_UPLOAD_MAX_TOTAL_BYTES)} total`);
+    decoded.push({
+      id: String(file?.id || `attachment-${index + 1}`).slice(0, 120),
+      name: sanitizeUploadFileName(file?.name),
+      mimeType: normalizeMimeType(file?.mimeType || file?.type),
+      size: buffer.length,
+      buffer,
+    });
+  }
+
+  const uploadDir = path.join(tmpdir(), "pi-webui-uploads", randomUUID());
+  await mkdir(uploadDir, { recursive: true });
+  const saved = [];
+  for (const [index, file] of decoded.entries()) {
+    const fileName = `${String(index + 1).padStart(2, "0")}-${file.name}`;
+    const filePath = path.join(uploadDir, fileName);
+    await writeFile(filePath, file.buffer);
+    saved.push({ id: file.id, name: file.name, mimeType: file.mimeType, size: file.size, path: filePath });
+  }
+  return { files: saved, uploadDir };
+}
+
+function normalizeRpcImages(value) {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  if (value.length > ATTACHMENT_UPLOAD_MAX_FILES) throw new Error(`images are limited to ${ATTACHMENT_UPLOAD_MAX_FILES} files`);
+  const images = [];
+  let totalBytes = 0;
+  for (const [index, image] of value.entries()) {
+    const mimeType = normalizeMimeType(image?.mimeType);
+    if (!RPC_IMAGE_MIME_TYPES.has(mimeType)) throw new Error(`image ${index + 1} has unsupported MIME type ${mimeType}`);
+    const data = stripDataUrlPrefix(image?.data).replace(/\s+/g, "");
+    if (!data) throw new Error(`image ${index + 1} data is required`);
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(data)) throw new Error(`image ${index + 1} data must be base64 encoded`);
+    const approxBytes = Math.floor((data.length * 3) / 4);
+    if (approxBytes > INLINE_IMAGE_MAX_BYTES) throw new Error(`image ${index + 1} exceeds ${formatBytes(INLINE_IMAGE_MAX_BYTES)} inline limit`);
+    totalBytes += approxBytes;
+    if (totalBytes > INLINE_IMAGE_TOTAL_MAX_BYTES) throw new Error(`inline images exceed ${formatBytes(INLINE_IMAGE_TOTAL_MAX_BYTES)} total`);
+    images.push({ type: "image", data, mimeType });
+  }
+  return images.length ? images : undefined;
+}
+
+function attachImages(command, body) {
+  const images = normalizeRpcImages(body?.images);
+  if (images) command.images = images;
+  return command;
+}
+
 function commandFromPost(pathname, body) {
   switch (pathname) {
     case "/api/prompt": {
@@ -1389,17 +1504,17 @@ function commandFromPost(pathname, body) {
       if (body.streamingBehavior === "steer" || body.streamingBehavior === "followUp") {
         command.streamingBehavior = body.streamingBehavior;
       }
-      return command;
+      return attachImages(command, body);
     }
     case "/api/steer": {
       const message = String(body.message || "").trim();
       if (!message) throw new Error("message is required");
-      return { type: "steer", message };
+      return attachImages({ type: "steer", message }, body);
     }
     case "/api/follow-up": {
       const message = String(body.message || "").trim();
       if (!message) throw new Error("message is required");
-      return { type: "follow_up", message };
+      return attachImages({ type: "follow_up", message }, body);
     }
     case "/api/abort":
       return { type: "abort" };
@@ -1418,6 +1533,18 @@ function commandFromPost(pathname, body) {
       }
       return { type: "set_thinking_level", level };
     }
+    case "/api/steering-mode": {
+      const mode = String(body.mode || "").trim();
+      if (!["all", "one-at-a-time"].includes(mode)) throw new Error("Invalid steering mode");
+      return { type: "set_steering_mode", mode };
+    }
+    case "/api/follow-up-mode": {
+      const mode = String(body.mode || "").trim();
+      if (!["all", "one-at-a-time"].includes(mode)) throw new Error("Invalid follow-up mode");
+      return { type: "set_follow_up_mode", mode };
+    }
+    case "/api/auto-compaction":
+      return { type: "set_auto_compaction", enabled: body.enabled === true };
     case "/api/compact":
       return body.customInstructions ? { type: "compact", customInstructions: String(body.customInstructions) } : { type: "compact" };
     default:
@@ -2112,6 +2239,235 @@ async function getCommandData(tab) {
   }
 }
 
+function resolveCliPath(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return path.isAbsolute(text) ? text : path.resolve(options.cwd, text);
+}
+
+function resolveTabPath(tab, value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return path.isAbsolute(text) ? text : path.resolve(tab?.cwd || options.cwd, text);
+}
+
+function configuredSessionDir() {
+  for (let index = 0; index < options.piArgs.length; index++) {
+    const arg = options.piArgs[index];
+    if (arg === "--session-dir" && options.piArgs[index + 1]) return resolveCliPath(options.piArgs[index + 1]);
+    if (arg.startsWith("--session-dir=")) return resolveCliPath(arg.slice("--session-dir=".length));
+  }
+  return undefined;
+}
+
+function requirePersistentSessions() {
+  if (options.noSession) throw makeHttpError(400, "Session selectors are unavailable when Web UI was started with --no-session.");
+}
+
+function isoDate(value) {
+  const date = value instanceof Date ? value : new Date(value || 0);
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+}
+
+function normalizeSessionInfo(info, currentSessionFile) {
+  const sessionPath = String(info.path || "");
+  return {
+    path: sessionPath,
+    id: String(info.id || ""),
+    name: info.name || undefined,
+    cwd: String(info.cwd || ""),
+    created: isoDate(info.created),
+    modified: isoDate(info.modified),
+    messageCount: Number.isFinite(info.messageCount) ? info.messageCount : 0,
+    firstMessage: truncateStatusText(info.firstMessage || "(no messages)", 220),
+    parentSessionPath: info.parentSessionPath || undefined,
+    current: !!currentSessionFile && path.resolve(sessionPath) === path.resolve(currentSessionFile),
+  };
+}
+
+async function currentSessionState(tab) {
+  const response = await safeRpcResponse(tab, { type: "get_state" }, STATUS_RPC_TIMEOUT_MS);
+  if (response.success === false) throw makeHttpError(400, response.error || "failed to load current session state");
+  rememberTabState(tab, response.data);
+  return response.data || {};
+}
+
+async function getSessionSelectorData(tab, scope = "current") {
+  requirePersistentSessions();
+  const state = await currentSessionState(tab).catch(() => tab.lastState || {});
+  const sessionDir = configuredSessionDir();
+  const listAll = String(scope || "current").toLowerCase() === "all";
+  const sessions = listAll ? await SessionManager.listAll(sessionDir) : await SessionManager.list(tab.cwd, sessionDir);
+  return {
+    scope: listAll ? "all" : "current",
+    sessionDir: sessionDir || undefined,
+    currentSessionFile: state.sessionFile || tabRestorableSessionFile(tab),
+    sessions: sessions.slice(0, SESSION_SELECTOR_LIMIT).map((info) => normalizeSessionInfo(info, state.sessionFile || tabRestorableSessionFile(tab))),
+    limited: sessions.length > SESSION_SELECTOR_LIMIT,
+  };
+}
+
+function extractSessionTextContent(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => {
+      if (typeof part === "string") return part;
+      if (part?.type === "text" && typeof part.text === "string") return part.text;
+      if (part?.type === "toolCall") return `[tool call: ${part.toolName || "tool"}]`;
+      if (part?.type === "thinking") return "[thinking]";
+      if (part?.type === "image") return "[image]";
+      return "";
+    })
+    .filter(Boolean)
+    .join(" ");
+}
+
+function sessionTreeEntryLabel(entry) {
+  if (!entry || typeof entry !== "object") return "entry";
+  if (entry.type === "message") return entry.message?.role || "message";
+  if (entry.type === "branch_summary") return "branch summary";
+  if (entry.type === "compaction") return "compaction";
+  if (entry.type === "model_change") return "model";
+  if (entry.type === "thinking_level_change") return "thinking";
+  if (entry.type === "custom_message") return entry.customType || "custom";
+  return entry.type || "entry";
+}
+
+function sessionTreeEntryText(entry) {
+  if (!entry || typeof entry !== "object") return "";
+  if (entry.type === "message") return extractSessionTextContent(entry.message?.content);
+  if (entry.type === "custom_message") return extractSessionTextContent(entry.content);
+  if (entry.type === "branch_summary") return entry.summary || "branch summary";
+  if (entry.type === "compaction") return entry.summary || "compaction summary";
+  if (entry.type === "model_change") return [entry.provider, entry.modelId].filter(Boolean).join("/");
+  if (entry.type === "thinking_level_change") return entry.thinkingLevel || "";
+  return "";
+}
+
+function flattenSessionTree(nodes, { depth = 0, leafId, result = [] } = {}) {
+  for (const node of nodes || []) {
+    const entry = node.entry || {};
+    result.push({
+      id: entry.id,
+      parentId: entry.parentId ?? null,
+      depth,
+      type: entry.type || "entry",
+      role: entry.message?.role || undefined,
+      label: node.label || undefined,
+      timestamp: entry.timestamp || undefined,
+      title: sessionTreeEntryLabel(entry),
+      text: truncateStatusText(sessionTreeEntryText(entry), TREE_SELECTOR_TEXT_LIMIT),
+      childCount: Array.isArray(node.children) ? node.children.length : 0,
+      currentLeaf: !!leafId && entry.id === leafId,
+    });
+    flattenSessionTree(node.children || [], { depth: depth + 1, leafId, result });
+  }
+  return result;
+}
+
+async function getSessionTreeData(tab) {
+  requirePersistentSessions();
+  const state = await currentSessionState(tab).catch(() => tab.lastState || {});
+  const sessionFile = state.sessionFile || tabRestorableSessionFile(tab);
+  if (!sessionFile) throw makeHttpError(400, "No persisted session file is available for /tree.");
+  const manager = SessionManager.open(sessionFile, configuredSessionDir(), tab.cwd);
+  const leafId = manager.getLeafId();
+  return {
+    sessionFile: manager.getSessionFile(),
+    sessionId: manager.getSessionId(),
+    cwd: manager.getCwd(),
+    leafId,
+    nodes: flattenSessionTree(manager.getTree(), { leafId }),
+  };
+}
+
+async function getForkMessagesData(tab) {
+  const response = await safeRpcResponse(tab, { type: "get_fork_messages" });
+  if (response.success === false) throw makeHttpError(400, response.error || "failed to load fork points");
+  return { messages: Array.isArray(response.data?.messages) ? response.data.messages : [] };
+}
+
+async function requireIdleForSessionAction(tab, actionLabel) {
+  const state = await currentSessionState(tab);
+  if (state.isStreaming || state.isCompacting) throw makeHttpError(409, `Wait for the current agent run or compaction to finish before ${actionLabel}.`);
+}
+
+async function runForkCommand(tab, entryId) {
+  await requireIdleForSessionAction(tab, "forking the session");
+  const targetEntryId = String(entryId || "").trim();
+  if (!targetEntryId) throw makeHttpError(400, "entryId is required");
+  const response = await tab.rpc.send({ type: "fork", entryId: targetEntryId });
+  if (response.success === false) return response;
+  const state = await safeRpcData(tab, { type: "get_state" }, STATUS_RPC_TIMEOUT_MS);
+  if (state.ok) rememberTabState(tab, state.data);
+  return rpcSuccess("fork", {
+    message: response.data?.cancelled ? "Fork cancelled." : "Forked the current session.",
+    text: response.data?.text || "",
+    result: response.data,
+    tab: tabMeta(tab),
+  });
+}
+
+async function runCloneCommand(tab) {
+  await requireIdleForSessionAction(tab, "cloning the session");
+  const response = await tab.rpc.send({ type: "clone" });
+  if (response.success === false) return response;
+  const state = await safeRpcData(tab, { type: "get_state" }, STATUS_RPC_TIMEOUT_MS);
+  if (state.ok) rememberTabState(tab, state.data);
+  return rpcSuccess("clone", {
+    message: response.data?.cancelled ? "Clone cancelled." : "Cloned the current session.",
+    result: response.data,
+    tab: tabMeta(tab),
+  });
+}
+
+async function switchTabSession(tab, sessionPath) {
+  requirePersistentSessions();
+  await requireIdleForSessionAction(tab, "switching sessions");
+  const targetPath = resolveTabPath(tab, sessionPath);
+  if (!targetPath) throw makeHttpError(400, "sessionPath is required");
+  if (!targetPath.endsWith(".jsonl")) throw makeHttpError(400, "sessionPath must point to a .jsonl session file");
+  const targetStats = await stat(targetPath).catch(() => null);
+  if (!targetStats?.isFile()) throw makeHttpError(404, `Session file not found: ${targetPath}`);
+  const manager = SessionManager.open(targetPath, configuredSessionDir());
+  const response = await tab.rpc.send({ type: "switch_session", sessionPath: manager.getSessionFile() });
+  if (response.success === false) return response;
+  if (!response.data?.cancelled) {
+    tab.cwd = manager.getCwd();
+    const state = await safeRpcData(tab, { type: "get_state" }, STATUS_RPC_TIMEOUT_MS);
+    if (state.ok) rememberTabState(tab, state.data);
+  }
+  return rpcSuccess("switch_session", {
+    message: response.data?.cancelled ? "Resume cancelled." : "Resumed selected session.",
+    result: response.data,
+    tab: tabMeta(tab),
+  });
+}
+
+async function navigateSessionTree(tab, body) {
+  requirePersistentSessions();
+  await requireIdleForSessionAction(tab, "navigating the session tree");
+  const entryId = String(body.entryId || body.targetId || "").trim();
+  if (!entryId) throw makeHttpError(400, "entryId is required");
+  const payload = {
+    entryId,
+    summarize: body.summarize === true,
+    customInstructions: typeof body.customInstructions === "string" ? body.customInstructions : undefined,
+    replaceInstructions: body.replaceInstructions === true,
+    label: typeof body.label === "string" ? body.label : undefined,
+  };
+  const response = await tab.rpc.send({ type: "prompt", message: `/webui-tree-navigate ${JSON.stringify(payload)}` });
+  if (response.success === false) return response;
+  const state = await safeRpcData(tab, { type: "get_state" }, STATUS_RPC_TIMEOUT_MS);
+  if (state.ok) rememberTabState(tab, state.data);
+  return rpcSuccess("tree", {
+    message: "Navigated the session tree.",
+    result: response.data,
+    tab: tabMeta(tab),
+  });
+}
+
 function formatSessionOutput(tab, state, stats) {
   return [
     `Session: ${state.sessionName || state.sessionId || "unknown"}`,
@@ -2185,8 +2541,8 @@ async function handleNativeSlashCommand(tab, body) {
       return rpcSuccess("native_slash_command", { command: "hotkeys", message: webuiHotkeysOutput() });
     }
     case "clone": {
-      const response = await tab.rpc.send({ type: "clone" });
-      return response.success === false ? response : rpcSuccess("native_slash_command", { command: "clone", message: "Cloned the current session.", result: response.data });
+      const response = await runCloneCommand(tab);
+      return response.success === false ? response : rpcSuccess("native_slash_command", { command: "clone", message: response.data?.message || "Cloned the current session.", result: response.data?.result });
     }
     default:
       throw makeHttpError(400, `/${parsed.name} is a native Pi TUI command, but this Web UI cannot run that interactive command yet.`);
@@ -2487,13 +2843,13 @@ async function webuiStatus({ detailed = false, eventLimit = 40 } = {}) {
     piPid: tab?.rpc.child?.pid,
     piRunning: !!tab?.rpc.child && tab.rpc.child.exitCode === null,
     tabs: statusTabs,
-    restorableTabs: mergeRestorableTabDescriptors(statusTabs, closedRestorableTabs),
+    restorableTabs: mergeRestorableTabDescriptors(statusTabs),
   };
 
   if (detailed) {
     const detailedTabs = await Promise.all([...tabs.values()].map((item) => tabStatusDetails(item)));
     data.tabs = detailedTabs;
-    data.restorableTabs = mergeRestorableTabDescriptors(detailedTabs, closedRestorableTabs);
+    data.restorableTabs = mergeRestorableTabDescriptors(detailedTabs);
     data.closedTabs = closedRestorableTabs.slice();
     data.events = latestEvents(eventLimit);
   }
@@ -2667,9 +3023,65 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === "/api/attachments" && req.method === "POST") {
+      const body = await readJsonBody(req, { limitBytes: requestBodyLimitForPath(url.pathname) });
+      sendJson(res, 201, { ok: true, data: await saveUploadedAttachments(body) });
+      return;
+    }
+
     if (url.pathname === "/api/scoped-models" && req.method === "GET") {
       const tab = getRequestedTab(req, url);
       sendJson(res, 200, { ok: true, data: await getScopedModelData(tab) });
+      return;
+    }
+
+    if (url.pathname === "/api/fork-messages" && req.method === "GET") {
+      const tab = getRequestedTab(req, url);
+      sendJson(res, 200, { ok: true, data: await getForkMessagesData(tab) });
+      return;
+    }
+
+    if (url.pathname === "/api/sessions" && req.method === "GET") {
+      const tab = getRequestedTab(req, url);
+      sendJson(res, 200, { ok: true, data: await getSessionSelectorData(tab, url.searchParams.get("scope") || "current") });
+      return;
+    }
+
+    if (url.pathname === "/api/session-tree" && req.method === "GET") {
+      const tab = getRequestedTab(req, url);
+      sendJson(res, 200, { ok: true, data: await getSessionTreeData(tab) });
+      return;
+    }
+
+    if (url.pathname === "/api/fork" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const tab = getRequestedTab(req, url, body);
+      const response = await runForkCommand(tab, body.entryId);
+      sendJson(res, response.success === false ? 400 : 200, responseWithTab(response, tab));
+      return;
+    }
+
+    if (url.pathname === "/api/clone" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const tab = getRequestedTab(req, url, body);
+      const response = await runCloneCommand(tab);
+      sendJson(res, response.success === false ? 400 : 200, responseWithTab(response, tab));
+      return;
+    }
+
+    if (url.pathname === "/api/switch-session" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const tab = getRequestedTab(req, url, body);
+      const response = await switchTabSession(tab, body.sessionPath || body.path);
+      sendJson(res, response.success === false ? 400 : 200, responseWithTab(response, tab));
+      return;
+    }
+
+    if (url.pathname === "/api/tree-navigate" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const tab = getRequestedTab(req, url, body);
+      const response = await navigateSessionTree(tab, body);
+      sendJson(res, response.success === false ? 400 : 200, responseWithTab(response, tab));
       return;
     }
 
@@ -2696,7 +3108,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/prompt" && req.method === "POST") {
-      const body = await readJsonBody(req);
+      const body = await readJsonBody(req, { limitBytes: requestBodyLimitForPath(url.pathname) });
       const tab = getRequestedTab(req, url, body);
       const nativeResponse = await handleNativeSlashCommand(tab, body);
       if (nativeResponse) {
@@ -2756,7 +3168,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (req.method === "POST") {
-      const body = await readJsonBody(req);
+      const body = await readJsonBody(req, { limitBytes: requestBodyLimitForPath(url.pathname) });
       const command = commandFromPost(url.pathname, body);
       if (command) {
         const tab = getRequestedTab(req, url, body);

@@ -294,7 +294,18 @@ async function fetchRestorableTabs(url: string, existing: ExistingWebui, options
   const baseUrl = url.replace(/\/$/, "");
   const detailed = await fetchJsonWithTimeout(`${baseUrl}/api/webui-status?detailed=1&events=0`, {}, 7_000);
   const statusData = detailed?.ok && detailed.body?.ok === true ? detailed.body.data : undefined;
-  return mergeRestorableTabsFromStatusSources([statusData?.restorableTabs, statusData?.tabs, existing.restorableTabs, existing.tabs], options);
+
+  // Restart should preserve the tabs that are currently open in the Web UI.
+  // Older servers may expose recently closed tabs through `restorableTabs`, so
+  // prefer explicit live tab lists whenever the running server provides them.
+  const openTabSources: unknown[] = [];
+  const detailedTabs = statusData?.tabs;
+  if (Array.isArray(detailedTabs)) openTabSources.push(detailedTabs);
+  if (Array.isArray(existing.tabs)) openTabSources.push(existing.tabs);
+  if (openTabSources.length > 0) return mergeRestorableTabsFromStatusSources(openTabSources, options);
+
+  // Legacy fallback for servers that predate `tabs` in status/health payloads.
+  return mergeRestorableTabsFromStatusSources([statusData?.restorableTabs, existing.restorableTabs], options);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -748,6 +759,34 @@ function statusUsage(): string {
   ].join("\n");
 }
 
+type WebuiTreeNavigateArgs = {
+  entryId: string;
+  summarize?: boolean;
+  customInstructions?: string;
+  replaceInstructions?: boolean;
+  label?: string;
+};
+
+function parseWebuiTreeNavigateArgs(args: string): WebuiTreeNavigateArgs {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(args || "{}");
+  } catch (error) {
+    throw new Error(`Invalid Web UI tree navigation payload: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!parsed || typeof parsed !== "object") throw new Error("Web UI tree navigation payload must be an object");
+  const payload = parsed as Record<string, unknown>;
+  const entryId = typeof payload.entryId === "string" ? payload.entryId.trim() : "";
+  if (!entryId) throw new Error("Web UI tree navigation requires entryId");
+  return {
+    entryId,
+    summarize: payload.summarize === true,
+    customInstructions: typeof payload.customInstructions === "string" ? payload.customInstructions : undefined,
+    replaceInstructions: payload.replaceInstructions === true,
+    label: typeof payload.label === "string" ? payload.label : undefined,
+  };
+}
+
 export default function (pi: ExtensionAPI) {
   const startWebuiHandler = async (args: string, ctx: ExtensionCommandContext) => {
     let options: StartWebuiOptions;
@@ -806,6 +845,37 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify(`Failed to check Pi Web UI status:\n${error instanceof Error ? error.message : String(error)}\n${statusUsage()}`, "error");
       } finally {
         ctx.ui.setStatus("pi-webui", "");
+      }
+    },
+  });
+
+  pi.registerCommand("webui-tree-navigate", {
+    description: "Internal Web UI helper for browser session-tree navigation",
+    handler: async (args, ctx) => {
+      let payload: WebuiTreeNavigateArgs;
+      try {
+        payload = parseWebuiTreeNavigateArgs(args);
+      } catch (error) {
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+        return;
+      }
+
+      try {
+        await ctx.waitForIdle();
+        const result = (await ctx.navigateTree(payload.entryId, {
+          summarize: payload.summarize,
+          customInstructions: payload.customInstructions,
+          replaceInstructions: payload.replaceInstructions,
+          label: payload.label,
+        })) as { cancelled: boolean; editorText?: string };
+        if (result.cancelled) {
+          ctx.ui.notify("Web UI tree navigation cancelled.", "warning");
+          return;
+        }
+        if (typeof result.editorText === "string") ctx.ui.setEditorText(result.editorText);
+        ctx.ui.notify("Web UI navigated the session tree.", "info");
+      } catch (error) {
+        ctx.ui.notify(`Web UI tree navigation failed:\n${error instanceof Error ? error.message : String(error)}`, "error");
       }
     },
   });

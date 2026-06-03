@@ -21,6 +21,9 @@ const elements = {
   promptInput: $("#promptInput"),
   sendButton: $("#sendButton"),
   commandSuggest: $("#commandSuggest"),
+  attachmentTray: $("#attachmentTray"),
+  attachButton: $("#attachButton"),
+  attachmentInput: $("#attachmentInput"),
   busyBehavior: $("#busyBehavior"),
   steerButton: $("#steerButton"),
   followUpButton: $("#followUpButton"),
@@ -43,7 +46,13 @@ const elements = {
   setModelButton: $("#setModelButton"),
   thinkingSelect: $("#thinkingSelect"),
   setThinkingButton: $("#setThinkingButton"),
+  thinkingVisibilityToggle: $("#thinkingVisibilityToggle"),
+  thinkingVisibilityStatus: $("#thinkingVisibilityStatus"),
   themeSelect: $("#themeSelect"),
+  backgroundInput: $("#backgroundInput"),
+  backgroundChooseButton: $("#backgroundChooseButton"),
+  backgroundClearButton: $("#backgroundClearButton"),
+  backgroundStatus: $("#backgroundStatus"),
   networkStatus: $("#networkStatus"),
   openNetworkButton: $("#openNetworkButton"),
   agentDoneNotificationsToggle: $("#agentDoneNotificationsToggle"),
@@ -72,12 +81,21 @@ const elements = {
   pathPickerError: $("#pathPickerError"),
   pathPickerCancelButton: $("#pathPickerCancelButton"),
   pathPickerChooseButton: $("#pathPickerChooseButton"),
+  nativeCommandDialog: $("#nativeCommandDialog"),
+  nativeCommandTitle: $("#nativeCommandTitle"),
+  nativeCommandMessage: $("#nativeCommandMessage"),
+  nativeCommandSearch: $("#nativeCommandSearch"),
+  nativeCommandBody: $("#nativeCommandBody"),
+  nativeCommandError: $("#nativeCommandError"),
+  nativeCommandActions: $("#nativeCommandActions"),
 };
 
 let currentState = null;
 let tabs = [];
 let activeTabId = null;
+let activeTabGeneration = 0;
 let tabDrafts = new Map();
+let tabAttachments = new Map();
 let tabActivities = new Map();
 let tabSeenCompletionSerials = new Map();
 let streamBubble = null;
@@ -104,6 +122,7 @@ let refreshFooterTimer = null;
 let refreshTabsTimer = null;
 let eventSource = null;
 let activeDialog = null;
+let nativeCommandTabId = null;
 let pathPickerState = null;
 let pathFastPicks = [];
 let pathFastPicksReady = false;
@@ -133,12 +152,16 @@ let blockedTabNotificationKeys = new Set();
 let blockedTabNotificationPermissionRequested = false;
 let blockedTabNotificationFallbackNoted = false;
 let agentDoneNotificationsEnabled = false;
+let thinkingOutputVisible = true;
 let agentDoneNotificationPermissionRequested = false;
 let agentDoneNotificationFallbackNoted = false;
 let agentDoneNotificationKeys = new Set();
 let availableModels = [];
 let availableThemes = [];
 let currentThemeName = "catppuccin-mocha";
+let customBackground = null;
+let customBackgroundObjectUrl = null;
+let customBackgroundLoading = false;
 let footerScopedModels = [];
 let footerScopedModelPatterns = [];
 let footerScopedModelSource = "none";
@@ -154,15 +177,32 @@ let maxVisualViewportHeight = 0;
 let currentRunStartedAt = null;
 let currentRunStreamChars = 0;
 let latestTokPerSecond = null;
+let abortRequestInFlight = false;
+let abortLongPressTimer = null;
+let abortLongPressHandled = false;
 const dialogQueue = [];
 const SIDE_PANEL_STORAGE_KEY = "pi-webui-side-panel-collapsed";
 const SIDE_PANEL_SECTION_STORAGE_KEY = "pi-webui-side-panel-sections-collapsed";
 const TAB_STORAGE_KEY = "pi-webui-active-tab";
 const PATH_FAST_PICKS_STORAGE_KEY = "pi-webui-path-fast-picks";
 const AGENT_DONE_NOTIFICATIONS_STORAGE_KEY = "pi-webui-agent-done-notifications";
+const THINKING_VISIBILITY_STORAGE_KEY = "pi-webui-thinking-visible";
 const THEME_STORAGE_KEY = "pi-webui-theme";
+const CUSTOM_BACKGROUND_STORAGE_KEY = "pi-webui-custom-background";
+const CUSTOM_BACKGROUNDS_STORAGE_KEY = "pi-webui-custom-backgrounds";
+const CUSTOM_BACKGROUND_IDB_NAME = "pi-webui-custom-background";
+const CUSTOM_BACKGROUND_IDB_STORE = "backgrounds";
+const CUSTOM_BACKGROUND_LEGACY_ID = "active";
+const CUSTOM_BACKGROUND_MAX_FILE_BYTES = 24 * 1024 * 1024;
 const OPTIONAL_FEATURES_STORAGE_KEY = "pi-webui-optional-features-disabled";
 const LAST_USER_PROMPT_STORAGE_KEY = "pi-webui-last-user-prompts";
+const ATTACHMENT_MAX_FILES = 12;
+const ATTACHMENT_MAX_FILE_BYTES = 64 * 1024 * 1024;
+const ATTACHMENT_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
+const ATTACHMENT_INLINE_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+const ATTACHMENT_INLINE_IMAGE_TOTAL_MAX_BYTES = 16 * 1024 * 1024;
+const INLINE_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const BACKGROUND_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const DEFAULT_THEME_NAME = "catppuccin-mocha";
 const MOBILE_VIEW_QUERY = "(max-width: 720px), (max-device-width: 720px), (pointer: coarse) and (hover: none)";
 const CHAT_BOTTOM_THRESHOLD_PX = 96;
@@ -174,6 +214,7 @@ const CHAT_USER_SCROLL_INTENT_MS = 700;
 const RUN_INDICATOR_TICK_MS = 1000;
 const RUN_INDICATOR_START_GRACE_MS = 2500;
 const RUN_INDICATOR_STATE_RECHECK_MS = 5000;
+const ABORT_LONG_PRESS_MS = 700;
 const STREAM_OUTPUT_HIDE_DELAY_MS = 300;
 const STREAM_OUTPUT_TOOLCALL_GUARD_MS = 220;
 const STREAM_OUTPUT_MIN_VISIBLE_MS = 900;
@@ -189,6 +230,8 @@ const BLOCKED_TAB_NOTIFICATION_ICON = "/icon-192.png";
 const mobileViewMedia = window.matchMedia?.(MOBILE_VIEW_QUERY) || null;
 const statusEntries = new Map();
 const widgets = new Map();
+const liveToolRuns = new Map();
+const liveToolCards = new Map();
 // Optional feature detection intentionally checks loaded Pi capabilities (RPC-visible
 // commands and live widget events), not npm package folders. This keeps local dev
 // symlinks and independently installed packages working.
@@ -261,6 +304,8 @@ const OPTIONAL_COMMAND_FEATURES = new Map([
   ["git-footer-refresh", "gitFooterStatus"],
   ["todo-progress-status", "todoProgressWidget"],
 ]);
+const HIDDEN_COMMAND_NAMES = new Set(["webui-tree-navigate"]);
+const NATIVE_SELECTOR_COMMANDS = new Set(["model", "settings", "theme", "fork", "clone", "resume", "tree", "login", "logout", "scoped-models"]);
 const optionalFeatureInstallInProgress = new Set();
 const gitWorkflow = {
   active: false,
@@ -437,6 +482,55 @@ function restoreAgentDoneNotificationsSetting() {
   renderAgentDoneNotificationsToggle();
 }
 
+function readStoredThinkingOutputVisible() {
+  try {
+    const stored = localStorage.getItem(THINKING_VISIBILITY_STORAGE_KEY);
+    return stored === null ? true : stored === "1";
+  } catch {
+    return true;
+  }
+}
+
+function persistThinkingOutputVisible(visible) {
+  try {
+    localStorage.setItem(THINKING_VISIBILITY_STORAGE_KEY, visible ? "1" : "0");
+  } catch {
+    // Ignore storage failures; the toggle should still work for this page load.
+  }
+}
+
+function thinkingVisibilityStatusText() {
+  return thinkingOutputVisible ? "Visible" : "Hidden from transcript";
+}
+
+function renderThinkingVisibilityToggle() {
+  if (!elements.thinkingVisibilityToggle) return;
+  elements.thinkingVisibilityToggle.checked = thinkingOutputVisible;
+  elements.thinkingVisibilityToggle.setAttribute("aria-describedby", "thinkingVisibilityStatus");
+  if (elements.thinkingVisibilityStatus) elements.thinkingVisibilityStatus.textContent = thinkingVisibilityStatusText();
+}
+
+function removeStreamingThinkingBubble() {
+  streamThinkingBubble?.remove();
+  streamThinkingBubble = null;
+  streamThinking = null;
+  renderRunIndicator({ scroll: false });
+}
+
+function setThinkingOutputVisible(visible, { announce = false } = {}) {
+  thinkingOutputVisible = !!visible;
+  persistThinkingOutputVisible(thinkingOutputVisible);
+  renderThinkingVisibilityToggle();
+  if (!thinkingOutputVisible) removeStreamingThinkingBubble();
+  renderAllMessages({ preserveScroll: true });
+  if (announce) addEvent(thinkingOutputVisible ? "thinking output shown" : "thinking output hidden", thinkingOutputVisible ? "info" : "warn");
+}
+
+function restoreThinkingVisibilitySetting() {
+  thinkingOutputVisible = readStoredThinkingOutputVisible();
+  renderThinkingVisibilityToggle();
+}
+
 function setComposerActionsOpen(open) {
   const shouldOpen = open && isMobileView();
   document.body.classList.toggle("composer-actions-open", shouldOpen);
@@ -445,7 +539,11 @@ function setComposerActionsOpen(open) {
 }
 
 function isRunActive() {
-  return !!currentState?.isStreaming;
+  return !!currentState?.isStreaming || (runIndicatorLocallyActive && !currentState?.isCompacting);
+}
+
+function isAbortAvailable() {
+  return runIndicatorIsActive();
 }
 
 function resizePromptInput() {
@@ -459,12 +557,20 @@ function resizePromptInput() {
 
 function updateComposerModeButtons() {
   const runActive = isRunActive();
+  const abortAvailable = isAbortAvailable();
   const target = runActive ? elements.composerRow : elements.composerActionsPanel;
-  const before = runActive ? elements.sendButton : null;
+  const before = runActive ? elements.abortButton : null;
   for (const button of [elements.steerButton, elements.followUpButton]) {
     if (button.parentElement !== target) target.insertBefore(button, before);
+    button.hidden = !runActive;
+    button.disabled = !runActive;
   }
-  document.body.classList.toggle("pi-run-active", runActive);
+  elements.abortButton.hidden = !abortAvailable;
+  elements.abortButton.disabled = !abortAvailable || abortRequestInFlight;
+  elements.abortButton.textContent = abortRequestInFlight ? "Aborting…" : "Abort";
+  elements.abortButton.title = abortAvailable ? "Abort the active Pi run (Esc or hold)" : "Abort is available while Pi is running";
+  elements.abortButton.setAttribute("aria-label", elements.abortButton.title);
+  document.body.classList.toggle("pi-run-active", runActive || abortAvailable);
 }
 
 function updateFooterModelPickerPosition() {
@@ -620,6 +726,633 @@ async function api(path, { method = "GET", body, tabId = activeTabId, scoped = t
   return data;
 }
 
+function formatBytes(bytes) {
+  const value = Number(bytes) || 0;
+  if (value < 1024) return `${value} B`;
+  const units = ["KB", "MB", "GB"];
+  let scaled = value / 1024;
+  for (const unit of units) {
+    if (scaled < 1024 || unit === units[units.length - 1]) return `${scaled.toFixed(scaled >= 10 ? 1 : 2)} ${unit}`;
+    scaled /= 1024;
+  }
+  return `${value} B`;
+}
+
+function inferMimeTypeFromName(name = "") {
+  const ext = String(name).split(".").pop()?.toLowerCase() || "";
+  const map = {
+    md: "text/markdown",
+    markdown: "text/markdown",
+    txt: "text/plain",
+    log: "text/plain",
+    csv: "text/csv",
+    json: "application/json",
+    xml: "application/xml",
+    yaml: "application/x-yaml",
+    yml: "application/x-yaml",
+    toml: "application/toml",
+    pdf: "application/pdf",
+    doc: "application/msword",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    mp3: "audio/mpeg",
+    wav: "audio/wav",
+    m4a: "audio/mp4",
+    mp4: "video/mp4",
+    mov: "video/quicktime",
+    webm: "video/webm",
+  };
+  return map[ext] || "application/octet-stream";
+}
+
+function attachmentKind(mimeType = "", name = "") {
+  const type = String(mimeType || inferMimeTypeFromName(name));
+  if (type.startsWith("image/")) return "image";
+  if (type.startsWith("video/")) return "video";
+  if (type.startsWith("audio/")) return "audio";
+  if (type.startsWith("text/") || /(?:json|xml|pdf|word|excel|powerpoint|document|spreadsheet|presentation|markdown|csv)/i.test(type)) return "doc";
+  return "file";
+}
+
+function attachmentIcon(kind) {
+  return kind === "image" ? "🖼️" : kind === "video" ? "🎞️" : kind === "audio" ? "🎵" : kind === "doc" ? "📄" : "📎";
+}
+
+function attachmentsForTab(tabId = activeTabId) {
+  return tabId ? tabAttachments.get(tabId) || [] : [];
+}
+
+function ensureAttachmentsForTab(tabId = activeTabId) {
+  if (!tabId) return [];
+  if (!tabAttachments.has(tabId)) tabAttachments.set(tabId, []);
+  return tabAttachments.get(tabId);
+}
+
+function hasComposerPayload() {
+  return !!elements.promptInput.value.trim() || attachmentsForTab().length > 0;
+}
+
+function renderAttachmentTray() {
+  const tray = elements.attachmentTray;
+  if (!tray) return;
+  const attachments = attachmentsForTab();
+  tray.innerHTML = "";
+  tray.hidden = attachments.length === 0;
+  if (attachments.length === 0) return;
+
+  for (const attachment of attachments) {
+    const pill = make("span", "attachment-pill");
+    pill.title = `${attachment.name}\n${attachment.mimeType}\n${formatBytes(attachment.size)}`;
+    const icon = make("span", "attachment-pill-icon", attachmentIcon(attachment.kind));
+    const name = make("span", "attachment-pill-name", attachment.name);
+    const meta = make("span", "attachment-pill-meta", `${attachment.kind} · ${formatBytes(attachment.size)}`);
+    const remove = make("button", "attachment-remove-button", "×");
+    remove.type = "button";
+    remove.setAttribute("aria-label", `Remove ${attachment.name}`);
+    remove.addEventListener("click", () => removeAttachment(attachment.id));
+    pill.append(icon, name, meta, remove);
+    tray.append(pill);
+  }
+}
+
+function removeAttachment(id, tabId = activeTabId) {
+  const attachments = attachmentsForTab(tabId);
+  const index = attachments.findIndex((attachment) => attachment.id === id);
+  if (index === -1) return;
+  const [removed] = attachments.splice(index, 1);
+  if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+  if (attachments.length === 0) tabAttachments.delete(tabId);
+  if (tabId === activeTabId) renderAttachmentTray();
+}
+
+function clearAttachments(tabId = activeTabId) {
+  const attachments = attachmentsForTab(tabId);
+  for (const attachment of attachments) {
+    if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+  }
+  if (tabId) tabAttachments.delete(tabId);
+  if (tabId === activeTabId) renderAttachmentTray();
+}
+
+function addAttachmentFiles(fileList, source = "picker") {
+  const files = Array.from(fileList || []).filter(Boolean);
+  if (!files.length) return;
+  const attachments = ensureAttachmentsForTab();
+  if (!attachments.length && !activeTabId) return;
+  let totalBytes = attachments.reduce((sum, attachment) => sum + attachment.size, 0);
+  let added = 0;
+  const skipped = [];
+
+  for (const file of files) {
+    const name = file.name || `${source}-attachment`;
+    if (attachments.length >= ATTACHMENT_MAX_FILES) {
+      skipped.push(`${name}: attachment limit is ${ATTACHMENT_MAX_FILES}`);
+      continue;
+    }
+    if (file.size > ATTACHMENT_MAX_FILE_BYTES) {
+      skipped.push(`${name}: larger than ${formatBytes(ATTACHMENT_MAX_FILE_BYTES)}`);
+      continue;
+    }
+    if (totalBytes + file.size > ATTACHMENT_MAX_TOTAL_BYTES) {
+      skipped.push(`${name}: total attachment limit is ${formatBytes(ATTACHMENT_MAX_TOTAL_BYTES)}`);
+      continue;
+    }
+    const mimeType = file.type || inferMimeTypeFromName(name);
+    const kind = attachmentKind(mimeType, name);
+    attachments.push({
+      id: `att-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      file,
+      name,
+      mimeType,
+      size: file.size || 0,
+      source,
+      kind,
+      previewUrl: kind === "image" ? URL.createObjectURL(file) : undefined,
+    });
+    totalBytes += file.size || 0;
+    added++;
+  }
+
+  renderAttachmentTray();
+  if (added) addEvent(`attached ${added} ${added === 1 ? "file" : "files"} from ${source}`, "info");
+  if (skipped.length) addEvent(`skipped attachments: ${skipped.join("; ")}`, "warn");
+}
+
+function clipboardFiles(dataTransfer) {
+  const files = [];
+  const seen = new Set();
+  for (const file of Array.from(dataTransfer?.files || [])) {
+    const key = `${file.name}:${file.size}:${file.type}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      files.push(file);
+    }
+  }
+  for (const item of Array.from(dataTransfer?.items || [])) {
+    if (item.kind !== "file") continue;
+    const file = item.getAsFile?.();
+    if (!file) continue;
+    const key = `${file.name}:${file.size}:${file.type}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      files.push(file);
+    }
+  }
+  return files;
+}
+
+function handleAttachmentPaste(event) {
+  const files = clipboardFiles(event.clipboardData);
+  if (!files.length) return;
+  event.preventDefault();
+  addAttachmentFiles(files, "clipboard");
+}
+
+function isFileDrag(event) {
+  return Array.from(event.dataTransfer?.types || []).includes("Files");
+}
+
+function handleComposerDragOver(event) {
+  if (!isFileDrag(event)) return;
+  event.preventDefault();
+  elements.composer.classList.add("drag-over");
+}
+
+function handleComposerDragLeave(event) {
+  if (!elements.composer.contains(event.relatedTarget)) elements.composer.classList.remove("drag-over");
+}
+
+function handleComposerDrop(event) {
+  if (!isFileDrag(event)) return;
+  event.preventDefault();
+  elements.composer.classList.remove("drag-over");
+  addAttachmentFiles(event.dataTransfer?.files, "drop");
+}
+
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error || new Error("Failed to read attachment"));
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      const comma = result.indexOf(",");
+      resolve(comma === -1 ? result : result.slice(comma + 1));
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error || new Error("Failed to read background image"));
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.readAsDataURL(file);
+  });
+}
+
+function sanitizeBackgroundName(name) {
+  const safe = String(name || "custom background").replace(/[\r\n]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
+  return safe || "custom background";
+}
+
+function backgroundMimeType(file) {
+  const declared = String(file?.type || "").split(";", 1)[0].trim().toLowerCase();
+  if (BACKGROUND_IMAGE_MIME_TYPES.has(declared)) return declared;
+  const ext = String(file?.name || "").split(".").pop()?.toLowerCase() || "";
+  const byExt = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif" };
+  return byExt[ext] || declared || "application/octet-stream";
+}
+
+function normalizeCustomBackgroundRecord(value) {
+  if (!value || typeof value !== "object") return null;
+  const dataUrl = String(value.dataUrl || "");
+  const match = dataUrl.match(/^data:(image\/(?:png|jpeg|webp|gif));base64,[A-Za-z0-9+/]+={0,2}$/i);
+  if (!match) return null;
+  return {
+    name: sanitizeBackgroundName(value.name),
+    mimeType: match[1].toLowerCase(),
+    size: Math.max(0, Number(value.size) || 0),
+    dataUrl,
+    updatedAt: Number(value.updatedAt) || Date.now(),
+  };
+}
+
+function dataUrlToBlob(dataUrl) {
+  const match = String(dataUrl || "").match(/^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/]+={0,2})$/i);
+  if (!match) throw new Error("Invalid background data URL");
+  const binary = atob(match[2]);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+  return new Blob([bytes], { type: match[1].toLowerCase() });
+}
+
+function revokeCustomBackgroundObjectUrl() {
+  if (!customBackgroundObjectUrl) return;
+  URL.revokeObjectURL(customBackgroundObjectUrl);
+  customBackgroundObjectUrl = null;
+}
+
+function setCustomBackgroundRecord(background, { objectUrl = null } = {}) {
+  const record = normalizeCustomBackgroundRecord(background);
+  revokeCustomBackgroundObjectUrl();
+  customBackground = record;
+  if (!record) return null;
+  if (objectUrl) customBackgroundObjectUrl = objectUrl;
+  else {
+    try {
+      customBackgroundObjectUrl = URL.createObjectURL(dataUrlToBlob(record.dataUrl));
+    } catch {
+      customBackgroundObjectUrl = null;
+    }
+  }
+  return record;
+}
+
+function idbRequest(request) {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("IndexedDB request failed"));
+  });
+}
+
+function idbTransactionDone(transaction) {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error || new Error("IndexedDB transaction failed"));
+    transaction.onabort = () => reject(transaction.error || new Error("IndexedDB transaction aborted"));
+  });
+}
+
+function openCustomBackgroundDb() {
+  return new Promise((resolve, reject) => {
+    const indexedDb = window.indexedDB;
+    if (!indexedDb) {
+      reject(new Error("IndexedDB unavailable"));
+      return;
+    }
+    const request = indexedDb.open(CUSTOM_BACKGROUND_IDB_NAME, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(CUSTOM_BACKGROUND_IDB_STORE)) db.createObjectStore(CUSTOM_BACKGROUND_IDB_STORE);
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("Failed to open background storage"));
+  });
+}
+
+function customBackgroundThemeKey(themeName = currentThemeName) {
+  return String(themeName || DEFAULT_THEME_NAME).trim() || DEFAULT_THEME_NAME;
+}
+
+async function readCustomBackgroundFromIndexedDb(themeName = currentThemeName) {
+  const db = await openCustomBackgroundDb();
+  try {
+    return await idbRequest(db.transaction(CUSTOM_BACKGROUND_IDB_STORE, "readonly").objectStore(CUSTOM_BACKGROUND_IDB_STORE).get(customBackgroundThemeKey(themeName)));
+  } finally {
+    db.close();
+  }
+}
+
+async function readLegacyCustomBackgroundFromIndexedDb() {
+  const db = await openCustomBackgroundDb();
+  try {
+    return await idbRequest(db.transaction(CUSTOM_BACKGROUND_IDB_STORE, "readonly").objectStore(CUSTOM_BACKGROUND_IDB_STORE).get(CUSTOM_BACKGROUND_LEGACY_ID));
+  } finally {
+    db.close();
+  }
+}
+
+async function writeCustomBackgroundToIndexedDb(background, themeName = currentThemeName) {
+  const db = await openCustomBackgroundDb();
+  try {
+    const transaction = db.transaction(CUSTOM_BACKGROUND_IDB_STORE, "readwrite");
+    transaction.objectStore(CUSTOM_BACKGROUND_IDB_STORE).put(background, customBackgroundThemeKey(themeName));
+    await idbTransactionDone(transaction);
+  } finally {
+    db.close();
+  }
+}
+
+async function deleteCustomBackgroundFromIndexedDb(themeName = currentThemeName) {
+  const db = await openCustomBackgroundDb();
+  try {
+    const transaction = db.transaction(CUSTOM_BACKGROUND_IDB_STORE, "readwrite");
+    transaction.objectStore(CUSTOM_BACKGROUND_IDB_STORE).delete(customBackgroundThemeKey(themeName));
+    await idbTransactionDone(transaction);
+  } finally {
+    db.close();
+  }
+}
+
+async function deleteLegacyCustomBackgroundFromIndexedDb() {
+  const db = await openCustomBackgroundDb();
+  try {
+    const transaction = db.transaction(CUSTOM_BACKGROUND_IDB_STORE, "readwrite");
+    transaction.objectStore(CUSTOM_BACKGROUND_IDB_STORE).delete(CUSTOM_BACKGROUND_LEGACY_ID);
+    await idbTransactionDone(transaction);
+  } finally {
+    db.close();
+  }
+}
+
+function readCustomBackgroundFromLocalStorage(themeName = currentThemeName, { includeLegacy = false } = {}) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(CUSTOM_BACKGROUNDS_STORAGE_KEY) || "{}");
+    const record = parsed && typeof parsed === "object" ? normalizeCustomBackgroundRecord(parsed[customBackgroundThemeKey(themeName)]) : null;
+    if (record) return record;
+  } catch {
+    // Fall through to legacy storage below.
+  }
+  if (!includeLegacy) return null;
+  try {
+    return normalizeCustomBackgroundRecord(JSON.parse(localStorage.getItem(CUSTOM_BACKGROUND_STORAGE_KEY) || "null"));
+  } catch {
+    return null;
+  }
+}
+
+function writeCustomBackgroundToLocalStorage(background, themeName = currentThemeName) {
+  const record = normalizeCustomBackgroundRecord(background);
+  if (!record) throw new Error("Invalid background image data");
+  const key = customBackgroundThemeKey(themeName);
+  const parsed = JSON.parse(localStorage.getItem(CUSTOM_BACKGROUNDS_STORAGE_KEY) || "{}");
+  const backgrounds = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  backgrounds[key] = record;
+  localStorage.setItem(CUSTOM_BACKGROUNDS_STORAGE_KEY, JSON.stringify(backgrounds));
+}
+
+function removeCustomBackgroundFromLocalStorage(themeName = currentThemeName, { includeLegacy = false } = {}) {
+  const key = customBackgroundThemeKey(themeName);
+  try {
+    const parsed = JSON.parse(localStorage.getItem(CUSTOM_BACKGROUNDS_STORAGE_KEY) || "{}");
+    const backgrounds = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    delete backgrounds[key];
+    localStorage.setItem(CUSTOM_BACKGROUNDS_STORAGE_KEY, JSON.stringify(backgrounds));
+  } catch {
+    // Ignore fallback cleanup failures.
+  }
+  if (includeLegacy) {
+    try {
+      localStorage.removeItem(CUSTOM_BACKGROUND_STORAGE_KEY);
+    } catch {
+      // Ignore legacy cleanup failures.
+    }
+  }
+}
+
+async function readStoredCustomBackground(themeName = currentThemeName, { includeLegacy = false } = {}) {
+  try {
+    const stored = normalizeCustomBackgroundRecord(await readCustomBackgroundFromIndexedDb(themeName));
+    if (stored) return stored;
+    if (includeLegacy) {
+      const legacy = normalizeCustomBackgroundRecord(await readLegacyCustomBackgroundFromIndexedDb());
+      if (legacy) return legacy;
+    }
+  } catch {
+    // Fall back to localStorage for older browsers or private browsing modes.
+  }
+  return readCustomBackgroundFromLocalStorage(themeName, { includeLegacy });
+}
+
+async function persistCustomBackground(background, themeName = currentThemeName) {
+  const record = normalizeCustomBackgroundRecord(background);
+  if (!record) throw new Error("Invalid background image data");
+  try {
+    await writeCustomBackgroundToIndexedDb(record, themeName);
+    removeCustomBackgroundFromLocalStorage(themeName);
+    return;
+  } catch {
+    // Fall back to localStorage when IndexedDB is unavailable.
+  }
+  writeCustomBackgroundToLocalStorage(record, themeName);
+}
+
+async function clearStoredCustomBackground(themeName = currentThemeName, { includeLegacy = false } = {}) {
+  await Promise.allSettled([
+    deleteCustomBackgroundFromIndexedDb(themeName),
+    includeLegacy ? deleteLegacyCustomBackgroundFromIndexedDb() : Promise.resolve(),
+    Promise.resolve().then(() => removeCustomBackgroundFromLocalStorage(themeName, { includeLegacy })),
+  ]);
+}
+
+function customBackgroundCssImage(background = customBackground) {
+  if (!background?.dataUrl) return null;
+  return `url("${customBackgroundObjectUrl || background.dataUrl}")`;
+}
+
+function renderBackgroundControl() {
+  if (!elements.backgroundStatus) return;
+  const active = !!customBackground?.dataUrl;
+  const themeLabel = displayThemeName(currentThemeName) || currentThemeName || "theme";
+  elements.backgroundStatus.textContent = customBackgroundLoading
+    ? `Loading ${themeLabel} background…`
+    : active
+      ? `${themeLabel}: ${customBackground.name || "background"}`
+      : `${themeLabel}: theme default`;
+  if (elements.backgroundChooseButton) {
+    elements.backgroundChooseButton.disabled = customBackgroundLoading;
+    elements.backgroundChooseButton.textContent = active ? "Change background" : "Add background";
+  }
+  if (elements.backgroundInput) elements.backgroundInput.disabled = customBackgroundLoading;
+  if (elements.backgroundClearButton) {
+    elements.backgroundClearButton.hidden = !active;
+    elements.backgroundClearButton.disabled = customBackgroundLoading;
+  }
+}
+
+function applyCustomBackgroundOverride({ render = true } = {}) {
+  const activeImage = customBackgroundCssImage();
+  document.body.classList.toggle("custom-background-active", !!activeImage);
+  if (activeImage) document.documentElement.style.setProperty("--theme-background-image", activeImage);
+  if (render) renderBackgroundControl();
+}
+
+function reapplyCurrentThemeBackground() {
+  const theme = availableThemes.find((item) => item.name === currentThemeName);
+  if (theme && isOptionalFeatureEnabled("themeBundle")) applyTheme(theme, { persist: false });
+  else {
+    document.documentElement.style.setProperty("--theme-background-image", "none");
+    applyCustomBackgroundOverride();
+  }
+}
+
+async function loadCustomBackgroundForTheme(themeName = currentThemeName, { includeLegacy = false } = {}) {
+  const themeKey = customBackgroundThemeKey(themeName);
+  customBackgroundLoading = true;
+  renderBackgroundControl();
+  try {
+    const background = await readStoredCustomBackground(themeKey, { includeLegacy });
+    if (customBackgroundThemeKey(currentThemeName) !== themeKey) return;
+    setCustomBackgroundRecord(background);
+    if (background && includeLegacy) {
+      persistCustomBackground(background, themeKey).catch(() => {});
+    }
+  } catch (error) {
+    if (customBackgroundThemeKey(currentThemeName) === themeKey) {
+      addEvent(`failed to load ${displayThemeName(themeKey) || themeKey} background: ${error.message || String(error)}`, "warn");
+      setCustomBackgroundRecord(null);
+    }
+  } finally {
+    if (customBackgroundThemeKey(currentThemeName) === themeKey) {
+      customBackgroundLoading = false;
+      applyCustomBackgroundOverride();
+    }
+  }
+}
+
+async function setCustomBackgroundFromFile(file) {
+  if (!file) return;
+  const mimeType = backgroundMimeType(file);
+  if (!BACKGROUND_IMAGE_MIME_TYPES.has(mimeType)) {
+    addEvent("background must be a PNG, JPEG, WebP, or GIF image", "error");
+    return;
+  }
+  if ((file.size || 0) > CUSTOM_BACKGROUND_MAX_FILE_BYTES) {
+    addEvent(`background image is larger than ${formatBytes(CUSTOM_BACKGROUND_MAX_FILE_BYTES)}`, "error");
+    return;
+  }
+
+  const themeName = customBackgroundThemeKey(currentThemeName);
+  customBackgroundLoading = true;
+  renderBackgroundControl();
+  try {
+    const rawDataUrl = await readFileAsDataUrl(file);
+    const dataUrl = rawDataUrl.replace(/^data:;base64,/i, `data:${mimeType};base64,`);
+    const background = normalizeCustomBackgroundRecord({
+      name: file.name,
+      mimeType,
+      size: file.size || 0,
+      dataUrl,
+      updatedAt: Date.now(),
+    });
+    if (!background) throw new Error("Unsupported or invalid background image data");
+    let objectUrl = null;
+    try {
+      objectUrl = URL.createObjectURL(file);
+    } catch {
+      objectUrl = null;
+    }
+    const targetStillActive = customBackgroundThemeKey(currentThemeName) === themeName;
+    if (targetStillActive) {
+      setCustomBackgroundRecord(background, { objectUrl });
+      applyCustomBackgroundOverride({ render: false });
+    } else if (objectUrl) {
+      URL.revokeObjectURL(objectUrl);
+    }
+    try {
+      await persistCustomBackground(background, themeName);
+      addEvent(`custom background saved for ${displayThemeName(themeName) || themeName}: ${background.name}`);
+    } catch (error) {
+      addEvent(`background changed for this page, but persistent save failed: ${error.message || String(error)}`, "warn");
+    }
+  } catch (error) {
+    addEvent(`failed to set background: ${error.message || String(error)}`, "error");
+  } finally {
+    if (customBackgroundThemeKey(currentThemeName) === themeName) {
+      customBackgroundLoading = false;
+      renderBackgroundControl();
+    }
+  }
+}
+
+async function clearCustomBackground() {
+  const themeName = customBackgroundThemeKey(currentThemeName);
+  const hadBackground = !!customBackground?.dataUrl;
+  setCustomBackgroundRecord(null);
+  customBackgroundLoading = true;
+  renderBackgroundControl();
+  await clearStoredCustomBackground(themeName, { includeLegacy: true });
+  customBackgroundLoading = false;
+  reapplyCurrentThemeBackground();
+  renderBackgroundControl();
+  if (hadBackground) addEvent(`custom background removed for ${displayThemeName(themeName) || themeName}`);
+}
+
+async function initializeCustomBackground() {
+  await loadCustomBackgroundForTheme(currentThemeName, { includeLegacy: true });
+}
+
+async function prepareAttachmentsForPrompt(attachments, tabId) {
+  if (!attachments.length) return { images: [], uploadedFiles: [], inlineImageIds: new Set() };
+  const files = [];
+  const images = [];
+  const inlineImageIds = new Set();
+  let inlineImageBytes = 0;
+
+  for (const attachment of attachments) {
+    const data = await readFileAsBase64(attachment.file);
+    files.push({
+      id: attachment.id,
+      name: attachment.name,
+      mimeType: attachment.mimeType,
+      size: attachment.size,
+      data,
+    });
+    if (
+      INLINE_IMAGE_MIME_TYPES.has(attachment.mimeType) &&
+      attachment.size <= ATTACHMENT_INLINE_IMAGE_MAX_BYTES &&
+      inlineImageBytes + attachment.size <= ATTACHMENT_INLINE_IMAGE_TOTAL_MAX_BYTES
+    ) {
+      images.push({ type: "image", data, mimeType: attachment.mimeType });
+      inlineImageIds.add(attachment.id);
+      inlineImageBytes += attachment.size;
+    }
+  }
+
+  const response = await api("/api/attachments", { method: "POST", body: { files }, tabId });
+  return { images, uploadedFiles: response.data?.files || [], inlineImageIds };
+}
+
+function composeMessageWithAttachments(message, uploadedFiles, inlineImageIds) {
+  if (!uploadedFiles.length) return message;
+  const baseMessage = message || "Please inspect the attached file(s).";
+  const lines = uploadedFiles.map((file, index) => {
+    const inlineNote = inlineImageIds.has(file.id) ? "sent inline and saved at" : "saved at";
+    return `- ${index + 1}. ${file.name || "attachment"} (${file.mimeType || "application/octet-stream"}, ${formatBytes(file.size)}): ${inlineNote} ${file.path}`;
+  });
+  return `${baseMessage}\n\nAttached files:\n${lines.join("\n")}`;
+}
+
 function storedThemeName() {
   try {
     return localStorage.getItem(THEME_STORAGE_KEY) || DEFAULT_THEME_NAME;
@@ -667,16 +1400,32 @@ function isOptionalFeatureEnabled(featureId) {
   return isOptionalFeatureDetected(featureId) && !isOptionalFeatureDisabled(featureId);
 }
 
+function renderOptionalFeatureDependentDisplays() {
+  renderOptionalFeatureControls();
+  renderThemeSelect();
+  renderWidgets();
+  renderStatus();
+  renderCommands();
+  cancelStreamingAssistantTextRender();
+  cancelStreamBubbleHide();
+  streamBubble?.remove();
+  streamBubble = null;
+  streamText = null;
+  streamBubbleVisibleSince = 0;
+  renderAllMessages({ preserveScroll: true });
+  if (streamRawText) renderStreamingAssistantText();
+}
+
 function setOptionalFeatureDisabled(featureId, disabled) {
   if (!OPTIONAL_FEATURE_BY_ID.has(featureId)) return;
   if (disabled) disabledOptionalFeatures.add(featureId);
   else disabledOptionalFeatures.delete(featureId);
   storeDisabledOptionalFeatures();
-  renderOptionalFeatureControls();
-  renderThemeSelect();
-  renderWidgets();
-  renderStatus();
-  refreshCommands().catch((error) => addEvent(error.message || String(error), "error"));
+  renderOptionalFeatureDependentDisplays();
+  const tabContext = activeTabContext();
+  refreshCommands(tabContext).catch((error) => {
+    if (isCurrentTabContext(tabContext)) addEvent(error.message || String(error), "error");
+  });
 }
 
 function displayThemeName(name) {
@@ -702,6 +1451,16 @@ function themeColor(theme, key, fallback) {
 
 function themeExportColor(theme, key, fallback) {
   return resolveThemeValue(theme, theme?.export?.[key], fallback);
+}
+
+const LOCAL_BACKGROUND_IMAGE_PATTERN = /^(?:none|url\(["']?\/(?!\/)[A-Za-z0-9._~!$&'()*+,=:@%\/-]+["']?\))$/i;
+const BACKGROUND_OVERLAY_PATTERN = /^(?:none|linear-gradient\([^;\r\n{}<>]+\))$/i;
+const SAFE_BACKGROUND_TOKEN_PATTERN = /^[A-Za-z0-9%._ -]+$/;
+
+function themeExportCssValue(theme, key, fallback, pattern = /^[^;\r\n{}<>]+$/) {
+  const raw = String(theme?.export?.[key] ?? "").trim();
+  if (!raw) return fallback;
+  return pattern.test(raw) ? raw : fallback;
 }
 
 function hexToRgb(color) {
@@ -851,9 +1610,15 @@ function applyTheme(theme, { persist = false, announce = false } = {}) {
     "--background-glow-pink": colorWithAlpha(pink, isLight ? 0.16 : 0.34, pink),
     "--background-glow-blue": colorWithAlpha(accent, isLight ? 0.15 : 0.32, accent),
     "--background-glow-teal": colorWithAlpha(accent2, isLight ? 0.12 : 0.20, accent2),
+    "--theme-background-image": themeExportCssValue(theme, "backgroundImage", "none", LOCAL_BACKGROUND_IMAGE_PATTERN),
+    "--theme-background-overlay": themeExportCssValue(theme, "backgroundOverlay", "linear-gradient(180deg, rgba(17, 17, 27, 0), rgba(17, 17, 27, 0))", BACKGROUND_OVERLAY_PATTERN),
+    "--theme-background-size": themeExportCssValue(theme, "backgroundSize", "cover", SAFE_BACKGROUND_TOKEN_PATTERN),
+    "--theme-background-position": themeExportCssValue(theme, "backgroundPosition", "center", SAFE_BACKGROUND_TOKEN_PATTERN),
+    "--theme-background-repeat": themeExportCssValue(theme, "backgroundRepeat", "no-repeat", SAFE_BACKGROUND_TOKEN_PATTERN),
   };
 
   for (const [name, value] of Object.entries(vars)) root.style.setProperty(name, value);
+  applyCustomBackgroundOverride({ render: false });
   root.style.colorScheme = isLight ? "light" : "dark";
   document.body.classList.toggle("theme-light", isLight);
   document.body.classList.toggle("theme-dark", !isLight);
@@ -890,11 +1655,17 @@ function renderThemeSelect({ unavailableLabel = "Theme bundle unavailable" } = {
   elements.themeSelect.value = currentThemeName;
 }
 
-function setThemeByName(name, options = {}) {
+async function setThemeByName(name, options = {}) {
   if (!isOptionalFeatureEnabled("themeBundle")) return;
   const theme = availableThemes.find((item) => item.name === name);
   if (!theme) return;
+  currentThemeName = theme.name;
+  if (elements.themeSelect && elements.themeSelect.value !== theme.name) elements.themeSelect.value = theme.name;
+  setCustomBackgroundRecord(null);
+  customBackgroundLoading = true;
   applyTheme(theme, options);
+  renderBackgroundControl();
+  await loadCustomBackgroundForTheme(theme.name, { includeLegacy: !!options.includeLegacy });
 }
 
 async function initializeThemes() {
@@ -915,13 +1686,33 @@ async function initializeThemes() {
   const stored = storedThemeName();
   currentThemeName = availableThemes.some((theme) => theme.name === stored) ? stored : DEFAULT_THEME_NAME;
   renderThemeSelect();
-  setThemeByName(currentThemeName, { persist: false });
-  if (isOptionalFeatureEnabled("themeBundle") && !availableThemes.some((theme) => theme.name === currentThemeName) && availableThemes[0]) applyTheme(availableThemes[0], { persist: false });
+  await setThemeByName(currentThemeName, { persist: false, includeLegacy: true });
+  if (isOptionalFeatureEnabled("themeBundle") && !availableThemes.some((theme) => theme.name === currentThemeName) && availableThemes[0]) await setThemeByName(availableThemes[0].name, { persist: false });
   if (!availableThemes.length) addEvent("theme bundle unavailable; using built-in default theme", "warn");
 }
 
 function activeTab() {
   return tabs.find((tab) => tab.id === activeTabId) || null;
+}
+
+function activeTabContext(tabId = activeTabId) {
+  return { tabId: tabId || null, generation: activeTabGeneration };
+}
+
+function setActiveTabId(tabId, { remember = false } = {}) {
+  const nextTabId = tabId || null;
+  if (nextTabId !== activeTabId) activeTabGeneration += 1;
+  activeTabId = nextTabId;
+  if (remember) rememberActiveTab();
+  return activeTabContext(nextTabId);
+}
+
+function isCurrentTabContext(context) {
+  return !!context && context.tabId === activeTabId && context.generation === activeTabGeneration;
+}
+
+function eventTargetsActiveTab(event) {
+  return !event?.tabId || event.tabId === activeTabId;
 }
 
 function normalizeTabActivity(activity = {}) {
@@ -1181,11 +1972,12 @@ function restoreActiveDraft() {
   elements.promptInput.value = activeTabId ? tabDrafts.get(activeTabId) || "" : "";
   resizePromptInput();
   renderCommandSuggestions();
+  renderAttachmentTray();
 }
 
 function focusPromptInput({ defer = false } = {}) {
   const focus = () => {
-    if (!elements.promptInput || elements.dialog.open || elements.pathPickerDialog.open || document.visibilityState === "hidden") return;
+    if (!elements.promptInput || elements.dialog.open || elements.pathPickerDialog.open || elements.nativeCommandDialog.open || document.visibilityState === "hidden") return;
     try {
       elements.promptInput.focus({ preventScroll: true });
     } catch {
@@ -1237,6 +2029,8 @@ function resetActiveTabUi() {
   statusEntries.clear();
   widgets.clear();
   transientMessages = [];
+  liveToolRuns.clear();
+  liveToolCards.clear();
   availableCommands = [];
   resetOptionalFeatureAvailability();
   commandSuggestions = [];
@@ -1247,6 +2041,8 @@ function resetActiveTabUi() {
   removeRunIndicatorBubble();
   hideCommandSuggestions();
   cancelPendingDialogs();
+  if (elements.nativeCommandDialog.open) closeNativeCommandDialog();
+  if (pathPickerState) closePathPicker(null);
   Object.assign(gitWorkflow, {
     active: false,
     step: "idle",
@@ -1508,8 +2304,7 @@ async function refreshTabs({ selectStored = false } = {}) {
   syncAgentDoneNotificationsFromTabs(tabs, previousTabs);
   const stored = selectStored ? restoreStoredTabId() : null;
   if (!activeTabId || !tabs.some((tab) => tab.id === activeTabId)) {
-    activeTabId = (stored && tabs.some((tab) => tab.id === stored) ? stored : tabs[0]?.id) || null;
-    rememberActiveTab();
+    setActiveTabId((stored && tabs.some((tab) => tab.id === stored) ? stored : tabs[0]?.id) || null, { remember: true });
   }
   renderTabs();
   return tabs;
@@ -1521,15 +2316,14 @@ async function switchTab(tabId) {
   setMobileTabsExpanded(false);
   footerModelPickerOpen = false;
   saveActiveDraft();
-  activeTabId = tabId;
-  rememberActiveTab();
+  const tabContext = setActiveTabId(tabId, { remember: true });
   resetActiveTabUi();
   renderTabs();
   restoreActiveDraft();
   focusPromptInput({ defer: true });
-  connectEvents();
-  await refreshAll();
-  markTabOutputSeen();
+  connectEvents(tabContext);
+  await refreshAll(tabContext);
+  if (isCurrentTabContext(tabContext)) markTabOutputSeen();
 }
 
 async function createTerminalTab(cwd = activeTab()?.cwd, { triggerButton = elements.newTabButton } = {}) {
@@ -1598,22 +2392,25 @@ async function closeTerminalTabs(tabIds, { label = "selected terminal tabs" } = 
     const closedIds = response.data?.closedIds || targetIds;
     tabs = response.data?.tabs || tabs.filter((item) => !closedIds.includes(item.id));
     syncTabMetadata(tabs);
-    for (const id of closedIds) tabDrafts.delete(id);
+    for (const id of closedIds) {
+      tabDrafts.delete(id);
+      clearAttachments(id);
+    }
     clearOpenTerminalTabGroup(null, { force: true });
 
-    if (closedActiveTab || !tabs.some((item) => item.id === activeTabId)) {
-      activeTabId = (response.data?.activeTabId && tabs.some((item) => item.id === response.data.activeTabId)
+    const activeTabNeedsFallback = closedIds.includes(activeTabId) || !tabs.some((item) => item.id === activeTabId);
+    if (activeTabNeedsFallback) {
+      const tabContext = setActiveTabId((response.data?.activeTabId && tabs.some((item) => item.id === response.data.activeTabId)
         ? response.data.activeTabId
-        : (fallbackTabId && tabs.some((item) => item.id === fallbackTabId) ? fallbackTabId : tabs[0]?.id)) || null;
-      rememberActiveTab();
+        : (fallbackTabId && tabs.some((item) => item.id === fallbackTabId) ? fallbackTabId : tabs[0]?.id)) || null, { remember: true });
       resetActiveTabUi();
       renderTabs();
       restoreActiveDraft();
       focusPromptInput({ defer: true });
-      connectEvents();
+      connectEvents(tabContext);
       if (activeTabId) {
-        await refreshAll();
-        markTabOutputSeen();
+        await refreshAll(tabContext);
+        if (isCurrentTabContext(tabContext)) markTabOutputSeen();
       }
     } else {
       renderTabs();
@@ -1645,10 +2442,11 @@ async function initializeTabs() {
   renderTabs();
   restoreActiveDraft();
   focusPromptInput({ defer: true });
-  connectEvents();
+  const tabContext = activeTabContext();
+  connectEvents(tabContext);
   if (activeTabId) {
-    await refreshAll();
-    markTabOutputSeen();
+    await refreshAll(tabContext);
+    if (isCurrentTabContext(tabContext)) markTabOutputSeen();
   }
 }
 
@@ -2201,16 +2999,20 @@ function setFooterModelPickerOpen(open) {
 
 async function applyFooterModel(model) {
   if (!model?.provider || !model?.id) return;
+  const tabContext = activeTabContext();
   try {
     footerModelPickerOpen = false;
-    await api("/api/model", { method: "POST", body: { provider: model.provider, modelId: model.id } });
-    await refreshState();
-    await refreshModels();
+    await api("/api/model", { method: "POST", body: { provider: model.provider, modelId: model.id }, tabId: tabContext.tabId });
+    if (!isCurrentTabContext(tabContext)) return;
+    await refreshState(tabContext);
+    await refreshModels(tabContext);
   } catch (error) {
-    addEvent(error.message, "error");
+    if (isCurrentTabContext(tabContext)) addEvent(error.message, "error");
   } finally {
-    document.body.classList.toggle("footer-model-picker-open", footerModelPickerOpen);
-    renderFooter();
+    if (isCurrentTabContext(tabContext)) {
+      document.body.classList.toggle("footer-model-picker-open", footerModelPickerOpen);
+      renderFooter();
+    }
   }
 }
 
@@ -2480,10 +3282,11 @@ function pickCwd(tab, initialCwd) {
 async function changeActiveTabCwd() {
   const tab = activeTab();
   if (!tab) return;
+  const tabContext = activeTabContext(tab.id);
 
   const currentCwd = latestWorkspace?.cwd || tab.cwd || "";
   const cwd = await pickCwd(tab, currentCwd);
-  if (!cwd || cwd === currentCwd) return;
+  if (!isCurrentTabContext(tabContext) || !cwd || cwd === currentCwd) return;
   if (!window.confirm(`Restart ${tab.title} in:\n${cwd}\n\nCurrent in-flight work in this tab will be stopped.`)) return;
 
   saveActiveDraft();
@@ -2491,16 +3294,21 @@ async function changeActiveTabCwd() {
     const response = await api(`/api/tabs/${encodeURIComponent(tab.id)}`, { method: "PATCH", body: { cwd }, scoped: false });
     tabs = response.data?.tabs || tabs;
     syncTabMetadata(tabs);
-    activeTabId = response.data?.tab?.id || activeTabId;
+    if (!isCurrentTabContext(tabContext)) {
+      renderTabs();
+      return;
+    }
+    const nextContext = setActiveTabId(response.data?.tab?.id || activeTabId);
     resetActiveTabUi();
     renderTabs();
     restoreActiveDraft();
-    connectEvents();
-    await refreshAll();
+    connectEvents(nextContext);
+    await refreshAll(nextContext);
+    if (!isCurrentTabContext(nextContext)) return;
     const changedCwd = response.data?.tab?.cwd || cwd;
     addEvent(response.data?.changed === false ? `cwd unchanged: ${changedCwd}` : `changed ${tab.title} cwd to ${changedCwd}`, "info");
   } catch (error) {
-    addEvent(error.message, "error");
+    if (isCurrentTabContext(tabContext)) addEvent(error.message, "error");
   }
 }
 
@@ -2563,19 +3371,34 @@ function renderFooter() {
   updateFooterModelPickerPosition();
 }
 
-function scheduleRefreshMessages(delay = 120) {
+function scheduleRefreshMessages(delay = 120, tabContext = activeTabContext()) {
   clearTimeout(refreshMessagesTimer);
-  refreshMessagesTimer = setTimeout(() => refreshMessages().catch((error) => addEvent(error.message, "error")), delay);
+  refreshMessagesTimer = setTimeout(() => {
+    if (!isCurrentTabContext(tabContext)) return;
+    refreshMessages(tabContext).catch((error) => {
+      if (isCurrentTabContext(tabContext)) addEvent(error.message, "error");
+    });
+  }, delay);
 }
 
-function scheduleRefreshState(delay = 120) {
+function scheduleRefreshState(delay = 120, tabContext = activeTabContext()) {
   clearTimeout(refreshStateTimer);
-  refreshStateTimer = setTimeout(() => refreshState().catch((error) => addEvent(error.message, "error")), delay);
+  refreshStateTimer = setTimeout(() => {
+    if (!isCurrentTabContext(tabContext)) return;
+    refreshState(tabContext).catch((error) => {
+      if (isCurrentTabContext(tabContext)) addEvent(error.message, "error");
+    });
+  }, delay);
 }
 
-function scheduleRefreshFooter(delay = 300) {
+function scheduleRefreshFooter(delay = 300, tabContext = activeTabContext()) {
   clearTimeout(refreshFooterTimer);
-  refreshFooterTimer = setTimeout(() => refreshFooterData().catch((error) => addEvent(error.message, "error")), delay);
+  refreshFooterTimer = setTimeout(() => {
+    if (!isCurrentTabContext(tabContext)) return;
+    refreshFooterData(tabContext).catch((error) => {
+      if (isCurrentTabContext(tabContext)) addEvent(error.message, "error");
+    });
+  }, delay);
 }
 
 function renderStatus() {
@@ -2666,6 +3489,7 @@ function releaseDialogPromptParts(prompt) {
     title: question,
     message,
     plainMessage: stripAnsi(message),
+    featureId: isAurReleasePrompt ? "releaseAur" : "releaseNpm",
   };
 }
 
@@ -2821,13 +3645,17 @@ function appendReleaseNpmTerminalLine(parent, line) {
 }
 
 async function sendReleaseNpmCommand(command) {
+  const tabContext = activeTabContext();
   try {
-    await api("/api/prompt", { method: "POST", body: { message: command }, tabId: activeTabId });
+    await api("/api/prompt", { method: "POST", body: { message: command }, tabId: tabContext.tabId });
+    if (!isCurrentTabContext(tabContext)) return;
     addEvent(`${command} sent`, "info");
-    scheduleRefreshState();
+    scheduleRefreshState(120, tabContext);
   } catch (error) {
-    addEvent(error.message, "error");
-    addTransientMessage({ role: "error", title: command, content: error.message, level: "error" });
+    if (isCurrentTabContext(tabContext)) {
+      addEvent(error.message, "error");
+      addTransientMessage({ role: "error", title: command, content: error.message, level: "error" });
+    }
   }
 }
 
@@ -3135,8 +3963,11 @@ function failGitWorkflow(error, step = gitWorkflow.step) {
 
 function startGitWorkflow() {
   if (!isOptionalFeatureEnabled("gitWorkflow")) {
+    const tabContext = activeTabContext();
     addEvent(commandUnavailableMessage("git-staged-msg"), "warn");
-    refreshCommands().catch((error) => addEvent(error.message || String(error), "error"));
+    refreshCommands(tabContext).catch((error) => {
+      if (isCurrentTabContext(tabContext)) addEvent(error.message || String(error), "error");
+    });
     return;
   }
   if (gitWorkflow.active && !["done", "cancelled", "error"].includes(gitWorkflow.step) && !confirm("Restart the active git workflow?")) return;
@@ -3283,6 +4114,287 @@ function appendText(parent, text, className = "text-block") {
   return block;
 }
 
+function safeMarkdownLinkHref(url) {
+  const href = String(url || "").trim();
+  if (!href || /[\u0000-\u001f\u007f]/.test(href)) return "";
+  if (/^(?:https?:|mailto:)/i.test(href)) return href;
+  if (/^(?:#|\/(?!\/)|\.\/|\.\.\/)/.test(href)) return href;
+  return "";
+}
+
+function appendInlineMarkdown(parent, text, depth = 0) {
+  const value = String(text || "");
+  if (!value) return;
+  if (depth > 6) {
+    parent.append(document.createTextNode(value));
+    return;
+  }
+  let index = 0;
+  const appendPlain = (end) => {
+    if (end > index) parent.append(document.createTextNode(value.slice(index, end)));
+    index = end;
+  };
+  while (index < value.length) {
+    if (value[index] === "`") {
+      const end = value.indexOf("`", index + 1);
+      if (end > index + 1) {
+        const code = make("code", "markdown-inline-code", value.slice(index + 1, end));
+        parent.append(code);
+        index = end + 1;
+        continue;
+      }
+    }
+    if (value[index] === "[") {
+      const labelEnd = value.indexOf("](", index + 1);
+      const linkEnd = labelEnd === -1 ? -1 : value.indexOf(")", labelEnd + 2);
+      if (labelEnd !== -1 && linkEnd !== -1) {
+        const label = value.slice(index + 1, labelEnd);
+        const href = safeMarkdownLinkHref(value.slice(labelEnd + 2, linkEnd));
+        if (href) {
+          const link = make("a");
+          link.href = href;
+          if (/^https?:/i.test(href)) {
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+          }
+          appendInlineMarkdown(link, label, depth + 1);
+          parent.append(link);
+        } else {
+          parent.append(document.createTextNode(value.slice(index, linkEnd + 1)));
+        }
+        index = linkEnd + 1;
+        continue;
+      }
+    }
+    const strongMarker = value.startsWith("**", index) ? "**" : value.startsWith("__", index) ? "__" : "";
+    if (strongMarker) {
+      const end = value.indexOf(strongMarker, index + 2);
+      if (end > index + 2) {
+        const strong = make("strong");
+        appendInlineMarkdown(strong, value.slice(index + 2, end), depth + 1);
+        parent.append(strong);
+        index = end + 2;
+        continue;
+      }
+    }
+    if (value.startsWith("~~", index)) {
+      const end = value.indexOf("~~", index + 2);
+      if (end > index + 2) {
+        const del = make("del");
+        appendInlineMarkdown(del, value.slice(index + 2, end), depth + 1);
+        parent.append(del);
+        index = end + 2;
+        continue;
+      }
+    }
+    const emphasisMarker = value[index] === "*" || value[index] === "_" ? value[index] : "";
+    if (emphasisMarker && value[index + 1] !== emphasisMarker) {
+      const end = value.indexOf(emphasisMarker, index + 1);
+      if (end > index + 1) {
+        const em = make("em");
+        appendInlineMarkdown(em, value.slice(index + 1, end), depth + 1);
+        parent.append(em);
+        index = end + 1;
+        continue;
+      }
+    }
+    const nextSpecials = ["`", "[", "**", "__", "~~", "*", "_"]
+      .map((marker) => value.indexOf(marker, index + 1))
+      .filter((pos) => pos !== -1);
+    appendPlain(nextSpecials.length ? Math.min(...nextSpecials) : value.length);
+  }
+}
+
+function appendMarkdownParagraph(parent, lines) {
+  const paragraph = make("p");
+  lines.forEach((line, index) => {
+    if (index > 0) paragraph.append(make("br"));
+    appendInlineMarkdown(paragraph, line);
+  });
+  parent.append(paragraph);
+}
+
+function appendMarkdownCodeBlock(parent, code, language = "") {
+  const wrapper = make("div", "markdown-code-block");
+  if (language) wrapper.append(make("div", "markdown-code-language", language));
+  const pre = make("pre", "code-block markdown-code");
+  const codeNode = make("code", language ? `language-${language.replace(/[^a-z0-9_-]/gi, "")}` : "");
+  codeNode.textContent = code.replace(/\n+$/g, "");
+  pre.append(codeNode);
+  wrapper.append(pre);
+  parent.append(wrapper);
+}
+
+function markdownTableSeparator(line) {
+  return /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line || "");
+}
+
+function splitMarkdownTableRow(line) {
+  let row = String(line || "").trim();
+  if (row.startsWith("|")) row = row.slice(1);
+  if (row.endsWith("|")) row = row.slice(0, -1);
+  return row.split(/(?<!\\)\|/).map((cell) => cell.replace(/\\\|/g, "|").trim());
+}
+
+function appendMarkdownTable(parent, rows) {
+  const wrapper = make("div", "markdown-table-wrapper");
+  const table = make("table", "markdown-table");
+  const thead = make("thead");
+  const tbody = make("tbody");
+  const headerRow = make("tr");
+  for (const cell of rows[0] || []) {
+    const th = make("th");
+    appendInlineMarkdown(th, cell);
+    headerRow.append(th);
+  }
+  thead.append(headerRow);
+  for (const row of rows.slice(1)) {
+    const tr = make("tr");
+    for (const cell of row) {
+      const td = make("td");
+      appendInlineMarkdown(td, cell);
+      tr.append(td);
+    }
+    tbody.append(tr);
+  }
+  table.append(thead, tbody);
+  wrapper.append(table);
+  parent.append(wrapper);
+}
+
+function markdownListMatch(line) {
+  const unordered = line.match(/^\s{0,3}[-*+]\s+(.+)$/);
+  if (unordered) return { ordered: false, text: unordered[1] };
+  const ordered = line.match(/^\s{0,3}(\d+)[.)]\s+(.+)$/);
+  if (ordered) return { ordered: true, start: Number(ordered[1]), text: ordered[2] };
+  return null;
+}
+
+function appendMarkdownList(parent, items, ordered = false, start = null) {
+  const list = make(ordered ? "ol" : "ul", "markdown-list");
+  if (ordered && Number.isFinite(start) && start > 1) list.start = start;
+  for (const itemText of items) {
+    const li = make("li");
+    const task = String(itemText).match(/^\[( |x|X|-)\]\s+(.+)$/);
+    if (task) {
+      li.classList.add("markdown-task-item");
+      const checkbox = make("input", "markdown-task-checkbox");
+      checkbox.type = "checkbox";
+      checkbox.disabled = true;
+      checkbox.checked = task[1].toLowerCase() === "x";
+      li.append(checkbox);
+      appendInlineMarkdown(li, task[2]);
+    } else {
+      appendInlineMarkdown(li, itemText);
+    }
+    list.append(li);
+  }
+  parent.append(list);
+}
+
+function renderMarkdownInto(parent, text) {
+  const raw = String(text || "").replace(/\r\n?/g, "\n");
+  const lines = raw.split("\n");
+  let index = 0;
+  let paragraph = [];
+  const flushParagraph = () => {
+    if (paragraph.length) appendMarkdownParagraph(parent, paragraph);
+    paragraph = [];
+  };
+
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!line.trim()) {
+      flushParagraph();
+      index += 1;
+      continue;
+    }
+    const fence = line.match(/^\s*```\s*([\w.+-]*)\s*$/);
+    if (fence) {
+      flushParagraph();
+      const language = fence[1] || "";
+      const codeLines = [];
+      index += 1;
+      while (index < lines.length && !/^\s*```\s*$/.test(lines[index])) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) index += 1;
+      appendMarkdownCodeBlock(parent, codeLines.join("\n"), language);
+      continue;
+    }
+    if (markdownTableSeparator(lines[index + 1]) && line.includes("|")) {
+      flushParagraph();
+      const rows = [splitMarkdownTableRow(line)];
+      index += 2;
+      while (index < lines.length && lines[index].includes("|") && lines[index].trim()) {
+        rows.push(splitMarkdownTableRow(lines[index]));
+        index += 1;
+      }
+      appendMarkdownTable(parent, rows);
+      continue;
+    }
+    const heading = line.match(/^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if (heading) {
+      flushParagraph();
+      const level = Math.min(6, heading[1].length);
+      const node = make(`h${level}`, `markdown-heading markdown-heading-${level}`);
+      appendInlineMarkdown(node, heading[2]);
+      parent.append(node);
+      index += 1;
+      continue;
+    }
+    if (/^\s{0,3}(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+      flushParagraph();
+      parent.append(make("hr", "markdown-rule"));
+      index += 1;
+      continue;
+    }
+    if (/^\s{0,3}>\s?/.test(line)) {
+      flushParagraph();
+      const quoteLines = [];
+      while (index < lines.length && /^\s{0,3}>\s?/.test(lines[index])) {
+        quoteLines.push(lines[index].replace(/^\s{0,3}>\s?/, ""));
+        index += 1;
+      }
+      const quote = make("blockquote", "markdown-blockquote");
+      renderMarkdownInto(quote, quoteLines.join("\n"));
+      parent.append(quote);
+      continue;
+    }
+    const listMatch = markdownListMatch(line);
+    if (listMatch) {
+      flushParagraph();
+      const ordered = listMatch.ordered;
+      const start = listMatch.start || null;
+      const items = [];
+      while (index < lines.length) {
+        const item = markdownListMatch(lines[index]);
+        if (!item || item.ordered !== ordered) break;
+        items.push(item.text);
+        index += 1;
+      }
+      appendMarkdownList(parent, items, ordered, start);
+      continue;
+    }
+    paragraph.push(line);
+    index += 1;
+  }
+  flushParagraph();
+}
+
+function appendMarkdown(parent, text) {
+  const block = make("div", "markdown-body");
+  renderMarkdownInto(block, text);
+  parent.append(block);
+  return block;
+}
+
+function renderMarkdown(block, text) {
+  block.replaceChildren();
+  renderMarkdownInto(block, text);
+}
+
 function appendImage(parent, part) {
   const wrapper = make("div", "image-block");
   const img = document.createElement("img");
@@ -3296,7 +4408,7 @@ function appendImage(parent, part) {
 }
 
 function isActionFeedbackMessage(message) {
-  return message?.role === "assistant" || message?.role === "toolResult" || message?.role === "bashExecution";
+  return message?.role === "assistant" || message?.role === "toolExecution" || message?.role === "toolResult" || message?.role === "bashExecution";
 }
 
 function truncateActionFeedbackText(text, limit = ACTION_FEEDBACK_SNIPPET_LIMIT) {
@@ -3311,6 +4423,7 @@ function actionFeedbackKey(message, messageIndex) {
     messageIndex,
     message?.role || "message",
     message?.toolName || "",
+    message?.toolCallId || "",
     message?.command || "",
     message?.timestamp || "",
   ].join("|");
@@ -3327,6 +4440,12 @@ function actionFeedbackSummary(message) {
       title,
       snippet: truncateActionFeedbackText(`$ ${message.command || ""}\n\n${message.output || ""}`),
     };
+  }
+  if (message?.role === "toolExecution") {
+    const result = toolExecutionResult(message);
+    const args = message.arguments === undefined ? "" : JSON.stringify(message.arguments, null, 2);
+    const output = toolResultText(result);
+    return { kind: "action", title, snippet: truncateActionFeedbackText([args, output].filter(Boolean).join("\n\n")) };
   }
   return { kind: "action", title, snippet: truncateActionFeedbackText(textFromContent(message?.content)) };
 }
@@ -3356,9 +4475,10 @@ function actionFeedbackSteerMessage(item) {
 }
 
 async function sendLiveActionFeedback(item) {
+  const tabContext = activeTabContext(item.tabId);
   if (!isRunActive()) return;
   await api("/api/steer", { method: "POST", body: { message: actionFeedbackSteerMessage(item) }, tabId: item.tabId });
-  addEvent(`sent ${ACTION_FEEDBACK_REACTIONS[item.reaction]?.icon || "feedback"} action feedback as live steering`);
+  if (isCurrentTabContext(tabContext)) addEvent(`sent ${ACTION_FEEDBACK_REACTIONS[item.reaction]?.icon || "feedback"} action feedback as live steering`);
 }
 
 function setActionFeedback(message, messageIndex, reaction) {
@@ -3440,13 +4560,13 @@ function isMissingActionFeedbackEndpoint(error) {
   return error?.statusCode === 404 || /not found/i.test(error?.message || "");
 }
 
-async function postQueuedFeedback(tabId, items) {
+async function postQueuedFeedback(tabId, items, tabContext = activeTabContext(tabId)) {
   const feedback = items.map(serializeActionFeedback);
   try {
     await api("/api/action-feedback", { method: "POST", body: { feedback }, tabId });
   } catch (error) {
     if (!isMissingActionFeedbackEndpoint(error)) throw error;
-    addEvent("/api/action-feedback not found; falling back to a normal prompt. Restart Web UI to use the dedicated endpoint.", "warn");
+    if (isCurrentTabContext(tabContext)) addEvent("/api/action-feedback not found; falling back to a normal prompt. Restart Web UI to use the dedicated endpoint.", "warn");
     await api("/api/prompt", { method: "POST", body: { message: formatActionFeedbackLearningPrompt(feedback) }, tabId });
   }
 }
@@ -3491,6 +4611,7 @@ function renderFeedbackTray() {
 
 async function submitQueuedActionFeedback() {
   const tabId = activeTabId;
+  const tabContext = activeTabContext(tabId);
   const items = queuedActionFeedback(tabId);
   if (!tabId || items.length === 0 || actionFeedbackSendBusy) return;
   if (isRunActive()) {
@@ -3504,28 +4625,32 @@ async function submitQueuedActionFeedback() {
   setRunIndicatorActivity("Sending action feedback to Pi…");
   renderFeedbackTray();
   try {
-    await postQueuedFeedback(tabId, items);
+    await postQueuedFeedback(tabId, items, tabContext);
     actionFeedbackByTab.get(tabId)?.clear();
+    if (!isCurrentTabContext(tabContext)) return;
     renderAllMessages({ preserveScroll: true });
     addEvent("feedback sent; Pi will create a LEARNING");
-    scheduleRefreshState();
-    scheduleRefreshMessages();
-    scheduleRefreshFooter();
+    scheduleRefreshState(120, tabContext);
+    scheduleRefreshMessages(120, tabContext);
+    scheduleRefreshFooter(300, tabContext);
   } catch (error) {
     markTabIdleLocally(tabId);
-    clearRunIndicatorActivity();
-    addEvent(error.message, "error");
-    addTransientMessage({ role: "error", title: "feedback", content: error.message, level: "error" });
+    if (isCurrentTabContext(tabContext)) {
+      clearRunIndicatorActivity();
+      addEvent(error.message, "error");
+      addTransientMessage({ role: "error", title: "feedback", content: error.message, level: "error" });
+    }
   } finally {
     actionFeedbackSendBusy = false;
     renderFeedbackTray();
   }
 }
 
-function renderContent(parent, content) {
+function renderContent(parent, content, { markdown = false } = {}) {
   if (content === undefined || content === null) return;
   if (typeof content === "string") {
-    appendText(parent, content);
+    if (markdown) appendMarkdown(parent, stripTodoProgressLines(content));
+    else appendText(parent, content);
     return;
   }
   if (!Array.isArray(content)) {
@@ -3539,8 +4664,11 @@ function renderContent(parent, content) {
       continue;
     }
     if (part.type === "text") {
-      appendText(parent, part.text || "");
+      const text = assistantTextPartText(part);
+      if (markdown) appendMarkdown(parent, stripTodoProgressLines(text));
+      else appendText(parent, text);
     } else if (part.type === "thinking") {
+      if (!thinkingOutputVisible) continue;
       const details = make("details", "thinking-block");
       details.open = true;
       details.append(make("summary", undefined, "thinking"));
@@ -3561,10 +4689,11 @@ function renderContent(parent, content) {
 }
 
 function messageTitle(message) {
-  if (message.role === "assistant") return "Assistant";
+  if (message.role === "assistant") return message.title || "final output";
   if (message.title) return message.title;
   if (message.role === "thinking") return "thinking";
   if (message.role === "toolCall") return `tool call: ${message.toolName || "unknown"}`;
+  if (message.role === "toolExecution") return toolExecutionTitle(message);
   if (message.role === "assistantEvent") return "assistant event";
   if (message.role === "toolResult") return `tool result: ${message.toolName || "unknown"}`;
   if (message.role === "bashExecution") return `bash: ${message.command || ""}`;
@@ -3595,13 +4724,26 @@ function assistantToolCallArguments(part) {
   return part?.arguments || part?.args || part?.input || part?.toolCall?.arguments || {};
 }
 
+function assistantTextPartText(part) {
+  if (!part || typeof part !== "object" || part.type !== "text") return "";
+  if (typeof part.text === "string") return part.text;
+  return typeof part.content === "string" ? part.content : "";
+}
+
+function isEmptyAssistantTextPart(part) {
+  return !!(part && typeof part === "object" && part.type === "text" && !assistantTextPartText(part).trim());
+}
+
 function assistantFinalOutputPart(part) {
   if (part === undefined || part === null) return null;
   if (typeof part !== "object") {
     const text = String(part);
     return text.trim() ? { type: "text", text } : null;
   }
-  if (part.type === "text") return typeof part.text === "string" && part.text.trim() ? part : null;
+  if (part.type === "text") {
+    const text = assistantTextPartText(part);
+    return text.trim() ? { ...part, type: "text", text } : null;
+  }
   if (typeof part.text === "string") return part.text.trim() ? { ...part, type: "text", text: part.text } : null;
   if (part.type === "image") return part;
   if (typeof part.content === "string" && part.type !== "thinking" && part.type !== "toolCall" && typeof part.thinking !== "string") {
@@ -3615,10 +4757,10 @@ function assistantDisplayMessages(message) {
   const base = { timestamp: message.timestamp };
   const content = message.content;
   if (typeof content === "string") {
-    return content.trim() ? [{ ...message, title: "Assistant" }] : [];
+    return content.trim() ? [{ ...message, title: "final output" }] : [];
   }
   if (!Array.isArray(content)) {
-    return content === undefined || content === null ? [] : [{ ...message, title: "Assistant" }];
+    return content === undefined || content === null ? [] : [{ ...message, title: "final output" }];
   }
 
   const displayMessages = [];
@@ -3634,7 +4776,8 @@ function assistantDisplayMessages(message) {
     if (isAssistantToolCallPart(part)) {
       const toolName = assistantToolCallName(part);
       const args = assistantToolCallArguments(part);
-      displayMessages.push({ ...base, role: "toolCall", title: `tool call: ${toolName}`, toolName, arguments: args, content: args });
+      const toolCallId = assistantToolCallId(part);
+      displayMessages.push({ ...base, role: "toolCall", title: `tool call: ${toolName}`, toolName, toolCallId, arguments: args, content: args });
       continue;
     }
     const finalPart = assistantFinalOutputPart(part);
@@ -3642,13 +4785,14 @@ function assistantDisplayMessages(message) {
       if (!assistantHasToolCallAfter(content, index)) finalParts.push(finalPart);
       continue;
     }
+    if (isEmptyAssistantTextPart(part)) continue;
     if (part !== undefined && part !== null) {
       displayMessages.push({ ...base, role: "assistantEvent", title: part?.type ? `assistant ${part.type}` : "assistant event", content: part });
     }
   }
 
   if (finalParts.length > 0) {
-    displayMessages.push({ ...message, title: "Assistant", content: finalParts });
+    displayMessages.push({ ...message, title: "final output", content: finalParts });
   }
   return displayMessages;
 }
@@ -3742,6 +4886,7 @@ function stickyUserPromptViewportGap() {
 }
 
 function resetChatOutput() {
+  liveToolCards.clear();
   elements.chat.replaceChildren();
   if (elements.stickyUserPromptButton) elements.chat.append(elements.stickyUserPromptButton);
 }
@@ -3802,6 +4947,413 @@ function updateStickyUserPromptButton() {
   );
 }
 
+function assistantToolCallId(part) {
+  const id = part?.id || part?.toolCallId || part?.tool_call_id || part?.toolCall?.id || part?.toolCall?.toolCallId || part?.toolCall?.tool_call_id;
+  return id === undefined || id === null ? "" : String(id);
+}
+
+function toolResultCallId(message) {
+  const id = message?.toolCallId || message?.tool_call_id;
+  return id === undefined || id === null ? "" : String(id);
+}
+
+function buildToolResultMap(messages = latestMessages) {
+  const results = new Map();
+  for (const message of messages || []) {
+    if (message?.role !== "toolResult") continue;
+    const id = toolResultCallId(message);
+    if (id && !results.has(id)) results.set(id, message);
+  }
+  return results;
+}
+
+function buildAssistantToolCallIdSet(messages = latestMessages) {
+  const ids = new Set();
+  for (const message of messages || []) {
+    if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
+    for (const part of message.content) {
+      if (!isAssistantToolCallPart(part)) continue;
+      const id = assistantToolCallId(part);
+      if (id) ids.add(id);
+    }
+  }
+  return ids;
+}
+
+function toolResultForCallId(toolCallId, messages = latestMessages) {
+  const id = String(toolCallId || "");
+  if (!id) return null;
+  for (const message of messages || []) {
+    if (message?.role === "toolResult" && toolResultCallId(message) === id) return message;
+  }
+  return null;
+}
+
+function cleanupLiveToolRunsForMessages(messages = latestMessages) {
+  const results = buildToolResultMap(messages);
+  for (const id of liveToolRuns.keys()) {
+    if (results.has(id)) liveToolRuns.delete(id);
+  }
+}
+
+function shortenToolPath(value, fallback = ".") {
+  const path = normalizeDisplayPath(value || fallback);
+  if (path.length <= 96) return path;
+  return `…${path.slice(-95)}`;
+}
+
+function toolArgValue(args, keys) {
+  const keyList = Array.isArray(keys) ? keys : [keys];
+  for (const key of keyList) {
+    if (args && Object.prototype.hasOwnProperty.call(args, key)) return args[key];
+  }
+  return undefined;
+}
+
+function toolArgText(args, keys, fallback = "") {
+  const value = toolArgValue(args, keys);
+  if (value === undefined || value === null) return fallback;
+  if (typeof value === "string") return value;
+  return String(value);
+}
+
+function toolExecutionResult(message) {
+  if (message?.result) return message.result;
+  if (message?.partialResult) return { ...message.partialResult, isError: false };
+  if (message?.role === "toolResult") return message;
+  return null;
+}
+
+function toolResultText(result) {
+  if (!result) return "";
+  return stripAnsi(textFromContent(result.content)).replace(/\s+$/g, "");
+}
+
+function toolExecutionStatus(message) {
+  const result = toolExecutionResult(message);
+  if (message?.isPartial) return "running";
+  if (!result) return "pending";
+  return message?.isError || result?.isError ? "error" : "success";
+}
+
+function toolExecutionTitle(message) {
+  const name = runIndicatorToolName(message?.toolName || message?.name || "tool");
+  const status = toolExecutionStatus(message);
+  if (status === "running") return `tool: ${name} (running)`;
+  if (status === "pending") return `tool: ${name} (pending)`;
+  if (status === "error") return `tool: ${name} (failed)`;
+  return `tool: ${name}`;
+}
+
+function toolLineRange(args) {
+  const offset = toolArgValue(args, "offset");
+  const limit = toolArgValue(args, "limit");
+  const start = Number.isFinite(Number(offset)) ? Number(offset) : null;
+  const count = Number.isFinite(Number(limit)) ? Number(limit) : null;
+  if (start === null && count === null) return "";
+  const first = start ?? 1;
+  const last = count === null ? "" : first + count - 1;
+  return `:${first}${last ? `-${last}` : ""}`;
+}
+
+function appendToolTitle(parent, name, subject = "", meta = []) {
+  const line = make("div", "tool-title-line");
+  line.append(make("span", "tool-name", name));
+  if (subject) line.append(make("span", "tool-subject", subject));
+  parent.append(line);
+  const items = meta.filter(Boolean);
+  if (items.length > 0) {
+    const metaLine = make("div", "tool-meta-line");
+    for (const item of items) metaLine.append(make("span", "tool-meta-pill", item));
+    parent.append(metaLine);
+  }
+}
+
+function appendToolCommand(parent, command, meta = []) {
+  const line = make("pre", "tool-command-line");
+  line.textContent = `$ ${command || "..."}`;
+  parent.append(line);
+  const items = meta.filter(Boolean);
+  if (items.length > 0) {
+    const metaLine = make("div", "tool-meta-line");
+    for (const item of items) metaLine.append(make("span", "tool-meta-pill", item));
+    parent.append(metaLine);
+  }
+}
+
+function appendToolImages(parent, result) {
+  if (!Array.isArray(result?.content)) return;
+  for (const part of result.content) {
+    if (part?.type === "image") appendImage(parent, part);
+  }
+}
+
+function appendToolOutput(parent, text, { label = "output", previewLines = 10, previewFromEnd = false, open = false, emptyText = "" } = {}) {
+  const clean = stripAnsi(text).replace(/\s+$/g, "");
+  if (!clean) {
+    if (emptyText) appendText(parent, emptyText, "code-block tool-output-code muted-output");
+    return;
+  }
+  const lines = clean.split(/\r?\n/);
+  if (lines.length > previewLines) {
+    const details = make("details", "tool-output-details");
+    details.open = open;
+    details.append(make("summary", "tool-output-summary", `${label} (${lines.length} lines; expand)`));
+    appendText(details, clean, "code-block tool-output-code");
+    parent.append(details);
+
+    const preview = make("div", "tool-output-preview");
+    const visibleLines = previewFromEnd ? lines.slice(-previewLines) : lines.slice(0, previewLines);
+    const omitted = lines.length - visibleLines.length;
+    const hint = previewFromEnd
+      ? `… ${omitted} earlier line${omitted === 1 ? "" : "s"}; expand for full output`
+      : `… ${omitted} more line${omitted === 1 ? "" : "s"}; expand for full output`;
+    appendText(preview, `${visibleLines.join("\n")}\n${hint}`, "code-block tool-output-code tool-output-preview-text");
+    parent.append(preview);
+    return;
+  }
+  appendText(parent, clean, "code-block tool-output-code");
+}
+
+function appendToolWarnings(parent, details = {}) {
+  const warnings = [];
+  if (details.fullOutputPath) warnings.push(`Full output: ${details.fullOutputPath}`);
+  const truncation = details.truncation;
+  if (truncation?.truncated) {
+    if (truncation.truncatedBy === "lines") warnings.push(`Truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines`);
+    else if (truncation.outputLines) warnings.push(`Truncated: ${truncation.outputLines} lines shown`);
+    else warnings.push("Output truncated");
+  }
+  if (details.matchLimitReached) warnings.push(`Match limit reached: ${details.matchLimitReached}`);
+  if (details.resultLimitReached) warnings.push(`Result limit reached: ${details.resultLimitReached}`);
+  if (details.entryLimitReached) warnings.push(`Entry limit reached: ${details.entryLimitReached}`);
+  if (warnings.length === 0) return;
+  const box = make("div", "tool-warnings");
+  for (const warning of warnings) box.append(make("div", "tool-warning", warning));
+  parent.append(box);
+}
+
+function appendToolDiff(parent, diff) {
+  const value = String(diff || "").replace(/\s+$/g, "");
+  if (!value) return false;
+  const block = make("div", "tool-diff");
+  for (const line of value.split(/\r?\n/)) {
+    const cls = /^@@/.test(line)
+      ? "diff-hunk"
+      : /^\+/.test(line) && !/^\+\+\+/.test(line)
+        ? "diff-added"
+        : /^-/.test(line) && !/^---/.test(line)
+          ? "diff-removed"
+          : /^(?:\+\+\+|---)/.test(line)
+            ? "diff-file"
+            : "diff-context";
+    block.append(make("div", cls, line || " "));
+  }
+  parent.append(block);
+  return true;
+}
+
+function normalizeToolExecution(message) {
+  const result = toolExecutionResult(message);
+  const args = message?.arguments ?? message?.args ?? {};
+  const name = runIndicatorToolName(message?.toolName || message?.name || "tool");
+  return {
+    name,
+    args,
+    result,
+    text: toolResultText(result),
+    details: result?.details || message?.details || {},
+    isPartial: !!message?.isPartial,
+    isError: !!(message?.isError || result?.isError),
+    startedAt: message?.startedAt || null,
+    endedAt: message?.endedAt || null,
+  };
+}
+
+function toolElapsedLabel(tool) {
+  if (!tool.startedAt) return "";
+  const end = tool.endedAt || Date.now();
+  return `${tool.isPartial ? "elapsed" : "took"} ${formatDuration(end - tool.startedAt)}`;
+}
+
+function toolStatusLabel(tool) {
+  if (tool.isPartial) return "live";
+  if (tool.isError) return "failed";
+  if (tool.result) return "done";
+  return "pending";
+}
+
+function toolStateMeta(tool) {
+  return [toolElapsedLabel(tool), toolStatusLabel(tool)];
+}
+
+function toolLineCountLabel(text, label = "line") {
+  const value = String(text || "").replace(/\s+$/g, "");
+  if (!value) return "";
+  const count = value.split(/\r?\n/).length;
+  return `${count} ${label}${count === 1 ? "" : "s"}`;
+}
+
+function toolRawDetailsReplacer(key, value) {
+  if (typeof value === "string" && value.length > 4000) return `${value.slice(0, 4000)}… (${value.length - 4000} chars omitted)`;
+  return value;
+}
+
+function appendToolRawDetails(parent, tool) {
+  const raw = JSON.stringify({ arguments: tool.args ?? {}, result: tool.result ?? null, details: tool.details ?? {} }, toolRawDetailsReplacer, 2);
+  const details = make("details", "tool-raw-details");
+  details.append(make("summary", "tool-raw-summary", "raw tool data"));
+  appendText(details, raw, "code-block tool-raw-code");
+  parent.append(details);
+}
+
+function renderBashToolExecution(parent, tool) {
+  const command = toolArgText(tool.args, "command", "");
+  const timeout = toolArgValue(tool.args, "timeout");
+  const meta = [timeout ? `timeout ${timeout}s` : "", ...toolStateMeta(tool)];
+  appendToolCommand(parent, command, meta);
+  appendToolOutput(parent, tool.text, { label: tool.isPartial ? "live output" : "output", previewLines: 5, previewFromEnd: true, open: tool.isError, emptyText: tool.isPartial ? "(no output yet)" : "" });
+  appendToolWarnings(parent, tool.details);
+}
+
+function renderReadToolExecution(parent, tool) {
+  const path = toolArgText(tool.args, ["file_path", "path"], "");
+  appendToolTitle(parent, "read", `${shortenToolPath(path)}${toolLineRange(tool.args)}`, [toolLineCountLabel(tool.text), ...toolStateMeta(tool)]);
+  appendToolImages(parent, tool.result);
+  appendToolOutput(parent, tool.text, { label: "file output", previewLines: 10, open: tool.isError });
+  appendToolWarnings(parent, tool.details);
+}
+
+function renderWriteToolExecution(parent, tool) {
+  const path = toolArgText(tool.args, ["file_path", "path"], "");
+  const content = toolArgText(tool.args, "content", "");
+  const lineCount = content ? content.split(/\r?\n/).length : 0;
+  appendToolTitle(parent, "write", shortenToolPath(path), [lineCount > 0 ? `${lineCount} line${lineCount === 1 ? "" : "s"}` : "", ...toolStateMeta(tool)]);
+  appendToolOutput(parent, content, { label: "content", previewLines: 10 });
+  appendToolOutput(parent, tool.text, { label: "result", previewLines: 6, open: tool.isError });
+}
+
+function renderEditToolExecution(parent, tool) {
+  const path = toolArgText(tool.args, ["file_path", "path"], "");
+  const edits = Array.isArray(tool.args?.edits) ? tool.args.edits.length : 0;
+  appendToolTitle(parent, "edit", shortenToolPath(path), [edits ? `${edits} replacement${edits === 1 ? "" : "s"}` : "", ...toolStateMeta(tool)]);
+  const hasDiff = appendToolDiff(parent, tool.details?.diff || tool.details?.patch);
+  appendToolOutput(parent, tool.text, { label: "result", previewLines: hasDiff ? 4 : 10, open: tool.isError });
+}
+
+function renderGrepToolExecution(parent, tool) {
+  const pattern = toolArgText(tool.args, "pattern", "");
+  const path = toolArgText(tool.args, "path", ".");
+  appendToolTitle(parent, "grep", `/${pattern || "…"}/ in ${shortenToolPath(path)}`, [tool.args?.glob ? `glob ${tool.args.glob}` : "", tool.args?.ignoreCase ? "ignore-case" : "", tool.args?.literal ? "literal" : "", toolLineCountLabel(tool.text, "match line"), ...toolStateMeta(tool)]);
+  appendToolOutput(parent, tool.text, { label: "matches", previewLines: 10, open: tool.isError });
+  appendToolWarnings(parent, tool.details);
+}
+
+function renderFindToolExecution(parent, tool) {
+  const pattern = toolArgText(tool.args, "pattern", "");
+  const path = toolArgText(tool.args, "path", ".");
+  appendToolTitle(parent, "find", `${pattern || "…"} in ${shortenToolPath(path)}`, [tool.args?.limit ? `limit ${tool.args.limit}` : "", toolLineCountLabel(tool.text, "result"), ...toolStateMeta(tool)]);
+  appendToolOutput(parent, tool.text, { label: "results", previewLines: 10, open: tool.isError });
+  appendToolWarnings(parent, tool.details);
+}
+
+function renderLsToolExecution(parent, tool) {
+  const path = toolArgText(tool.args, "path", ".");
+  appendToolTitle(parent, "ls", shortenToolPath(path), [tool.args?.limit ? `limit ${tool.args.limit}` : "", toolLineCountLabel(tool.text, "entry"), ...toolStateMeta(tool)]);
+  appendToolOutput(parent, tool.text, { label: "entries", previewLines: 20, open: tool.isError });
+  appendToolWarnings(parent, tool.details);
+}
+
+function renderGenericToolExecution(parent, tool) {
+  appendToolTitle(parent, tool.name, "", toolStateMeta(tool));
+  appendToolOutput(parent, JSON.stringify(tool.args ?? {}, null, 2), { label: "arguments", previewLines: 12 });
+  appendToolImages(parent, tool.result);
+  appendToolOutput(parent, tool.text, { label: "result", previewLines: 10, open: tool.isError });
+  appendToolWarnings(parent, tool.details);
+}
+
+const WEBUI_TOOL_RENDERERS = {
+  bash: renderBashToolExecution,
+  read: renderReadToolExecution,
+  write: renderWriteToolExecution,
+  edit: renderEditToolExecution,
+  grep: renderGrepToolExecution,
+  find: renderFindToolExecution,
+  ls: renderLsToolExecution,
+};
+
+function renderToolExecution(parent, message) {
+  const tool = normalizeToolExecution(message);
+  const renderer = WEBUI_TOOL_RENDERERS[tool.name] || renderGenericToolExecution;
+  renderer(parent, tool);
+  appendToolRawDetails(parent, tool);
+}
+
+function liveToolRunMessage(run) {
+  return {
+    role: "toolExecution",
+    title: toolExecutionTitle(run),
+    toolName: run.toolName,
+    toolCallId: run.toolCallId,
+    arguments: run.arguments,
+    result: run.result,
+    isPartial: run.isPartial,
+    isError: run.isError,
+    startedAt: run.startedAt,
+    endedAt: run.endedAt,
+    timestamp: run.timestamp,
+    live: true,
+  };
+}
+
+function renderLiveToolRun(run, { scroll = true } = {}) {
+  if (!run?.toolCallId) return;
+  const existing = liveToolCards.get(run.toolCallId);
+  const shouldFollow = scroll && (autoFollowChat || isChatNearBottom());
+  const created = appendMessage(liveToolRunMessage(run), { transient: true, animateEntry: !existing });
+  if (existing?.isConnected && existing !== created.bubble) existing.replaceWith(created.bubble);
+  renderRunIndicator({ scroll: false });
+  if (shouldFollow) scrollChatToBottom();
+}
+
+function upsertLiveToolRun(event, patch = {}) {
+  const id = String(event.toolCallId || "");
+  if (!id) return null;
+  const existing = liveToolRuns.get(id) || {};
+  const now = Date.now();
+  const run = {
+    ...existing,
+    role: "toolExecution",
+    live: true,
+    toolCallId: id,
+    toolName: event.toolName || existing.toolName || "tool",
+    arguments: event.args ?? existing.arguments ?? {},
+    timestamp: existing.timestamp || now,
+    startedAt: existing.startedAt || now,
+    updatedAt: now,
+    ...patch,
+  };
+  liveToolRuns.set(id, run);
+  return run;
+}
+
+function handleToolExecutionStart(event) {
+  const run = upsertLiveToolRun(event, { isPartial: true, isError: false });
+  if (run) renderLiveToolRun(run);
+}
+
+function handleToolExecutionUpdate(event) {
+  const result = { ...(event.partialResult || {}), isError: false };
+  const run = upsertLiveToolRun(event, { result, isPartial: true, isError: false });
+  if (run) renderLiveToolRun(run, { scroll: false });
+}
+
+function handleToolExecutionEnd(event) {
+  const result = { ...(event.result || {}), isError: !!event.isError };
+  const run = upsertLiveToolRun(event, { result, isPartial: false, isError: !!event.isError, endedAt: Date.now() });
+  if (run) renderLiveToolRun(run);
+}
+
 function toolResultPreviewText(message, lineLimit = 10) {
   const text = textFromContent(message?.content).replace(/\s+$/g, "");
   if (!text) return "(empty tool result)";
@@ -3829,12 +5381,23 @@ function appendMessage(message, { streaming = false, messageIndex = -1, transien
   const role = String(message.role || "message");
   const safeRole = role.replace(/[^a-z0-9_-]/gi, "");
   const bubble = make("article", `message ${safeRole}${message.level ? ` ${message.level}` : ""}${streaming ? " streaming" : ""}${animateEntry ? " action-enter" : ""}`);
+  if (message.role === "toolExecution") {
+    const status = toolExecutionStatus(message);
+    bubble.classList.add(`tool-${status}`);
+    if (message.isError || status === "error") bubble.classList.add("error");
+    if (message.toolCallId) {
+      bubble.dataset.toolCallId = String(message.toolCallId);
+      if (message.live) liveToolCards.set(String(message.toolCallId), bubble);
+    }
+  }
   if (!transient && messageIndex >= 0) {
     bubble.dataset.messageIndex = String(messageIndex);
     if (role === "user") bubble.dataset.userPrompt = "true";
   }
   const isCollapsibleOutput = !streaming && (message.role === "toolResult" || message.role === "bashExecution" || message.role === "compactionSummary");
 
+  const hideMessageHeader = message.role === "assistant" && !isCollapsibleOutput;
+  if (hideMessageHeader) bubble.setAttribute("aria-label", messageTitle(message));
   const header = make(isCollapsibleOutput ? "summary" : "div", "message-header");
   header.append(make("span", "message-role", messageTitle(message)));
   header.append(make("span", "muted", formatDate(message.timestamp)));
@@ -3847,15 +5410,17 @@ function appendMessage(message, { streaming = false, messageIndex = -1, transien
   } else if (message.role === "toolResult") {
     renderContent(body, message.content);
     if (message.isError) bubble.classList.add("error");
+  } else if (message.role === "toolExecution") {
+    renderToolExecution(body, message);
   } else if (message.role === "thinking") {
     const thinkingText = message.thinking || textFromContent(message.content);
-    if (thinkingText || !streaming) appendText(body, thinkingText || "No thinking content was exposed by the provider.", "thinking-text");
+    if (thinkingOutputVisible && (thinkingText || !streaming)) appendText(body, thinkingText || "No thinking content was exposed by the provider.", "thinking-text");
   } else if (message.role === "toolCall") {
     appendText(body, JSON.stringify(message.arguments ?? message.content ?? {}, null, 2), "code-block");
   } else if (message.role === "assistantEvent") {
     appendText(body, typeof message.content === "string" ? message.content : JSON.stringify(message.content ?? {}, null, 2), "code-block");
   } else {
-    renderContent(body, message.content);
+    renderContent(body, message.content, { markdown: message.role === "assistant" });
   }
 
   if (isCollapsibleOutput) {
@@ -3868,6 +5433,8 @@ function appendMessage(message, { streaming = false, messageIndex = -1, transien
       appendText(preview, toolResultPreviewText(message, 10), "code-block tool-result-preview-text");
       bubble.append(preview);
     }
+  } else if (hideMessageHeader) {
+    bubble.append(body);
   } else {
     bubble.append(header, body);
   }
@@ -3884,13 +5451,31 @@ function appendTranscriptMessage(message, { streaming = false, messageIndex = -1
   let finalOutput = null;
   const displayMessages = assistantDisplayMessages(message);
   displayMessages.forEach((displayMessage) => {
-    const created = appendMessage(displayMessage, {
+    let transcriptMessage = displayMessage;
+    if (displayMessage.role === "toolCall" && displayMessage.toolCallId) {
+      const result = toolResultForCallId(displayMessage.toolCallId);
+      const liveRun = liveToolRuns.get(displayMessage.toolCallId);
+      transcriptMessage = {
+        ...displayMessage,
+        role: "toolExecution",
+        title: `tool: ${displayMessage.toolName || "unknown"}`,
+        arguments: liveRun?.arguments ?? displayMessage.arguments,
+        result: result || liveRun?.result || null,
+        isPartial: !result && !!liveRun?.isPartial,
+        isError: !!(result?.isError || liveRun?.isError),
+        startedAt: liveRun?.startedAt || null,
+        endedAt: liveRun?.endedAt || null,
+        live: !!liveRun && !result,
+      };
+    }
+    if (transcriptMessage.role === "thinking" && !thinkingOutputVisible) return;
+    const created = appendMessage(transcriptMessage, {
       streaming: false,
-      messageIndex: displayMessage.role === "assistant" ? messageIndex : -1,
+      messageIndex: ["assistant", "toolExecution"].includes(transcriptMessage.role) ? messageIndex : -1,
       transient: false,
-      animateEntry: animateEntry && isActionTranscriptMessage(displayMessage),
+      animateEntry: animateEntry && isActionTranscriptMessage(transcriptMessage),
     });
-    if (displayMessage.role === "assistant") finalOutput = created;
+    if (transcriptMessage.role === "assistant") finalOutput = created;
   });
   return finalOutput;
 }
@@ -3908,25 +5493,29 @@ function clearRunIndicatorGraceCheck() {
   runIndicatorGraceCheckTimer = null;
 }
 
-function scheduleRunIndicatorGraceCheck() {
+function scheduleRunIndicatorGraceCheck(tabContext = activeTabContext()) {
   if (!runIndicatorLocallyActive || stateHasRunIndicatorActivity(currentState) || !runIndicatorStartedAt) return;
   const elapsedMs = performance.now() - runIndicatorStartedAt;
   const delayMs = Math.max(120, RUN_INDICATOR_START_GRACE_MS - elapsedMs + 120);
   clearRunIndicatorGraceCheck();
   runIndicatorGraceCheckTimer = setTimeout(() => {
     runIndicatorGraceCheckTimer = null;
-    if (!runIndicatorLocallyActive || stateHasRunIndicatorActivity(currentState)) return;
+    if (!isCurrentTabContext(tabContext) || !runIndicatorLocallyActive || stateHasRunIndicatorActivity(currentState)) return;
     runIndicatorLastStateCheckAt = performance.now();
-    refreshState().catch((error) => addEvent(error.message, "error"));
+    refreshState(tabContext).catch((error) => {
+      if (isCurrentTabContext(tabContext)) addEvent(error.message, "error");
+    });
   }, delayMs);
 }
 
-function maybeRefreshRunIndicatorState() {
+function maybeRefreshRunIndicatorState(tabContext = activeTabContext()) {
   if (!runIndicatorIsActive()) return;
   const now = performance.now();
   if (now - runIndicatorLastStateCheckAt < RUN_INDICATOR_STATE_RECHECK_MS) return;
   runIndicatorLastStateCheckAt = now;
-  refreshState().catch((error) => addEvent(error.message, "error"));
+  refreshState(tabContext).catch((error) => {
+    if (isCurrentTabContext(tabContext)) addEvent(error.message, "error");
+  });
 }
 
 function formatRunIndicatorElapsed() {
@@ -4023,6 +5612,7 @@ function setRunIndicatorActivity(activity, { active = true, scroll = true } = {}
   }
   runIndicatorActivity = activity || runIndicatorActivity || "Waiting for output or action…";
   renderRunIndicator({ scroll });
+  updateComposerModeButtons();
   if (active) scheduleRunIndicatorGraceCheck();
 }
 
@@ -4033,6 +5623,7 @@ function clearRunIndicatorActivity({ render = true } = {}) {
   runIndicatorStartedAt = null;
   runIndicatorActivity = "Waiting for output or action…";
   if (render) renderRunIndicator();
+  updateComposerModeButtons();
 }
 
 function syncRunIndicatorFromState(state = currentState) {
@@ -4052,15 +5643,21 @@ function syncRunIndicatorFromState(state = currentState) {
   } else {
     renderRunIndicator();
   }
+  updateComposerModeButtons();
 }
 
 function runIndicatorToolName(name) {
   return cleanStatusText(name || "tool") || "tool";
 }
 
-function scheduleAbortStateChecks() {
+function scheduleAbortStateChecks(tabContext = activeTabContext()) {
   for (const delay of [250, 900, 1800, 3600]) {
-    setTimeout(() => refreshState().catch((error) => addEvent(error.message, "error")), delay);
+    setTimeout(() => {
+      if (!isCurrentTabContext(tabContext)) return;
+      refreshState(tabContext).catch((error) => {
+        if (isCurrentTabContext(tabContext)) addEvent(error.message, "error");
+      });
+    }, delay);
   }
 }
 
@@ -4072,7 +5669,7 @@ function messageTimestampMs(message) {
 }
 
 function isActionTranscriptMessage(message) {
-  return ["assistantEvent", "bashExecution", "toolCall", "toolResult"].includes(message?.role);
+  return ["assistantEvent", "bashExecution", "toolCall", "toolExecution", "toolResult"].includes(message?.role);
 }
 
 function assistantMessageHasActionContent(message) {
@@ -4100,6 +5697,7 @@ function actionEntryKey(item) {
     item?.messageIndex ?? -1,
     message.role || "message",
     message.toolName || "",
+    message.toolCallId || "",
     message.command || "",
     message.title || "",
     message.timestamp || "",
@@ -4123,12 +5721,22 @@ function rememberActionEntries(items) {
 
 function orderedTranscriptItems() {
   const items = [];
+  const assistantToolCallIds = buildAssistantToolCallIdSet(latestMessages);
+  const toolResults = buildToolResultMap(latestMessages);
   latestMessages.forEach((message, index) => {
+    const resultId = message?.role === "toolResult" ? toolResultCallId(message) : "";
+    if (resultId && assistantToolCallIds.has(resultId)) return;
     items.push({ message, messageIndex: index, transient: false, timestampMs: messageTimestampMs(message), order: index });
   });
   transientMessages.forEach((message, index) => {
     items.push({ message, messageIndex: index, transient: true, timestampMs: messageTimestampMs(message), order: latestMessages.length + index });
   });
+  let liveOrder = latestMessages.length + transientMessages.length;
+  for (const [toolCallId, run] of liveToolRuns.entries()) {
+    if (assistantToolCallIds.has(toolCallId) || toolResults.has(toolCallId)) continue;
+    const message = liveToolRunMessage(run);
+    items.push({ message, messageIndex: -1, transient: true, timestampMs: messageTimestampMs(message), order: liveOrder++ });
+  }
   return items.sort((a, b) => a.timestampMs - b.timestampMs || a.order - b.order);
 }
 
@@ -4280,7 +5888,7 @@ function showComposerButtonTooltip(button) {
 }
 
 function sendPromptFromModeButton(kind, button) {
-  if (!elements.promptInput.value.trim()) {
+  if (!hasComposerPayload()) {
     showComposerButtonTooltip(button);
     return;
   }
@@ -4303,6 +5911,7 @@ function optionalFeatureIdForCommand(name) {
 }
 
 function isCommandVisible(command) {
+  if (HIDDEN_COMMAND_NAMES.has(command.name)) return false;
   const featureId = optionalFeatureIdForCommand(command.name);
   return !featureId || isOptionalFeatureEnabled(featureId);
 }
@@ -4322,13 +5931,31 @@ function optionalFeatureUnavailableMessage(featureId) {
   return `${feature.label} unavailable: ${feature.capabilityLabel} is not loaded. Install or enable ${feature.packageName}.`;
 }
 
+function rememberOptionalControlDefault(button, key, value) {
+  if (!(key in button.dataset)) button.dataset[key] = value || "";
+}
+
 function setOptionalControlState(button, available, unavailableTitle) {
   if (!button) return;
-  if (!button.dataset.defaultTitle) button.dataset.defaultTitle = button.getAttribute("title") || "";
+  rememberOptionalControlDefault(button, "defaultTitle", button.getAttribute("title"));
+  rememberOptionalControlDefault(button, "defaultAriaLabel", button.getAttribute("aria-label"));
+  if (button.hasAttribute("data-tooltip")) rememberOptionalControlDefault(button, "defaultTooltip", button.getAttribute("data-tooltip"));
+
+  const nextTitle = available ? button.dataset.defaultTitle : unavailableTitle;
+  const nextAriaLabel = available ? button.dataset.defaultAriaLabel : unavailableTitle;
+  const nextTooltip = available ? button.dataset.defaultTooltip : unavailableTitle;
+
   button.disabled = !available;
   button.setAttribute("aria-disabled", available ? "false" : "true");
   button.classList.toggle("feature-unavailable", !available);
-  button.setAttribute("title", available ? button.dataset.defaultTitle : unavailableTitle);
+  if (nextTitle) button.setAttribute("title", nextTitle);
+  else button.removeAttribute("title");
+  if (nextAriaLabel) button.setAttribute("aria-label", nextAriaLabel);
+  else button.removeAttribute("aria-label");
+  if (button.dataset.defaultTooltip !== undefined) {
+    if (nextTooltip) button.setAttribute("data-tooltip", nextTooltip);
+    else button.removeAttribute("data-tooltip");
+  }
 }
 
 function resetOptionalFeatureAvailability() {
@@ -4456,8 +6083,9 @@ async function installOptionalFeature(featureId) {
     if (confirm(`${feature.label} install finished. Reload the active Pi tab now to enable newly loaded resources?`)) {
       sendPrompt("prompt", "/reload");
     } else {
-      await Promise.allSettled([refreshCommands(), initializeThemes()]);
-      renderOptionalFeatureControls();
+      const tabContext = activeTabContext();
+      await Promise.allSettled([refreshCommands(tabContext), initializeThemes()]);
+      if (isCurrentTabContext(tabContext)) renderOptionalFeatureControls();
     }
   } catch (error) {
     addEvent(error.message || String(error), "error");
@@ -4473,11 +6101,476 @@ function runPublishWorkflow(command) {
   const commandName = String(command || "").replace(/^\//, "").split(/\s+/)[0];
   const featureId = OPTIONAL_COMMAND_FEATURES.get(commandName);
   if ((featureId && !isOptionalFeatureEnabled(featureId)) || !hasAvailableCommand(commandName)) {
+    const tabContext = activeTabContext();
     addEvent(commandUnavailableMessage(commandName), "warn");
-    refreshCommands().catch((error) => addEvent(error.message || String(error), "error"));
+    refreshCommands(tabContext).catch((error) => {
+      if (isCurrentTabContext(tabContext)) addEvent(error.message || String(error), "error");
+    });
     return;
   }
   sendPrompt("prompt", command);
+}
+
+function slashCommandName(message) {
+  const match = String(message || "").trim().match(/^\/([^\s]+)$/);
+  return match ? match[1] : "";
+}
+
+function openNativeCommandDialog({ title, message = "", searchPlaceholder = "" } = {}) {
+  nativeCommandTabId ||= activeTabId;
+  elements.nativeCommandTitle.textContent = title || "Pi command";
+  elements.nativeCommandMessage.textContent = message;
+  elements.nativeCommandMessage.hidden = !message;
+  elements.nativeCommandSearch.value = "";
+  elements.nativeCommandSearch.placeholder = searchPlaceholder || "Filter choices…";
+  elements.nativeCommandSearch.hidden = !searchPlaceholder;
+  elements.nativeCommandSearch.oninput = null;
+  elements.nativeCommandBody.replaceChildren();
+  elements.nativeCommandError.hidden = true;
+  elements.nativeCommandError.textContent = "";
+  elements.nativeCommandActions.replaceChildren();
+  addNativeCommandAction("Cancel", closeNativeCommandDialog);
+  if (!elements.nativeCommandDialog.open) elements.nativeCommandDialog.showModal();
+  if (searchPlaceholder) queueMicrotask(() => elements.nativeCommandSearch.focus());
+}
+
+function closeNativeCommandDialog() {
+  if (elements.nativeCommandDialog.open) elements.nativeCommandDialog.close();
+  elements.nativeCommandSearch.oninput = null;
+  nativeCommandTabId = null;
+}
+
+function nativeCommandApi(path, options = {}) {
+  return api(path, { ...options, tabId: options.tabId || nativeCommandTabId || activeTabId });
+}
+
+function setNativeCommandError(message) {
+  elements.nativeCommandError.textContent = message || "";
+  elements.nativeCommandError.hidden = !message;
+}
+
+function addNativeCommandAction(label, handler, className) {
+  const button = make("button", className, label);
+  button.type = "button";
+  button.addEventListener("click", handler);
+  elements.nativeCommandActions.append(button);
+  return button;
+}
+
+function renderNativeLoading(label = "Loading…") {
+  elements.nativeCommandBody.replaceChildren(make("div", "native-command-empty muted", label));
+}
+
+function nativeSelectorMatches(item, query) {
+  if (!query) return true;
+  const needle = query.toLowerCase();
+  return [item.label, item.description, item.meta, item.badge]
+    .filter(Boolean)
+    .some((value) => String(value).toLowerCase().includes(needle));
+}
+
+function renderNativeSelectorItems(items, { emptyText = "No choices.", onSelect, activeId } = {}) {
+  const query = elements.nativeCommandSearch.value.trim();
+  const filtered = items.filter((item) => nativeSelectorMatches(item, query));
+  elements.nativeCommandBody.replaceChildren();
+  if (!filtered.length) {
+    elements.nativeCommandBody.append(make("div", "native-command-empty muted", emptyText));
+    return;
+  }
+  const list = make("div", "native-selector-list");
+  for (const item of filtered) {
+    const button = make("button", `native-selector-item${item.id === activeId ? " active" : ""}`);
+    button.type = "button";
+    if (item.depth !== undefined) button.style.setProperty("--tree-depth", String(item.depth));
+    button.disabled = item.disabled === true;
+    button.addEventListener("click", () => onSelect?.(item));
+    const title = make("span", "native-selector-title");
+    title.append(make("strong", undefined, item.label || item.id || "choice"));
+    if (item.badge) title.append(make("span", "native-selector-badge", item.badge));
+    const detail = make("span", "native-selector-detail", item.description || "");
+    const meta = make("span", "native-selector-meta", item.meta || "");
+    button.append(title);
+    if (item.description) button.append(detail);
+    if (item.meta) button.append(meta);
+    list.append(button);
+  }
+  elements.nativeCommandBody.append(list);
+}
+
+function setNativeActionBusy(button, busy, label = "Working…") {
+  if (!button) return;
+  if (!button.dataset.defaultLabel) button.dataset.defaultLabel = button.textContent || "";
+  button.disabled = busy;
+  button.textContent = busy ? label : button.dataset.defaultLabel;
+}
+
+function modelOptionLabel(model) {
+  return `${model.provider}/${model.id}`;
+}
+
+async function openNativeModelSelector() {
+  openNativeCommandDialog({ title: "/model", message: "Select the active model for this Pi tab.", searchPlaceholder: "Filter models…" });
+  renderNativeLoading("Loading models…");
+  try {
+    const response = await nativeCommandApi("/api/models");
+    const models = Array.isArray(response.data?.models) ? response.data.models : [];
+    const activeId = currentState?.model ? `${currentState.model.provider}/${currentState.model.id}` : "";
+    const items = models.map((model) => ({
+      id: modelOptionLabel(model),
+      label: modelOptionLabel(model),
+      description: model.name || model.description || "",
+      meta: model.contextWindow ? `context ${model.contextWindow}` : model.provider,
+      model,
+      badge: modelOptionLabel(model) === activeId ? "current" : "",
+    }));
+    const render = () => renderNativeSelectorItems(items, {
+      emptyText: "No models match this filter.",
+      activeId,
+      onSelect: async (item) => {
+        setNativeCommandError("");
+        try {
+          await nativeCommandApi("/api/model", { method: "POST", body: { provider: item.model.provider, modelId: item.model.id } });
+          addTransientMessage({ role: "native", title: "/model", content: `Model set to ${item.label}.`, level: "info" });
+          closeNativeCommandDialog();
+          await refreshState();
+        } catch (error) {
+          setNativeCommandError(error.message || String(error));
+        }
+      },
+    });
+    elements.nativeCommandSearch.oninput = render;
+    render();
+  } catch (error) {
+    setNativeCommandError(error.message || String(error));
+    elements.nativeCommandBody.replaceChildren();
+  }
+}
+
+function openNativeThemeSelector() {
+  openNativeCommandDialog({ title: "/theme", message: "Select the browser Web UI theme. Pi terminal theme changes remain native-TUI only.", searchPlaceholder: "Filter themes…" });
+  const load = async () => {
+    if (!availableThemes.length) await initializeThemes();
+    const items = availableThemes.map((theme) => ({
+      id: theme.name,
+      label: theme.label || displayThemeName(theme.name) || theme.name,
+      description: theme.name,
+      meta: theme.author ? `by ${theme.author}` : "browser theme",
+      theme,
+      badge: theme.name === currentThemeName ? "current" : "",
+    }));
+    const render = () => renderNativeSelectorItems(items, {
+      emptyText: "No themes match this filter.",
+      activeId: currentThemeName,
+      onSelect: async (item) => {
+        try {
+          await setThemeByName(item.theme.name, { persist: true, announce: true });
+          addTransientMessage({ role: "native", title: "/theme", content: `Theme set to ${item.label}.`, level: "info" });
+          closeNativeCommandDialog();
+        } catch (error) {
+          setNativeCommandError(error.message || String(error));
+        }
+      },
+    });
+    elements.nativeCommandSearch.oninput = render;
+    render();
+  };
+  renderNativeLoading("Loading themes…");
+  load().catch((error) => {
+    setNativeCommandError(error.message || String(error));
+    elements.nativeCommandBody.replaceChildren();
+  });
+}
+
+function nativeSettingSelect(label, value, options) {
+  const field = make("label", "native-settings-field");
+  field.append(make("span", "native-settings-label", label));
+  const select = make("select");
+  for (const option of options) {
+    const element = make("option", undefined, option.label || option.value);
+    element.value = option.value;
+    select.append(element);
+  }
+  select.value = value;
+  field.append(select);
+  return { field, select };
+}
+
+function nativeSettingToggle(label, checked, hint) {
+  const field = make("label", "native-settings-toggle");
+  const input = make("input");
+  input.type = "checkbox";
+  input.checked = !!checked;
+  const text = make("span");
+  text.append(make("strong", undefined, label));
+  if (hint) text.append(make("span", "native-settings-hint", hint));
+  field.append(input, text);
+  return { field, input };
+}
+
+function openNativeSettingsDialog() {
+  openNativeCommandDialog({ title: "/settings", message: "Quick Web UI settings for the active Pi tab." });
+  elements.nativeCommandBody.replaceChildren();
+  const state = currentState || {};
+  const body = make("div", "native-settings-grid");
+  const thinking = nativeSettingSelect("Thinking level", state.thinkingLevel || "off", ["off", "minimal", "low", "medium", "high", "xhigh"].map((value) => ({ value })));
+  const steering = nativeSettingSelect("Steering queue", state.steeringMode || "one-at-a-time", [
+    { value: "one-at-a-time", label: "one at a time" },
+    { value: "all", label: "all queued" },
+  ]);
+  const followUp = nativeSettingSelect("Follow-up queue", state.followUpMode || "one-at-a-time", [
+    { value: "one-at-a-time", label: "one at a time" },
+    { value: "all", label: "all queued" },
+  ]);
+  const autoCompact = nativeSettingToggle("Auto compaction", state.autoCompactionEnabled !== false, "Let Pi compact when context is nearly full.");
+  const thinkingOutput = nativeSettingToggle("Show thinking output", thinkingOutputVisible, "Local browser transcript visibility.");
+  const doneNotifications = nativeSettingToggle("Agent done notifications", agentDoneNotificationsEnabled, "Browser notification after background tab work completes.");
+  const busyBehavior = nativeSettingSelect("Busy prompt behavior", elements.busyBehavior.value || "followUp", [
+    { value: "followUp", label: "follow-up" },
+    { value: "steer", label: "steer" },
+  ]);
+  body.append(thinking.field, steering.field, followUp.field, busyBehavior.field, autoCompact.field, thinkingOutput.field, doneNotifications.field);
+  elements.nativeCommandBody.append(body);
+  elements.nativeCommandActions.replaceChildren();
+  addNativeCommandAction("Model…", () => openNativeModelSelector());
+  addNativeCommandAction("Theme…", () => openNativeThemeSelector());
+  addNativeCommandAction("Cancel", closeNativeCommandDialog);
+  const save = addNativeCommandAction("Apply", async () => {
+    setNativeActionBusy(save, true, "Applying…");
+    setNativeCommandError("");
+    try {
+      const requests = [];
+      if (thinking.select.value !== state.thinkingLevel) requests.push(nativeCommandApi("/api/thinking", { method: "POST", body: { level: thinking.select.value } }));
+      if (steering.select.value !== state.steeringMode) requests.push(nativeCommandApi("/api/steering-mode", { method: "POST", body: { mode: steering.select.value } }));
+      if (followUp.select.value !== state.followUpMode) requests.push(nativeCommandApi("/api/follow-up-mode", { method: "POST", body: { mode: followUp.select.value } }));
+      if (autoCompact.input.checked !== state.autoCompactionEnabled) requests.push(nativeCommandApi("/api/auto-compaction", { method: "POST", body: { enabled: autoCompact.input.checked } }));
+      elements.busyBehavior.value = busyBehavior.select.value;
+      if (thinkingOutput.input.checked !== thinkingOutputVisible) setThinkingOutputVisible(thinkingOutput.input.checked);
+      if (doneNotifications.input.checked !== agentDoneNotificationsEnabled) await setAgentDoneNotificationsEnabled(doneNotifications.input.checked);
+      await Promise.all(requests);
+      addTransientMessage({ role: "native", title: "/settings", content: "Settings updated.", level: "info" });
+      closeNativeCommandDialog();
+      await refreshState();
+    } catch (error) {
+      setNativeCommandError(error.message || String(error));
+    } finally {
+      setNativeActionBusy(save, false);
+    }
+  }, "primary");
+}
+
+async function openNativeForkSelector() {
+  openNativeCommandDialog({ title: "/fork", message: "Choose a previous user message to fork before.", searchPlaceholder: "Filter fork points…" });
+  renderNativeLoading("Loading fork points…");
+  try {
+    const response = await nativeCommandApi("/api/fork-messages");
+    const items = (response.data?.messages || []).map((message, index) => ({
+      id: message.entryId,
+      label: `#${index + 1} user message`,
+      description: message.text || "",
+      meta: message.entryId,
+      message,
+    })).reverse();
+    const render = () => renderNativeSelectorItems(items, {
+      emptyText: "No user messages are available to fork from.",
+      onSelect: async (item) => {
+        setNativeCommandError("");
+        try {
+          const result = await nativeCommandApi("/api/fork", { method: "POST", body: { entryId: item.message.entryId } });
+          applyResponseTab(result);
+          const restoredText = result.data?.text || result.data?.result?.text || "";
+          if (restoredText) {
+            elements.promptInput.value = restoredText;
+            resizePromptInput();
+            focusPromptInput({ defer: true });
+          }
+          addTransientMessage({ role: "native", title: "/fork", content: result.data?.message || "Forked the current session.", level: "info" });
+          closeNativeCommandDialog();
+          await refreshAll();
+        } catch (error) {
+          setNativeCommandError(error.message || String(error));
+        }
+      },
+    });
+    elements.nativeCommandSearch.oninput = render;
+    render();
+  } catch (error) {
+    setNativeCommandError(error.message || String(error));
+    elements.nativeCommandBody.replaceChildren();
+  }
+}
+
+function openNativeCloneDialog() {
+  openNativeCommandDialog({ title: "/clone", message: "Duplicate the current session at the current position." });
+  elements.nativeCommandBody.append(make("p", "native-command-note", "This creates a new forked session and switches this Web UI tab to it."));
+  elements.nativeCommandActions.replaceChildren();
+  addNativeCommandAction("Cancel", closeNativeCommandDialog);
+  const clone = addNativeCommandAction("Clone session", async () => {
+    setNativeActionBusy(clone, true, "Cloning…");
+    try {
+      const result = await nativeCommandApi("/api/clone", { method: "POST", body: {} });
+      applyResponseTab(result);
+      addTransientMessage({ role: "native", title: "/clone", content: result.data?.message || "Cloned the current session.", level: "info" });
+      closeNativeCommandDialog();
+      await refreshAll();
+    } catch (error) {
+      setNativeCommandError(error.message || String(error));
+    } finally {
+      setNativeActionBusy(clone, false);
+    }
+  }, "primary");
+}
+
+async function openNativeResumeSelector(scope = "current") {
+  openNativeCommandDialog({ title: "/resume", message: "Resume another persisted Pi session.", searchPlaceholder: "Filter sessions…" });
+  renderNativeLoading("Loading sessions…");
+  const selectedScope = scope === "all" ? "all" : "current";
+  try {
+    const response = await nativeCommandApi(`/api/sessions?scope=${encodeURIComponent(selectedScope)}`);
+    const items = (response.data?.sessions || []).map((session) => ({
+      id: session.path,
+      label: session.name || session.firstMessage || session.id || session.path,
+      description: session.firstMessage || "(no messages)",
+      meta: `${session.cwd || "unknown cwd"} · ${session.messageCount || 0} messages · ${session.modified || "unknown time"}`,
+      badge: session.current ? "current" : "",
+      disabled: session.current,
+      session,
+    }));
+    const render = () => renderNativeSelectorItems(items, {
+      emptyText: selectedScope === "all" ? "No sessions match this filter." : "No sessions for this working directory match this filter.",
+      onSelect: async (item) => {
+        setNativeCommandError("");
+        try {
+          const result = await nativeCommandApi("/api/switch-session", { method: "POST", body: { sessionPath: item.session.path } });
+          applyResponseTab(result);
+          addTransientMessage({ role: "native", title: "/resume", content: result.data?.message || "Resumed selected session.", level: "info" });
+          closeNativeCommandDialog();
+          await refreshAll();
+        } catch (error) {
+          setNativeCommandError(error.message || String(error));
+        }
+      },
+    });
+    elements.nativeCommandSearch.oninput = render;
+    elements.nativeCommandActions.replaceChildren();
+    addNativeCommandAction(selectedScope === "all" ? "Current cwd" : "All sessions", () => openNativeResumeSelector(selectedScope === "all" ? "current" : "all"));
+    addNativeCommandAction("Cancel", closeNativeCommandDialog);
+    render();
+  } catch (error) {
+    setNativeCommandError(error.message || String(error));
+    elements.nativeCommandBody.replaceChildren();
+  }
+}
+
+async function openNativeTreeSelector() {
+  openNativeCommandDialog({ title: "/tree", message: "Navigate the current session tree. Choosing a user message restores it into the editor.", searchPlaceholder: "Filter tree…" });
+  renderNativeLoading("Loading session tree…");
+  try {
+    const response = await nativeCommandApi("/api/session-tree");
+    const nodes = response.data?.nodes || [];
+    const summarize = nativeSettingToggle("Summarize abandoned branch", false, "Optional; may call the active model before switching branches.");
+    const labelField = make("label", "native-settings-field");
+    labelField.append(make("span", "native-settings-label", "Optional label"));
+    const labelInput = make("input", "dialog-input");
+    labelInput.placeholder = "checkpoint label";
+    labelField.append(labelInput);
+    const options = make("div", "native-tree-options");
+    options.append(summarize.field, labelField);
+    const items = nodes.map((node) => ({
+      id: node.id,
+      label: `${node.title}${node.label ? ` · ${node.label}` : ""}`,
+      description: node.text || "",
+      meta: `${node.timestamp || ""}${node.childCount ? ` · ${node.childCount} child${node.childCount === 1 ? "" : "ren"}` : ""}`,
+      badge: node.currentLeaf ? "leaf" : "",
+      depth: node.depth || 0,
+      node,
+    }));
+    const navigate = async (item) => {
+      setNativeCommandError("");
+      try {
+        const result = await nativeCommandApi("/api/tree-navigate", {
+          method: "POST",
+          body: {
+            entryId: item.node.id,
+            summarize: summarize.input.checked,
+            label: labelInput.value.trim() || undefined,
+          },
+        });
+        applyResponseTab(result);
+        addTransientMessage({ role: "native", title: "/tree", content: result.data?.message || "Navigated the session tree.", level: "info" });
+        closeNativeCommandDialog();
+        await refreshAll();
+      } catch (error) {
+        setNativeCommandError(error.message || String(error));
+      }
+    };
+    const render = () => {
+      renderNativeSelectorItems(items, { emptyText: "No session tree entries match this filter.", onSelect: navigate });
+      elements.nativeCommandBody.prepend(options);
+    };
+    elements.nativeCommandSearch.oninput = render;
+    render();
+  } catch (error) {
+    setNativeCommandError(error.message || String(error));
+    elements.nativeCommandBody.replaceChildren();
+  }
+}
+
+function openNativeScopedModelsInfo() {
+  openNativeCommandDialog({ title: "/scoped-models", message: "Scoped model selection is available in the footer model picker." });
+  elements.nativeCommandBody.append(make("p", "native-command-note", "Use the footer model chip to choose among scoped models. The full native scoped-models editor is still TUI-only."));
+}
+
+function openNativeAuthInfo(mode) {
+  const command = mode === "logout" ? "/logout" : "/login";
+  openNativeCommandDialog({ title: command, message: "Provider credential entry is intentionally not implemented in the browser yet." });
+  const note = [
+    "Use native Pi TUI authentication for now, or configure provider credentials through environment variables or models.json.",
+    "This avoids accepting or storing API keys in the Web UI until the credential flow has a dedicated security design.",
+  ].join("\n\n");
+  elements.nativeCommandBody.append(make("p", "native-command-note", note));
+}
+
+async function handleNativeSlashSelectorCommand(message, { usesPromptInput = false } = {}) {
+  const name = slashCommandName(message);
+  if (!NATIVE_SELECTOR_COMMANDS.has(name)) return false;
+  setComposerActionsOpen(false);
+  hideCommandSuggestions();
+  if (usesPromptInput) {
+    elements.promptInput.value = "";
+    resizePromptInput();
+  }
+  switch (name) {
+    case "model":
+      await openNativeModelSelector();
+      return true;
+    case "settings":
+      openNativeSettingsDialog();
+      return true;
+    case "theme":
+      openNativeThemeSelector();
+      return true;
+    case "fork":
+      await openNativeForkSelector();
+      return true;
+    case "clone":
+      openNativeCloneDialog();
+      return true;
+    case "resume":
+      await openNativeResumeSelector();
+      return true;
+    case "tree":
+      await openNativeTreeSelector();
+      return true;
+    case "scoped-models":
+      openNativeScopedModelsInfo();
+      return true;
+    case "login":
+    case "logout":
+      openNativeAuthInfo(name);
+      return true;
+    default:
+      return false;
+  }
 }
 
 function shouldSendPromptFromEnter(event) {
@@ -4488,6 +6581,7 @@ function shouldSendPromptFromEnter(event) {
 
 function renderMessages(messages) {
   latestMessages = messages || [];
+  cleanupLiveToolRunsForMessages(latestMessages);
   syncLastUserPromptFromMessages(latestMessages);
   renderAllMessages();
   renderFooter();
@@ -4530,7 +6624,7 @@ function renderStreamingAssistantText() {
   const assistantText = stripTodoProgressLines(streamRawText, { streaming: true });
   if (assistantText) {
     ensureStreamBubble();
-    streamText.textContent = assistantText;
+    renderMarkdown(streamText, assistantText);
   } else {
     scheduleStreamBubbleHide();
   }
@@ -4551,26 +6645,29 @@ function suppressStreamingAssistantTextBeforeToolCall() {
 
 function ensureStreamBubble() {
   cancelStreamBubbleHide();
-  if (streamBubble) return;
-  const created = appendMessage({ role: "assistant", title: "Assistant", timestamp: Date.now(), content: "" }, { streaming: true });
+  if (streamBubble?.parentElement === elements.chat) return;
+  const created = appendMessage({ role: "assistant", title: "final output", timestamp: Date.now(), content: "" }, { streaming: true });
   streamBubble = created.bubble;
-  streamText = appendText(created.body, "");
+  streamText = make("div", "markdown-body streaming-markdown");
+  created.body.append(streamText);
   streamBubbleVisibleSince = performance.now();
   renderRunIndicator({ scroll: false });
   scrollChatToBottom();
 }
 
 function ensureStreamingThinkingBubble() {
-  if (streamThinkingBubble) return;
+  if (!thinkingOutputVisible) return false;
+  if (streamThinkingBubble?.parentElement === elements.chat) return true;
   const created = appendMessage({ role: "thinking", title: "thinking", timestamp: Date.now(), content: "" }, { streaming: true });
   streamThinkingBubble = created.bubble;
   streamThinking = appendText(created.body, "", "thinking-text");
   renderRunIndicator({ scroll: false });
   scrollChatToBottom();
+  return true;
 }
 
 function showStreamingThinking(placeholder = "Thinking…") {
-  ensureStreamingThinkingBubble();
+  if (!ensureStreamingThinkingBubble()) return;
   if (!streamThinking.textContent) streamThinking.textContent = placeholder;
 }
 
@@ -4603,9 +6700,8 @@ function assistantTextFromMessage(message) {
   const parts = [];
   for (let index = 0; index < content.length; index += 1) {
     const part = content[index];
-    if (part && typeof part === "object" && part.type === "text" && typeof part.text === "string" && !assistantHasToolCallAfter(content, index)) {
-      parts.push(part.text);
-    }
+    const text = assistantTextPartText(part);
+    if (text && !assistantHasToolCallAfter(content, index)) parts.push(text);
   }
   return parts.length ? parts.join("\n\n") : "";
 }
@@ -4621,11 +6717,13 @@ function assistantThinkingTextFromMessage(message) {
 }
 
 function setStreamingThinkingText(text) {
+  if (!thinkingOutputVisible) return;
   showStreamingThinking("");
-  streamThinking.textContent = text;
+  if (streamThinking) streamThinking.textContent = text;
 }
 
 function syncStreamingThinkingFromMessage(event, { placeholder = "" } = {}) {
+  if (!thinkingOutputVisible) return true;
   const text = assistantThinkingTextFromMessage(assistantStreamingMessage(event));
   if (text === null) return false;
   if (text || placeholder || streamThinkingBubble) setStreamingThinkingText(text || placeholder);
@@ -4643,10 +6741,10 @@ function handleMessageUpdate(event) {
     currentRunStreamChars += delta.length;
     setRunIndicatorActivity("Thinking…", { scroll: false });
     const synced = syncStreamingThinkingFromMessage(event);
-    if (!synced || (!streamThinking?.textContent && delta)) {
+    if (thinkingOutputVisible && (!synced || (!streamThinking?.textContent && delta))) {
       showStreamingThinking("");
-      if (streamThinking.textContent === "Thinking…") streamThinking.textContent = "";
-      streamThinking.textContent += delta;
+      if (streamThinking?.textContent === "Thinking…") streamThinking.textContent = "";
+      if (streamThinking) streamThinking.textContent += delta;
     }
     renderFooter();
     scrollChatToBottom();
@@ -4681,29 +6779,36 @@ function handleMessageUpdate(event) {
   }
 }
 
-async function refreshState() {
-  const response = await api("/api/state");
+async function refreshState(tabContext = activeTabContext()) {
+  if (!tabContext.tabId) return;
+  const response = await api("/api/state", { tabId: tabContext.tabId });
+  if (!isCurrentTabContext(tabContext)) return;
   currentState = response.data || null;
   syncActiveTabActivityFromState(currentState);
   syncRunIndicatorFromState(currentState);
   renderStatus();
 }
 
-async function refreshStats() {
-  const response = await api("/api/stats");
+async function refreshStats(tabContext = activeTabContext()) {
+  if (!tabContext.tabId) return;
+  const response = await api("/api/stats", { tabId: tabContext.tabId });
+  if (!isCurrentTabContext(tabContext)) return;
   latestStats = response.data || null;
   renderFooter();
 }
 
-async function refreshWorkspace() {
+async function refreshWorkspace(tabContext = activeTabContext()) {
+  if (!tabContext.tabId) return;
+  let nextWorkspace = null;
   try {
-    const response = await api("/api/workspace");
-    latestWorkspace = response.data || null;
+    const response = await api("/api/workspace", { tabId: tabContext.tabId });
+    nextWorkspace = response.data || null;
   } catch (error) {
+    if (!isCurrentTabContext(tabContext)) return;
     // Older webui server processes do not have /api/workspace. Fall back to /api/health,
     // which has exposed cwd from the beginning, so the footer still shows the real path.
-    const health = await api("/api/health");
-    latestWorkspace = health.cwd
+    const health = await api("/api/health", { tabId: tabContext.tabId });
+    nextWorkspace = health.cwd
       ? {
           cwd: health.cwd,
           displayCwd: normalizeDisplayPath(health.cwd),
@@ -4712,6 +6817,8 @@ async function refreshWorkspace() {
         }
       : null;
   }
+  if (!isCurrentTabContext(tabContext)) return;
+  latestWorkspace = nextWorkspace;
   renderFooter();
 }
 
@@ -4780,12 +6887,15 @@ async function refreshNetworkStatus() {
   renderNetworkStatus();
 }
 
-async function refreshFooterData() {
-  await Promise.allSettled([refreshStats(), refreshWorkspace()]);
+async function refreshFooterData(tabContext = activeTabContext()) {
+  if (!tabContext.tabId) return;
+  await Promise.allSettled([refreshStats(tabContext), refreshWorkspace(tabContext)]);
 }
 
-async function refreshMessages() {
-  const response = await api("/api/messages");
+async function refreshMessages(tabContext = activeTabContext()) {
+  if (!tabContext.tabId) return;
+  const response = await api("/api/messages", { tabId: tabContext.tabId });
+  if (!isCurrentTabContext(tabContext)) return;
   latestMessages = response.data?.messages || [];
   resetStreamBubble();
   renderMessages(latestMessages);
@@ -4793,21 +6903,28 @@ async function refreshMessages() {
   renderFooter();
 }
 
-async function refreshModels() {
-  const response = await api("/api/models");
+async function refreshModels(tabContext = activeTabContext()) {
+  if (!tabContext.tabId) return;
+  const response = await api("/api/models", { tabId: tabContext.tabId });
   const models = response.data?.models || [];
-  availableModels = models;
+  let scopedModels = [];
+  let scopedModelPatterns = [];
+  let scopedModelSource = "none";
+  let scopedModelError = null;
   try {
-    const scopedResponse = await api("/api/scoped-models");
-    footerScopedModels = scopedResponse.data?.models || [];
-    footerScopedModelPatterns = scopedResponse.data?.patterns || [];
-    footerScopedModelSource = scopedResponse.data?.source || "none";
+    const scopedResponse = await api("/api/scoped-models", { tabId: tabContext.tabId });
+    scopedModels = scopedResponse.data?.models || [];
+    scopedModelPatterns = scopedResponse.data?.patterns || [];
+    scopedModelSource = scopedResponse.data?.source || "none";
   } catch (error) {
-    footerScopedModels = [];
-    footerScopedModelPatterns = [];
-    footerScopedModelSource = "none";
-    addEvent(`failed to load scoped models: ${error.message}`, "warn");
+    scopedModelError = error;
   }
+  if (!isCurrentTabContext(tabContext)) return;
+  availableModels = models;
+  footerScopedModels = scopedModels;
+  footerScopedModelPatterns = scopedModelPatterns;
+  footerScopedModelSource = scopedModelSource;
+  if (scopedModelError) addEvent(`failed to load scoped models: ${scopedModelError.message}`, "warn");
   elements.modelSelect.replaceChildren();
   for (const model of models) {
     const option = document.createElement("option");
@@ -5185,10 +7302,7 @@ function insertPathSuggestion(index = commandSuggestIndex) {
   return true;
 }
 
-async function refreshCommands() {
-  const response = await api("/api/commands");
-  availableCommands = normalizeCommands(response.data?.commands || []);
-  updateOptionalFeatureAvailability();
+function renderCommands() {
   elements.commandsBox.replaceChildren();
   if (!availableCommands.length) {
     elements.commandsBox.textContent = "No RPC-visible commands.";
@@ -5219,8 +7333,27 @@ async function refreshCommands() {
   renderCommandSuggestions();
 }
 
-async function refreshAll() {
-  const results = await Promise.allSettled([refreshState(), refreshMessages(), refreshModels(), refreshCommands(), refreshStats(), refreshWorkspace(), refreshNetworkStatus()]);
+async function refreshCommands(tabContext = activeTabContext()) {
+  if (!tabContext.tabId) return;
+  const response = await api("/api/commands", { tabId: tabContext.tabId });
+  if (!isCurrentTabContext(tabContext)) return;
+  availableCommands = normalizeCommands(response.data?.commands || []);
+  updateOptionalFeatureAvailability();
+  renderCommands();
+}
+
+async function refreshAll(tabContext = activeTabContext()) {
+  if (!tabContext.tabId) return;
+  const results = await Promise.allSettled([
+    refreshState(tabContext),
+    refreshMessages(tabContext),
+    refreshModels(tabContext),
+    refreshCommands(tabContext),
+    refreshStats(tabContext),
+    refreshWorkspace(tabContext),
+    refreshNetworkStatus(),
+  ]);
+  if (!isCurrentTabContext(tabContext)) return;
   for (const result of results) {
     if (result.status === "rejected") addEvent(result.reason.message || String(result.reason), "error");
   }
@@ -5303,42 +7436,56 @@ async function closeNetworkAccess() {
 async function sendPrompt(kind = "prompt", explicitMessage) {
   const usesPromptInput = explicitMessage === undefined;
   const rawMessage = usesPromptInput ? elements.promptInput.value : explicitMessage;
-  const message = String(rawMessage || "").trim();
-  if (!message) return;
-
+  const originalMessage = String(rawMessage || "").trim();
   const targetTabId = activeTabId;
-  const startsRun = kind === "prompt" && !currentState?.isStreaming;
-  if (kind === "prompt" && !message.startsWith("/")) rememberLastUserPrompt(message, { tabId: targetTabId });
+  if (!targetTabId) return;
+  const tabContext = activeTabContext(targetTabId);
+  const attachments = usesPromptInput ? [...attachmentsForTab(targetTabId)] : [];
+  if (!originalMessage && attachments.length === 0) return;
+  if (kind === "prompt" && attachments.length === 0 && await handleNativeSlashSelectorCommand(originalMessage, { usesPromptInput })) return;
+
+  const targetWasStreaming = !!currentState?.isStreaming;
+  const busyBehavior = elements.busyBehavior.value || "followUp";
+  const startsRun = kind === "prompt" && !targetWasStreaming;
   autoFollowChat = true;
   updateJumpToLatestButton();
   setComposerActionsOpen(false);
   if (startsRun) {
     markTabWorkingLocally(targetTabId);
-    setRunIndicatorActivity("Sending prompt to Pi…");
+    setRunIndicatorActivity(attachments.length ? "Uploading attachments…" : "Sending prompt to Pi…");
   }
 
+  let message = originalMessage;
   try {
+    const prepared = attachments.length ? await prepareAttachmentsForPrompt(attachments, targetTabId) : { images: [], uploadedFiles: [], inlineImageIds: new Set() };
+    message = composeMessageWithAttachments(originalMessage, prepared.uploadedFiles, prepared.inlineImageIds);
+    const bodyBase = { message };
+    if (prepared.images.length) bodyBase.images = prepared.images;
+    if (kind === "prompt" && !message.startsWith("/")) rememberLastUserPrompt(message, { tabId: targetTabId });
+    if (startsRun && isCurrentTabContext(tabContext)) setRunIndicatorActivity("Sending prompt to Pi…");
+
     let response;
     if (kind === "steer") {
-      response = await api("/api/steer", { method: "POST", body: { message }, tabId: targetTabId });
+      response = await api("/api/steer", { method: "POST", body: bodyBase, tabId: targetTabId });
     } else if (kind === "follow-up") {
-      response = await api("/api/follow-up", { method: "POST", body: { message }, tabId: targetTabId });
+      response = await api("/api/follow-up", { method: "POST", body: bodyBase, tabId: targetTabId });
     } else {
-      const body = { message };
-      if (currentState?.isStreaming) body.streamingBehavior = elements.busyBehavior.value || "followUp";
+      const body = { ...bodyBase };
+      if (targetWasStreaming) body.streamingBehavior = busyBehavior;
       response = await api("/api/prompt", { method: "POST", body, tabId: targetTabId });
     }
     applyResponseTab(response);
     if (response?.command === "native_slash_command" && /^\/new(?:\s|$)/.test(message)) forgetLastUserPrompt(targetTabId);
+    const targetStillActive = isCurrentTabContext(tabContext);
     if (startsRun && response?.command === "native_slash_command") {
       markTabIdleLocally(targetTabId);
-      clearRunIndicatorActivity();
-    } else if (kind === "steer" && currentState?.isStreaming) {
+      if (targetStillActive) clearRunIndicatorActivity();
+    } else if (targetStillActive && kind === "steer" && currentState?.isStreaming) {
       setRunIndicatorActivity("Steering sent; waiting for the next output or action…");
-    } else if (kind === "follow-up" && currentState?.isStreaming) {
+    } else if (targetStillActive && kind === "follow-up" && currentState?.isStreaming) {
       setRunIndicatorActivity("Follow-up queued; current agent run is still active…");
     }
-    if (response?.command === "native_slash_command" && response.data?.copyText) {
+    if (targetStillActive && response?.command === "native_slash_command" && response.data?.copyText) {
       try {
         await navigator.clipboard.writeText(response.data.copyText);
       } catch (error) {
@@ -5346,22 +7493,33 @@ async function sendPrompt(kind = "prompt", explicitMessage) {
         response.data.level = "warn";
       }
     }
-    if (response?.command === "native_slash_command" && response.data?.message) {
+    if (targetStillActive && response?.command === "native_slash_command" && response.data?.message) {
       addTransientMessage({ role: "native", title: message.split(/\s+/, 1)[0], content: response.data.message, level: response.data.level || "info" });
     }
     if (usesPromptInput) {
-      elements.promptInput.value = "";
-      resizePromptInput();
+      clearAttachments(targetTabId);
+      if (targetStillActive) {
+        elements.promptInput.value = "";
+        resizePromptInput();
+      } else {
+        tabDrafts.set(targetTabId, "");
+      }
     }
-    hideCommandSuggestions();
-    scheduleRefreshState();
+    if (targetStillActive) {
+      hideCommandSuggestions();
+      scheduleRefreshState(120, tabContext);
+    } else {
+      scheduleRefreshTabs(300);
+    }
   } catch (error) {
     if (startsRun) {
       markTabIdleLocally(targetTabId);
-      clearRunIndicatorActivity();
+      if (isCurrentTabContext(tabContext)) clearRunIndicatorActivity();
     }
-    addEvent(error.message, "error");
-    addTransientMessage({ role: "error", title: message.startsWith("/") ? message.split(/\s+/, 1)[0] : "error", content: error.message, level: "error" });
+    if (isCurrentTabContext(tabContext)) {
+      addEvent(error.message, "error");
+      addTransientMessage({ role: "error", title: message.startsWith("/") ? message.split(/\s+/, 1)[0] : "error", content: error.message, level: "error" });
+    }
   }
 }
 
@@ -5437,12 +7595,14 @@ function handleExtensionUiRequest(request) {
 
 async function sendDialogResponse(payload) {
   const { tabId = activeTabId, ...body } = payload;
+  const tabContext = activeTabContext(tabId);
   try {
     const response = await api("/api/extension-ui-response", { method: "POST", body, tabId });
     if (!applyResponseTab(response) && decrementTabPendingBlockerCount(tabId)) renderTabs();
   } catch (error) {
-    addEvent(error.message, "error");
+    if (isCurrentTabContext(tabContext)) addEvent(error.message, "error");
   } finally {
+    if (!isCurrentTabContext(tabContext)) return;
     if (elements.dialog.open) elements.dialog.close();
     activeDialog = null;
     if (runIndicatorIsActive()) setRunIndicatorActivity("Continuing after your response…");
@@ -5464,7 +7624,8 @@ function showNextDialog() {
   const request = activeDialog;
 
   const prompt = normalizeDialogPrompt(request);
-  const releasePrompt = request.method === "select" ? releaseDialogPromptParts(prompt) : null;
+  const detectedReleasePrompt = request.method === "select" ? releaseDialogPromptParts(prompt) : null;
+  const releasePrompt = detectedReleasePrompt && isOptionalFeatureEnabled(detectedReleasePrompt.featureId) ? detectedReleasePrompt : null;
   const displayPrompt = releasePrompt || prompt;
   const isGuardrailDialog = isGuardrailDialogPrompt(displayPrompt);
   const isReleaseDialog = !!releasePrompt;
@@ -5518,8 +7679,22 @@ function showNextDialog() {
   elements.dialog.showModal();
 }
 
+function handleInactiveTabEvent(event) {
+  if (event.type === "extension_ui_request" && EXTENSION_UI_BLOCKING_METHODS.has(event.method)) {
+    if (!event.replayed) notifyBlockedTab(event.tabId, { request: event, count: event.pendingExtensionUiRequestCount });
+    renderTabs();
+  } else if (event.type === "agent_end") {
+    notifyAgentDone(event.tabId, { activity: event.tabActivity, tabTitle: event.tabTitle });
+  }
+}
+
 function handleEvent(event) {
   ingestEventTabActivity(event);
+  if (!eventTargetsActiveTab(event)) {
+    handleInactiveTabEvent(event);
+    return;
+  }
+  const tabContext = activeTabContext(event.tabId || activeTabId);
   switch (event.type) {
     case "webui_connected":
       addEvent(`connected to ${event.tabTitle || "terminal"} for ${event.cwd}`);
@@ -5549,7 +7724,12 @@ function handleEvent(event) {
       renderStatus();
       renderWidgets();
       refreshTabs().catch((error) => addEvent(error.message, "error"));
-      setTimeout(() => refreshAll().catch((error) => addEvent(error.message, "error")), 500);
+      setTimeout(() => {
+        if (!isCurrentTabContext(tabContext)) return;
+        refreshAll(tabContext).catch((error) => {
+          if (isCurrentTabContext(tabContext)) addEvent(error.message, "error");
+        });
+      }, 500);
       break;
     case "webui_extension_ui_cancelled":
       removeQueuedDialogRequests(event.ids || []);
@@ -5639,10 +7819,18 @@ function handleEvent(event) {
       scheduleRefreshFooter();
       break;
     case "tool_execution_start":
+      streamToolCallSeen = true;
+      suppressStreamingAssistantTextBeforeToolCall();
+      handleToolExecutionStart(event);
       setRunIndicatorActivity(`Running tool: ${runIndicatorToolName(event.toolName)}…`);
       addEvent(`tool ${event.toolName} started`);
       break;
+    case "tool_execution_update":
+      handleToolExecutionUpdate(event);
+      setRunIndicatorActivity(`Running tool: ${runIndicatorToolName(event.toolName)}…`, { scroll: false });
+      break;
     case "tool_execution_end":
+      handleToolExecutionEnd(event);
       setRunIndicatorActivity(`Tool ${runIndicatorToolName(event.toolName)} ${event.isError ? "failed" : "finished"}; waiting for the agent's next step…`);
       addEvent(`tool ${event.toolName} ${event.isError ? "failed" : "finished"}`, event.isError ? "error" : "info");
       scheduleRefreshMessages();
@@ -5660,6 +7848,29 @@ function handleEvent(event) {
       markTabOutputSeen();
       scheduleRefreshMessages();
       break;
+    case "auto_retry_start": {
+      const seconds = Math.max(0, Math.ceil(Number(event.delayMs || 0) / 1000));
+      const retryText = `Retrying (${event.attempt || "?"}/${event.maxAttempts || "?"}) in ${seconds}s after: ${event.errorMessage || "model/provider error"}`;
+      setRunIndicatorActivity(retryText);
+      addEvent(retryText, "warn");
+      addTransientMessage({ role: "warn", title: "auto retry", content: retryText, level: "warn" });
+      break;
+    }
+    case "auto_retry_end":
+      if (event.success === false) {
+        const retryError = `Retry failed after ${event.attempt || "?"} attempt(s): ${event.finalError || "Unknown error"}`;
+        addEvent(retryError, "error");
+        addTransientMessage({ role: "error", title: "auto retry failed", content: retryError, level: "error" });
+      } else {
+        addEvent(`retry recovered after ${event.attempt || "?"} attempt(s)`);
+      }
+      break;
+    case "extension_error": {
+      const message = `${event.extensionPath || "extension"}${event.event ? ` during ${event.event}` : ""}: ${event.error || "unknown extension error"}`;
+      addEvent(message, "error");
+      addTransientMessage({ role: "error", title: "extension error", content: message, level: "error" });
+      break;
+    }
     case "extension_ui_request":
       handleExtensionUiRequest(event);
       break;
@@ -5682,18 +7893,23 @@ function handleEvent(event) {
   }
 }
 
-function connectEvents() {
+function connectEvents(tabContext = activeTabContext()) {
   eventSource?.close();
-  if (!activeTabId) return;
-  eventSource = new EventSource(`/api/events?tab=${encodeURIComponent(activeTabId)}`);
-  eventSource.onmessage = (message) => {
+  eventSource = null;
+  if (!tabContext.tabId || !isCurrentTabContext(tabContext)) return;
+  const source = new EventSource(`/api/events?tab=${encodeURIComponent(tabContext.tabId)}`);
+  eventSource = source;
+  source.onmessage = (message) => {
+    if (eventSource !== source || !isCurrentTabContext(tabContext)) return;
     try {
       handleEvent(JSON.parse(message.data));
     } catch (error) {
-      addEvent(error.message, "error");
+      if (isCurrentTabContext(tabContext)) addEvent(error.message, "error");
     }
   };
-  eventSource.onerror = () => addEvent("event stream disconnected; browser will retry", "warn");
+  source.onerror = () => {
+    if (eventSource === source && isCurrentTabContext(tabContext)) addEvent("event stream disconnected; browser will retry", "warn");
+  };
 }
 
 elements.sendFeedbackButton.addEventListener("click", () => submitQueuedActionFeedback());
@@ -5730,70 +7946,143 @@ publishMenuContainer?.addEventListener("focusout", () => {
 elements.releaseNpmButton.addEventListener("click", () => runPublishWorkflow("/release-npm"));
 elements.releaseAurButton.addEventListener("click", () => runPublishWorkflow("/release-aur"));
 elements.gitWorkflowCancelButton.addEventListener("click", cancelGitWorkflow);
-elements.abortButton.addEventListener("click", async () => {
+elements.nativeCommandDialog.addEventListener("close", () => {
+  elements.nativeCommandSearch.oninput = null;
+  nativeCommandTabId = null;
+});
+
+function resetAbortLongPressAffordance() {
+  clearTimeout(abortLongPressTimer);
+  abortLongPressTimer = null;
+  elements.abortButton.classList.remove("long-pressing");
+  if (!abortRequestInFlight) elements.abortButton.textContent = "Abort";
+}
+
+async function abortActiveRun({ source = "button" } = {}) {
+  if (abortRequestInFlight || !isAbortAvailable()) return;
+  const tabContext = activeTabContext();
+  abortRequestInFlight = true;
+  resetAbortLongPressAffordance();
+  updateComposerModeButtons();
   const hadActiveRun = runIndicatorIsActive();
   try {
-    if (hadActiveRun) setRunIndicatorActivity("Abort requested; checking whether Pi stopped…");
-    await api("/api/abort", { method: "POST", body: {} });
+    if (hadActiveRun) setRunIndicatorActivity(`Abort requested${source === "escape" ? " from Esc" : source === "long-press" ? " from long-press" : ""}; checking whether Pi stopped…`);
+    await api("/api/abort", { method: "POST", body: {}, tabId: tabContext.tabId });
+    if (!isCurrentTabContext(tabContext)) return;
     addAbortTranscriptNotice({ activeRun: hadActiveRun });
-    scheduleAbortStateChecks();
+    scheduleAbortStateChecks(tabContext);
   } catch (error) {
-    addEvent(error.message, "error");
-    addAbortTranscriptNotice({ errorMessage: error.message });
+    if (isCurrentTabContext(tabContext)) {
+      addEvent(error.message, "error");
+      addAbortTranscriptNotice({ errorMessage: error.message });
+    }
+  } finally {
+    abortRequestInFlight = false;
+    updateComposerModeButtons();
   }
+}
+
+function startAbortLongPress(event) {
+  if (!isAbortAvailable() || abortRequestInFlight) return;
+  if (event.button !== undefined && event.button !== 0) return;
+  resetAbortLongPressAffordance();
+  abortLongPressHandled = false;
+  elements.abortButton.classList.add("long-pressing");
+  elements.abortButton.textContent = "Hold…";
+  abortLongPressTimer = setTimeout(() => {
+    abortLongPressTimer = null;
+    abortLongPressHandled = true;
+    abortActiveRun({ source: "long-press" });
+  }, ABORT_LONG_PRESS_MS);
+}
+
+elements.abortButton.addEventListener("pointerdown", startAbortLongPress);
+for (const eventName of ["pointerup", "pointerleave", "pointercancel", "blur"]) {
+  elements.abortButton.addEventListener(eventName, resetAbortLongPressAffordance);
+}
+elements.abortButton.addEventListener("click", (event) => {
+  if (abortLongPressHandled) {
+    event.preventDefault();
+    abortLongPressHandled = false;
+    return;
+  }
+  abortActiveRun({ source: "button" });
 });
 elements.newSessionButton.addEventListener("click", async () => {
   setComposerActionsOpen(false);
+  const tabContext = activeTabContext();
   if (!confirm("Start a new Pi session?")) return;
   try {
-    const response = await api("/api/new-session", { method: "POST", body: {} });
+    const response = await api("/api/new-session", { method: "POST", body: {}, tabId: tabContext.tabId });
     applyResponseTab(response);
-    forgetLastUserPrompt(activeTabId);
-    await refreshAll();
-    focusPromptInput({ defer: true });
+    forgetLastUserPrompt(tabContext.tabId);
+    if (!isCurrentTabContext(tabContext)) return;
+    await refreshAll(tabContext);
+    if (isCurrentTabContext(tabContext)) focusPromptInput({ defer: true });
   } catch (error) {
-    addEvent(error.message, "error");
+    if (isCurrentTabContext(tabContext)) addEvent(error.message, "error");
   }
 });
 elements.compactButton.addEventListener("click", async () => {
   setComposerActionsOpen(false);
+  const tabContext = activeTabContext();
   try {
     elements.compactButton.disabled = true;
     elements.compactButton.textContent = "Compacting…";
     setRunIndicatorActivity("Requesting context compaction…");
     scrollChatToBottom({ force: true });
     addEvent("manual compaction requested");
-    await api("/api/compact", { method: "POST", body: {} });
-    scheduleRefreshState();
-    scheduleRefreshMessages(600);
-    scheduleRefreshFooter(600);
+    await api("/api/compact", { method: "POST", body: {}, tabId: tabContext.tabId });
+    if (!isCurrentTabContext(tabContext)) return;
+    scheduleRefreshState(120, tabContext);
+    scheduleRefreshMessages(600, tabContext);
+    scheduleRefreshFooter(600, tabContext);
   } catch (error) {
-    clearRunIndicatorActivity();
-    addEvent(error.message, "error");
+    if (isCurrentTabContext(tabContext)) {
+      clearRunIndicatorActivity();
+      addEvent(error.message, "error");
+    }
   } finally {
-    elements.compactButton.disabled = !!currentState?.isCompacting;
-    elements.compactButton.textContent = currentState?.isCompacting ? "Compacting…" : "Compact";
+    if (isCurrentTabContext(tabContext)) {
+      elements.compactButton.disabled = !!currentState?.isCompacting;
+      elements.compactButton.textContent = currentState?.isCompacting ? "Compacting…" : "Compact";
+    }
   }
 });
 elements.setModelButton.addEventListener("click", async () => {
   if (!elements.modelSelect.value) return;
+  const tabContext = activeTabContext();
   try {
     const selected = JSON.parse(elements.modelSelect.value);
-    await api("/api/model", { method: "POST", body: selected });
-    await refreshState();
+    await api("/api/model", { method: "POST", body: selected, tabId: tabContext.tabId });
+    if (isCurrentTabContext(tabContext)) await refreshState(tabContext);
   } catch (error) {
-    addEvent(error.message, "error");
+    if (isCurrentTabContext(tabContext)) addEvent(error.message, "error");
   }
 });
 elements.setThinkingButton.addEventListener("click", async () => {
+  const tabContext = activeTabContext();
   try {
-    await api("/api/thinking", { method: "POST", body: { level: elements.thinkingSelect.value } });
-    await refreshState();
+    await api("/api/thinking", { method: "POST", body: { level: elements.thinkingSelect.value }, tabId: tabContext.tabId });
+    if (isCurrentTabContext(tabContext)) await refreshState(tabContext);
   } catch (error) {
-    addEvent(error.message, "error");
+    if (isCurrentTabContext(tabContext)) addEvent(error.message, "error");
   }
 });
-elements.themeSelect.addEventListener("change", () => setThemeByName(elements.themeSelect.value, { persist: true, announce: true }));
+elements.themeSelect.addEventListener("change", () => {
+  setThemeByName(elements.themeSelect.value, { persist: true, announce: true }).catch((error) => addEvent(error.message || String(error), "error"));
+});
+if (elements.backgroundChooseButton && elements.backgroundInput) {
+  elements.backgroundChooseButton.addEventListener("click", () => elements.backgroundInput.click());
+  elements.backgroundInput.addEventListener("change", () => {
+    const [file] = Array.from(elements.backgroundInput.files || []);
+    elements.backgroundInput.value = "";
+    setCustomBackgroundFromFile(file).catch((error) => addEvent(error.message || String(error), "error"));
+  });
+}
+if (elements.backgroundClearButton) {
+  elements.backgroundClearButton.addEventListener("click", () => clearCustomBackground().catch((error) => addEvent(error.message || String(error), "error")));
+}
 elements.openNetworkButton.addEventListener("click", openToNetwork);
 elements.agentDoneNotificationsToggle.addEventListener("change", () => {
   setAgentDoneNotificationsEnabled(elements.agentDoneNotificationsToggle.checked, {
@@ -5804,6 +8093,11 @@ elements.agentDoneNotificationsToggle.addEventListener("change", () => {
     renderAgentDoneNotificationsToggle();
   });
 });
+if (elements.thinkingVisibilityToggle) {
+  elements.thinkingVisibilityToggle.addEventListener("change", () => {
+    setThinkingOutputVisible(elements.thinkingVisibilityToggle.checked, { announce: true });
+  });
+}
 elements.toggleSidePanelButton.addEventListener("click", () => {
   setSidePanelCollapsed(true);
 });
@@ -5850,6 +8144,7 @@ document.addEventListener("pointermove", (event) => {
 }, { passive: true });
 window.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
+  if (elements.dialog?.open || elements.pathPickerDialog?.open) return;
   if (publishMenuOpen) {
     setPublishMenuOpen(false);
     return;
@@ -5866,8 +8161,17 @@ window.addEventListener("keydown", (event) => {
     setFooterModelPickerOpen(false);
     return;
   }
+  if (!elements.commandSuggest.hidden) {
+    hideCommandSuggestions();
+    return;
+  }
   if (isMobileView() && !document.body.classList.contains("side-panel-collapsed")) {
     setSidePanelCollapsed(true);
+    return;
+  }
+  if (isAbortAvailable()) {
+    event.preventDefault();
+    abortActiveRun({ source: "escape" });
   }
 });
 
@@ -5881,6 +8185,18 @@ elements.pathPickerDialog.addEventListener("cancel", (event) => {
 elements.pathPickerDialog.addEventListener("close", () => {
   if (pathPickerState) closePathPicker(null);
 });
+
+if (elements.attachButton && elements.attachmentInput) {
+  elements.attachButton.addEventListener("click", () => elements.attachmentInput.click());
+  elements.attachmentInput.addEventListener("change", () => {
+    addAttachmentFiles(elements.attachmentInput.files, "picker");
+    elements.attachmentInput.value = "";
+  });
+}
+elements.promptInput.addEventListener("paste", handleAttachmentPaste);
+elements.composer.addEventListener("dragover", handleComposerDragOver);
+elements.composer.addEventListener("dragleave", handleComposerDragLeave);
+elements.composer.addEventListener("drop", handleComposerDrop);
 
 elements.promptInput.addEventListener("keydown", (event) => {
   if (shouldSendPromptFromEnter(event)) {
@@ -5943,9 +8259,15 @@ updateComposerModeButtons();
 updateOptionalFeatureAvailability();
 loadLastUserPromptCache();
 installViewportHandlers();
-initializeThemes().catch((error) => addEvent(`failed to load themes: ${error.message}`, "warn"));
+currentThemeName = storedThemeName();
+renderBackgroundControl();
+initializeThemes().catch((error) => {
+  addEvent(`failed to load themes: ${error.message}`, "warn");
+  initializeCustomBackground().catch((backgroundError) => addEvent(`failed to initialize background: ${backgroundError.message}`, "warn"));
+});
 initializeFastPicks().catch((error) => addEvent(`failed to initialize path fast picks: ${error.message}`, "error"));
 restoreAgentDoneNotificationsSetting();
+restoreThinkingVisibilitySetting();
 restoreSidePanelSectionState();
 bindSidePanelSectionToggles();
 restoreSidePanelState();

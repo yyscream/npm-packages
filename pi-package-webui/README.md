@@ -70,8 +70,10 @@ pi-webui --cwd /path/to/project
 - Per-tab activity indicators for idle, working, blocked, and completed unseen work, with browser notifications when a tab needs an extension UI response and an optional side-panel toggle for agent-done notifications
 - Live assistant text streaming, including streamed thinking blocks when exposed by the provider
 - Prompt, steer, follow-up, abort, new session, and manual compact controls
+- Attachment button plus drag/drop and clipboard paste for images, documents, video, audio, and other files; uploaded files are saved to a server temp path and supported images are also sent through Pi RPC image attachments
 - Busy-session behavior selector for follow-up vs steer
 - Model and thinking-level controls
+- Browser-native selector dialogs for native slash commands such as `/model`, `/settings`, `/theme`, `/fork`, `/clone`, `/resume`, and `/tree`; `/login`/`/logout` currently show non-secret guidance rather than accepting credentials in the browser
 - Slash-command autocomplete while typing `/...`
 - `@` file/path references with live suggestions from the active tab cwd
 - Tool, process, compaction, queue, and extension event log
@@ -120,7 +122,7 @@ Examples:
 /webui-start --name browser -- --model anthropic/claude-sonnet-4-5:high
 ```
 
-If a compatible Web UI is already running on the target URL, `/webui-start` captures its open terminal tabs plus any terminal tabs closed during the current server run, stops that instance, then starts a fresh server and reopens those tabs from their session files when available.
+If a compatible Web UI is already running on the target URL, `/webui-start` captures its currently open terminal tabs, stops that instance, then starts a fresh server and reopens only those open tabs from their session files when available. Tabs you closed in the Web UI stay closed; use `/resume` if you want to reopen an older Pi session manually.
 
 Status commands:
 
@@ -200,11 +202,13 @@ The local server exposes:
 - `GET /api/directories?tab=<tabId>&path=<path>` for the browser cwd picker
 - `GET /api/path-suggestions?tab=<tabId>&query=<path>` for `@` file/path reference autocomplete in the prompt composer
 - `GET /api/path-fast-picks` and `POST /api/path-fast-picks` for cwd picker fast picks persisted across browser tabs, Pi terminal tabs, and Web UI server restarts
+- `POST /api/attachments` for browser-selected, pasted, or dropped files; files are stored under the OS temp directory and referenced in the prompt, while supported images can also be sent inline via RPC `images`
 - `GET /api/themes` for optional theme data from `@firstpick/pi-themes-bundle` when available
+- `GET /api/fork-messages`, `POST /api/fork`, `POST /api/clone`, `GET /api/sessions`, `POST /api/switch-session`, `GET /api/session-tree`, and `POST /api/tree-navigate` for browser-native native slash selectors
 - localhost-only `POST /api/optional-feature-install` for explicit, warned installation of whitelisted optional feature packages
 - `GET /api/network` and localhost-only `POST /api/network/open` for local-network exposure status/control
 - `GET /api/webui-status?detailed=1` for slash-command status reporting
-- `POST /api/shutdown` for localhost-only graceful restarts from `/webui-start`; restart captures detailed tab status first so open and recently closed tabs can be restored with their session files
+- `POST /api/shutdown` for localhost-only graceful restarts from `/webui-start`; restart captures detailed open-tab status first so currently open tabs can be restored with their session files
 - HTTP endpoints for prompt/session/model/thinking/compact/git actions; tab-scoped calls use `?tab=<tabId>`
 - `POST /api/action-feedback?tab=<tabId>` to turn queued action/final-output reactions into a Pi prompt that creates/updates a LEARNING after the run is idle
 - `/api/events?tab=<tabId>` as a per-tab Server-Sent Events stream for Pi RPC events

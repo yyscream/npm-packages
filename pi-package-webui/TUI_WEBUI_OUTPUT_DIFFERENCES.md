@@ -30,6 +30,47 @@ This is a **source inspection** report, not a screenshot/UI test report.
 
 ---
 
+## Implementation progress
+
+_Last implementation update: 2026-06-03_
+
+Implemented in `public/app.js` / `public/styles.css` and covered by `tests/mobile-static.test.mjs`:
+
+- [x] Generic live tool cards for `tool_execution_start`, `tool_execution_update`, and `tool_execution_end`.
+- [x] Paired assistant tool-call parts with matching `toolResult` messages by `toolCallId`, hiding paired raw result rows.
+- [x] Browser-side built-in tool renderer registry for `bash`, `read`, `write`, `edit`, `grep`, `find`, and `ls`.
+- [x] TUI-like `bash` output previews, tool metadata pills, tool state styling, and `edit` diff rendering.
+- [x] Transcript-visible `auto_retry_start`, `auto_retry_end`, and `extension_error` event cards.
+- [x] Safe browser-native Markdown rendering for assistant output, including headings, lists, code fences, links, blockquotes, and tables.
+- [x] Thinking output show/hide toggle with persisted local preference.
+- [x] Tool renderer polish: consistent status/elapsed metadata and safe raw tool-data expanders.
+- [x] Hidden redundant assistant final-output headers.
+- [x] Browser-native native slash selector dialogs for `/model`, `/settings`, `/theme`, `/fork`, `/clone`, `/resume`, `/tree`, and `/scoped-models`.
+- [x] Session-selector backend helpers for fork points, session lists, session trees, session switching, clone/fork, and Web UI-assisted tree navigation.
+
+Still open / intentionally deferred:
+
+- [ ] Syntax highlighting for code fences and file previews.
+- [ ] Credential-entry parity for `/login` / `/logout` remains intentionally deferred; Web UI currently shows non-secret guidance instead of accepting or storing API keys.
+- [ ] Formal serializable extension/custom renderer descriptors.
+- [ ] Footer/status, startup resources, and full custom TUI component parity.
+
+### Next possible implementations
+
+Recommended next work, ordered by low-risk/high-value first:
+
+1. **Syntax highlighting for code fences and tool/file previews** — add a browser-side highlighter or small tokenizer while preserving plain-text fallback.
+2. **Tool expansion controls** — persisted defaults for collapsed/expanded tools, raw details, and thinking/tool sections.
+3. **Read/write renderer polish** — better file labels, image/file previews, truncation summaries, and copied TUI preview limits.
+4. **Compaction/retry status polish** — closer TUI-like countdown/cancel hints, compaction summary display, and retry outcome states.
+5. **Visual parity smoke fixtures** — fixture transcript or scripted side-by-side sessions for Markdown, tools, thinking, retries, widgets, and extension dialogs.
+6. **Startup/resources panel** — show loaded context files, skills, prompts, extensions, themes, and diagnostics when RPC/server data is available.
+7. **Slash selector polish** — persisted selector preferences, richer `/tree` current-branch detection, and a designed credential flow for `/login` / `/logout` if browser credential entry is accepted.
+8. **Footer/status parity prototype** — decide between browser-native footer refinement and serializable footer/status descriptors.
+9. **Serializable extension/custom renderer descriptors** — formal protocol for safe rich extension output in Web UI.
+
+---
+
 ## Executive summary
 
 The Web UI already has broad functional coverage: browser chat, multiple isolated RPC tabs, live assistant text/thinking streaming, model/thinking controls, queue controls, extension dialogs, status/widgets, a Pi-style footer, optional release/todo widgets, Git workflow, and action feedback.
@@ -40,14 +81,14 @@ The biggest output differences come from one architectural fact:
 
 Because of that, the Web UI **does not automatically get** TUI-only rendering features such as built-in tool `renderCall`/`renderResult`, extension `registerMessageRenderer`, extension `ctx.ui.custom()` components, custom footers/headers/editors, overlays, or TUI keybinding-driven expansion behavior.
 
-Highest-impact gaps if the goal is “similar output”:
+Highest-impact remaining gaps if the goal is “similar output”:
 
-1. **Tool cards:** TUI has rich built-in and custom renderers; Web UI mostly shows raw tool-call JSON plus raw/collapsed tool results.
-2. **Markdown/code/diff rendering:** TUI uses a Markdown component, syntax highlighting, compact previews, and diffs; Web UI currently renders most text as `<pre>` blocks.
-3. **Live tool progress:** TUI displays `tool_execution_update` output in the tool component; Web UI currently handles `tool_execution_start`/`tool_execution_end`, but not `tool_execution_update` as transcript output.
-4. **Extension UI parity:** TUI supports full custom components, overlays, widgets as components, custom footer/header/editor, working indicators, custom message renderers; RPC/Web UI only supports a subset.
-5. **Footer/status parity:** Web UI approximates a Pi-style footer independently. It cannot render the TUI custom footer from `git-footer-status` because `setFooter()` is a no-op in RPC mode.
-6. **Startup/resources display:** TUI shows loaded context, skills, prompts, extensions, themes, diagnostics, and key hints. Web UI mostly shows commands/optional features in the side panel instead.
+1. **Syntax highlighting and richer previews:** Web UI now renders Markdown and diffs, but code fences and file/tool previews still lack TUI-style syntax coloring.
+2. **Extension UI parity:** TUI supports full custom components, overlays, widgets as components, custom footer/header/editor, working indicators, and custom message renderers; RPC/Web UI only supports a subset.
+3. **Footer/status parity:** Web UI approximates a Pi-style footer independently. It cannot render the TUI custom footer from `git-footer-status` because `setFooter()` is a no-op in RPC mode.
+4. **Startup/resources display:** TUI shows loaded context, skills, prompts, extensions, themes, diagnostics, and key hints. Web UI mostly shows commands/optional features in the side panel instead.
+5. **Selector/editor parity:** Web UI now has browser-native selectors for the common native slash commands, but they remain approximations and do not execute TUI selector components; extension autocomplete providers and custom editor replacement APIs are still TUI-only.
+6. **Visual regression evidence:** Current parity is source/static-test based; it still needs side-by-side TUI/Web UI fixture or screenshot verification.
 
 ---
 
@@ -106,7 +147,7 @@ Important implementation files:
   - renders browser transcript and side panel
   - handles selected RPC/SSE events
   - fetches full messages through `/api/messages` → RPC `get_messages`
-  - decomposes assistant messages into separate thinking/tool-call/final-output cards
+  - decomposes assistant messages into thinking, paired tool-execution, and final-output cards
   - implements Web UI-specific widgets/footer/dialogs
 
 ---
@@ -116,12 +157,12 @@ Important implementation files:
 | Area | TUI | Web UI | Current parity |
 |---|---|---|---|
 | User/assistant chat | Direct pi-tui components | DOM cards from RPC messages | Partial |
-| Assistant streaming text | Live TUI component updates | Live browser stream bubble | Good, but plain text |
-| Thinking stream | Inline/Markdown, hide toggle | Separate thinking card/bubble | Partial |
-| Tool calls/results | Rich paired tool components | Tool-call JSON + tool-result cards after refresh | Low/partial |
-| Live tool output | Handles `tool_execution_update` | Not rendered as transcript output currently | Low |
-| Built-in tool renderers | Full `renderCall`/`renderResult` | Not reused | Low |
-| Custom tool renderers | Supported | Not supported over RPC | Low |
+| Assistant streaming text | Live TUI component updates | Live browser stream bubble with safe Markdown | Good |
+| Thinking stream | Inline/Markdown, hide toggle | Separate thinking card/bubble with persisted show/hide toggle | Good/partial layout difference |
+| Tool calls/results | Rich paired tool components | Paired browser tool-execution cards by `toolCallId` | Good for built-ins |
+| Live tool output | Handles `tool_execution_update` | Transcript-visible live tool cards keyed by `toolCallId` | Good |
+| Built-in tool renderers | Full `renderCall`/`renderResult` | Browser-native renderers for common built-ins | Good/partial polish |
+| Custom tool renderers | Supported | Not supported over RPC except known browser renderers | Low |
 | Custom message renderers | Supported | Not supported | Low |
 | Extension dialogs | Native TUI components | Browser modal bridge | Good for basic dialogs |
 | Extension custom components/overlays | Supported | Not supported (`custom()` degrades in RPC) | None |
@@ -133,7 +174,7 @@ Important implementation files:
 | Themes | TUI theme objects + ANSI | Browser CSS variables from optional theme bundle | Partial |
 | Images | TUI image components when terminal supports | Browser `<img>` data URI display | Different but browser-friendly |
 | Queue | Inline pending-message UI | Side panel queue + busy behavior selector | Partial |
-| Compaction/retry | Loaders, cancel hints, retry countdown | Run indicator/compact button; no explicit retry UI | Partial |
+| Compaction/retry | Loaders, cancel hints, retry countdown | Run indicator/compact button plus visible retry cards; countdown/cancel parity incomplete | Partial |
 
 ---
 
@@ -192,11 +233,11 @@ Implementation: `dist/modes/interactive/components/assistant-message.js`.
 
 - Assistant messages are decomposed into separate display messages:
   - `role: "thinking"`
-  - `role: "toolCall"`
+  - paired `role: "toolExecution"` cards for assistant tool calls with `toolCallId`
   - `role: "assistantEvent"`
   - final `role: "assistant"`
-- Most textual content is rendered with `appendText()` into `<pre>`-style blocks.
-- Thinking is a separate card or streaming bubble.
+- Final and streaming assistant text render through a browser-native Markdown renderer.
+- Thinking is a separate card or streaming bubble, with a persisted show/hide toggle.
 - Final output parts are collected only when there is no later tool call after that content part.
 - During streaming, text may be delayed briefly and suppressed before a tool call to avoid transient tool/checklist-looking text.
 
@@ -210,14 +251,13 @@ Relevant functions:
 
 #### Difference
 
-The TUI presents assistant output as themed Markdown within Pi's component tree. The Web UI presents a browser transcript of semantic cards, mostly plain text/preformatted output.
+The TUI presents assistant output as themed Markdown within Pi's component tree. The Web UI now presents browser Markdown cards for assistant output, but it is still a browser-native renderer rather than the exact TUI Markdown component.
 
-Main output gaps:
+Remaining output gaps:
 
-- No full Markdown rendering parity in Web UI.
-- No TUI markdown theme/syntax highlighting for normal assistant text.
+- No syntax highlighting for code fences or file previews yet.
 - Thinking appears as separate cards instead of inline themed blocks.
-- No TUI hidden-thinking toggle equivalent.
+- Web UI has a local show/hide thinking toggle, but does not consume TUI `setHiddenThinkingLabel()` custom labels.
 - No OSC 133 markers, which are terminal-specific and probably not relevant in the browser.
 
 ---
@@ -233,21 +273,20 @@ Main output gaps:
 
 #### Web UI behavior
 
-- Web UI streams thinking into `streamThinkingBubble`.
-- Final thinking appears as a separate `role: "thinking"` message/card.
-- There is no direct hide/expand thinking toggle mirroring TUI behavior.
+- Web UI streams thinking into `streamThinkingBubble` when thinking output is visible.
+- Final thinking appears as a separate `role: "thinking"` message/card when thinking output is visible.
+- The side panel has a persisted “Show thinking output” toggle stored in localStorage.
 - It does not consume TUI's `setHiddenThinkingLabel()` behavior as a visual mode because RPC/Web UI only receives semantic events/messages.
 
 #### Difference
 
-Web UI has good raw thinking visibility when providers expose thinking, but different presentation and controls.
+Web UI has good raw thinking visibility when providers expose thinking and can now hide/show it locally, but presentation still differs from TUI inline themed thinking blocks.
 
-Parity improvements:
+Remaining parity improvements:
 
-- Add a Web UI setting: “show/hide thinking blocks”.
-- Preserve hidden state in local storage.
-- When hidden, render a compact `Thinking...` card or inline label.
 - Optionally render thinking as collapsible `<details>` by default.
+- Consider a compact hidden `Thinking...` placeholder if hiding all thinking feels too abrupt.
+- Expose TUI custom hidden-thinking labels through RPC if Pi adds a serializable field.
 
 ---
 
@@ -273,33 +312,33 @@ Implementation: `dist/modes/interactive/components/tool-execution.js`.
 
 #### Web UI behavior
 
-The Web UI receives the same RPC event stream, but current transcript rendering is much simpler:
+The Web UI receives the same RPC event stream and now renders generic tool executions as browser-native action cards:
 
-- `tool_execution_start` updates the run indicator and adds an event-log entry.
-- `tool_execution_end` updates the run indicator, adds an event-log entry, and schedules message refresh.
-- `tool_execution_update` is not currently rendered into the transcript.
-- Final transcript rehydration via `/api/messages` renders:
-  - assistant tool-call parts as separate `toolCall` cards with JSON arguments
-  - tool results as separate collapsible `toolResult` cards with raw content
+- `tool_execution_start` creates/updates a live tool card and run indicator.
+- `tool_execution_update` updates the same live tool card with partial output.
+- `tool_execution_end` marks the card success/error and schedules message reconciliation.
+- Final transcript rehydration via `/api/messages` pairs assistant tool-call parts with matching `toolResult` messages by `toolCallId`.
+- Paired raw `toolResult` rows are suppressed; raw call/result details remain available in the paired tool card.
 - No shared TUI `renderCall`/`renderResult` functions are invoked in the browser.
 
 Relevant Web UI functions:
 
-- `handleEvent()` handles `tool_execution_start` and `tool_execution_end`.
-- `appendMessage()` renders `toolCall` and `toolResult` messages.
-- `toolResultPreviewText()` creates a generic preview for collapsed tool results.
+- `handleEvent()` handles `tool_execution_start`, `tool_execution_update`, and `tool_execution_end`.
+- `appendMessage()` renders paired `toolExecution` cards plus fallback raw `toolResult` messages.
+- `renderToolExecution()` dispatches to browser-side built-in tool renderers.
+- `appendToolRawDetails()` keeps safe raw call/result data available.
 
 #### Built-in tool renderer differences
 
 | Tool | TUI output | Web UI output today |
 |---|---|---|
-| `read` | Compact path/resource/skill/docs labels; optional line range; syntax-highlighted preview when expanded; image handling | Tool-call JSON and raw/collapsed text result |
-| `bash` | `$ command` header; live partial output; elapsed/took time; tail preview in collapsed mode; truncation/full-output warnings | Event log says tool started/finished; final raw tool result after refresh; no live partial transcript output |
-| `edit` | Pre-execution diff preview once args complete; success/error-colored diff shell; final diff reconciliation | JSON args and raw success/error result; no diff preview unless raw content happens to include it |
-| `write` | Path header plus syntax-highlighted content preview; compact collapsed view; errors in result | JSON args and raw result |
-| `grep` | Compact `/pattern/ in path`; limited preview; truncation warnings | JSON args and raw/collapsed result |
-| `find` | Compact pattern/path; limited preview; truncation warnings | JSON args and raw/collapsed result |
-| `ls` | Compact path; limited preview; truncation warnings | JSON args and raw/collapsed result |
+| `read` | Compact path/resource/skill/docs labels; optional line range; syntax-highlighted preview when expanded; image handling | Browser card with path/range, image handling, text preview, warnings; no syntax highlighting yet |
+| `bash` | `$ command` header; live partial output; elapsed/took time; tail preview in collapsed mode; truncation/full-output warnings | Browser card with command, live/tail output, elapsed/took/status pills, warnings |
+| `edit` | Pre-execution diff preview once args complete; success/error-colored diff shell; final diff reconciliation | Browser card with path, edit count, diff rendering from `details.diff`/`details.patch`, status/result |
+| `write` | Path header plus syntax-highlighted content preview; compact collapsed view; errors in result | Browser card with path, content preview, status/result; no syntax highlighting yet |
+| `grep` | Compact `/pattern/ in path`; limited preview; truncation warnings | Browser card with pattern/path, glob/literal/case pills, preview, warnings |
+| `find` | Compact pattern/path; limited preview; truncation warnings | Browser card with pattern/path, limit/status pills, preview, warnings |
+| `ls` | Compact path; limited preview; truncation warnings | Browser card with path, limit/status pills, preview, warnings |
 
 #### Custom tool renderer differences
 
@@ -319,7 +358,7 @@ To make Web UI tools look like TUI output, one of these approaches is needed:
 2. **Shared neutral render descriptors:** add/introduce a shared render-model layer where Pi/tool renderers return serializable blocks that both TUI and Web UI can render.
 3. **ANSI-to-HTML TUI snapshot:** render TUI components to ANSI lines server-side and convert to HTML. This might help visually, but it is brittle for width, interactivity, widgets, dialogs, images, and browser responsiveness.
 
-Most practical near-term path: implement a Web UI renderer registry for built-in tools first.
+The practical near-term path was implemented: Web UI now has a browser-side renderer registry for built-in tools. Remaining tool parity work is renderer polish, syntax highlighting, expansion defaults, and safe custom renderer descriptors.
 
 ---
 
@@ -337,21 +376,17 @@ This is why long-running `bash` output can appear live in the TUI.
 
 #### Web UI behavior
 
-`handleEvent()` does not currently have a `tool_execution_update` case. It handles `tool_execution_start` and `tool_execution_end`, but partial output is not displayed as a live transcript card.
-
-The release workflow widgets are an exception because the release extensions send string widgets (`setWidget`) that the Web UI special-cases. That is not generic tool-progress parity.
+`handleEvent()` now has a `tool_execution_update` case. It maintains live tool cards keyed by `toolCallId`, updates partial output, marks success/error on end, and reconciles with `/api/messages` final history to avoid duplicates.
 
 #### Difference
 
-Generic live tool progress is missing in Web UI. This is very visible for `bash`, long-running custom tools, and tools that emit incremental updates.
+Generic live tool progress is now present in Web UI. Remaining differences are visual/component-level: the browser renderer approximates the TUI component but does not reuse `pi-tui` render functions, terminal image fallbacks, or TUI expansion/keybinding semantics.
 
-Recommended Web UI behavior:
+Remaining recommended behavior:
 
-- Maintain a `toolRuns` map keyed by `toolCallId`.
-- On `tool_execution_start`, create/update a live tool card.
-- On `tool_execution_update`, replace the accumulated partial output in that card.
-- On `tool_execution_end`, mark success/error and keep the final card.
-- Reconcile with `/api/messages` final history to avoid duplicates.
+- Persist expansion defaults for live/final tool cards.
+- Keep improving truncation, full-output, and preview metadata.
+- Add fixture tests for long-running `bash` and custom tools that emit incremental updates.
 
 ---
 
@@ -370,17 +405,17 @@ So the user sees tool call + result as one action row.
 
 #### Web UI behavior
 
-The Web UI decomposes assistant content into separate `toolCall` cards and renders `toolResult` messages separately. There is no single paired action row for generic tools.
+The Web UI now pairs assistant tool-call parts with matching `toolResult` messages and renders a single `toolExecution` card per `toolCallId`. Raw result rows are hidden once paired, while raw data remains available in the tool card.
 
 #### Difference
 
-The Web UI transcript feels more like an event log/raw RPC transcript. The TUI feels like a structured action timeline.
+The Web UI transcript now resembles TUI's structured action timeline for built-in tools. Remaining differences are visual polish, expansion behavior, and unsupported custom TUI tool renderers.
 
-Parity improvement:
+Remaining parity improvement:
 
-- During `renderAllMessages()`, build a map of assistant tool calls and matching `toolResult` messages.
-- Render a single tool/action card per `toolCallId`.
-- Hide or collapse the raw separate `toolResult` card once paired.
+- Add persisted expansion controls.
+- Improve browser tool renderers for edge cases and syntax-highlighted previews.
+- Define a safe descriptor path for custom extension renderers.
 
 ---
 
@@ -397,26 +432,25 @@ The TUI uses Pi's `Markdown` component and tool-specific syntax/diff renderers:
 
 #### Web UI behavior
 
-The Web UI primarily uses:
+The Web UI now uses:
 
-- `<pre>` blocks via `appendText()`.
+- Browser-native Markdown rendering for final/streaming assistant text.
 - JSON pretty-printing for unknown/non-text objects.
 - CSS classes for card styling.
 - Some ANSI stripping/rendering in dialogs/widgets.
 - Specialized release widgets with line tone classes.
+- Browser diff rendering for `edit` tool `details.diff` / `details.patch`.
 
-It does not currently have equivalent Markdown rendering or built-in diff rendering for generic assistant/tool output.
+It does not yet have syntax highlighting for code fences or known file previews.
 
 #### Difference
 
-Even when the same content is present, it often looks much less structured in Web UI.
+The same content is now much more structured in Web UI, but code-heavy output is still less rich than TUI because syntax highlighting is missing.
 
-Parity improvement:
+Remaining parity improvement:
 
-- Add a safe Markdown renderer for assistant text and custom text blocks.
 - Add syntax highlighting for code fences and known file previews.
-- Add a Web UI diff renderer for `edit` tool `details.diff` / `details.patch`.
-- Preserve plain `<pre>` fallback for logs and raw tool output.
+- Preserve plain `<pre>` fallback for logs, unknown languages, raw tool output, and very large content.
 
 ---
 
@@ -647,23 +681,21 @@ Current event handling includes:
 
 - `agent_start` / `agent_end`
 - `message_start` / `message_update` / `message_end`
-- `tool_execution_start` / `tool_execution_end`
+- `tool_execution_start` / `tool_execution_update` / `tool_execution_end`
 - `compaction_start` / `compaction_end`
+- `auto_retry_start` / `auto_retry_end`
 - `queue_update`
+- `extension_error`
 - `extension_ui_request`
 
 Current event handling does **not** explicitly render:
 
-- `tool_execution_update`
 - `turn_start`
 - `turn_end`
-- `auto_retry_start`
-- `auto_retry_end`
-- `extension_error`
 
 #### Difference
 
-Web UI has a good browser-native notion of “the agent is running”, but it is not the same as TUI's spinner/loader/working indicator system, and some RPC events are ignored for output purposes.
+Web UI has a good browser-native notion of “the agent is running” and now renders major tool/retry/error events, but it is not the same as TUI's spinner/loader/working indicator system.
 
 ---
 
@@ -717,11 +749,22 @@ Current `NATIVE_SLASH_COMMANDS` entries include:
 - `reload`
 - `quit`
 
-But `handleNativeSlashCommand()` currently implements only some of them directly (not the full native TUI feature set).
+`handleNativeSlashCommand()` implements non-selector commands such as `/new`, `/compact`, `/name`, `/session`, `/copy`, `/hotkeys`, `/clone`, and `/reload` directly. The browser now intercepts exact selector-style commands before prompt forwarding and opens Web UI dialogs for:
+
+- `/model`
+- `/settings`
+- `/theme`
+- `/fork`
+- `/clone`
+- `/resume`
+- `/tree`
+- `/scoped-models`
+
+`/login` and `/logout` currently open a non-secret guidance dialog instead of accepting credentials in the browser.
 
 #### Difference
 
-The command list may show TUI-like native commands, but not all have equivalent browser UI behavior yet.
+The command list now has browser behavior for the common native selectors, but these are Web UI-controlled DOM selectors, not reused TUI components. Some native commands remain informational or unimplemented in Web UI.
 
 ---
 
@@ -794,12 +837,11 @@ Web UI shows:
 - Run indicator text for compaction.
 - Event log entries for compaction start/end.
 - Message refresh after compaction.
-
-It does not currently render explicit `auto_retry_start` / `auto_retry_end` UI.
+- Transcript-visible auto-retry start/end/failure cards.
 
 #### Difference
 
-Compaction is visible but not identical. Retry visibility is lower than in TUI.
+Compaction and retries are visible, but not identical to TUI. Remaining differences are countdown/cancel-loader polish and compaction summary presentation.
 
 ---
 
@@ -819,11 +861,19 @@ TUI has rich selector components for:
 
 #### Web UI behavior
 
-Web UI has its own terminal tabs and some native slash command emulation. It does not yet reproduce all selector UIs.
+Web UI has its own terminal tabs plus browser-native selector dialogs:
+
+- `/fork` loads fork points from RPC `get_fork_messages`, calls RPC `fork`, switches the active tab to the forked session, and restores selected user text into the browser composer when available.
+- `/clone` confirms and calls RPC `clone`.
+- `/resume` lists current-cwd or all persisted sessions through `SessionManager.list()` / `SessionManager.listAll()`, then calls RPC `switch_session`.
+- `/tree` reads the current session JSONL tree with `SessionManager`, then navigates by sending an internal `/webui-tree-navigate` extension command that calls `ctx.navigateTree()` and can restore editor text through RPC extension UI events.
+- `/model`, `/settings`, and `/theme` use browser DOM selectors backed by existing Web UI/RPC endpoints.
+
+`/login` / `/logout` remain guidance-only to avoid browser credential entry without a dedicated security design.
 
 #### Difference
 
-Session navigation output/controls are structurally different.
+Session navigation controls are now available in Web UI, but their interaction model and visuals are browser-native. Tree current-branch detection is derived from persisted session data and may not match every transient in-memory TUI branch state until Pi persists or reports it.
 
 ---
 
@@ -889,22 +939,24 @@ From `public/app.js#handleEvent()`:
   - `message_update`
   - `message_end`
   - `tool_execution_start`
+  - `tool_execution_update`
   - `tool_execution_end`
   - `compaction_start`
   - `compaction_end`
+  - `auto_retry_start`
+  - `auto_retry_end`
+  - `extension_error`
   - `extension_ui_request`
   - `response`
 
 ### Explicit gaps
 
-Web UI currently does not have output handling for:
+Web UI now has transcript-visible output handling for `tool_execution_update`, `auto_retry_start`, `auto_retry_end`, and `extension_error`.
 
-- `tool_execution_update`
+Remaining event-level gaps are lower-impact/debug-oriented:
+
 - `turn_start`
 - `turn_end`
-- `auto_retry_start`
-- `auto_retry_end`
-- `extension_error`
 
 ---
 
@@ -935,72 +987,86 @@ A browser can do things the TUI cannot (tabs, PWA, mouse UI, responsive layout, 
 
 ## Recommended parity roadmap
 
-### Phase 1 — Handle missing events
+### Completed phases
 
-High value, low/medium complexity.
+These high-impact transcript-parity phases are now implemented in the Web UI source:
 
-- Add `tool_execution_update` handling in `public/app.js`.
-- Maintain live tool cards keyed by `toolCallId`.
-- Add explicit `auto_retry_start` / `auto_retry_end` UI.
-- Add `extension_error` display as a visible warning/error card.
-- Optionally show `turn_start` / `turn_end` in debug/event log.
+1. **Event visibility**
+   - `tool_execution_start` / `tool_execution_update` / `tool_execution_end` live cards.
+   - Transcript-visible `auto_retry_start`, `auto_retry_end`, and `extension_error` cards.
+2. **Paired tool calls and results**
+   - Assistant tool-call parts are paired with matching `toolResult` messages by `toolCallId`.
+   - Paired raw tool-result rows are suppressed, with raw data available inside tool cards.
+3. **Built-in browser tool renderers**
+   - Browser renderers exist for `bash`, `read`, `write`, `edit`, `grep`, `find`, and `ls`.
+   - Cards include tool state, elapsed/took time, previews, warnings, and edit diffs.
+4. **Assistant Markdown and thinking visibility**
+   - Assistant final/streaming text renders as safe browser-native Markdown.
+   - Thinking output can be hidden/shown with persisted local preference.
+   - Redundant assistant final-output headers are hidden.
+5. **Native slash selector UIs**
+   - Browser-native dialogs exist for `/model`, `/settings`, `/theme`, `/fork`, `/clone`, `/resume`, `/tree`, and `/scoped-models`.
+   - Backend helpers expose fork points, session lists, session trees, clone/fork, session switching, and internal tree navigation.
+   - `/login` and `/logout` deliberately remain guidance-only until credential-entry/security design is settled.
 
-Expected improvement: Web UI will feel much more alive during long-running commands/tools.
+### Phase 5 — Syntax highlighting and preview polish
 
-### Phase 2 — Pair tool calls and results
+Low/medium complexity, high visual value.
 
-High value, medium complexity.
+- Add syntax highlighting for Markdown code fences.
+- Add syntax-highlighted read/write previews by file extension.
+- Keep plain-text fallback for logs, unknown languages, and very large output.
+- Preserve copyable code text and safe link handling.
 
-- In `orderedTranscriptItems()` / `renderAllMessages()`, build a tool-call/result relationship map.
-- Render paired tool action cards instead of separate raw `toolCall` + `toolResult` cards.
-- Keep raw view available behind an “expand raw” details block.
+Expected improvement: code-heavy assistant/tool output will look closer to TUI while preserving browser safety.
 
-Expected improvement: transcript structure will resemble TUI's action rows.
+### Phase 6 — Tool expansion and renderer defaults
 
-### Phase 3 — Implement built-in Web UI tool renderers
+Low/medium complexity.
 
-Highest visual impact.
+- Add persisted defaults for tool output expansion, raw tool-data details, and thinking sections.
+- Tighten renderer edge cases for empty output, truncation, full-output-path warnings, and image previews.
+- Add richer file/resource labels for `read` and `write` where data is available.
 
-Implement browser renderers for:
+Expected improvement: better control over dense transcripts and closer TUI action-row behavior.
 
-1. `bash`
-   - command header
-   - live partial output
-   - elapsed/took time
-   - tail preview
-   - truncation/full-output path warnings
-2. `read`
-   - path + line range
-   - compact resource/docs/skill labels
-   - syntax-highlighted expanded preview
-   - image preview
-3. `edit`
-   - diff preview from streamed args/details
-   - success/error state
-4. `write`
-   - path + content preview
-   - syntax highlighting
-5. `grep` / `find` / `ls`
-   - compact call headers
-   - limited preview with expand hint
-   - truncation warnings
+### Phase 7 — Visual parity fixtures
 
-Expected improvement: main tool output starts matching TUI closely.
+Low complexity, high confidence value.
 
-### Phase 4 — Add Markdown/diff rendering
+- Add a fixture transcript or scripted smoke flow that exercises Markdown, tools, thinking, retries, widgets, and extension dialogs.
+- Use it for side-by-side TUI/Web UI checks before larger renderer changes.
 
-Medium/high value.
+Expected improvement: future parity changes can be verified against reproducible output instead of manual ad-hoc prompts.
 
-- Safe Markdown renderer for assistant messages.
-- Code fence highlighting.
-- Diff renderer for edit patches/diffs.
-- Keep log-like output as `<pre>`.
+### Phase 8 — Startup/resources display
 
-Expected improvement: final assistant output and code-heavy content will look much closer to TUI.
+Medium complexity.
 
-### Phase 5 — Formalize Web UI extension render hooks
+- Add a Web UI “Startup resources” card/side panel section.
+- Show loaded context files, skills, prompts, extensions, themes, diagnostics.
+- Source from RPC where available; otherwise add a Web UI server helper if needed.
 
-Medium/high complexity.
+Expected improvement: first-screen Web UI context resembles TUI startup output.
+
+### Phase 9 — Footer/status parity decision
+
+Medium/high complexity depending on design.
+
+Choose one:
+
+1. **Browser-native footer remains canonical for Web UI**
+   - Copy desired `git-footer-status` fields into Web UI.
+   - Display selected `setStatus()` entries in footer meta.
+2. **Serializable footer/status descriptor**
+   - Extension can emit a footer/status descriptor through status/widget/custom RPC event.
+   - Browser renders it with CSS.
+
+Expected improvement: less drift between TUI custom footer and Web UI footer.
+
+### Phase 10 — Formalize Web UI extension render hooks
+
+Highest complexity; design first.
 
 Possible API conventions:
 
@@ -1010,27 +1076,6 @@ Possible API conventions:
 - Optional package-provided browser render modules loaded only from trusted/local packages.
 
 Expected improvement: custom extension output can be rich without attempting to execute pi-tui components in the browser.
-
-### Phase 6 — Footer/status parity decision
-
-Choose one:
-
-1. **Browser-native footer remains canonical for Web UI**
-   - Copy desired `git-footer-status` fields into Web UI.
-   - Display selected `setStatus()` entries in footer meta.
-2. **Serializable footer descriptor**
-   - Extension can emit a footer descriptor through status/widget/custom RPC event.
-   - Browser renders it with CSS.
-
-Expected improvement: less drift between TUI custom footer and Web UI footer.
-
-### Phase 7 — Startup/resources display
-
-- Add a Web UI “Startup resources” card/side panel section.
-- Show loaded context files, skills, prompts, extensions, themes, diagnostics.
-- Source from RPC where available; otherwise add a Web UI server helper if needed.
-
-Expected improvement: first-screen Web UI context resembles TUI startup output.
 
 ---
 
@@ -1064,19 +1109,20 @@ The server already tracks pending extension UI requests and replays them. Live t
 
 ---
 
-## Suggested concrete first patch set
+## Suggested concrete next patch set
 
-If implementing parity now, start with this order:
+If continuing parity work now, start with this order:
 
-1. Add `tool_execution_update` handling and live generic tool cards.
-2. Pair final `toolCall` + `toolResult` transcript cards by `toolCallId`.
-3. Add Web UI built-in renderer for `bash`.
-4. Add Web UI built-in renderer for `edit` diffs.
-5. Add Markdown renderer for assistant text.
-6. Add Web UI settings/toggles for thinking visibility and tool expansion.
-7. Add retry/extension-error event display.
+1. Add syntax highlighting for Markdown code fences and read/write previews, with plain-text fallback.
+2. Add persisted expansion defaults for tool output, raw tool data, and thinking sections.
+3. Improve `read` / `write` / `grep` / `find` / `ls` renderer edge cases: truncation summaries, file/image labels, preview line limits, and empty-output wording.
+4. Add a fixture-based visual parity smoke test or documented side-by-side test transcript.
+5. Add a startup/resources side-panel section if the data is available from RPC/server helpers.
+6. Polish native slash selectors: richer tree branch/current markers, persisted selector defaults, and decide whether `/login` / `/logout` can safely accept credentials in-browser.
+7. Prototype footer/status parity: either browser-native field copy or a serializable footer/status descriptor.
+8. Design serializable extension/custom renderer descriptors after the safer browser-native work above is stable.
 
-This order gives the most visible improvement before touching harder extension-renderer API design.
+This order keeps low-risk browser-renderer improvements first and defers protocol/trust-boundary changes.
 
 ---
 
@@ -1110,13 +1156,16 @@ npm --prefix pi-package-webui run check
 
 The Web UI is already a capable RPC client, but it is not a TUI renderer. The current differences are mostly not bugs; they follow from the TUI using local `pi-tui` components while Web UI consumes RPC JSON.
 
-For “similar output,” focus first on **browser-native reimplementations of the TUI's semantic renderers**:
+For “similar output,” the already-implemented browser-native semantic renderers have closed the largest transcript gaps: live tool cards, paired tool/result cards, built-in tool cards, Markdown/diff rendering, thinking visibility, and retry/error visibility.
 
-1. live tool cards,
-2. paired tool call/result cards,
-3. built-in tool-specific renderers,
-4. Markdown/diff rendering,
-5. thinking/tool expansion controls,
-6. richer event handling.
+The next useful focus is **polish and safe extensibility**:
 
-Those changes would close most user-visible parity gaps without requiring risky browser execution of TUI extension code.
+1. syntax-highlighted code/file previews,
+2. persisted expansion controls,
+3. richer tool preview metadata,
+4. startup/resources visibility,
+5. footer/status parity,
+6. fixture-based visual verification,
+7. serializable extension/custom renderer descriptors.
+
+Those continue to improve parity without requiring risky browser execution of TUI extension code.

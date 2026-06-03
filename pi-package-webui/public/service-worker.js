@@ -1,4 +1,4 @@
-const CACHE_NAME = "pi-webui-pwa-v12";
+const CACHE_NAME = "pi-webui-pwa-v16";
 const APP_SHELL = [
   "/",
   "/index.html",
@@ -8,6 +8,8 @@ const APP_SHELL = [
   "/apple-touch-icon.png",
   "/icon-192.png",
   "/icon-512.png",
+  "/catppuccin-mocha-background.png",
+  "/matrix-background.webp",
   "/manifest.webmanifest",
 ];
 
