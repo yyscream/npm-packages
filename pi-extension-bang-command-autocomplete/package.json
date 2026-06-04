@@ -19,6 +19,7 @@
   },
   "files": [
     "index.ts",
+    "images",
     "README.md",
     "LICENSE"
   ],

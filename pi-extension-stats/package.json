@@ -10,6 +10,7 @@
     "extension"
   ],
   "pi": {
+    "image": "https://unpkg.com/@firstpick/pi-extension-stats/images/stats_v0.1.2.png",
     "extensions": [
       "./index.ts"
     ]
@@ -22,6 +23,7 @@
   },
   "files": [
     "index.ts",
+    "images",
     "README.md",
     "LICENSE"
   ]
