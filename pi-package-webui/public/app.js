@@ -60,6 +60,7 @@ const elements = {
   backgroundStatus: $("#backgroundStatus"),
   networkStatus: $("#networkStatus"),
   openNetworkButton: $("#openNetworkButton"),
+  stopServerButton: $("#stopServerButton"),
   agentDoneNotificationsToggle: $("#agentDoneNotificationsToggle"),
   agentDoneNotificationsStatus: $("#agentDoneNotificationsStatus"),
   optionalFeaturesBox: $("#optionalFeaturesBox"),
@@ -167,6 +168,7 @@ let blockedTabNotificationPermissionRequested = false;
 let blockedTabNotificationFallbackNoted = false;
 let agentDoneNotificationsEnabled = false;
 let thinkingOutputVisible = true;
+let toolOutputGloballyExpanded = false;
 let agentDoneNotificationPermissionRequested = false;
 let agentDoneNotificationFallbackNoted = false;
 let agentDoneNotificationKeys = new Set();
@@ -192,6 +194,9 @@ let currentRunStartedAt = null;
 let currentRunStreamChars = 0;
 let latestTokPerSecond = null;
 let abortRequestInFlight = false;
+let userBashByTab = new Map();
+let userBashQueuesByTab = new Map();
+let latestQueuedMessagesByTab = new Map();
 let abortLongPressTimer = null;
 let abortLongPressHandled = false;
 const dialogQueue = [];
@@ -201,6 +206,7 @@ const TAB_STORAGE_KEY = "pi-webui-active-tab";
 const PATH_FAST_PICKS_STORAGE_KEY = "pi-webui-path-fast-picks";
 const AGENT_DONE_NOTIFICATIONS_STORAGE_KEY = "pi-webui-agent-done-notifications";
 const THINKING_VISIBILITY_STORAGE_KEY = "pi-webui-thinking-visible";
+const TOOL_OUTPUT_EXPANDED_STORAGE_KEY = "pi-webui-tool-output-expanded";
 const THEME_STORAGE_KEY = "pi-webui-theme";
 const CUSTOM_BACKGROUND_STORAGE_KEY = "pi-webui-custom-background";
 const CUSTOM_BACKGROUNDS_STORAGE_KEY = "pi-webui-custom-backgrounds";
@@ -237,6 +243,7 @@ const STREAM_OUTPUT_HIDE_DELAY_MS = 300;
 const STREAM_OUTPUT_TOOLCALL_GUARD_MS = 220;
 const STREAM_OUTPUT_MIN_VISIBLE_MS = 900;
 const TOOL_LIVE_UPDATE_THROTTLE_MS = 80;
+const UNEXPOSED_THINKING_TEXT = "No thinking content was exposed by the provider.";
 const TODO_PROGRESS_LINE_REGEX = /^\s*(?:(?:[-*]|\d+[.)])\s*)?\[(?: |x|X|-)\]\s+.+$/;
 const TODO_PROGRESS_PARTIAL_LINE_REGEX = /^\s*(?:(?:[-*]|\d+[.)])\s*)?\[(?: |x|X|-)?\]?\s*.*$/;
 const CHAT_SCROLL_KEYS = new Set(["ArrowDown", "ArrowUp", "End", "Home", "PageDown", "PageUp", " "]);
@@ -249,6 +256,7 @@ const BLOCKED_TAB_NOTIFICATION_ICON = "/icon-192.png";
 const mobileViewMedia = window.matchMedia?.(MOBILE_VIEW_QUERY) || null;
 const statusEntries = new Map();
 const widgets = new Map();
+const todoProgressWidgetExpandedByTab = new Map();
 const liveToolRuns = new Map();
 const liveToolCards = new Map();
 const liveToolRenderQueue = new Map();
@@ -360,6 +368,10 @@ function bindGitWorkflowToActiveTab() {
   return gitWorkflow;
 }
 
+function gitWorkflowActionTabId() {
+  return activeTabId;
+}
+
 function resetGitWorkflowForTab(tabId = activeTabId) {
   if (!tabId) return;
   gitWorkflowsByTab.set(tabId, createGitWorkflowState());
@@ -434,10 +446,12 @@ function sidePanelSectionRecords() {
 
 function readStoredSidePanelSectionCollapsedIds() {
   try {
-    const parsed = JSON.parse(localStorage.getItem(SIDE_PANEL_SECTION_STORAGE_KEY) || "[]");
+    const stored = localStorage.getItem(SIDE_PANEL_SECTION_STORAGE_KEY);
+    if (stored === null) return null;
+    const parsed = JSON.parse(stored);
     return new Set(Array.isArray(parsed) ? parsed.filter((value) => typeof value === "string") : []);
   } catch {
-    return new Set();
+    return null;
   }
 }
 
@@ -462,17 +476,32 @@ function setSidePanelSectionCollapsed(record, collapsed, { persist = true } = {}
   if (persist) persistSidePanelSectionState();
 }
 
-function restoreSidePanelSectionState() {
-  const collapsedIds = readStoredSidePanelSectionCollapsedIds();
+function setOnlySidePanelSectionExpanded(targetRecord, { persist = true } = {}) {
+  const targetId = targetRecord?.id || null;
   for (const record of sidePanelSectionRecords()) {
-    setSidePanelSectionCollapsed(record, collapsedIds.has(record.id), { persist: false });
+    setSidePanelSectionCollapsed(record, record.id !== targetId, { persist: false });
+  }
+  if (persist) persistSidePanelSectionState();
+}
+
+function restoreSidePanelSectionState() {
+  const records = sidePanelSectionRecords();
+  const collapsedIds = readStoredSidePanelSectionCollapsedIds();
+  const expandedRecords = collapsedIds ? records.filter(({ id }) => !collapsedIds.has(id)) : [];
+  const expandedId = expandedRecords.length === 1 ? expandedRecords[0].id : null;
+  for (const record of records) {
+    setSidePanelSectionCollapsed(record, record.id !== expandedId, { persist: false });
   }
 }
 
 function bindSidePanelSectionToggles() {
   for (const record of sidePanelSectionRecords()) {
     record.button.addEventListener("click", () => {
-      setSidePanelSectionCollapsed(record, !record.section.classList.contains("collapsed"));
+      if (record.section.classList.contains("collapsed")) {
+        setOnlySidePanelSectionExpanded(record);
+      } else {
+        setSidePanelSectionCollapsed(record, true);
+      }
     });
   }
 }
@@ -560,6 +589,22 @@ function persistThinkingOutputVisible(visible) {
   }
 }
 
+function readStoredToolOutputExpanded() {
+  try {
+    return localStorage.getItem(TOOL_OUTPUT_EXPANDED_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function persistToolOutputExpanded(expanded) {
+  try {
+    localStorage.setItem(TOOL_OUTPUT_EXPANDED_STORAGE_KEY, expanded ? "1" : "0");
+  } catch {
+    // Ignore storage failures; this can remain a page-local preference.
+  }
+}
+
 function thinkingVisibilityStatusText() {
   return thinkingOutputVisible ? "Visible" : "Hidden from transcript";
 }
@@ -587,6 +632,24 @@ function setThinkingOutputVisible(visible, { announce = false } = {}) {
   if (announce) addEvent(thinkingOutputVisible ? "thinking output shown" : "thinking output hidden", thinkingOutputVisible ? "info" : "warn");
 }
 
+function applyToolOutputExpansionToDom(expanded = toolOutputGloballyExpanded) {
+  for (const details of elements.chat.querySelectorAll(".tool-output-details, .tool-raw-details, .message.toolResult .message-collapse, .message.toolExecution details, .message.bashExecution .message-collapse")) {
+    details.open = !!expanded;
+  }
+}
+
+function setToolOutputGloballyExpanded(expanded, { announce = false, rerender = false } = {}) {
+  toolOutputGloballyExpanded = !!expanded;
+  persistToolOutputExpanded(toolOutputGloballyExpanded);
+  if (rerender) renderAllMessages({ preserveScroll: true });
+  else applyToolOutputExpansionToDom();
+  if (announce) addEvent(toolOutputGloballyExpanded ? "tool and bash output expanded" : "tool and bash output collapsed", "info");
+}
+
+function restoreToolOutputExpansionSetting() {
+  toolOutputGloballyExpanded = readStoredToolOutputExpanded();
+}
+
 function restoreThinkingVisibilitySetting() {
   thinkingOutputVisible = readStoredThinkingOutputVisible();
   renderThinkingVisibilityToggle();
@@ -599,12 +662,34 @@ function setComposerActionsOpen(open) {
   if (!shouldOpen) setPublishMenuOpen(false);
 }
 
+function isUserBashActive(tabId = activeTabId) {
+  return !!tabId && userBashByTab.has(tabId);
+}
+
+function userBashQueueForTab(tabId) {
+  if (!tabId) return [];
+  let queue = userBashQueuesByTab.get(tabId);
+  if (!queue) {
+    queue = [];
+    userBashQueuesByTab.set(tabId, queue);
+  }
+  return queue;
+}
+
+function queuedUserBashCount(tabId = activeTabId) {
+  return tabId ? userBashQueueForTab(tabId).length : 0;
+}
+
+function isUserBashRunningOrQueued(tabId = activeTabId) {
+  return isUserBashActive(tabId) || queuedUserBashCount(tabId) > 0;
+}
+
 function isRunActive() {
-  return !!currentState?.isStreaming || (runIndicatorLocallyActive && !currentState?.isCompacting);
+  return !!currentState?.isStreaming || isUserBashRunningOrQueued() || (runIndicatorLocallyActive && !currentState?.isCompacting);
 }
 
 function isAbortAvailable() {
-  return runIndicatorIsActive();
+  return runIndicatorIsActive() || isUserBashActive();
 }
 
 function resizePromptInput() {
@@ -839,6 +924,20 @@ async function copyText(text) {
   const copied = document.execCommand("copy");
   textarea.remove();
   if (!copied) throw new Error("Clipboard copy failed");
+}
+
+function triggerNativeDownload(download) {
+  const url = String(download?.url || "").trim();
+  if (!url) return false;
+  const anchor = document.createElement("a");
+  anchor.href = new URL(url, window.location.href).href;
+  anchor.download = String(download.fileName || "");
+  anchor.rel = "noopener";
+  anchor.hidden = true;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  return true;
 }
 
 async function copyServerStartCommand() {
@@ -2243,8 +2342,12 @@ function resetActiveTabUi() {
   resetChatOutput();
   elements.stateDetails.replaceChildren();
   elements.eventLog.replaceChildren();
-  elements.queueBox.textContent = "No queued messages.";
-  elements.queueBox.classList.add("muted");
+  const queuedSnapshot = activeTabId ? latestQueuedMessagesByTab.get(activeTabId) : null;
+  if (queuedSnapshot) renderQueue({ tabId: activeTabId, ...queuedSnapshot });
+  else {
+    elements.queueBox.textContent = "No queued messages.";
+    elements.queueBox.classList.add("muted");
+  }
   elements.commandsBox.textContent = "Loading…";
   elements.commandsBox.classList.add("muted");
   elements.sessionLine.textContent = activeTab() ? "Connecting…" : "No terminal tabs.";
@@ -3960,12 +4063,19 @@ function renderTodoProgressWidget(_key, lines) {
   const todo = parseTodoProgressWidget(lines);
   if (!todo) return null;
 
-  const node = make("section", "widget todo-widget");
+  const tabId = activeTabId || "default";
+  const node = make("details", "widget todo-widget");
+  node.open = todoProgressWidgetExpandedByTab.get(tabId) === true;
   node.setAttribute("aria-label", "Todo progress");
+  node.addEventListener("toggle", () => {
+    todoProgressWidgetExpandedByTab.set(tabId, node.open);
+  });
 
   const percent = todo.total > 0 ? Math.max(0, Math.min(100, (todo.done / todo.total) * 100)) : 0;
+  const summary = make("summary", "todo-widget-summary");
   const header = make("div", "todo-widget-header");
   header.append(
+    make("span", "todo-widget-toggle", "›"),
     make("span", "todo-widget-title", "Todo progress"),
     make("span", "todo-widget-count", `${todo.done}/${todo.total}`),
     make("span", "todo-widget-meta", todo.partial ? `${todo.partial} partial` : "active"),
@@ -3975,7 +4085,9 @@ function renderTodoProgressWidget(_key, lines) {
   const fill = make("span", "todo-widget-progress-fill");
   fill.style.width = `${percent}%`;
   progress.append(fill);
+  summary.append(header, progress);
 
+  const body = make("div", "todo-widget-body");
   const list = make("ol", "todo-widget-list");
   for (const item of todo.items) {
     const row = make("li", `todo-widget-item ${item.status}`);
@@ -3985,9 +4097,11 @@ function renderTodoProgressWidget(_key, lines) {
     );
     list.append(row);
   }
+  if (todo.items.length) body.append(list);
+  if (todo.footer) body.append(make("div", "todo-widget-footer", todo.footer));
 
-  node.append(header, progress, list);
-  if (todo.footer) node.append(make("div", "todo-widget-footer", todo.footer));
+  node.append(summary);
+  if (body.children.length) node.append(body);
   return node;
 }
 
@@ -4312,24 +4426,24 @@ function renderGitWorkflow() {
   elements.gitWorkflowCancelButton.disabled = false;
 
   if (gitWorkflow.step === "add") {
-    addGitWorkflowAction("Run git add .", runGitAdd, "primary", false);
+    addGitWorkflowAction("Run git add .", () => runGitAdd(), "primary", false);
   } else if (gitWorkflow.step === "generate") {
-    addGitWorkflowAction("Run /git-staged-msg", runGitMessagePrompt, "primary", false);
+    addGitWorkflowAction("Run /git-staged-msg", () => runGitMessagePrompt(), "primary", false);
     addGitWorkflowAction("Preview current message files", () => loadGitWorkflowMessage({ requireFresh: false }), "", false);
   } else if (gitWorkflow.step === "generating") {
     addGitWorkflowAction("Refresh message preview", () => loadGitWorkflowMessage({ requireFresh: true }), "", false);
   } else if (gitWorkflow.step === "message") {
     addGitWorkflowAction("Commit short", () => commitGitWorkflow("short"), "primary", false);
     addGitWorkflowAction("Commit long", () => commitGitWorkflow("long"), "primary", false);
-    addGitWorkflowAction("Regenerate", runGitMessagePrompt, "", false);
+    addGitWorkflowAction("Regenerate", () => runGitMessagePrompt(), "", false);
   } else if (gitWorkflow.step === "push") {
-    addGitWorkflowAction("Run git push", pushGitWorkflow, "primary", false);
+    addGitWorkflowAction("Run git push", () => pushGitWorkflow(), "primary", false);
   } else if (gitWorkflow.step === "done") {
     addGitWorkflowAction("Close", () => setGitWorkflow({ active: false }), "primary", false);
-    addGitWorkflowAction("Start another", startGitWorkflow, "", false);
+    addGitWorkflowAction("Start another", () => startGitWorkflow(), "", false);
   } else if (["cancelled", "error"].includes(gitWorkflow.step)) {
     addGitWorkflowAction("Close", () => setGitWorkflow({ active: false }), "primary", false);
-    addGitWorkflowAction("Restart", startGitWorkflow, "", false);
+    addGitWorkflowAction("Restart", () => startGitWorkflow(), "", false);
   }
 }
 
@@ -4357,8 +4471,7 @@ function failGitWorkflow(error, step, { tabId = activeTabId } = {}) {
   }, { tabId });
 }
 
-function startGitWorkflow() {
-  const tabId = activeTabId;
+function startGitWorkflow(tabId = activeTabId) {
   if (!tabId) return;
   if (!isOptionalFeatureEnabled("gitWorkflow")) {
     const tabContext = activeTabContext(tabId);
@@ -4382,8 +4495,7 @@ function startGitWorkflow() {
   }, { tabId });
 }
 
-async function cancelGitWorkflow() {
-  const tabId = activeTabId;
+async function cancelGitWorkflow(tabId = gitWorkflowActionTabId()) {
   const tabContext = activeTabContext(tabId);
   const workflow = gitWorkflowForTab(tabId, { create: false });
   if (!workflow?.active) return;
@@ -4398,8 +4510,7 @@ async function cancelGitWorkflow() {
   if (shouldAbortPi && isCurrentTabContext(tabContext)) scheduleAbortStateChecks();
 }
 
-async function runGitAdd() {
-  const tabId = activeTabId;
+async function runGitAdd(tabId = gitWorkflowActionTabId()) {
   const tabContext = activeTabContext(tabId);
   const workflow = gitWorkflowForTab(tabId, { create: false });
   if (!workflow) return;
@@ -4415,10 +4526,11 @@ async function runGitAdd() {
   }
 }
 
-async function runGitMessagePrompt() {
-  const tabId = activeTabId;
+async function runGitMessagePrompt(tabId = gitWorkflowActionTabId()) {
   const tabContext = activeTabContext(tabId);
-  if (currentState?.isStreaming) {
+  const targetTab = tabs.find((tab) => tab.id === tabId);
+  const targetBusy = tabId === activeTabId ? !!currentState?.isStreaming : activityForTab(targetTab).isWorking;
+  if (targetBusy) {
     failGitWorkflow(new Error("Pi is currently running. Wait for it to finish or abort before generating a staged commit message."), "generate", { tabId });
     return;
   }
@@ -4441,7 +4553,8 @@ async function runGitMessagePrompt() {
     if (isCurrentTabContext(tabContext)) scheduleRefreshState(120, tabContext);
     setTimeout(() => {
       const currentWorkflow = gitWorkflowForTab(tabId, { create: false });
-      if (isCurrentTabContext(tabContext) && isCurrentGitWorkflowRun(runId, tabId) && currentWorkflow?.step === "generating" && !currentState?.isStreaming) {
+      const targetStillBusy = tabId === activeTabId && currentState?.isStreaming;
+      if (isCurrentGitWorkflowRun(runId, tabId) && currentWorkflow?.step === "generating" && !targetStillBusy) {
         loadGitWorkflowMessage({ requireFresh: true, retries: 1, runId, tabId });
       }
     }, 2500);
@@ -4483,8 +4596,7 @@ async function loadGitWorkflowMessage({ requireFresh = false, retries = 0, runId
   }
 }
 
-async function commitGitWorkflow(variant) {
-  const tabId = activeTabId;
+async function commitGitWorkflow(variant, tabId = gitWorkflowActionTabId()) {
   const tabContext = activeTabContext(tabId);
   const workflow = gitWorkflowForTab(tabId, { create: false });
   if (!workflow) return;
@@ -4500,8 +4612,7 @@ async function commitGitWorkflow(variant) {
   }
 }
 
-async function pushGitWorkflow() {
-  const tabId = activeTabId;
+async function pushGitWorkflow(tabId = gitWorkflowActionTabId()) {
   const tabContext = activeTabContext(tabId);
   const workflow = gitWorkflowForTab(tabId, { create: false });
   if (!workflow) return;
@@ -4521,19 +4632,31 @@ function resumeGitWorkflowForActiveTab(tabContext = activeTabContext()) {
   if (!isCurrentTabContext(tabContext)) return;
   bindGitWorkflowToActiveTab();
   renderGitWorkflow();
-  if (gitWorkflow.active && gitWorkflow.step === "generating" && !currentState?.isStreaming) {
+  const workflowTabId = gitWorkflowActionTabId();
+  if (workflowTabId === tabContext.tabId && gitWorkflow.active && gitWorkflow.step === "generating" && !currentState?.isStreaming) {
     const retryDelayMs = Math.max(0, 2500 - (Date.now() - (gitWorkflow.messageRequestedAt || 0)));
     if (retryDelayMs > 0) {
       setTimeout(() => resumeGitWorkflowForActiveTab(tabContext), retryDelayMs);
       return;
     }
-    loadGitWorkflowMessage({ requireFresh: true, retries: 3, runId: gitWorkflow.runId, tabId: tabContext.tabId });
+    loadGitWorkflowMessage({ requireFresh: true, retries: 3, runId: gitWorkflow.runId, tabId: workflowTabId });
   }
 }
 
+function normalizeQueuedMessages(event) {
+  const normalize = (items) => (Array.isArray(items) ? items.map((item) => String(item || "")).filter((item) => item.trim()) : []);
+  return {
+    steering: normalize(event?.steering),
+    followUp: normalize(event?.followUp),
+  };
+}
+
 function renderQueue(event) {
-  const steering = event?.steering || [];
-  const followUp = event?.followUp || [];
+  const snapshot = normalizeQueuedMessages(event);
+  const tabId = event?.tabId || activeTabId;
+  if (tabId) latestQueuedMessagesByTab.set(tabId, snapshot);
+  const steering = snapshot.steering;
+  const followUp = snapshot.followUp;
   if (steering.length === 0 && followUp.length === 0) {
     elements.queueBox.textContent = "No queued messages.";
     elements.queueBox.classList.add("muted");
@@ -4543,7 +4666,30 @@ function renderQueue(event) {
   const lines = [];
   if (steering.length) lines.push(`Steering (${steering.length}):`, ...steering.map((item) => `• ${item}`));
   if (followUp.length) lines.push(`Follow-up (${followUp.length}):`, ...followUp.map((item) => `• ${item}`));
+  lines.push("↳ Alt+Up restores the latest observed queue snapshot to the composer (RPC queue clearing is pending upstream support).");
   elements.queueBox.textContent = lines.join("\n");
+}
+
+function queuedMessagesForComposer(tabId = activeTabId) {
+  const snapshot = latestQueuedMessagesByTab.get(tabId) || { steering: [], followUp: [] };
+  return [...(snapshot.steering || []), ...(snapshot.followUp || [])].map((item) => String(item || "").trim()).filter(Boolean);
+}
+
+function restoreQueuedMessagesToComposerFromShortcut() {
+  const queued = queuedMessagesForComposer();
+  if (queued.length === 0) {
+    addEvent("no queued messages to restore", "warn");
+    return false;
+  }
+  const queuedText = queued.join("\n\n");
+  const currentText = elements.promptInput.value || "";
+  elements.promptInput.value = [queuedText, currentText].filter((item) => item.trim()).join("\n\n");
+  resizePromptInput();
+  renderCommandSuggestions();
+  saveActiveDraft();
+  focusPromptInput({ defer: true });
+  addEvent(`restored ${queued.length} queued message${queued.length === 1 ? "" : "s"} to composer; Pi's RPC queue is still pending upstream clear support`, "warn");
+  return true;
 }
 
 function appendText(parent, text, className = "text-block") {
@@ -5107,11 +5253,12 @@ function renderContent(parent, content, { markdown = false } = {}) {
       if (markdown) appendMarkdown(parent, stripTodoProgressLines(text));
       else appendText(parent, text);
     } else if (part.type === "thinking") {
-      if (!thinkingOutputVisible) continue;
+      const thinking = visibleThinkingText(assistantThinkingText(part));
+      if (!thinkingOutputVisible || !thinking) continue;
       const details = make("details", "thinking-block");
       details.open = true;
       details.append(make("summary", undefined, "thinking"));
-      appendText(details, part.thinking || "No thinking content was exposed by the provider.", "thinking-text");
+      appendText(details, thinking, "thinking-text");
       parent.append(details);
     } else if (part.type === "toolCall") {
       const details = make("details");
@@ -5145,6 +5292,13 @@ function assistantThinkingText(part) {
   if (part.type !== "thinking" && typeof part.thinking !== "string") return "";
   if (typeof part.thinking === "string") return part.thinking;
   return typeof part.content === "string" ? part.content : "";
+}
+
+function visibleThinkingText(text) {
+  const value = String(text || "");
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === UNEXPOSED_THINKING_TEXT) return "";
+  return value;
 }
 
 function isAssistantToolCallPart(part) {
@@ -5208,8 +5362,8 @@ function assistantDisplayMessages(message) {
     const part = content[index];
     const isThinkingPart = part && typeof part === "object" && (part.type === "thinking" || typeof part.thinking === "string");
     if (isThinkingPart) {
-      const thinking = assistantThinkingText(part) || "No thinking content was exposed by the provider.";
-      displayMessages.push({ ...base, role: "thinking", title: "thinking", content: thinking, thinking });
+      const thinking = visibleThinkingText(assistantThinkingText(part));
+      if (thinking) displayMessages.push({ ...base, role: "thinking", title: "thinking", content: thinking, thinking });
       continue;
     }
     if (isAssistantToolCallPart(part)) {
@@ -5326,8 +5480,18 @@ function stickyUserPromptViewportGap() {
 
 function resetChatOutput() {
   liveToolCards.clear();
-  elements.chat.replaceChildren();
-  if (elements.stickyUserPromptButton) elements.chat.append(elements.stickyUserPromptButton);
+  const preservedNodes = [];
+  if (elements.stickyUserPromptButton) preservedNodes.push(elements.stickyUserPromptButton);
+  if (runIndicatorBubble?.parentElement === elements.chat) preservedNodes.push(runIndicatorBubble);
+  elements.chat.replaceChildren(...preservedNodes);
+}
+
+function appendChatMessageBubble(bubble) {
+  if (runIndicatorBubble?.parentElement === elements.chat && bubble !== runIndicatorBubble) {
+    elements.chat.insertBefore(bubble, runIndicatorBubble);
+  } else {
+    elements.chat.append(bubble);
+  }
 }
 
 function userPromptTargets() {
@@ -5539,7 +5703,7 @@ function appendToolOutput(parent, text, { label = "output", previewLines = 10, p
   const lines = clean.split(/\r?\n/);
   if (lines.length > previewLines) {
     const details = make("details", "tool-output-details");
-    details.open = open;
+    details.open = open || toolOutputGloballyExpanded;
     details.append(make("summary", "tool-output-summary", `${label} (${lines.length} lines; expand)`));
     appendText(details, clean, "code-block tool-output-code");
     parent.append(details);
@@ -5649,6 +5813,37 @@ function appendToolRawDetails(parent, tool) {
   parent.append(details);
 }
 
+function toolRenderSignatureReplacer() {
+  const seen = new WeakSet();
+  return (key, value) => {
+    if (typeof value === "bigint") return `${value}n`;
+    if (typeof value === "string" && value.length > 8000) return `${value.slice(0, 4000)}…${value.slice(-4000)} (${value.length} chars)`;
+    if (value && typeof value === "object") {
+      if (seen.has(value)) return "[Circular]";
+      seen.add(value);
+    }
+    return toolRawDetailsReplacer(key, value);
+  };
+}
+
+function toolExecutionRenderSignature(message) {
+  const tool = normalizeToolExecution(message);
+  try {
+    return JSON.stringify({
+      name: tool.name,
+      args: tool.args,
+      result: tool.result,
+      details: tool.details,
+      isPartial: tool.isPartial,
+      isError: tool.isError,
+      startedAt: tool.startedAt,
+      endedAt: tool.endedAt,
+    }, toolRenderSignatureReplacer());
+  } catch {
+    return `${message?.toolName || message?.name || "tool"}|${message?.toolCallId || ""}|${message?.isPartial ? "partial" : "final"}|${message?.isError ? "error" : "ok"}`;
+  }
+}
+
 function renderBashToolExecution(parent, tool) {
   const command = toolArgText(tool.args, "command", "");
   const timeout = toolArgValue(tool.args, "timeout");
@@ -5750,9 +5945,15 @@ function liveToolRunMessage(run) {
 
 function applyToolExecutionBubbleState(bubble, message) {
   const status = toolExecutionStatus(message);
-  bubble.classList.remove("tool-pending", "tool-running", "tool-success", "tool-error", "error");
-  bubble.classList.add(`tool-${status}`);
-  if (message.isError || status === "error") bubble.classList.add("error");
+  const nextClass = `tool-${status}`;
+  if (bubble.dataset.toolStatus !== status || !bubble.classList.contains(nextClass)) {
+    for (const className of ["tool-pending", "tool-running", "tool-success", "tool-error"]) {
+      if (className !== nextClass) bubble.classList.remove(className);
+    }
+    bubble.classList.add(nextClass);
+    bubble.dataset.toolStatus = status;
+  }
+  bubble.classList.toggle("error", !!(message.isError || status === "error"));
   if (message.toolCallId) {
     const id = String(message.toolCallId);
     bubble.dataset.toolCallId = id;
@@ -5815,7 +6016,7 @@ function reuseToolExecutionBubble(reusableToolCards, message, { streaming = fals
     bubble.removeAttribute("data-user-prompt");
   }
   if (!streaming && !transient) renderActionFeedbackControls(bubble, message, messageIndex);
-  elements.chat.append(bubble);
+  appendChatMessageBubble(bubble);
   return { bubble, body };
 }
 
@@ -5829,10 +6030,13 @@ function updateLiveToolCard(bubble, message) {
   if (role) role.textContent = messageTitle(message);
   const timestamp = header?.querySelector(".muted");
   if (timestamp) timestamp.textContent = formatDate(message.timestamp);
+  const nextRenderSignature = toolExecutionRenderSignature(message);
+  if (bubble._toolRenderSignature === nextRenderSignature && body.childElementCount > 0) return true;
   const detailsOpenState = captureToolDetailsOpenState(body);
   body.replaceChildren();
   renderToolExecution(body, message);
   restoreToolDetailsOpenState(body, detailsOpenState);
+  bubble._toolRenderSignature = nextRenderSignature;
   return true;
 }
 
@@ -5979,9 +6183,10 @@ function appendMessage(message, { streaming = false, messageIndex = -1, transien
     if (message.isError) bubble.classList.add("error");
   } else if (message.role === "toolExecution") {
     renderToolExecution(body, message);
+    bubble._toolRenderSignature = toolExecutionRenderSignature(message);
   } else if (message.role === "thinking") {
-    const thinkingText = message.thinking || textFromContent(message.content);
-    if (thinkingOutputVisible && (thinkingText || !streaming)) appendText(body, thinkingText || "No thinking content was exposed by the provider.", "thinking-text");
+    const thinkingText = visibleThinkingText(message.thinking || textFromContent(message.content));
+    if (thinkingOutputVisible && thinkingText) appendText(body, thinkingText, "thinking-text");
   } else if (message.role === "toolCall") {
     appendText(body, JSON.stringify(message.arguments ?? message.content ?? {}, null, 2), "code-block");
   } else if (message.role === "assistantEvent") {
@@ -5992,7 +6197,7 @@ function appendMessage(message, { streaming = false, messageIndex = -1, transien
 
   if (isCollapsibleOutput) {
     const details = make("details", "message-collapse");
-    if (message.isError) details.open = true;
+    if (message.isError || toolOutputGloballyExpanded) details.open = true;
     details.append(header, body);
     bubble.append(details);
     if (message.role === "toolResult" && !message.isError) {
@@ -6006,7 +6211,7 @@ function appendMessage(message, { streaming = false, messageIndex = -1, transien
     bubble.append(header, body);
   }
   if (!streaming && !transient) renderActionFeedbackControls(bubble, message, messageIndex);
-  elements.chat.append(bubble);
+  appendChatMessageBubble(bubble);
   return { bubble, body };
 }
 
@@ -6049,11 +6254,11 @@ function appendTranscriptMessage(message, { streaming = false, messageIndex = -1
 }
 
 function stateHasRunIndicatorActivity(state = currentState) {
-  return !!state?.isStreaming || !!state?.isCompacting;
+  return !!state?.isStreaming || !!state?.isCompacting || isUserBashActive();
 }
 
 function runIndicatorIsActive() {
-  return runIndicatorLocallyActive || stateHasRunIndicatorActivity(currentState);
+  return runIndicatorLocallyActive || stateHasRunIndicatorActivity(currentState) || isUserBashActive();
 }
 
 function clearRunIndicatorGraceCheck() {
@@ -6126,22 +6331,24 @@ function stopRunIndicatorTicker() {
   runIndicatorTimer = null;
 }
 
-function ensureRunIndicatorBubble() {
-  if (runIndicatorBubble?.parentElement !== elements.chat) {
-    runIndicatorBubble = make("article", "message runIndicator run-indicator-message streaming");
-    runIndicatorBubble.setAttribute("aria-live", "polite");
-    runIndicatorBubble.setAttribute("aria-label", "Agent is running:");
+function createRunIndicatorBubble() {
+  runIndicatorBubble = make("article", "message runIndicator run-indicator-message streaming");
+  runIndicatorBubble.setAttribute("aria-live", "polite");
+  runIndicatorBubble.setAttribute("aria-label", "Agent is running:");
 
-    const body = make("div", "message-body");
-    const row = make("div", "run-indicator-row");
-    const pulse = make("span", "run-indicator-pulse");
-    pulse.setAttribute("aria-hidden", "true");
-    runIndicatorText = make("span", "run-indicator-text");
-    runIndicatorMeta = make("span", "run-indicator-meta");
-    row.append(pulse, runIndicatorText, runIndicatorMeta);
-    body.append(row);
-    runIndicatorBubble.append(body);
-  }
+  const body = make("div", "message-body");
+  const row = make("div", "run-indicator-row");
+  const pulse = make("span", "run-indicator-pulse");
+  pulse.setAttribute("aria-hidden", "true");
+  runIndicatorText = make("span", "run-indicator-text");
+  runIndicatorMeta = make("span", "run-indicator-meta");
+  row.append(pulse, runIndicatorText, runIndicatorMeta);
+  body.append(row);
+  runIndicatorBubble.append(body);
+}
+
+function ensureRunIndicatorBubble() {
+  if (!runIndicatorBubble || !runIndicatorText || !runIndicatorMeta) createRunIndicatorBubble();
   if (elements.chat.lastElementChild !== runIndicatorBubble) elements.chat.append(runIndicatorBubble);
 }
 
@@ -6149,9 +6356,11 @@ function updateRunIndicatorBubble() {
   if (!runIndicatorIsActive()) return;
   if (!runIndicatorStartedAt) runIndicatorStartedAt = performance.now();
   ensureRunIndicatorBubble();
-  runIndicatorText.textContent = runIndicatorHeadline();
+  const headline = runIndicatorHeadline();
+  if (runIndicatorText.textContent !== headline) runIndicatorText.textContent = headline;
   const detail = runIndicatorDetail();
-  runIndicatorMeta.textContent = runIndicatorShowsElapsed() ? `${detail} · run time ${formatRunIndicatorElapsed()}` : detail;
+  const meta = runIndicatorShowsElapsed() ? `${detail} · run time ${formatRunIndicatorElapsed()}` : detail;
+  if (runIndicatorMeta.textContent !== meta) runIndicatorMeta.textContent = meta;
 }
 
 function removeRunIndicatorBubble() {
@@ -6324,6 +6533,7 @@ function renderAllMessages({ preserveScroll = false } = {}) {
     });
   }
   rememberActionEntries(transcriptItems);
+  applyToolOutputExpansionToDom();
   renderRunIndicator({ scroll: false });
   updateStickyUserPromptButton();
   if (shouldFollow) scrollChatToBottom({ force: true });
@@ -6335,12 +6545,13 @@ function renderAllMessages({ preserveScroll = false } = {}) {
   updateStickyUserPromptButton();
 }
 
-function addTransientMessage({ role = "notice", title, content, level = "info" }) {
+function addTransientMessage({ role = "notice", title, content, level = "info", ...details }) {
   transientMessages.push({
     role,
     title,
     level,
     content,
+    ...details,
     timestamp: Date.now(),
   });
   if (transientMessages.length > 80) transientMessages.splice(0, transientMessages.length - 80);
@@ -7237,9 +7448,9 @@ function ensureStreamingThinkingBubble() {
   return true;
 }
 
-function showStreamingThinking(placeholder = "Thinking…") {
+function showStreamingThinking(initialText = "") {
   if (!ensureStreamingThinkingBubble()) return;
-  if (!streamThinking.textContent) streamThinking.textContent = placeholder;
+  if (initialText && !streamThinking.textContent) streamThinking.textContent = initialText;
 }
 
 function resetStreamBubble() {
@@ -7255,7 +7466,7 @@ function resetStreamBubble() {
 }
 
 function thinkingDeltaText(update) {
-  return update.delta || update.thinking || update.content || "";
+  return visibleThinkingText(update.delta || update.thinking || update.content || "");
 }
 
 function assistantStreamingMessage(event) {
@@ -7282,37 +7493,38 @@ function assistantThinkingTextFromMessage(message) {
   if (!Array.isArray(content)) return null;
   const parts = content
     .filter((part) => part && typeof part === "object" && (part.type === "thinking" || typeof part.thinking === "string"))
-    .map((part) => assistantThinkingText(part))
+    .map((part) => visibleThinkingText(assistantThinkingText(part)))
     .filter((text) => text.trim());
   return parts.length ? parts.join("\n\n") : "";
 }
 
 function setStreamingThinkingText(text) {
-  if (!thinkingOutputVisible) return;
+  const thinking = visibleThinkingText(text);
+  if (!thinkingOutputVisible || !thinking) return false;
   showStreamingThinking("");
-  if (streamThinking) streamThinking.textContent = text;
+  if (streamThinking) streamThinking.textContent = thinking;
+  return true;
 }
 
 function syncStreamingThinkingFromMessage(event, { placeholder = "" } = {}) {
   if (!thinkingOutputVisible) return true;
   const text = assistantThinkingTextFromMessage(assistantStreamingMessage(event));
   if (text === null) return false;
-  if (text || placeholder || streamThinkingBubble) setStreamingThinkingText(text || placeholder);
-  return true;
+  return setStreamingThinkingText(text || placeholder);
 }
 
 function handleMessageUpdate(event) {
   const update = event.assistantMessageEvent || {};
   if (update.type === "thinking_start") {
     setRunIndicatorActivity("Thinking…", { scroll: false });
-    syncStreamingThinkingFromMessage(event, { placeholder: "Thinking…" });
+    syncStreamingThinkingFromMessage(event);
     scrollChatToBottom();
   } else if (update.type === "thinking_delta") {
     const delta = thinkingDeltaText(update);
     currentRunStreamChars += delta.length;
     setRunIndicatorActivity("Thinking…", { scroll: false });
     const synced = syncStreamingThinkingFromMessage(event);
-    if (thinkingOutputVisible && (!synced || (!streamThinking?.textContent && delta))) {
+    if (thinkingOutputVisible && delta && (!synced || !streamThinking?.textContent)) {
       showStreamingThinking("");
       if (streamThinking?.textContent === "Thinking…") streamThinking.textContent = "";
       if (streamThinking) streamThinking.textContent += delta;
@@ -8006,6 +8218,216 @@ async function closeNetworkAccess() {
   }
 }
 
+async function stopServer() {
+  if (!confirm("Stop the Pi Web UI server?\n\nThis disconnects all browser clients and stops the Pi tabs managed by this Web UI.")) return;
+
+  const button = elements.stopServerButton;
+  button.disabled = true;
+  button.textContent = "Stopping…";
+  try {
+    await api("/api/shutdown", { method: "POST", scoped: false });
+    addEvent("Pi Web UI server stop requested", "warn");
+    setBackendOffline(true, new Error("stop requested from side panel"));
+  } catch (error) {
+    if (error?.backendOffline) {
+      addEvent("Pi Web UI server appears to be offline after stop request", "warn");
+      setBackendOffline(true, error);
+      return;
+    }
+    addEvent(error.message || String(error), "error");
+    button.disabled = false;
+    button.textContent = "Stop Server";
+  }
+}
+
+function appShortcutModelLabel(model) {
+  return model ? `${model.provider}/${model.id}` : "unknown model";
+}
+
+async function cycleModelFromShortcut(direction = "forward") {
+  const tabContext = activeTabContext();
+  if (!tabContext.tabId) return;
+  try {
+    const response = await api("/api/model-cycle", { method: "POST", body: { direction }, tabId: tabContext.tabId });
+    applyResponseTab(response);
+    const model = response.data?.model;
+    const scope = response.data?.scoped ? `scoped (${response.data.scopeSource})` : "all models";
+    if (isCurrentTabContext(tabContext)) {
+      addTransientMessage({ role: "native", title: "model cycle", content: `Model set to ${appShortcutModelLabel(model)} via ${direction} cycle over ${scope}.`, level: "info" });
+      await Promise.allSettled([refreshState(tabContext), refreshModels(tabContext), refreshStats(tabContext)]);
+    }
+  } catch (error) {
+    if (isCurrentTabContext(tabContext)) {
+      addEvent(error.message, "error");
+      addTransientMessage({ role: "error", title: "model cycle", content: error.message, level: "error" });
+    }
+  }
+}
+
+async function cycleThinkingFromShortcut() {
+  const tabContext = activeTabContext();
+  if (!tabContext.tabId) return;
+  try {
+    const response = await api("/api/thinking-cycle", { method: "POST", body: {}, tabId: tabContext.tabId });
+    if (response.data?.level && currentState) currentState = { ...currentState, thinkingLevel: response.data.level };
+    if (isCurrentTabContext(tabContext)) {
+      addTransientMessage({ role: "native", title: "thinking", content: response.data?.level ? `Thinking level: ${response.data.level}` : "Thinking level did not change.", level: "info" });
+      await Promise.allSettled([refreshState(tabContext), refreshStats(tabContext)]);
+    }
+  } catch (error) {
+    if (isCurrentTabContext(tabContext)) {
+      addEvent(error.message, "error");
+      addTransientMessage({ role: "error", title: "thinking", content: error.message, level: "error" });
+    }
+  }
+}
+
+function clearPromptFromShortcut() {
+  const input = elements.promptInput;
+  if (document.activeElement !== input) return false;
+  if (input.selectionStart !== input.selectionEnd) return false;
+  if (!input.value) return false;
+  input.value = "";
+  resizePromptInput();
+  renderCommandSuggestions();
+  addEvent("prompt cleared", "info");
+  return true;
+}
+
+function parseUserBashInput(message) {
+  const text = String(message || "").trim();
+  if (!text.startsWith("!") || text === "!" || text === "!!") return null;
+  const excludeFromContext = text.startsWith("!!");
+  const command = text.slice(excludeFromContext ? 2 : 1).trim();
+  if (!command) return null;
+  return { command, excludeFromContext };
+}
+
+function userBashOutputSummary(result = {}, excludeFromContext = false) {
+  const output = String(result.output || "").trimEnd();
+  const status = result.cancelled ? "cancelled" : result.exitCode === 0 ? "exit 0" : result.exitCode === undefined || result.exitCode === null ? "finished" : `exit ${result.exitCode}`;
+  const context = excludeFromContext ? "excluded from LLM context" : "included in the next LLM context";
+  const lines = [`# ${status}; ${context}`];
+  if (output) lines.push("", output);
+  if (result.truncated && result.fullOutputPath) lines.push("", `Full output: ${result.fullOutputPath}`);
+  return lines.join("\n");
+}
+
+function clearComposerAfterUserBash({ usesPromptInput, targetTabId, tabContext }) {
+  if (!usesPromptInput) return;
+  clearAttachments(targetTabId);
+  if (isCurrentTabContext(tabContext)) {
+    elements.promptInput.value = "";
+    resizePromptInput();
+  } else {
+    tabDrafts.set(targetTabId, "");
+  }
+}
+
+function enqueueUserBashCommand(parsed, { usesPromptInput = false, targetTabId = activeTabId } = {}) {
+  if (!targetTabId || !parsed?.command) return;
+  const tabContext = activeTabContext(targetTabId);
+  clearComposerAfterUserBash({ usesPromptInput, targetTabId, tabContext });
+  const queue = userBashQueueForTab(targetTabId);
+  queue.push({ command: parsed.command, excludeFromContext: parsed.excludeFromContext === true, enqueuedAt: Date.now() });
+  const waiting = queue.length;
+  if (isCurrentTabContext(tabContext)) {
+    addTransientMessage({
+      role: "bashExecution",
+      title: parsed.excludeFromContext ? "bash (!! queued)" : "bash (! queued)",
+      command: parsed.command,
+      output: `Queued behind the active bash command. Position: ${waiting}.\n\nOutput will be ${parsed.excludeFromContext ? "excluded from" : "included in the next"} LLM context when it runs.`,
+      excludeFromContext: parsed.excludeFromContext === true,
+      level: "info",
+    });
+    addEvent(`bash queued (${waiting} waiting): ${parsed.command}`, "info");
+    setRunIndicatorActivity(`Bash queued (${waiting} waiting)…`);
+    updateComposerModeButtons();
+  }
+}
+
+function dequeueNextUserBashCommand(targetTabId) {
+  return userBashQueueForTab(targetTabId).shift() || null;
+}
+
+async function runUserBashCommand(parsed, { usesPromptInput = false, targetTabId = activeTabId, queued = false } = {}) {
+  if (!targetTabId || !parsed?.command) return;
+  const tabContext = activeTabContext(targetTabId);
+  const { command, excludeFromContext } = parsed;
+  autoFollowChat = true;
+  setComposerActionsOpen(false);
+  hideCommandSuggestions();
+  userBashByTab.set(targetTabId, { command, excludeFromContext, startedAt: Date.now() });
+  markTabWorkingLocally(targetTabId);
+  if (isCurrentTabContext(tabContext)) {
+    const waiting = queuedUserBashCount(targetTabId);
+    setRunIndicatorActivity(`Running bash: ${command}${waiting ? ` (${waiting} queued)` : ""}`);
+    addTransientMessage({
+      role: "bashExecution",
+      title: excludeFromContext ? "bash (!!)" : "bash (!)" ,
+      command,
+      output: `${queued ? "Dequeued and running.\n\n" : ""}${excludeFromContext ? "Output will be excluded from LLM context." : "Output will be included in the next LLM context."}\n\nRunning…`,
+      excludeFromContext,
+      level: "info",
+    });
+  }
+  clearComposerAfterUserBash({ usesPromptInput, targetTabId, tabContext });
+
+  try {
+    const response = await api("/api/bash", { method: "POST", body: { command, excludeFromContext }, tabId: targetTabId });
+    const result = response.data || {};
+    applyResponseTab(response);
+    if (isCurrentTabContext(tabContext)) {
+      addTransientMessage({
+        role: "bashExecution",
+        title: excludeFromContext ? "bash (!! complete)" : "bash (! complete)",
+        command,
+        output: userBashOutputSummary(result, excludeFromContext),
+        exitCode: result.exitCode,
+        cancelled: result.cancelled === true,
+        truncated: result.truncated === true,
+        fullOutputPath: result.fullOutputPath,
+        excludeFromContext,
+        level: result.cancelled ? "warn" : result.exitCode ? "error" : "info",
+      });
+      addEvent(`bash ${result.cancelled ? "cancelled" : "finished"}: ${command}`, result.cancelled || result.exitCode ? "warn" : "info");
+      scheduleRefreshMessages(250, tabContext);
+      scheduleRefreshState(250, tabContext);
+    } else {
+      scheduleRefreshTabs(300);
+    }
+  } catch (error) {
+    if (isCurrentTabContext(tabContext)) {
+      addEvent(error.message, "error");
+      addTransientMessage({ role: "error", title: excludeFromContext ? "!! bash failed" : "! bash failed", content: error.message, level: "error" });
+    }
+  } finally {
+    userBashByTab.delete(targetTabId);
+    const nextQueued = dequeueNextUserBashCommand(targetTabId);
+    if (isCurrentTabContext(tabContext)) {
+      if (nextQueued) {
+        setRunIndicatorActivity(`Starting queued bash (${queuedUserBashCount(targetTabId)} waiting)…`);
+      } else if (!currentState?.isStreaming && !currentState?.isCompacting) {
+        markTabIdleLocally(targetTabId);
+        clearRunIndicatorActivity();
+      } else {
+        syncRunIndicatorFromState(currentState);
+      }
+      updateComposerModeButtons();
+    }
+    if (nextQueued) void runUserBashCommand(nextQueued, { usesPromptInput: false, targetTabId, queued: true });
+  }
+}
+
+async function sendUserBashCommand(parsed, { usesPromptInput = false, targetTabId = activeTabId } = {}) {
+  if (!targetTabId || !parsed?.command) return;
+  if (isUserBashActive(targetTabId) || queuedUserBashCount(targetTabId) > 0) {
+    enqueueUserBashCommand(parsed, { usesPromptInput, targetTabId });
+    return;
+  }
+  await runUserBashCommand(parsed, { usesPromptInput, targetTabId });
+}
+
 async function sendPrompt(kind = "prompt", explicitMessage) {
   const usesPromptInput = explicitMessage === undefined;
   const rawMessage = usesPromptInput ? elements.promptInput.value : explicitMessage;
@@ -8016,6 +8438,11 @@ async function sendPrompt(kind = "prompt", explicitMessage) {
   const attachments = usesPromptInput ? [...attachmentsForTab(targetTabId)] : [];
   if (!originalMessage && attachments.length === 0) return;
   if (kind === "prompt" && attachments.length === 0 && await handleNativeSlashSelectorCommand(originalMessage, { usesPromptInput })) return;
+  const userBash = kind === "prompt" && attachments.length === 0 ? parseUserBashInput(originalMessage) : null;
+  if (userBash) {
+    await sendUserBashCommand(userBash, { usesPromptInput, targetTabId });
+    return;
+  }
 
   const targetWasStreaming = !!currentState?.isStreaming;
   const busyBehavior = elements.busyBehavior.value || "followUp";
@@ -8060,11 +8487,14 @@ async function sendPrompt(kind = "prompt", explicitMessage) {
     }
     if (targetStillActive && response?.command === "native_slash_command" && response.data?.copyText) {
       try {
-        await navigator.clipboard.writeText(response.data.copyText);
+        await copyText(response.data.copyText);
       } catch (error) {
         response.data.message = `${response.data.message || "Copy requested, but clipboard access failed."}\n\nClipboard access failed: ${error.message}\n\n${response.data.copyText}`;
         response.data.level = "warn";
       }
+    }
+    if (targetStillActive && response?.command === "native_slash_command" && response.data?.download) {
+      if (triggerNativeDownload(response.data.download)) addEvent(`download started: ${response.data.download.fileName || response.data.download.url}`, "info");
     }
     if (targetStillActive && response?.command === "native_slash_command" && response.data?.message) {
       addTransientMessage({ role: "native", title: message.split(/\s+/, 1)[0], content: response.data.message, level: response.data.level || "info" });
@@ -8459,7 +8889,7 @@ function handleEvent(event) {
         syncActiveTabActivityFromState(currentState);
         syncRunIndicatorFromState(currentState);
         renderStatus();
-      } else if (["set_model", "set_thinking_level", "new_session", "compact"].includes(event.command)) {
+      } else if (["set_model", "cycle_model", "set_thinking_level", "cycle_thinking_level", "new_session", "compact"].includes(event.command)) {
         if (event.command === "new_session") {
           const tabId = event.tabId || activeTabId;
           forgetLastUserPrompt(tabId);
@@ -8531,7 +8961,7 @@ publishMenuContainer?.addEventListener("focusout", () => {
 });
 elements.releaseNpmButton.addEventListener("click", () => runPublishWorkflow("/release-npm"));
 elements.releaseAurButton.addEventListener("click", () => runPublishWorkflow("/release-aur"));
-elements.gitWorkflowCancelButton.addEventListener("click", cancelGitWorkflow);
+elements.gitWorkflowCancelButton.addEventListener("click", () => cancelGitWorkflow());
 elements.nativeCommandDialog.addEventListener("close", () => {
   elements.nativeCommandSearch.oninput = null;
   nativeCommandTabId = null;
@@ -8550,8 +8980,17 @@ async function abortActiveRun({ source = "button" } = {}) {
   abortRequestInFlight = true;
   resetAbortLongPressAffordance();
   updateComposerModeButtons();
+  const hadActiveBash = isUserBashActive(tabContext.tabId);
   const hadActiveRun = runIndicatorIsActive();
   try {
+    if (hadActiveBash) {
+      const command = userBashByTab.get(tabContext.tabId)?.command || "bash";
+      setRunIndicatorActivity(`Abort requested${source === "escape" ? " from Esc" : source === "long-press" ? " from long-press" : ""}; stopping bash…`);
+      await api("/api/abort-bash", { method: "POST", body: {}, tabId: tabContext.tabId });
+      if (!isCurrentTabContext(tabContext)) return;
+      addTransientMessage({ role: "native", title: "bash aborted", content: `⛔ Abort requested for bash command:\n${command}`, level: "warn" });
+      return;
+    }
     if (hadActiveRun) setRunIndicatorActivity(`Abort requested${source === "escape" ? " from Esc" : source === "long-press" ? " from long-press" : ""}; checking whether Pi stopped…`);
     await api("/api/abort", { method: "POST", body: {}, tabId: tabContext.tabId });
     if (!isCurrentTabContext(tabContext)) return;
@@ -8671,6 +9110,7 @@ if (elements.backgroundClearButton) {
   elements.backgroundClearButton.addEventListener("click", () => clearCustomBackground().catch((error) => addEvent(error.message || String(error), "error")));
 }
 elements.openNetworkButton.addEventListener("click", openToNetwork);
+elements.stopServerButton.addEventListener("click", stopServer);
 elements.agentDoneNotificationsToggle.addEventListener("change", () => {
   setAgentDoneNotificationsEnabled(elements.agentDoneNotificationsToggle.checked, {
     requestPermission: elements.agentDoneNotificationsToggle.checked,
@@ -8729,6 +9169,66 @@ document.addEventListener("pointermove", (event) => {
   }
   rememberPointerPosition(event);
 }, { passive: true });
+
+function isTextEntryTarget(target) {
+  if (!target) return false;
+  const tag = String(target.tagName || "").toLowerCase();
+  return target.isContentEditable || tag === "textarea" || tag === "input" || tag === "select";
+}
+
+function shouldHandleNativeAppShortcut(event) {
+  if (event.defaultPrevented) return false;
+  if (elements.dialog?.open || elements.pathPickerDialog?.open || elements.nativeCommandDialog?.open) return false;
+  return event.target === elements.promptInput || !isTextEntryTarget(event.target);
+}
+
+function handleNativeAppShortcut(event) {
+  if (!shouldHandleNativeAppShortcut(event)) return;
+  const key = event.key;
+  const lowerKey = String(key || "").toLowerCase();
+  const ctrlOrMeta = event.ctrlKey || event.metaKey;
+
+  if (ctrlOrMeta && !event.altKey && lowerKey === "l") {
+    event.preventDefault();
+    openNativeModelSelector();
+    return;
+  }
+  if (ctrlOrMeta && !event.altKey && lowerKey === "p") {
+    event.preventDefault();
+    cycleModelFromShortcut(event.shiftKey ? "backward" : "forward");
+    return;
+  }
+  if (ctrlOrMeta && !event.altKey && !event.shiftKey && lowerKey === "t") {
+    event.preventDefault();
+    setThinkingOutputVisible(!thinkingOutputVisible, { announce: true });
+    return;
+  }
+  if (ctrlOrMeta && !event.altKey && !event.shiftKey && lowerKey === "o") {
+    event.preventDefault();
+    setToolOutputGloballyExpanded(!toolOutputGloballyExpanded, { announce: true });
+    return;
+  }
+  if (ctrlOrMeta && !event.altKey && !event.shiftKey && lowerKey === "c") {
+    if (clearPromptFromShortcut()) event.preventDefault();
+    return;
+  }
+  if (!event.ctrlKey && !event.metaKey && !event.altKey && event.shiftKey && key === "Tab") {
+    event.preventDefault();
+    cycleThinkingFromShortcut();
+    return;
+  }
+  if (!event.ctrlKey && !event.metaKey && event.altKey && key === "Enter") {
+    event.preventDefault();
+    if (hasComposerPayload()) sendPrompt("follow-up");
+    return;
+  }
+  if (!event.ctrlKey && !event.metaKey && event.altKey && key === "ArrowUp") {
+    event.preventDefault();
+    restoreQueuedMessagesToComposerFromShortcut();
+  }
+}
+
+window.addEventListener("keydown", handleNativeAppShortcut, { capture: true });
 window.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
   if (elements.dialog?.open || elements.pathPickerDialog?.open) return;
@@ -8789,6 +9289,7 @@ elements.composer.addEventListener("dragleave", handleComposerDragLeave);
 elements.composer.addEventListener("drop", handleComposerDrop);
 
 elements.promptInput.addEventListener("keydown", (event) => {
+  if (event.defaultPrevented) return;
   if (shouldSendPromptFromEnter(event)) {
     event.preventDefault();
     hideCommandSuggestions();
@@ -8858,6 +9359,7 @@ initializeThemes().catch((error) => {
 initializeFastPicks().catch((error) => addEvent(`failed to initialize path fast picks: ${error.message}`, "error"));
 restoreAgentDoneNotificationsSetting();
 restoreThinkingVisibilitySetting();
+restoreToolOutputExpansionSetting();
 restoreSidePanelSectionState();
 bindSidePanelSectionToggles();
 restoreSidePanelState();

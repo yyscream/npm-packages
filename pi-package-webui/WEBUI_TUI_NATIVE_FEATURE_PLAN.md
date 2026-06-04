@@ -36,25 +36,30 @@ Success means a user can move between terminal Pi and Pi Web UI without losing c
 - File attachments through picker, drag/drop, paste, and inline RPC image support for supported image types.
 - Slash-command autocomplete and `@` path suggestions from the active tab cwd.
 - Browser-native dialogs for many native commands: `/model`, `/settings`, `/theme`, `/fork`, `/clone`, `/resume`, `/tree`; `/login` and `/logout` are safe guidance only.
+- Native parity foundation: `WEBUI_TUI_NATIVE_PARITY.json`, `GET /api/native-parity`, matrix-derived command discovery, structured native-command responses, and `tests/native-parity.test.mjs`.
+- Initial `/export` parity: no-path HTML browser download via short-lived opaque token, plus explicit new `.html`/`.jsonl` server-side writes.
+- Initial `!`/`!!` bash parity: composer interception, include/exclude context flags, transient bash cards, active bash abort, and one-active-per-tab FIFO queuing.
+- Core browser-safe native shortcut defaults: `Ctrl/Cmd+L`, `Ctrl/Cmd+P`, `Shift+Ctrl/Cmd+P`, `Shift+Tab`, `Ctrl/Cmd+T`, `Ctrl/Cmd+O`, `Alt+Enter`, degraded `Alt+Up`, and guarded `Ctrl/Cmd+C` prompt clear.
 - Extension UI RPC bridge for `notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`, `select`, `confirm`, `input`, and `editor`.
 - Side panel, optional companion package state, themes/custom backgrounds, footer telemetry, mobile/PWA shell, and browser notifications.
 
 ### Partial native coverage
 
 - `/settings` covers key runtime controls, but not the full native settings surface.
+- `/export` works for no-path downloads and new explicit paths, but overwrite confirmation UI and full trusted-context policy are still pending.
+- `!`/`!!` bash works for active/queued commands, but per-item queued cancellation and runtime LAN shell warnings are still pending.
+- Core shortcuts are implemented as browser-safe defaults, but full action-ID/user keybinding integration and double-Escape action are still pending.
+- `Alt+Up` restores the latest observed queue snapshot to the composer, but cannot clear Pi's RPC queue or restore attachments until upstream RPC exposes that state/control.
 - `/tree` supports session-tree navigation but not full TUI parity for filters, folding, label editing, and label timestamp toggles.
 - `/resume` supports session picking, but not full TUI parity for delete, rename, sort, path display, and named-only filters.
 - `/scoped-models` currently points to the footer picker instead of providing a full enabled-model editor.
 - `/hotkeys` returns Web UI-specific help, not the configured native keybinding table.
-- Tool output is collapsible per-card, but native `Ctrl+O` global tool expansion/collapse parity is incomplete.
 - Browser theme selection works, but native TUI theme switching through Pi's own theme API is degraded in RPC mode.
 
 ### Missing or intentionally degraded native coverage
 
-- User bash editor commands: `!command` and `!!command`.
-- Native commands: `/export`, `/import`, `/share`, `/changelog`, and `/quit`.
+- Native commands: `/import`, `/share`, `/changelog`, and `/quit`.
 - Full browser auth for `/login` and `/logout`.
-- Native keybindings: model cycling, thinking cycling/toggle, clear editor, double-Escape action, queue retrieval, and user-configurable shortcuts.
 - Native external editor flow (`Ctrl+G` / `$VISUAL` or `$EDITOR`).
 - Startup header/resource overview showing loaded context files, prompts, skills, extensions, and shortcuts.
 - TUI-only extension UI APIs in RPC mode: `ctx.ui.custom()`, overlays, `setWorkingMessage()`, `setWorkingVisible()`, `setWorkingIndicator()`, `setFooter()`, `setHeader()`, `setEditorComponent()`, `addAutocompleteProvider()`, `setToolsExpanded()`, and `getEditorText()`.
@@ -73,54 +78,60 @@ Therefore Web UI parity must use two tracks:
 ### P0 — Parity foundation and safety
 
 1. **Create a native feature parity matrix and keep it tested**
+   - Status: implemented initial matrix in `WEBUI_TUI_NATIVE_PARITY.json`; enforced by `tests/native-parity.test.mjs` and static checks.
    - Track each TUI command, shortcut, editor feature, session action, and extension UI method.
    - Add test assertions so newly implemented parity is not accidentally removed.
    - Output: `docs`/plan table plus static tests in `tests/mobile-static.test.mjs` or a new targeted test file.
 
 2. **Build a consistent native-command adapter layer**
+   - Status: implemented initial server-authoritative adapter with structured success/unavailable responses, native downloads, clipboard text, and matrix-derived command metadata.
    - Centralize Web UI handling for native commands rather than scattering logic across `public/app.js` and `bin/pi-webui.mjs`.
    - Define a common response shape for native command results: transcript message, toast/event, tab metadata updates, downloads, clipboard text, warnings, and follow-up refresh hints.
    - Files: `bin/pi-webui.mjs`, `public/app.js`.
 
 3. **Define the Web UI security model for sensitive native features**
+   - Status: initial guard taxonomy and localhost/trusted-context rules are encoded in the parity matrix and README; per-feature confirmation UIs remain ongoing.
    - `/login`, `/logout`, `/share`, `/import`, `/export`, `/quit`, optional installs, and network exposure need explicit trust boundaries.
    - Preserve the current no-auth warning and localhost-only protections for sensitive operations.
    - Do not accept raw API keys in the browser until a dedicated secret-handling design exists.
 
 4. **Add a small integration-test harness for tab-scoped RPC actions**
+   - Status: static/native parity harness is in place; true HTTP/RPC integration tests are still pending.
    - Static tests are useful, but native parity needs request/response tests for server endpoints.
    - Start with pure server helper tests where possible, then add lightweight local server tests if practical.
 
 ### P1 — Core native TUI parity
 
 1. **Implement `!command` and `!!command` user bash parity**
+   - Status: initial parity implemented; remaining gaps are per-item queued cancellation, confirmation/warning polish, and runtime LAN shell warning UI.
    - Native behavior:
      - `!cmd` runs shell command and includes output in the next LLM context.
      - `!!cmd` runs shell command without sending output to the LLM context.
      - Bash should be abortable.
-   - Current gap: Web UI prompt submission treats these as normal prompts.
-   - Plan:
+   - Implemented:
      - Detect leading `!`/`!!` in composer before normal prompt send.
      - Add server endpoint backed by RPC `bash` and `abort_bash`.
      - Render `bashExecution` transcript cards and preserve include/exclude-from-context metadata.
      - Add active bash state and abort affordance distinct from agent abort.
+     - Serialize bash through one-active-per-tab FIFO queue on server and frontend.
    - Files: `public/app.js`, `bin/pi-webui.mjs`, `public/styles.css`, tests.
    - Acceptance:
      - `!pwd` creates a bash execution card and output affects the next prompt.
      - `!!pwd` creates a card but is excluded from LLM context.
      - Long-running bash can be aborted.
+     - Additional bash submissions queue behind the active command.
 
 2. **Implement `/export`**
+   - Status: initial parity implemented; remaining gap is overwrite confirmation/trusted-context UI for explicit paths.
    - Native behavior: export current session, HTML by default, optional path/format.
-   - Current gap: listed as native but not handled by Web UI.
-   - Plan:
+   - Implemented:
      - Use RPC `export_html` for HTML export.
      - For explicit `.jsonl`, copy or expose the current session file through a safe localhost-only download endpoint.
      - Add browser download and transcript-visible result.
    - Files: `bin/pi-webui.mjs`, `public/app.js`.
    - Acceptance:
      - `/export` downloads or links an HTML export.
-     - `/export /tmp/foo.html` writes server-side path and reports it.
+     - `/export /tmp/foo.html` writes server-side path and reports it when the target is new.
      - Errors are shown as native command cards.
 
 3. **Expand `/settings` to native parity**
@@ -147,6 +158,7 @@ Therefore Web UI parity must use two tracks:
      - Changes either apply immediately or clearly say `/reload`/restart is needed.
 
 4. **Implement full `/scoped-models` editor and model cycling**
+   - Status: model cycling shortcut/server helper is implemented; full visual editor/persistence remains pending.
    - Native behavior:
      - `Ctrl+P` cycles forward through enabled/scoped models.
      - `Shift+Ctrl+P` cycles backward.
@@ -162,16 +174,17 @@ Therefore Web UI parity must use two tracks:
      - `Ctrl+P` / `Shift+Ctrl+P` change models when focus is not in a conflicting input.
 
 5. **Complete native keyboard shortcut parity**
+   - Status: core browser-safe defaults implemented; action-ID/user keybinding config, double-Escape action, and exact queue clearing remain pending.
    - High-value shortcuts:
-     - `Ctrl+L`: model selector.
-     - `Ctrl+P` / `Shift+Ctrl+P`: cycle scoped models.
-     - `Shift+Tab`: cycle thinking level.
-     - `Ctrl+T`: collapse/expand thinking blocks.
-     - `Ctrl+O`: collapse/expand tool output globally.
-     - `Alt+Enter`: follow-up queue.
-     - `Alt+Up`: restore queued messages to editor.
-     - `Escape`: abort/cancel; double Escape opens configured action (`tree`, `fork`, or none).
-     - `Ctrl+C`: clear editor; double Ctrl+C should be carefully mapped because browser semantics differ.
+     - `Ctrl+L`: model selector. **Implemented as `Ctrl/Cmd+L`.**
+     - `Ctrl+P` / `Shift+Ctrl+P`: cycle scoped models. **Implemented as `Ctrl/Cmd+P` and `Shift+Ctrl/Cmd+P`.**
+     - `Shift+Tab`: cycle thinking level. **Implemented.**
+     - `Ctrl+T`: collapse/expand thinking blocks. **Implemented as browser thinking visibility toggle.**
+     - `Ctrl+O`: collapse/expand tool output globally. **Implemented.**
+     - `Alt+Enter`: follow-up queue. **Implemented.**
+     - `Alt+Up`: restore queued messages to editor. **Degraded: restores observed text snapshot only.**
+     - `Escape`: abort/cancel; double Escape opens configured action (`tree`, `fork`, or none). **Single Escape implemented; double Escape pending.**
+     - `Ctrl+C`: clear editor; double Ctrl+C should be carefully mapped because browser semantics differ. **Guarded clear implemented; double Ctrl+C intentionally not mapped.**
    - Plan:
      - Introduce a Web UI keybinding manager with context-aware guards for text inputs, dialogs, mobile, and browser-reserved shortcuts.
      - Read user keybindings if feasible; otherwise document browser-safe defaults and expose overrides later.
@@ -258,17 +271,22 @@ Therefore Web UI parity must use two tracks:
      - Include browser/Web UI overrides and conflicts.
 
 6. **Tool expansion parity**
+   - Status: implemented initial global browser-local toggle via `Ctrl/Cmd+O`; hint polish remains optional.
    - Native `Ctrl+O` toggles tool output expansion.
-   - Plan:
+   - Implemented:
      - Maintain a global tool expansion state and apply it to existing/new tool cards.
-     - Persist per-tab or per-browser preference.
-     - Show keybinding hints on collapsed cards.
+     - Persist per-browser preference.
+   - Remaining:
+     - Show richer keybinding hints on collapsed cards.
 
 7. **Queue retrieval parity**
+   - Status: degraded implementation via `Alt+Up`; exact native parity needs upstream RPC queue clear/attachment access.
    - Native `Alt+Up` restores queued messages to the editor.
-   - Plan:
+   - Implemented:
      - Track queue contents from `queue_update` events.
-     - Add restore-to-editor action for steering/follow-up queues.
+     - Add restore-to-editor action for steering/follow-up queue text.
+   - Remaining:
+     - Clear the upstream RPC queue after restore.
      - Preserve images/attachments where possible, or warn when not restorable.
 
 8. **Startup header/resource inspector**
@@ -329,29 +347,29 @@ These features are important but constrained by current RPC limitations.
 
 ### Phase 0 — Baseline and tests
 
-- Create a checked-in parity matrix from this plan.
-- Add tests that assert every listed native command has an explicit Web UI status: implemented, partial, planned, or intentionally unsupported.
-- Add tests for native-command guard messages so unsupported commands fail clearly.
+- [x] Create a checked-in parity matrix from this plan.
+- [x] Add tests that assert every listed native command has an explicit Web UI status.
+- [-] Add tests for native-command guard messages so unsupported commands fail clearly. Static coverage exists; HTTP/RPC coverage remains pending.
 
 ### Phase 1 — Native command adapter and quick wins
 
-- Add centralized command adapter in `bin/pi-webui.mjs`.
-- Implement `/export`.
-- Add `/quit` decision and minimal safe implementation.
-- Improve unsupported-command messaging with next-best actions.
+- [x] Add centralized command adapter in `bin/pi-webui.mjs`.
+- [-] Implement `/export`. Initial no-path/new-path support is done; overwrite confirmation remains pending.
+- [ ] Add `/quit` decision and minimal safe implementation.
+- [x] Improve unsupported-command messaging with next-best actions.
 
 ### Phase 2 — Editor and queue parity
 
-- Implement `!`/`!!` bash commands and abort bash.
-- Implement keyboard manager for core shortcuts.
-- Add queue retrieval (`Alt+Up`) and clearer queue editing.
-- Add global tool expand/collapse.
+- [-] Implement `!`/`!!` bash commands and abort bash. Initial active/queued support is done; per-item queued cancellation and warning polish remain pending.
+- [-] Implement keyboard manager for core shortcuts. Browser-safe defaults are done; action-ID/user keybinding config and double-Escape remain pending.
+- [-] Add queue retrieval (`Alt+Up`) and clearer queue editing. Text snapshot restore is done; RPC queue clear/attachment restore remain pending.
+- [x] Add global tool expand/collapse.
 
 ### Phase 3 — Settings and model parity
 
-- Expand `/settings`.
-- Implement full `/scoped-models` editor.
-- Add model/thinking cycling shortcuts and persistent visible status.
+- [ ] Expand `/settings`.
+- [-] Implement full `/scoped-models` editor. Model cycle shortcuts/helpers are done; full editor/persistence remains pending.
+- [-] Add model/thinking cycling shortcuts and persistent visible status. Cycling shortcuts are done; status/persistence polish remains pending.
 
 ### Phase 4 — Session navigation parity
 
@@ -380,18 +398,18 @@ These features are important but constrained by current RPC limitations.
 ### `/export`
 
 - Priority: P1
-- Current state: native command advertised but not implemented in Web UI.
+- Current state: degraded/mostly implemented. `/export` creates an HTML browser download with a short-lived token; explicit new `.html`/`.jsonl` paths write server-side. Overwrite confirmation is pending.
 - Backend: RPC `export_html`; safe session file download for JSONL.
-- Frontend: native command result card with download/open/copy-path actions.
-- Tests: command route, invalid path, download metadata, visible transcript output.
+- Frontend: native command result card with automatic download and transcript-visible result.
+- Tests: static/native parity coverage exists; HTTP route tests for invalid path/download metadata remain pending.
 
 ### `!` and `!!` bash
 
 - Priority: P1
-- Current state: missing.
-- Backend: RPC `bash`, `abort_bash`; preserve include/exclude context semantics.
-- Frontend: composer interception, bash-running state, output card, abort control.
-- Tests: command detection, include/exclude flag, abort path.
+- Current state: degraded/mostly implemented. Leading `!`/`!!` composer interception, include/exclude flags, active abort, transient output cards, and one-active-per-tab FIFO queuing are in place.
+- Backend: RPC `bash`, `abort_bash`; preserve include/exclude context semantics; server-side FIFO serialization.
+- Frontend: composer interception, bash-running state, queued bash cards, output card, abort control.
+- Tests: static/native parity coverage exists; runtime queue/abort smoke testing remains recommended.
 
 ### Full `/settings`
 
@@ -512,17 +530,17 @@ These features are important but constrained by current RPC limitations.
 
 ## Recommended next implementation order
 
-1. P0 parity matrix + native command adapter.
-2. `/export`.
-3. `!`/`!!` bash and abort bash.
-4. Core keyboard manager: `Ctrl+L`, `Shift+Tab`, `Ctrl+P`, `Shift+Ctrl+P`, `Ctrl+O`, `Ctrl+T`, `Alt+Enter`, `Alt+Up`, Escape/double Escape.
-5. Full `/settings`.
-6. Full `/scoped-models`.
-7. Full `/tree`.
-8. Full `/resume`.
-9. Safe `/login`/`/logout`.
-10. `/import`, `/share`, `/changelog`, `/quit`.
-11. Extension TUI bridge proposals/implementation.
+1. [x] P0 parity matrix + native command adapter.
+2. [-] `/export` — initial download/new-path support done; overwrite confirmation remains.
+3. [-] `!`/`!!` bash and abort bash — initial active/queued support done; per-item queue cancellation and warning polish remain.
+4. [-] Core keyboard manager: `Ctrl+L`, `Shift+Tab`, `Ctrl+P`, `Shift+Ctrl+P`, `Ctrl+O`, `Ctrl+T`, `Alt+Enter`, `Alt+Up`, Escape/double Escape — browser-safe defaults done; action-ID config and double-Escape remain.
+5. [ ] Full `/settings`.
+6. [ ] Full `/scoped-models` editor.
+7. [ ] Full `/tree`.
+8. [ ] Full `/resume`.
+9. [ ] Safe `/login`/`/logout`.
+10. [ ] `/import`, `/share`, `/changelog`, `/quit`.
+11. [ ] Extension TUI bridge proposals/implementation.
 
 ## Definition of done for native parity features
 

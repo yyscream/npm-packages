@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
-import { access, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { homedir, networkInterfaces, tmpdir } from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -15,6 +16,7 @@ const require = createRequire(import.meta.url);
 const packageRoot = path.resolve(__dirname, "..");
 const publicDir = path.join(packageRoot, "public");
 const packageJson = JSON.parse(await readFile(path.join(packageRoot, "package.json"), "utf8"));
+const nativeParityMatrix = JSON.parse(await readFile(path.join(packageRoot, "WEBUI_TUI_NATIVE_PARITY.json"), "utf8"));
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 31415;
@@ -46,6 +48,7 @@ const SESSION_SELECTOR_LIMIT = 200;
 const TREE_SELECTOR_TEXT_LIMIT = 260;
 const NETWORK_REBIND_DELAY_MS = 100;
 const NETWORK_REBIND_FORCE_CLOSE_MS = 750;
+const NATIVE_DOWNLOAD_TOKEN_TTL_MS = 10 * 60 * 1000;
 const AUTO_TAB_TITLE_MAX_LENGTH = 44;
 const AUTO_TAB_TITLE_WORD_LIMIT = 8;
 const AUTO_TAB_TITLE_STOP_WORDS = new Set([
@@ -88,6 +91,7 @@ const AUTO_TAB_TITLE_STOP_WORDS = new Set([
 
 const MIME_TYPES = new Map([
   [".html", "text/html; charset=utf-8"],
+  [".jsonl", "application/x-ndjson; charset=utf-8"],
   [".js", "text/javascript; charset=utf-8"],
   [".css", "text/css; charset=utf-8"],
   [".svg", "image/svg+xml"],
@@ -96,29 +100,32 @@ const MIME_TYPES = new Map([
   [".webmanifest", "application/manifest+json; charset=utf-8"],
 ]);
 
-const NATIVE_SLASH_COMMANDS = [
-  { name: "settings", description: "Open settings menu" },
-  { name: "model", description: "Select model (opens selector UI)" },
-  { name: "scoped-models", description: "Enable/disable models for Ctrl+P cycling" },
-  { name: "export", description: "Export session (HTML default, or specify path: .html/.jsonl)" },
-  { name: "import", description: "Import and resume a session from a JSONL file" },
-  { name: "share", description: "Share session as a secret GitHub gist" },
-  { name: "copy", description: "Copy last agent message to clipboard" },
-  { name: "name", description: "Set session display name" },
-  { name: "session", description: "Show session info and stats" },
-  { name: "changelog", description: "Show changelog entries" },
-  { name: "hotkeys", description: "Show all keyboard shortcuts" },
-  { name: "fork", description: "Create a new fork from a previous user message" },
-  { name: "clone", description: "Duplicate the current session at the current position" },
-  { name: "tree", description: "Navigate session tree (switch branches)" },
-  { name: "login", description: "Configure provider authentication" },
-  { name: "logout", description: "Remove provider authentication" },
-  { name: "new", description: "Start a new session" },
-  { name: "compact", description: "Manually compact the session context" },
-  { name: "resume", description: "Resume a different session" },
-  { name: "reload", description: "Reload keybindings, extensions, skills, prompts, and themes" },
-  { name: "quit", description: "Quit Pi" },
-].map((command) => ({ ...command, source: "native", location: "Pi" }));
+function nativeParitySurfaces(matrix = nativeParityMatrix) {
+  return Array.isArray(matrix?.surfaces) ? matrix.surfaces : [];
+}
+
+function nativeSlashCommandEntries(matrix = nativeParityMatrix) {
+  return nativeParitySurfaces(matrix)
+    .filter((surface) => surface?.kind === "slash-command")
+    .map((surface) => {
+      const name = String(surface.command?.name || surface.id || "").replace(/^\//, "").trim();
+      return {
+        name,
+        description: String(surface.command?.description || surface.title || `/${name}`),
+        source: "native",
+        location: "Pi",
+        nativeParity: {
+          status: surface.webStatus || "unsupported",
+          priority: surface.priority || "P2",
+          guards: Array.isArray(surface.guards) ? surface.guards : [],
+          sensitive: surface.sensitive === true,
+        },
+      };
+    })
+    .filter((command) => command.name);
+}
+
+const NATIVE_SLASH_COMMANDS = nativeSlashCommandEntries();
 const NATIVE_SLASH_COMMAND_NAMES = new Set(NATIVE_SLASH_COMMANDS.map((command) => command.name));
 const OPTIONAL_FEATURE_PACKAGES = new Map([
   ["gitWorkflow", "@firstpick/pi-prompts-git-pr"],
@@ -480,6 +487,71 @@ function sendSse(res, event) {
 
 function rpcSuccess(command, data = {}) {
   return { type: "response", command, success: true, data };
+}
+
+const nativeDownloadTokens = new Map();
+
+function pruneNativeDownloadTokens(now = Date.now()) {
+  for (const [token, item] of nativeDownloadTokens) {
+    if (!item || item.expiresAt <= now) nativeDownloadTokens.delete(token);
+  }
+}
+
+function safeDownloadFileName(name, fallback = "pi-export") {
+  const text = String(name || fallback).replace(/[\r\n\\/]+/g, " ").replace(/\s+/g, " ").trim();
+  return (text || fallback).slice(0, 180);
+}
+
+function contentDispositionAttachment(fileName) {
+  const safeName = safeDownloadFileName(fileName);
+  const asciiName = safeName.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
+  return `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(safeName)}`;
+}
+
+function registerNativeDownload(filePath, { fileName, contentType, command = "native" } = {}) {
+  pruneNativeDownloadTokens();
+  const token = randomUUID();
+  const expiresAt = Date.now() + NATIVE_DOWNLOAD_TOKEN_TTL_MS;
+  const record = {
+    path: filePath,
+    fileName: safeDownloadFileName(fileName || path.basename(filePath)),
+    contentType: contentType || MIME_TYPES.get(path.extname(filePath).toLowerCase()) || "application/octet-stream",
+    command,
+    expiresAt,
+  };
+  nativeDownloadTokens.set(token, record);
+  return {
+    url: `/api/native-download/${encodeURIComponent(token)}`,
+    fileName: record.fileName,
+    contentType: record.contentType,
+    expiresAt: new Date(expiresAt).toISOString(),
+  };
+}
+
+async function sendNativeDownload(res, token) {
+  pruneNativeDownloadTokens();
+  const item = nativeDownloadTokens.get(token);
+  if (!item) throw makeHttpError(404, "Download token expired or not found");
+  const fileStats = await stat(item.path).catch(() => null);
+  if (!fileStats?.isFile()) {
+    nativeDownloadTokens.delete(token);
+    throw makeHttpError(404, "Download file expired or not found");
+  }
+  res.writeHead(200, {
+    "content-type": item.contentType,
+    "content-length": String(fileStats.size),
+    "content-disposition": contentDispositionAttachment(item.fileName),
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+  });
+  await new Promise((resolve, reject) => {
+    const stream = createReadStream(item.path);
+    stream.on("error", reject);
+    res.on("error", reject);
+    res.on("close", resolve);
+    stream.on("end", resolve);
+    stream.pipe(res);
+  });
 }
 
 const ACTION_FEEDBACK_REACTIONS = new Set(["up", "down", "question"]);
@@ -1198,6 +1270,40 @@ async function getScopedModelData(tab) {
   return { models: resolveScopedModelsFromPatterns(patterns, response.data?.models || []), patterns, source, rpcRunning: response.rpcRunning !== false };
 }
 
+function modelKey(model) {
+  return model?.provider && model?.id ? `${model.provider}/${model.id}` : "";
+}
+
+async function cycleTabModel(tab, direction = "forward") {
+  const availableResponse = await tab.rpc.send({ type: "get_available_models" });
+  if (availableResponse.success === false) return availableResponse;
+  const allModels = Array.isArray(availableResponse.data?.models) ? availableResponse.data.models : [];
+  const { patterns, source } = await configuredScopedModelPatterns(tab.cwd);
+  const scopedModels = patterns.length ? resolveScopedModelsFromPatterns(patterns, allModels) : [];
+  const candidates = scopedModels.length ? scopedModels : allModels;
+  if (!candidates.length) throw makeHttpError(400, "No models are available to cycle.");
+
+  const state = await currentSessionState(tab).catch(() => tab.lastState || {});
+  const currentKey = modelKey(state.model);
+  const currentIndex = candidates.findIndex((model) => modelKey(model) === currentKey);
+  const backwards = direction === "backward" || direction === "previous" || direction === "prev";
+  let nextIndex;
+  if (backwards) nextIndex = currentIndex > 0 ? currentIndex - 1 : candidates.length - 1;
+  else nextIndex = currentIndex >= 0 && currentIndex < candidates.length - 1 ? currentIndex + 1 : 0;
+  const nextModel = candidates[nextIndex];
+  const response = await tab.rpc.send({ type: "set_model", provider: nextModel.provider, modelId: nextModel.id });
+  if (response.success === false) return response;
+  return rpcSuccess("cycle_model", {
+    model: response.data || nextModel,
+    direction: backwards ? "backward" : "forward",
+    scoped: scopedModels.length > 0,
+    scopeSource: scopedModels.length > 0 ? source : "all",
+    index: nextIndex,
+    count: candidates.length,
+    tab: tabMeta(tab),
+  });
+}
+
 function pathPickerRoots(activeCwd, viewedCwd) {
   const home = process.env.HOME || process.env.USERPROFILE;
   return uniquePathItems([
@@ -1818,6 +1924,13 @@ function commandFromPost(pathname, body) {
     }
     case "/api/abort":
       return { type: "abort" };
+    case "/api/bash": {
+      const command = String(body.command || "").trim();
+      if (!command) throw new Error("command is required");
+      return { type: "bash", command, excludeFromContext: body.excludeFromContext === true };
+    }
+    case "/api/abort-bash":
+      return { type: "abort_bash" };
     case "/api/new-session":
       return body.parentSession ? { type: "new_session", parentSession: String(body.parentSession) } : { type: "new_session" };
     case "/api/model": {
@@ -1833,6 +1946,8 @@ function commandFromPost(pathname, body) {
       }
       return { type: "set_thinking_level", level };
     }
+    case "/api/thinking-cycle":
+      return { type: "cycle_thinking_level" };
     case "/api/steering-mode": {
       const mode = String(body.mode || "").trim();
       if (!["all", "one-at-a-time"].includes(mode)) throw new Error("Invalid steering mode");
@@ -2011,6 +2126,77 @@ function tabActivitySnapshot(tab) {
 function pendingExtensionUiMap(tab) {
   if (!tab.pendingExtensionUiRequests) tab.pendingExtensionUiRequests = new Map();
   return tab.pendingExtensionUiRequests;
+}
+
+function bashQueueForTab(tab) {
+  if (!tab.bashQueue) tab.bashQueue = [];
+  return tab.bashQueue;
+}
+
+function settleBashQueueItem(item, kind, value) {
+  if (!item || item.settled) return;
+  item.settled = true;
+  if (kind === "resolve") item.resolve(value);
+  else item.reject(value);
+}
+
+function bashQueueEvent(tab) {
+  const queue = bashQueueForTab(tab);
+  const activeItem = tab.bashQueueDraining ? queue[0] : null;
+  return {
+    type: "webui_bash_queue_update",
+    tabId: tab.id,
+    tabTitle: tab.title,
+    activeCommand: activeItem?.command?.command,
+    queueLength: Math.max(0, queue.length - (activeItem ? 1 : 0)),
+    tabActivity: tabActivitySnapshot(tab),
+  };
+}
+
+function broadcastBashQueueUpdate(tab) {
+  if (tab?.sseClients) broadcastTabEvent(tab, bashQueueEvent(tab));
+}
+
+function rejectTabBashQueue(tab, error) {
+  const queue = tab?.bashQueue;
+  if (!queue?.length) return;
+  for (const item of queue.splice(0)) settleBashQueueItem(item, "reject", error);
+  tab.bashQueueDraining = false;
+  broadcastBashQueueUpdate(tab);
+}
+
+async function drainTabBashQueue(tab) {
+  if (tab.bashQueueDraining) return;
+  const queue = bashQueueForTab(tab);
+  tab.bashQueueDraining = true;
+  try {
+    while (queue.length > 0) {
+      const item = queue[0];
+      broadcastBashQueueUpdate(tab);
+      try {
+        const response = await tab.rpc.send(item.command);
+        settleBashQueueItem(item, "resolve", response);
+      } catch (error) {
+        settleBashQueueItem(item, "reject", error);
+      } finally {
+        const index = queue.indexOf(item);
+        if (index >= 0) queue.splice(index, 1);
+        broadcastBashQueueUpdate(tab);
+      }
+    }
+  } finally {
+    tab.bashQueueDraining = false;
+    broadcastBashQueueUpdate(tab);
+  }
+}
+
+function sendQueuedBashCommand(tab, command) {
+  return new Promise((resolve, reject) => {
+    const queue = bashQueueForTab(tab);
+    queue.push({ id: randomUUID(), command, resolve, reject, settled: false, queuedAt: new Date().toISOString() });
+    broadcastBashQueueUpdate(tab);
+    void drainTabBashQueue(tab);
+  });
 }
 
 function isPendingExtensionUiRequest(event) {
@@ -2268,6 +2454,8 @@ async function createTab({ id: requestedId, index, title, titleSource, conversat
     lastState: null,
     activity: createTabActivity(createdAt),
     pendingExtensionUiRequests: new Map(),
+    bashQueue: [],
+    bashQueueDraining: false,
     rpc: undefined,
     rpcUnsubscribe: undefined,
     sseClients: new Set(),
@@ -2427,6 +2615,7 @@ async function updateTabCwd(id, cwd) {
   const oldRpc = tab.rpc;
   tab.rpcUnsubscribe?.();
   tab.rpcUnsubscribe = undefined;
+  rejectTabBashQueue(tab, new Error("Pi tab is restarting; queued bash commands were cancelled"));
   oldRpc.stop();
 
   tab.cwd = nextCwd;
@@ -2462,6 +2651,7 @@ async function restartTabRpc(tab, reason = "reload") {
   const oldRpc = tab.rpc;
   tab.rpcUnsubscribe?.();
   tab.rpcUnsubscribe = undefined;
+  rejectTabBashQueue(tab, new Error("Pi tab is reloading; queued bash commands were cancelled"));
   oldRpc.stop();
 
   resetTabActivity(tab);
@@ -2784,6 +2974,102 @@ function formatSessionOutput(tab, state, stats) {
   ].filter(Boolean).join("\n");
 }
 
+function nativeExportBaseName(tab, state = {}) {
+  const source = state.sessionName || tab?.title || state.sessionId || "pi-session";
+  const date = new Date().toISOString().replace(/[:.]/g, "-");
+  return safeDownloadFileName(`${source}-${date}`, "pi-session").replace(/\s+/g, "-");
+}
+
+async function nativeExportTempPath(tab, state = {}, ext = ".html") {
+  const dir = path.join(tmpdir(), "pi-webui-native-exports");
+  await mkdir(dir, { recursive: true });
+  return path.join(dir, `${nativeExportBaseName(tab, state)}-${randomUUID()}${ext}`);
+}
+
+function exportTargetExtension(targetPath) {
+  return path.extname(targetPath).toLowerCase();
+}
+
+async function exportTargetExists(targetPath) {
+  const targetStats = await stat(targetPath).catch(() => null);
+  return !!targetStats;
+}
+
+async function handleNativeExportCommand(tab, args, req) {
+  const explicitTarget = String(args || "").trim();
+  const state = await currentSessionState(tab).catch(() => tab.lastState || {});
+
+  if (!explicitTarget) {
+    const outputPath = await nativeExportTempPath(tab, state, ".html");
+    const response = await tab.rpc.send({ type: "export_html", outputPath });
+    if (response.success === false) return response;
+    const exportedPath = response.data?.path || outputPath;
+    const download = registerNativeDownload(exportedPath, {
+      command: "export",
+      fileName: `${nativeExportBaseName(tab, state)}.html`,
+      contentType: MIME_TYPES.get(".html"),
+    });
+    return nativeCommandResponse("export", {
+      status: "succeeded",
+      level: "info",
+      message: `Exported current session to HTML.\nDownload: ${download.fileName}\nLink expires: ${download.expiresAt}`,
+      download,
+      result: response.data,
+    });
+  }
+
+  if (!isLocalAddress(req?.socket?.remoteAddress)) {
+    return nativeCommandResponse("export", {
+      status: "unavailable",
+      level: "warn",
+      reason: "Server-side export paths are only allowed from localhost.",
+      safetyRestriction: "Explicit /export paths write files on the server and are blocked for non-local browser clients.",
+      message: "Explicit /export paths are only allowed from localhost. Run /export without a path for a browser download, or retry from the local machine.",
+    });
+  }
+
+  const targetPath = resolveTabPath(tab, explicitTarget);
+  const ext = exportTargetExtension(targetPath);
+  if (![".html", ".jsonl"].includes(ext)) throw makeHttpError(400, "Usage: /export [path.html|path.jsonl]");
+  if (await exportTargetExists(targetPath)) {
+    return nativeCommandResponse("export", {
+      status: "confirmation_required",
+      level: "warn",
+      reason: `Export target already exists: ${targetPath}`,
+      safetyRestriction: "Overwrites require an explicit confirmation flow, which is not available from plain slash-command text yet.",
+      message: `Export target already exists and was not overwritten:\n${targetPath}\n\nUse /export without a path for a browser download, or delete/rename the existing file first.`,
+    });
+  }
+
+  await mkdir(path.dirname(targetPath), { recursive: true });
+
+  if (ext === ".html") {
+    const response = await tab.rpc.send({ type: "export_html", outputPath: targetPath });
+    if (response.success === false) return response;
+    return nativeCommandResponse("export", {
+      status: "succeeded",
+      level: "info",
+      message: `Exported current session HTML to server path:\n${response.data?.path || targetPath}`,
+      serverPath: response.data?.path || targetPath,
+      result: response.data,
+    });
+  }
+
+  requirePersistentSessions();
+  const sessionFile = state.sessionFile || tabRestorableSessionFile(tab);
+  if (!sessionFile) throw makeHttpError(400, "No persisted session file is available for JSONL export.");
+  const sourceStats = await stat(sessionFile).catch(() => null);
+  if (!sourceStats?.isFile()) throw makeHttpError(404, `Current session file not found: ${sessionFile}`);
+  await copyFile(sessionFile, targetPath);
+  return nativeCommandResponse("export", {
+    status: "succeeded",
+    level: "info",
+    message: `Copied current session JSONL to server path:\n${targetPath}`,
+    serverPath: targetPath,
+    result: { path: targetPath, sourcePath: sessionFile },
+  });
+}
+
 function webuiHotkeysOutput() {
   return [
     "Web UI hotkeys:",
@@ -2796,7 +3082,46 @@ function webuiHotkeysOutput() {
   ].join("\n");
 }
 
-async function handleNativeSlashCommand(tab, body) {
+function nativeParitySurfaceForCommand(name) {
+  return nativeParitySurfaces().find((surface) => surface.kind === "slash-command" && surface.command?.name === name) || null;
+}
+
+function nativeCommandResponse(command, data = {}) {
+  const surface = nativeParitySurfaceForCommand(command);
+  const status = data.status || (surface?.webStatus === "implemented" ? "succeeded" : surface?.webStatus === "degraded" ? "degraded" : "unavailable");
+  const level = data.level || (status === "succeeded" ? "info" : "warn");
+  return rpcSuccess("native_slash_command", {
+    command,
+    status,
+    level,
+    nativeParity: surface ? {
+      webStatus: surface.webStatus,
+      priority: surface.priority,
+      sensitive: surface.sensitive === true,
+      guards: Array.isArray(surface.guards) ? surface.guards : [],
+    } : undefined,
+    ...data,
+  });
+}
+
+function nativeCommandUnavailable(command, details = {}) {
+  const surface = nativeParitySurfaceForCommand(command);
+  const guards = Array.isArray(surface?.guards) ? surface.guards.filter((guard) => guard !== "none") : [];
+  const reason = details.reason || surface?.currentBehavior || "This native Pi TUI command is not implemented in the Web UI yet.";
+  const nextActions = details.nextActions || [
+    surface?.targetBehavior ? `Planned Web UI behavior: ${surface.targetBehavior}` : "Use the Pi TUI for this command until Web UI parity is implemented.",
+  ];
+  return nativeCommandResponse(command, {
+    status: "unavailable",
+    level: "warn",
+    reason,
+    safetyRestriction: details.safetyRestriction || (guards.length ? `Guarded by: ${guards.join(", ")}.` : undefined),
+    nextActions,
+    message: details.message || [`/${command} is not available in the Web UI yet.`, reason, ...nextActions].filter(Boolean).join("\n"),
+  });
+}
+
+async function handleNativeSlashCommand(tab, body, req) {
   const parsed = parseSlashCommand(body.message);
   if (!parsed) return undefined;
 
@@ -2830,6 +3155,9 @@ async function handleNativeSlashCommand(tab, body) {
       if (state.success === false) return state;
       return rpcSuccess("native_slash_command", { command: "session", message: formatSessionOutput(tab, state.data || {}, stats.success === false ? null : stats.data) });
     }
+    case "export": {
+      return handleNativeExportCommand(tab, parsed.args, req);
+    }
     case "copy": {
       const response = await tab.rpc.send({ type: "get_last_assistant_text" });
       if (response.success === false) return response;
@@ -2845,7 +3173,7 @@ async function handleNativeSlashCommand(tab, body) {
       return response.success === false ? response : rpcSuccess("native_slash_command", { command: "clone", message: response.data?.message || "Cloned the current session.", result: response.data?.result });
     }
     default:
-      throw makeHttpError(400, `/${parsed.name} is a native Pi TUI command, but this Web UI cannot run that interactive command yet.`);
+      return nativeCommandUnavailable(parsed.name);
   }
 }
 
@@ -2869,6 +3197,7 @@ async function closeTab(id) {
   }
   tab.sseClients.clear();
   tab.rpcUnsubscribe?.();
+  rejectTabBashQueue(tab, new Error("Pi tab closed; queued bash commands were cancelled"));
   tab.rpc.stop();
   tabs.delete(id);
   return tab;
@@ -3249,6 +3578,16 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === "/api/native-parity" && req.method === "GET") {
+      sendJson(res, 200, { ok: true, data: nativeParityMatrix });
+      return;
+    }
+
+    if (url.pathname.startsWith("/api/native-download/") && req.method === "GET") {
+      await sendNativeDownload(res, decodeURIComponent(url.pathname.slice("/api/native-download/".length)));
+      return;
+    }
+
     if (url.pathname === "/api/themes" && req.method === "GET") {
       sendJson(res, 200, { ok: true, data: await readBundledThemes() });
       return;
@@ -3345,6 +3684,14 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === "/api/model-cycle" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const tab = getRequestedTab(req, url, body);
+      const response = await cycleTabModel(tab, body.direction || body.mode);
+      sendJson(res, response.success === false ? 400 : 200, responseWithTab(response, tab));
+      return;
+    }
+
     if (url.pathname === "/api/fork-messages" && req.method === "GET") {
       const tab = getRequestedTab(req, url);
       sendJson(res, 200, { ok: true, data: await getForkMessagesData(tab) });
@@ -3420,7 +3767,7 @@ const server = createServer(async (req, res) => {
     if (url.pathname === "/api/prompt" && req.method === "POST") {
       const body = await readJsonBody(req, { limitBytes: requestBodyLimitForPath(url.pathname) });
       const tab = getRequestedTab(req, url, body);
-      const nativeResponse = await handleNativeSlashCommand(tab, body);
+      const nativeResponse = await handleNativeSlashCommand(tab, body, req);
       if (nativeResponse) {
         sendJson(res, nativeResponse.success === false ? 400 : 200, responseWithTab(nativeResponse, tab));
         return;
@@ -3488,7 +3835,7 @@ const server = createServer(async (req, res) => {
           maybeNameTabForConversation(tab, command);
           markTabWorking(tab);
         }
-        const response = await tab.rpc.send(command);
+        const response = command.type === "bash" ? await sendQueuedBashCommand(tab, command) : await tab.rpc.send(command);
         if (response.success === false && startsVisibleWork) markTabIdle(tab);
         if (response.success !== false && command.type === "new_session") {
           tab.conversationStarted = false;

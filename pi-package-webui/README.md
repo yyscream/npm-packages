@@ -57,6 +57,12 @@ For direct development from this package directory:
 node bin/pi-webui.mjs --cwd /path/to/project
 ```
 
+Or use the helper script in dev mode. `--dev` bypasses any `pi-webui` on `PATH` and runs this checkout's `bin/pi-webui.mjs`:
+
+```bash
+./start-webui.sh --dev --cwd /path/to/project
+```
+
 After a global npm install:
 
 ```bash
@@ -71,6 +77,10 @@ pi-webui --cwd /path/to/project
 - Live transcript with streamed assistant text/thinking, Markdown output, active-run status, tool/bash cards, queue/compaction events, jump-to-latest, sticky last-prompt navigation, and abort by button, Esc, or long press.
 - Prompt composer for prompts, steer/follow-up, busy-session behavior, model/thinking controls, manual compact/new session, uploads by button/drag/drop/paste, slash-command autocomplete, and `@` file/path references with live suggestions.
 - Browser-native selector dialogs for `/model`, `/settings`, `/theme`, `/fork`, `/clone`, `/resume`, `/tree`, and `/scoped-models`; `/login`/`/logout` show non-secret guidance instead of accepting credentials in the browser.
+- Native TUI parity tracking through `WEBUI_TUI_NATIVE_PARITY.json`, used as the source of truth for native command discovery and exposed at `GET /api/native-parity`.
+- Initial `/export` parity: `/export` creates an HTML browser download through a short-lived opaque token, while explicit new `.html`/`.jsonl` paths write server-side from localhost only.
+- Initial `!` / `!!` bash parity: leading `!cmd` runs queued RPC bash and includes output in the next LLM context; `!!cmd` runs with `excludeFromContext`; the active bash can be aborted from the Web UI.
+- Initial native shortcut parity for Ctrl/Cmd+L model selector, Ctrl/Cmd+P and Shift+Ctrl/Cmd+P model cycling, Shift+Tab thinking cycling, Ctrl/Cmd+T thinking visibility, Ctrl/Cmd+O tool/bash expansion, Alt+Enter follow-up, degraded Alt+Up queue restore, and Ctrl/Cmd+C prompt clear when no text is selected.
 - Session/workspace helpers for per-tab cwd changes, a clickable footer cwd picker with server-persisted fast picks, fork/clone/resume/tree navigation, and restart-safe restoration of currently open tabs.
 - Collapsible side-panel control deck for model/thinking/settings, optional features, Codex usage, session/queue/commands/events, local-network exposure, browser notifications, and Web UI themes/custom backgrounds.
 - Pi-style footer with token/cache/context/cost/speed telemetry, estimated Pi-context tokens, cwd/git/runtime/model/thinking metadata, and a scoped-model picker.
@@ -194,12 +204,16 @@ The local server exposes:
 - `GET /api/path-fast-picks` and `POST /api/path-fast-picks` for cwd picker fast picks persisted across browser tabs, Pi terminal tabs, and Web UI server restarts
 - `POST /api/attachments` for browser-selected, pasted, or dropped files; files are stored under the OS temp directory and referenced in the prompt, while supported images can also be sent inline via RPC `images`
 - `GET /api/themes` for optional theme data from `@firstpick/pi-themes-bundle` when available
+- `GET /api/native-parity` for the machine-readable native TUI parity matrix that drives native command discovery
+- `GET /api/native-download/<token>` for short-lived opaque native command artifacts such as browser `/export` downloads
 - `GET /api/fork-messages`, `POST /api/fork`, `POST /api/clone`, `GET /api/sessions`, `POST /api/switch-session`, `GET /api/session-tree`, and `POST /api/tree-navigate` for browser-native native slash selectors
 - localhost-only `POST /api/optional-feature-install` for explicit, warned installation of whitelisted optional feature packages
 - `GET /api/network` and localhost-only `POST /api/network/open` for local-network exposure status/control
 - `GET /api/webui-status?detailed=1` for slash-command status reporting
 - `POST /api/shutdown` for localhost-only graceful restarts from `/webui-start`; restart captures detailed open-tab status first so currently open tabs can be restored with their session files
 - HTTP endpoints for prompt/session/model/thinking/compact/git actions; tab-scoped calls use `?tab=<tabId>`
+- `POST /api/bash?tab=<tabId>` and `POST /api/abort-bash?tab=<tabId>` for leading `!` / `!!` user bash parity with server-side one-active-per-tab FIFO queuing
+- `POST /api/model-cycle?tab=<tabId>` and `POST /api/thinking-cycle?tab=<tabId>` for native shortcut model/thinking cycling
 - `POST /api/action-feedback?tab=<tabId>` to turn queued action/final-output reactions into a Pi prompt that creates/updates a LEARNING after the run is idle
 - `/api/events?tab=<tabId>` as a per-tab Server-Sent Events stream for Pi RPC events
 - `/api/extension-ui-response?tab=<tabId>` for browser responses to extension UI prompts
@@ -213,3 +227,4 @@ Pi stdout is read as JSONL and split only on `\n`, matching Pi RPC framing.
 - `--host 0.0.0.0` also makes the UI reachable from the network and is unsafe unless the network is trusted.
 - The UI is intended as a local companion, not a hardened multi-user web service.
 - Browser actions can trigger Pi tools, shell commands, file edits, and git operations according to the spawned Pi session's permissions.
+- If the Web UI is exposed to a LAN, any connected browser client can use `!` / `!!` bash and the `/api/bash` endpoint to run shell commands as the Web UI process user.

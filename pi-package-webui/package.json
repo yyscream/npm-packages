@@ -45,8 +45,8 @@
     "pi-webui": "./bin/pi-webui.mjs"
   },
   "scripts": {
-    "check": "node --check public/app.js && node --check bin/pi-webui.mjs && node tests/mobile-static.test.mjs",
-    "test": "node tests/mobile-static.test.mjs"
+    "check": "node --check public/app.js && node --check bin/pi-webui.mjs && node tests/mobile-static.test.mjs && node tests/native-parity.test.mjs",
+    "test": "node tests/mobile-static.test.mjs && node tests/native-parity.test.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.78.0"
@@ -66,6 +66,9 @@
     "public",
     "images",
     "tests",
+    "start-webui.sh",
+    "start-webui.ps1",
+    "WEBUI_TUI_NATIVE_PARITY.json",
     "README.md",
     "LICENSE"
   ],

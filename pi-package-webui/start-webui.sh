@@ -7,6 +7,36 @@ DEFAULT_HOST="127.0.0.1"
 DEFAULT_PORT="31415"
 SERVER_PID=""
 
+script_dir() {
+  local source dir
+  source="${BASH_SOURCE[0]}"
+
+  while [[ -L "$source" ]]; do
+    dir="$(cd -P "$(dirname "$source")" >/dev/null 2>&1 && pwd)"
+    source="$(readlink "$source")"
+    [[ "$source" != /* ]] && source="$dir/$source"
+  done
+
+  cd -P "$(dirname "$source")" >/dev/null 2>&1 && pwd
+}
+
+local_pi_webui_bin() {
+  local candidate
+  candidate="$(script_dir)/bin/pi-webui.mjs"
+
+  if [[ ! -f "$candidate" ]]; then
+    echo "--dev expected the local Pi Web UI server at: $candidate" >&2
+    return 1
+  fi
+
+  if ! command -v node >/dev/null 2>&1; then
+    echo "node is required to run the local Pi Web UI server in --dev mode." >&2
+    return 1
+  fi
+
+  printf '%s\n' "$candidate"
+}
+
 cleanup() {
   if [[ -n "${SERVER_PID:-}" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
     kill "$SERVER_PID" 2>/dev/null || true
@@ -316,25 +346,53 @@ wait_until_ready() {
 }
 
 main() {
-  local cwd host port browser_host connect_host url target_url i ready_status
+  local cwd host port browser_host connect_host url target_url i ready_status dev_mode local_webui_bin
   local args=("$@")
+  local pass_args=()
+  local webui_cmd=()
   cwd="$(choose_cwd)"
   host="${PI_WEBUI_HOST:-$DEFAULT_HOST}"
   port="${PI_WEBUI_PORT:-$DEFAULT_PORT}"
+  dev_mode=0
 
   for ((i = 0; i < ${#args[@]}; i++)); do
     case "${args[$i]}" in
       --)
+        pass_args+=("${args[@]:$i}")
         break
         ;;
+      --dev)
+        dev_mode=1
+        ;;
       --cwd)
-        if ((i + 1 < ${#args[@]})); then cwd="${args[$((i + 1))]}"; fi
+        if ((i + 1 < ${#args[@]})); then
+          cwd="${args[$((i + 1))]}"
+          pass_args+=("${args[$i]}" "${args[$((i + 1))]}")
+          ((i += 1))
+        else
+          pass_args+=("${args[$i]}")
+        fi
         ;;
       --host)
-        if ((i + 1 < ${#args[@]})); then host="${args[$((i + 1))]}"; fi
+        if ((i + 1 < ${#args[@]})); then
+          host="${args[$((i + 1))]}"
+          pass_args+=("${args[$i]}" "${args[$((i + 1))]}")
+          ((i += 1))
+        else
+          pass_args+=("${args[$i]}")
+        fi
         ;;
       --port)
-        if ((i + 1 < ${#args[@]})); then port="${args[$((i + 1))]}"; fi
+        if ((i + 1 < ${#args[@]})); then
+          port="${args[$((i + 1))]}"
+          pass_args+=("${args[$i]}" "${args[$((i + 1))]}")
+          ((i += 1))
+        else
+          pass_args+=("${args[$i]}")
+        fi
+        ;;
+      *)
+        pass_args+=("${args[$i]}")
         ;;
     esac
   done
@@ -346,6 +404,9 @@ main() {
   if webui_is_running "$url"; then
     target_url="$(webui_url_for_cwd "$url" "$cwd")"
     echo "Pi Web UI already appears to be running at: $url"
+    if [[ "$dev_mode" -eq 1 ]]; then
+      echo "--dev only affects newly started servers; stop the existing server first to run this checkout."
+    fi
     echo "Opening: $target_url"
     open_url "$target_url" || true
     exit 0
@@ -361,12 +422,19 @@ main() {
     exit 1
   fi
 
-  ensure_pi_webui
+  if [[ "$dev_mode" -eq 1 ]]; then
+    local_webui_bin="$(local_pi_webui_bin)"
+    webui_cmd=(node "$local_webui_bin")
+    echo "Dev mode: using local Pi Web UI server: $local_webui_bin"
+  else
+    ensure_pi_webui
+    webui_cmd=(pi-webui)
+  fi
 
   echo "Starting Pi Web UI in: $cwd"
   echo "Web UI URL: $url"
 
-  pi-webui --cwd "$cwd" --host "$host" --port "$port" "$@" &
+  "${webui_cmd[@]}" --cwd "$cwd" --host "$host" --port "$port" "${pass_args[@]}" &
   SERVER_PID="$!"
 
   trap cleanup EXIT

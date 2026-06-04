@@ -162,14 +162,14 @@
           </button>
         </div>
         <div class="side-panel-body">
-          <section class="side-panel-section" data-side-panel-section="controls">
+          <section class="side-panel-section collapsed" data-side-panel-section="controls">
             <h2>
-              <button id="sidePanelSectionToggleControls" class="side-panel-section-toggle" type="button" aria-expanded="true" aria-controls="sidePanelSectionControls" aria-label="Collapse Controls section" title="Collapse Controls section" data-side-panel-section-toggle="controls">
+              <button id="sidePanelSectionToggleControls" class="side-panel-section-toggle" type="button" aria-expanded="false" aria-controls="sidePanelSectionControls" aria-label="Expand Controls section" title="Expand Controls section" data-side-panel-section-toggle="controls">
                 <span class="side-panel-section-label">Controls</span>
                 <span class="side-panel-section-chevron" aria-hidden="true">›</span>
               </button>
             </h2>
-            <div id="sidePanelSectionControls" class="side-panel-section-content">
+            <div id="sidePanelSectionControls" class="side-panel-section-content" hidden>
               <div class="side-panel-controls">
                 <div class="control-field">
                   <label for="modelSelect">Model</label>
@@ -216,6 +216,10 @@
                   <div id="networkStatus" class="network-status closed">Local only</div>
                   <button id="openNetworkButton" type="button">Open to network</button>
                 </div>
+                <div class="control-field server-control-field">
+                  <label>Server</label>
+                  <button id="stopServerButton" class="danger" type="button" title="Stop the Pi Web UI server and disconnect all browser clients" aria-label="Stop the Pi Web UI server">Stop Server</button>
+                </div>
                 <div class="control-field notification-control-field">
                   <span class="control-label">Notifications</span>
                   <label class="toggle-control" for="agentDoneNotificationsToggle">
@@ -229,72 +233,72 @@
               </div>
             </div>
           </section>
-          <section class="side-panel-section" data-side-panel-section="optional-features">
+          <section class="side-panel-section collapsed" data-side-panel-section="optional-features">
             <h2>
-              <button id="sidePanelSectionToggleOptionalFeatures" class="side-panel-section-toggle" type="button" aria-expanded="true" aria-controls="sidePanelSectionOptionalFeatures" aria-label="Collapse Optional features section" title="Collapse Optional features section" data-side-panel-section-toggle="optional-features">
+              <button id="sidePanelSectionToggleOptionalFeatures" class="side-panel-section-toggle" type="button" aria-expanded="false" aria-controls="sidePanelSectionOptionalFeatures" aria-label="Expand Optional features section" title="Expand Optional features section" data-side-panel-section-toggle="optional-features">
                 <span class="side-panel-section-label">Optional features</span>
                 <span class="side-panel-section-chevron" aria-hidden="true">›</span>
               </button>
             </h2>
-            <div id="sidePanelSectionOptionalFeatures" class="side-panel-section-content">
+            <div id="sidePanelSectionOptionalFeatures" class="side-panel-section-content" hidden>
               <div id="optionalFeaturesBox" class="optional-features-box muted">Checking optional features…</div>
             </div>
           </section>
-          <section class="side-panel-section" data-side-panel-section="codex-usage">
+          <section class="side-panel-section collapsed" data-side-panel-section="codex-usage">
             <h2>
-              <button id="sidePanelSectionToggleCodexUsage" class="side-panel-section-toggle" type="button" aria-expanded="true" aria-controls="sidePanelSectionCodexUsage" aria-label="Collapse Codex Usage section" title="Collapse Codex Usage section" data-side-panel-section-toggle="codex-usage">
+              <button id="sidePanelSectionToggleCodexUsage" class="side-panel-section-toggle" type="button" aria-expanded="false" aria-controls="sidePanelSectionCodexUsage" aria-label="Expand Codex Usage section" title="Expand Codex Usage section" data-side-panel-section-toggle="codex-usage">
                 <span class="side-panel-section-label">Codex Usage</span>
                 <span class="side-panel-section-chevron" aria-hidden="true">›</span>
               </button>
             </h2>
-            <div id="sidePanelSectionCodexUsage" class="side-panel-section-content">
+            <div id="sidePanelSectionCodexUsage" class="side-panel-section-content" hidden>
               <div class="codex-usage-actions">
                 <button id="refreshCodexUsageButton" type="button">Refresh usage</button>
               </div>
               <div id="codexUsageBox" class="codex-usage-box muted">Checking Codex usage…</div>
             </div>
           </section>
-          <section class="side-panel-section" data-side-panel-section="session">
+          <section class="side-panel-section collapsed" data-side-panel-section="session">
             <h2>
-              <button id="sidePanelSectionToggleSession" class="side-panel-section-toggle" type="button" aria-expanded="true" aria-controls="sidePanelSectionSession" aria-label="Collapse Session section" title="Collapse Session section" data-side-panel-section-toggle="session">
+              <button id="sidePanelSectionToggleSession" class="side-panel-section-toggle" type="button" aria-expanded="false" aria-controls="sidePanelSectionSession" aria-label="Expand Session section" title="Expand Session section" data-side-panel-section-toggle="session">
                 <span class="side-panel-section-label">Session</span>
                 <span class="side-panel-section-chevron" aria-hidden="true">›</span>
               </button>
             </h2>
-            <div id="sidePanelSectionSession" class="side-panel-section-content">
+            <div id="sidePanelSectionSession" class="side-panel-section-content" hidden>
               <dl id="stateDetails" class="details"></dl>
             </div>
           </section>
-          <section class="side-panel-section" data-side-panel-section="queue">
+          <section class="side-panel-section collapsed" data-side-panel-section="queue">
             <h2>
-              <button id="sidePanelSectionToggleQueue" class="side-panel-section-toggle" type="button" aria-expanded="true" aria-controls="sidePanelSectionQueue" aria-label="Collapse Queue section" title="Collapse Queue section" data-side-panel-section-toggle="queue">
+              <button id="sidePanelSectionToggleQueue" class="side-panel-section-toggle" type="button" aria-expanded="false" aria-controls="sidePanelSectionQueue" aria-label="Expand Queue section" title="Expand Queue section" data-side-panel-section-toggle="queue">
                 <span class="side-panel-section-label">Queue</span>
                 <span class="side-panel-section-chevron" aria-hidden="true">›</span>
               </button>
             </h2>
-            <div id="sidePanelSectionQueue" class="side-panel-section-content">
+            <div id="sidePanelSectionQueue" class="side-panel-section-content" hidden>
               <div id="queueBox" class="queue-box muted">No queued messages.</div>
             </div>
           </section>
-          <section class="side-panel-section" data-side-panel-section="commands">
+          <section class="side-panel-section collapsed" data-side-panel-section="commands">
             <h2>
-              <button id="sidePanelSectionToggleCommands" class="side-panel-section-toggle" type="button" aria-expanded="true" aria-controls="sidePanelSectionCommands" aria-label="Collapse Commands section" title="Collapse Commands section" data-side-panel-section-toggle="commands">
+              <button id="sidePanelSectionToggleCommands" class="side-panel-section-toggle" type="button" aria-expanded="false" aria-controls="sidePanelSectionCommands" aria-label="Expand Commands section" title="Expand Commands section" data-side-panel-section-toggle="commands">
                 <span class="side-panel-section-label">Commands</span>
                 <span class="side-panel-section-chevron" aria-hidden="true">›</span>
               </button>
             </h2>
-            <div id="sidePanelSectionCommands" class="side-panel-section-content">
+            <div id="sidePanelSectionCommands" class="side-panel-section-content" hidden>
               <div id="commandsBox" class="commands-box muted">Loading…</div>
             </div>
           </section>
-          <section class="side-panel-section" data-side-panel-section="events">
+          <section class="side-panel-section collapsed" data-side-panel-section="events">
             <h2>
-              <button id="sidePanelSectionToggleEvents" class="side-panel-section-toggle" type="button" aria-expanded="true" aria-controls="sidePanelSectionEvents" aria-label="Collapse Events section" title="Collapse Events section" data-side-panel-section-toggle="events">
+              <button id="sidePanelSectionToggleEvents" class="side-panel-section-toggle" type="button" aria-expanded="false" aria-controls="sidePanelSectionEvents" aria-label="Expand Events section" title="Expand Events section" data-side-panel-section-toggle="events">
                 <span class="side-panel-section-label">Events</span>
                 <span class="side-panel-section-chevron" aria-hidden="true">›</span>
               </button>
             </h2>
-            <div id="sidePanelSectionEvents" class="side-panel-section-content">
+            <div id="sidePanelSectionEvents" class="side-panel-section-content" hidden>
               <div id="eventLog" class="event-log"></div>
             </div>
           </section>

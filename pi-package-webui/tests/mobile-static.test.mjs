@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const [pkgRaw, html, css, app, server, extension, readme, manifestRaw, serviceWorker, appleIcon, icon192, icon512, matrixBackground, mochaBackground] = await Promise.all([
+const [pkgRaw, html, css, app, server, extension, readme, startScript, manifestRaw, serviceWorker, appleIcon, icon192, icon512, matrixBackground, mochaBackground] = await Promise.all([
   readFile(join(root, "package.json"), "utf8"),
   readFile(join(root, "public", "index.html"), "utf8"),
   readFile(join(root, "public", "styles.css"), "utf8"),
@@ -12,6 +12,7 @@ const [pkgRaw, html, css, app, server, extension, readme, manifestRaw, serviceWo
   readFile(join(root, "bin", "pi-webui.mjs"), "utf8"),
   readFile(join(root, "index.ts"), "utf8"),
   readFile(join(root, "README.md"), "utf8"),
+  readFile(join(root, "start-webui.sh"), "utf8"),
   readFile(join(root, "public", "manifest.webmanifest"), "utf8"),
   readFile(join(root, "public", "service-worker.js"), "utf8"),
   readFile(join(root, "public", "apple-touch-icon.png")),
@@ -44,6 +45,7 @@ assert.match(html, /id="themeSelect"/, "side panel should expose a theme selecto
 assert.match(html, /<label for="themeSelect">Theme<\/label>/, "theme selector should be labeled in side-panel controls");
 assert.match(html, /id="backgroundInput"[^>]*type="file"[^>]*accept="image\/png,image\/jpeg,image\/webp,image\/gif"/, "side panel should expose an image picker for custom backgrounds");
 assert.match(html, /id="backgroundClearButton"[\s\S]*?>×<\/button>/, "side-panel background control should expose an X remove button");
+assert.match(html, /id="stopServerButton"[^>]*?>Stop Server<\/button>/, "side panel should expose a Stop Server button");
 assert.match(html, /id="agentDoneNotificationsToggle"/, "side panel should expose an agent-done notifications toggle");
 assert.match(html, /id="agentDoneNotificationsStatus"/, "agent-done notifications toggle should expose status text");
 assert.match(html, /id="thinkingVisibilityToggle"/, "side panel should expose a thinking-output visibility toggle");
@@ -60,6 +62,22 @@ assert.match(html, /data-side-panel-section="controls"/, "side panel controls sh
 assert.match(html, /data-side-panel-section="commands"/, "side panel commands should live in a collapsible section");
 assert.match(html, /class="side-panel-section-toggle"[^>]*aria-controls="sidePanelSectionControls"/, "side panel section toggles should target their content panels");
 assert.match(html, /class="side-panel-section-label">Events<\/span>/, "side panel events should expose a section toggle label");
+const sidePanelToggleStates = Array.from(
+  html.matchAll(/class="side-panel-section-toggle"[^>]*aria-expanded="([^"]+)"/g),
+  (match) => match[1],
+);
+assert.ok(sidePanelToggleStates.length >= 7, "side panel should expose section toggle states");
+assert.deepEqual([...new Set(sidePanelToggleStates)], ["false"], "side-panel sections should start collapsed by default");
+assert.equal(
+  (html.match(/<section class="side-panel-section collapsed" data-side-panel-section=/g) || []).length,
+  sidePanelToggleStates.length,
+  "side-panel sections should render with the collapsed class by default",
+);
+assert.equal(
+  (html.match(/class="side-panel-section-content" hidden/g) || []).length,
+  sidePanelToggleStates.length,
+  "side-panel section panels should be hidden by default",
+);
 assert.match(html, /id="jumpToLatestButton"/, "chat should expose a jump-to-latest control for non-forced streaming");
 assert.match(html, /id="stickyUserPromptButton"/, "chat should expose a fixed last-user-prompt jump control");
 assert.match(html, /id="feedbackTray"/, "chat should expose a queued action-feedback tray");
@@ -105,6 +123,8 @@ assert.match(css, /\.message\.run-indicator-message \{[\s\S]*?border-color/, "ac
 assert.match(css, /\.message\.action-enter \{[\s\S]*?action-card-slide-in/, "new action cards should subtly slide in from the bottom");
 assert.match(css, /@keyframes action-card-slide-in \{[\s\S]*?translateY\(0\.42rem\)/, "action-card entry animation should start below the final position");
 assert.match(css, /\.message\.thinking,\n\.message\.toolCall,\n\.message\.assistantEvent/, "thinking and assistant events should have non-assistant transcript card styling");
+assert.doesNotMatch(css, /\.message\.thinking\.streaming\.complete[\s\S]*?content:\s*" done"/, "completed live thinking cards should not append a green DONE label");
+assert.doesNotMatch(css, /\.thinking-block\.streaming-thinking\.complete[\s\S]*?content:\s*" done"/, "completed thinking details should not append a green DONE label");
 assert.match(css, /\.message\.toolResult, \.message\.bashExecution, \.message\.compactionSummary/, "compaction summaries should render as compact collapsible transcript cards");
 assert.match(css, /\.message\.toolExecution \{[\s\S]*?border-color/, "paired tool executions should render as distinct TUI-like action cards");
 assert.match(css, /\.tool-diff \{[\s\S]*?font-family:/, "edit tool diffs should have a dedicated monospace renderer");
@@ -119,6 +139,8 @@ assert.match(css, /\.side-panel-section\.collapsed \.side-panel-section-content,
 assert.match(css, /\.side-panel-section:not\(\.collapsed\) \.side-panel-section-chevron/, "expanded side panel sections should rotate the chevron");
 assert.match(css, /\.optional-feature-pill\.enabled/, "optional features should visually distinguish enabled state");
 assert.match(css, /\.todo-widget \{[\s\S]*?display:\s*grid/, "todo-progress widget should render as a styled checklist card");
+assert.match(css, /\.todo-widget-summary \{[\s\S]*?cursor:\s*pointer/, "todo-progress widget should expose a compact expandable summary");
+assert.match(css, /\.todo-widget-body \{[\s\S]*?max-height:/, "expanded todo-progress details should be height-limited");
 assert.match(css, /\.todo-widget-item\.partial \.todo-widget-marker/, "todo-progress partial items should have distinct styling");
 assert.match(css, /\.todo-widget-item\.done \.todo-widget-text[\s\S]*?text-decoration:\s*line-through/, "todo-progress completed items should be visually crossed out");
 assert.match(css, /\.release-npm-widget \{[\s\S]*?display:\s*grid/, "release-npm output should render as a specialized Web UI widget");
@@ -215,6 +237,8 @@ assert.match(app, /Restart Web UI to load themes/, "frontend should explain when
 assert.match(app, /themeSelect\.addEventListener\("change"/, "side-panel theme selector should switch themes immediately");
 assert.match(app, /open \? "Close for network" : "Open to network"/, "network button should toggle from open to close action");
 assert.match(app, /api\("\/api\/network\/close", \{ method: "POST"/, "network close action should call the close endpoint");
+assert.match(app, /stopServerButton\.addEventListener\("click", stopServer\)/, "Stop Server button should be wired to the shutdown handler");
+assert.match(app, /api\("\/api\/shutdown", \{ method: "POST", scoped: false \}\)/, "Stop Server action should call the unscoped shutdown endpoint");
 assert.match(server, /async function closeNetworkAccess\(\)/, "server should expose a local-only rebind helper for closing network access");
 assert.match(server, /url\.pathname === "\/api\/network\/close" && req\.method === "POST"/, "server should route network close requests");
 assert.match(server, /server\.closeAllConnections\?\.\(\)/, "network rebind should force-close long-lived clients so close-to-localhost can complete");
@@ -256,10 +280,27 @@ assert.match(app, /function hasQueuedDialogRequest\(id\)/, "frontend should dedu
 assert.match(app, /if \(request\.replayed\) addEvent\(`recovered pending \$\{request\.method\} request`, "warn"\)/, "frontend should surface replayed extension UI blockers");
 assert.match(app, /case "webui_extension_ui_cancelled":/, "frontend should close dialogs cancelled by backend abort handling");
 assert.match(app, /function parseTodoProgressWidget\(lines\)/, "todo-progress widgets should be parsed from extension widget lines");
+assert.match(app, /const todoProgressWidgetExpandedByTab = new Map\(\)/, "todo-progress expansion state should survive widget re-renders per tab");
+assert.match(app, /const node = make\("details", "widget todo-widget"\)/, "todo-progress widget should render collapsed by default as expandable details");
 assert.match(app, /Optional feature detection intentionally checks loaded Pi capabilities/, "optional Web UI features should be detected through loaded capabilities, not package folders");
 assert.match(app, /function resetOptionalFeatureAvailability\(\)/, "optional feature state should reset across active-tab and reload boundaries");
 assert.match(app, /function renderOptionalFeaturePanel\(\)/, "side panel should render optional feature installed/enabled state");
 assert.match(app, /function setSidePanelSectionCollapsed\(record, collapsed/, "side panel sections should have explicit collapse/expand behavior");
+assert.match(
+  app,
+  /function setOnlySidePanelSectionExpanded\(targetRecord,[\s\S]*?setSidePanelSectionCollapsed\(record, record\.id !== targetId, \{ persist: false \}\);[\s\S]*?persistSidePanelSectionState\(\);/,
+  "opening a side-panel section should collapse every other section before persisting",
+);
+assert.match(
+  app,
+  /const expandedRecords = collapsedIds \? records\.filter\(\(\{ id \}\) => !collapsedIds\.has\(id\)\) : \[\];\n\s+const expandedId = expandedRecords\.length === 1 \? expandedRecords\[0\]\.id : null;/,
+  "side-panel section restore should preserve at most one expanded section and otherwise default collapsed",
+);
+assert.match(
+  app,
+  /if \(record\.section\.classList\.contains\("collapsed"\)\) \{\n\s+setOnlySidePanelSectionExpanded\(record\);\n\s+\} else \{\n\s+setSidePanelSectionCollapsed\(record, true\);\n\s+\}/,
+  "side-panel section toggles should expand at most one section at a time",
+);
 assert.match(app, /function renderCodexUsage\(\)/, "frontend should render Codex usage buckets in the side panel");
 assert.match(app, /api\(`\/api\/codex-usage\$\{suffix\}`, \{ scoped: false \}\)/, "Codex usage should load through a server endpoint without browser credentials");
 assert.match(app, /restoreSidePanelSectionState\(\);\nbindSidePanelSectionToggles\(\);/, "side panel section state should restore before toggles are bound");
@@ -276,6 +317,10 @@ assert.match(app, /const releasePrompt = detectedReleasePrompt && isOptionalFeat
 assert.match(app, /case "webui_tab_reloaded":[\s\S]*resetOptionalFeatureAvailability\(\)/, "optional feature state should reset when the RPC tab reloads resources");
 assert.match(app, /function runPublishWorkflow\(command\)[\s\S]*hasAvailableCommand\(commandName\)/, "publish workflow launch should guard on loaded slash commands");
 assert.match(app, /if \(!isOptionalFeatureEnabled\("gitWorkflow"\)\)/, "guided git workflow should guard on enabled /git-staged-msg feature");
+assert.match(app, /const gitWorkflowsByTab = new Map\(\)/, "guided git workflow state should be stored per terminal tab");
+assert.match(app, /function bindGitWorkflowToActiveTab\(\) \{\n\s+gitWorkflow = gitWorkflowForTab\(activeTabId\) \|\| createGitWorkflowState\(\);/, "guided git workflow should render only the active terminal tab's workflow state");
+assert.match(app, /function setGitWorkflow\(patch, \{ tabId = activeTabId \} = \{\}\)[\s\S]*if \(tabId === activeTabId\) \{[\s\S]*renderGitWorkflow\(\);/, "guided git workflow should not render inactive terminal workflows globally");
+assert.doesNotMatch(app, /gitWorkflowVisibleTabId|Workflow belongs to/, "guided git workflow should not pin or show workflows outside their owning terminal tab");
 assert.match(app, /function renderReleaseNpmOutputWidget\(\)/, "release-npm live output should use a specialized Web UI renderer");
 assert.match(app, /function renderReleaseAurOutputWidget\(\)/, "release-aur live output should use a specialized Web UI renderer");
 assert.match(app, /releaseNpmActionButton\("Abort", "\/release-abort", "danger"\)/, "release-npm Web UI output should expose an abort action");
@@ -293,6 +338,10 @@ assert.match(app, /appendToolRawDetails\(parent, tool\)/, "paired tool cards sho
 assert.match(app, /function toolStateMeta\(tool\)/, "tool cards should expose consistent status and elapsed metadata across built-in renderers");
 assert.match(app, /const TOOL_LIVE_UPDATE_THROTTLE_MS = 80/, "live tool cards should coalesce rapid partial updates before re-rendering");
 assert.match(app, /function updateLiveToolCard\(bubble, message\)[\s\S]*?body\.replaceChildren\(\);[\s\S]*?renderToolExecution\(body, message\);/, "live tool card updates should re-render the existing card body in place");
+assert.match(app, /function applyToolExecutionBubbleState\(bubble, message\)[\s\S]*?bubble\.dataset\.toolStatus !== status[\s\S]*?bubble\.classList\.add\(nextClass\)[\s\S]*?bubble\.classList\.toggle\("error"/, "tool status classes should not be removed and re-added on every live update");
+assert.match(app, /function toolExecutionRenderSignature\(message\)[\s\S]*?normalizeToolExecution\(message\)[\s\S]*?toolRenderSignatureReplacer\(\)/, "tool cards should derive stable render signatures from normalized tool payloads");
+assert.match(app, /const nextRenderSignature = toolExecutionRenderSignature\(message\)[\s\S]*?bubble\._toolRenderSignature === nextRenderSignature[\s\S]*?return true;[\s\S]*?bubble\._toolRenderSignature = nextRenderSignature/, "live tool card updates should skip identical body re-renders");
+assert.match(app, /message\.role === "toolExecution"[\s\S]*?renderToolExecution\(body, message\);[\s\S]*?bubble\._toolRenderSignature = toolExecutionRenderSignature\(message\);/, "new tool cards should cache their initial render signature");
 assert.match(app, /function scheduleLiveToolRunRender\(run[\s\S]*?liveToolRenderQueue\.set[\s\S]*?TOOL_LIVE_UPDATE_THROTTLE_MS/, "live tool update events should be queued and throttled for smoother browser output");
 assert.match(app, /function handleToolExecutionUpdate\(event\)[\s\S]*?event\.partialResult[\s\S]*?scheduleLiveToolRunRender\(run, \{ scroll: false \}\)/, "live tool_execution_update events should update transcript-visible tool cards without replacing them per event");
 assert.match(app, /function captureReusableToolCards\(\)[\s\S]*?\.message\.toolExecution\[data-tool-call-id\]/, "full transcript re-renders should capture existing tool cards before clearing the chat");
@@ -309,7 +358,16 @@ assert.match(app, /if \(isEmptyAssistantTextPart\(part\)\) continue;/, "empty as
 assert.match(app, /function assistantFinalOutputPart\(part\)[\s\S]*?if \(part\.type === "text"\) \{[\s\S]*?const text = assistantTextPartText\(part\);[\s\S]*?return text\.trim\(\) \? \{ \.\.\.part, type: "text", text \} : null;/, "assistant text parts should normalize supported text payload shapes");
 assert.match(app, /\["assistant", "toolExecution"\]\.includes\(transcriptMessage\.role\) \? messageIndex : -1/, "final Assistant output and paired tool action cards should keep the source message index for feedback");
 assert.match(app, /function ensureStreamingThinkingBubble\(\)[\s\S]*if \(!thinkingOutputVisible\) return false/, "live thinking should respect the show/hide thinking-output toggle");
-assert.match(app, /if \(thinkingOutputVisible && \(thinkingText \|\| !streaming\)\) appendText\(body, thinkingText \|\| "No thinking content was exposed by the provider\.", "thinking-text"\);/, "empty live thinking cards should not render the no-thinking fallback before deltas arrive");
+assert.match(app, /const UNEXPOSED_THINKING_TEXT = "No thinking content was exposed by the provider\."/, "frontend should name the provider no-thinking placeholder for suppression");
+assert.match(app, /function visibleThinkingText\(text\)[\s\S]*?trimmed === UNEXPOSED_THINKING_TEXT[\s\S]*?return "";/, "provider no-thinking placeholders should normalize to empty thinking output");
+assert.match(app, /if \(isThinkingPart\) \{[\s\S]*?visibleThinkingText\(assistantThinkingText\(part\)\)[\s\S]*?if \(thinking\) displayMessages\.push/, "assistant transcript splitting should skip empty or unexposed thinking parts");
+assert.match(app, /message\.role === "thinking"[\s\S]*?visibleThinkingText\(message\.thinking \|\| textFromContent\(message\.content\)\)[\s\S]*?if \(thinkingOutputVisible && thinkingText\) appendText\(body, thinkingText, "thinking-text"\);/, "thinking cards should suppress empty and provider no-thinking placeholder output");
+assert.match(app, /function showStreamingThinking\(initialText = ""\)[\s\S]*?if \(initialText && !streamThinking\.textContent\) streamThinking\.textContent = initialText;/, "live thinking should not create a visible placeholder card before content arrives");
+assert.match(app, /function setStreamingThinkingText\(text\)[\s\S]*?const thinking = visibleThinkingText\(text\);[\s\S]*?if \(!thinkingOutputVisible \|\| !thinking\) return false;[\s\S]*?return true;/, "live thinking text setters should ignore empty text instead of clearing or flashing the card");
+assert.match(app, /function syncStreamingThinkingFromMessage\(event[\s\S]*?return setStreamingThinkingText\(text \|\| placeholder\);/, "partial-message thinking sync should only report success after setting visible thinking text");
+assert.doesNotMatch(app, /text \|\| placeholder \|\| streamThinkingBubble/, "partial-message thinking sync should not clear an existing thinking card when a partial carries no visible thinking text");
+assert.match(app, /if \(thinkingOutputVisible && delta && \(!synced \|\| !streamThinking\?\.textContent\)\) \{/, "live thinking delta fallback should require visible delta text before creating a card");
+assert.match(app, /function thinkingDeltaText\(update\) \{[\s\S]*?return visibleThinkingText\(update\.delta \|\| update\.thinking \|\| update\.content \|\| ""\);/, "live thinking deltas should suppress provider no-thinking placeholders too");
 assert.match(app, /const THINKING_VISIBILITY_STORAGE_KEY = "pi-webui-thinking-visible"/, "thinking visibility should persist in browser storage");
 assert.match(app, /function setThinkingOutputVisible\(visible[\s\S]*renderAllMessages\(\{ preserveScroll: true \}\)/, "thinking visibility changes should immediately re-render the transcript");
 assert.match(app, /function assistantStreamingMessage\(event\)/, "live streaming should read the authoritative partial assistant message from RPC events like the TUI");
@@ -340,6 +398,11 @@ assert.match(app, /return "Agent is running: ";/, "active agent indicator should
 assert.doesNotMatch(app, /"agent running"/, "active agent indicator should not render a separate title/header label");
 assert.doesNotMatch(app, /runIndicatorTimestamp/, "active agent indicator should not render a separate live timestamp header");
 assert.match(app, /runIndicatorBubble = make\("article", "message runIndicator run-indicator-message streaming"\)/, "active agent indicator should use a dedicated streaming transcript card");
+assert.match(app, /function resetChatOutput\(\)[\s\S]*?preservedNodes[\s\S]*?runIndicatorBubble\?\.parentElement === elements\.chat[\s\S]*?elements\.chat\.replaceChildren\(\.\.\.preservedNodes\)/, "transcript re-renders should preserve the live run indicator node instead of tearing it down");
+assert.match(app, /function appendChatMessageBubble\(bubble\)[\s\S]*?insertBefore\(bubble, runIndicatorBubble\)/, "new transcript cards should insert before the active run indicator so it stays stable at the bottom");
+assert.match(app, /function ensureRunIndicatorBubble\(\)[\s\S]*?!runIndicatorBubble \|\| !runIndicatorText \|\| !runIndicatorMeta[\s\S]*?elements\.chat\.lastElementChild !== runIndicatorBubble/, "active agent indicator should reuse the existing bubble across transcript re-renders instead of recreating it");
+assert.match(app, /const headline = runIndicatorHeadline\(\);\n\s+if \(runIndicatorText\.textContent !== headline\) runIndicatorText\.textContent = headline;/, "active agent indicator should avoid redundant headline DOM writes that can flicker");
+assert.match(app, /const meta = runIndicatorShowsElapsed\(\) \? `\$\{detail\} · run time[\s\S]*?if \(runIndicatorMeta\.textContent !== meta\) runIndicatorMeta\.textContent = meta;/, "active agent indicator should avoid redundant metadata DOM writes except elapsed changes");
 assert.match(app, /runIndicatorShowsElapsed\(\) \? `\$\{detail\} · run time/, "active agent indicator should label elapsed run time instead of showing a bare counter");
 assert.match(app, /Abort requested/, "abort feedback should clarify that Web UI is checking stop status");
 assert.match(app, /const ABORT_LONG_PRESS_MS = 700/, "Abort long-press timing should be explicit");
@@ -405,6 +468,15 @@ assert.match(app, /function openNativeTreeSelector\(\)[\s\S]*?\/api\/session-tre
 assert.match(app, /Provider credential entry is intentionally not implemented in the browser yet/, "native /login should remain a safe non-secret guidance dialog");
 assert.match(app, /const HIDDEN_COMMAND_NAMES = new Set\(\["webui-tree-navigate"\]\)/, "internal Web UI helper commands should stay out of command pickers");
 assert.match(app, /function shouldSendPromptFromEnter\(event\)/, "prompt keyboard handling should be centralized");
+assert.match(app, /function handleNativeAppShortcut\(event\)/, "native app shortcut handling should be centralized");
+assert.match(app, /window\.addEventListener\("keydown", handleNativeAppShortcut, \{ capture: true \}\)/, "native shortcuts should run before textarea-specific key handling");
+assert.match(app, /cycleModelFromShortcut\(event\.shiftKey \? "backward" : "forward"\)/, "Ctrl+P and Shift+Ctrl+P should cycle models");
+assert.match(app, /cycleThinkingFromShortcut\(\)/, "Shift+Tab should cycle thinking level");
+assert.match(app, /setToolOutputGloballyExpanded\(!toolOutputGloballyExpanded, \{ announce: true \}\)/, "Ctrl+O should toggle global tool expansion");
+assert.match(app, /function restoreQueuedMessagesToComposerFromShortcut\(\)/, "Alt+Up should restore queued steering\/follow-up text into the composer");
+assert.match(app, /event\.altKey && key === "ArrowUp"[\s\S]*?restoreQueuedMessagesToComposerFromShortcut\(\)/, "Alt+Up should be handled by native shortcut routing");
+assert.match(app, /clearPromptFromShortcut\(\)/, "Ctrl+C should clear only through a guarded prompt helper");
+assert.match(app, /if \(event\.defaultPrevented\) return;/, "textarea keydown handling should respect app-level shortcut interception");
 assert.match(app, /return !isMobileView\(\);/, "plain Enter should send only outside mobile view so mobile Return can insert newlines");
 assert.match(app, /mobile-keyboard-open/, "JS should toggle mobile keyboard mode from viewport/focus state");
 assert.match(app, /maxVisualViewportHeight - viewportHeight > 120/, "keyboard mode should detect viewport shrink even when keyboard inset is unavailable");
@@ -470,7 +542,7 @@ assert.match(app, /bindMobileViewChanges\(/, "side panel state should react to m
 assert.match(app, /function restoreSidePanelState\(\) \{\n\s+if \(isMobileView\(\)\)/, "mobile should start with side panel collapsed even if desktop state was expanded");
 assert.match(app, /case "webui_tab_reloaded":/, "frontend should handle native /reload tab restart events");
 assert.match(app, /addTransientMessage\(\{ role: "native", title: "\/reload"/, "native /reload should produce visible transcript output");
-assert.match(app, /navigator\.clipboard\.writeText\(response\.data\.copyText\)/, "native /copy should use the browser clipboard when available");
+assert.match(app, /await copyText\(response\.data\.copyText\)/, "native /copy should use the shared browser clipboard helper when available");
 assert.match(app, /Clipboard access failed:[\s\S]*?response\.data\.copyText/, "native /copy should show text in transcript when clipboard access fails");
 assert.match(app, /setTimeout\(\(\) => \{[\s\S]*?refreshAll\(tabContext\)\.catch/, "frontend should refresh state after native /reload restarts the RPC process");
 assert.match(app, /api\("\/api\/path-fast-picks"/, "frontend should load/save fast picks through the server API");
@@ -498,8 +570,8 @@ assert.match(server, /AuthStorage, SessionManager/, "server should import AuthSt
 assert.match(server, /const CODEX_TOKEN_REFRESH_SKEW_MS = 5 \* 60 \* 1000/, "server should refresh Codex OAuth tokens before they expire");
 assert.match(server, /url\.pathname === "\/api\/codex-usage" && req\.method === "GET"/, "server should expose a sanitized Codex usage endpoint");
 assert.match(server, /OPENAI_CODEX_USAGE_ENDPOINT/, "server should query Codex usage from the backend, not the browser");
-assert.match(server, /const NATIVE_SLASH_COMMANDS = \[/, "server should define Pi native slash commands for autocomplete");
-assert.match(server, /\{ name: "reload", description: "Reload keybindings, extensions, skills, prompts, and themes" \}/, "native /reload should be advertised for autocomplete");
+assert.match(server, /const NATIVE_SLASH_COMMANDS = nativeSlashCommandEntries\(\)/, "server should define Pi native slash commands for autocomplete from the parity matrix");
+assert.match(server, /WEBUI_TUI_NATIVE_PARITY\.json/, "native command descriptions should come from the parity matrix source of truth");
 assert.match(server, /function parseSlashCommand\(message\)/, "server should parse native slash commands before prompt forwarding");
 assert.match(server, /function generatedTabTitleFromPrompt\(message\)/, "server should derive concise automatic tab titles from first prompts");
 assert.match(server, /function maybeNameTabForConversation\(tab, command\)/, "server should auto-name default tabs when a conversation starts");
@@ -522,7 +594,7 @@ assert.match(server, /resolvePendingExtensionUiRequest\(tab, payload\.id\)/, "ex
 assert.match(server, /type: "webui_extension_ui_resolved"[\s\S]*?pendingExtensionUiRequestCount/, "extension UI responses should notify clients that a blocker resolved");
 assert.match(server, /command\.type === "abort"[\s\S]*?cancelPendingExtensionUiRequests\(tab\)/, "abort should cancel hidden pending extension UI requests");
 assert.match(server, /type: "webui_extension_ui_cancelled"/, "server should notify browsers when pending extension UI requests are cancelled");
-assert.match(server, /async function handleNativeSlashCommand\(tab, body\)/, "server should intercept supported native slash commands");
+assert.match(server, /async function handleNativeSlashCommand\(tab, body, req\)/, "server should intercept supported native slash commands with request context for security guards");
 assert.match(server, /const restoreTabs = readRestoreTabsFromEnv\(\)/, "server should accept restart tab restore descriptors from the launcher environment");
 assert.match(server, /delete process\.env\.PI_WEBUI_RESTORE_TABS/, "server should avoid leaking restore descriptors into spawned Pi RPC processes");
 assert.match(server, /if \(sessionFile && !options\.noSession\) piArgs\.push\("--session", sessionFile\)/, "restored tabs should resume previous session files");
@@ -557,15 +629,28 @@ assert.match(server, /maybeNameTabForConversation\(tab, command\);[\s\S]*?markTa
 assert.match(server, /function formatSessionOutput\(tab, state, stats\)/, "native /session should have visible Web UI output");
 assert.match(server, /case "session": \{[\s\S]*?formatSessionOutput\(tab, state\.data \|\| \{\}, stats\.success === false \? null : stats\.data\)/, "native /session should render state and stats through Web UI");
 assert.match(server, /case "copy": \{[\s\S]*?get_last_assistant_text[\s\S]*?copyText: text/, "native /copy should return text for browser clipboard handling");
+assert.match(server, /case "export": \{[\s\S]*?handleNativeExportCommand\(tab, parsed\.args, req\)/, "native /export should run through the Web UI export helper");
+assert.match(server, /url\.pathname\.startsWith\("\/api\/native-download\/"\) && req\.method === "GET"/, "native /export should expose short-lived opaque download URLs");
+assert.match(app, /function triggerNativeDownload\(download\)/, "frontend should auto-start native command downloads");
+assert.match(server, /case "\/api\/bash": \{[\s\S]*?type: "bash", command, excludeFromContext: body\.excludeFromContext === true/, "server should expose user bash execution with exclude-from-context support");
+assert.match(server, /case "\/api\/abort-bash":[\s\S]*?type: "abort_bash"/, "server should expose user bash abort");
+assert.match(server, /function sendQueuedBashCommand\(tab, command\)/, "server should serialize user bash through a per-tab FIFO queue");
+assert.match(server, /command\.type === "bash" \? await sendQueuedBashCommand\(tab, command\) : await tab\.rpc\.send\(command\)/, "POST routing should use the bash FIFO queue before RPC send");
+assert.match(app, /function parseUserBashInput\(message\)/, "frontend should parse leading ! and !! bash commands");
+assert.match(app, /let userBashQueuesByTab = new Map\(\)/, "frontend should keep a per-tab user bash queue");
+assert.match(app, /enqueueUserBashCommand\(parsed, \{ usesPromptInput, targetTabId \}\)/, "frontend should queue additional bash commands while one is active");
+assert.match(app, /await sendUserBashCommand\(userBash, \{ usesPromptInput, targetTabId \}\)/, "prompt sending should run user bash before normal prompt forwarding");
 assert.match(server, /case "hotkeys": \{[\s\S]*?webuiHotkeysOutput\(\)/, "native /hotkeys should return Web UI hotkey output");
 assert.match(server, /url\.pathname === "\/api\/commands" && req\.method === "GET"[\s\S]*?getCommandData\(tab\)/, "GET /api/commands should merge native and RPC-visible commands");
+assert.match(server, /WEBUI_TUI_NATIVE_PARITY\.json/, "server should load the native parity matrix");
+assert.match(server, /url\.pathname === "\/api\/native-parity" && req\.method === "GET"/, "server should expose the native parity matrix endpoint");
 assert.match(server, /function safeRpcResponse\(tab, command/, "server should provide stopped-RPC fallbacks for refresh endpoints");
 assert.match(server, /function primeTabRpc\(tab\)/, "server should prime new terminal RPC state before returning created tabs");
 assert.match(server, /specific Web UI action or final-output cards/, "server feedback-learning prompt should cover final outputs as well as actions");
 assert.match(server, /function formatActionFeedbackLearningPrompt\(items\)/, "server should convert feedback into a LEARNING prompt");
 assert.match(server, /url\.pathname === "\/api\/action-feedback" && req\.method === "POST"[\s\S]*?handleActionFeedback\(tab, body\)/, "POST /api/action-feedback should trigger the feedback-learning prompt");
 assert.match(server, /Wait for the current agent run or compaction to finish before sending feedback\./, "server should only accept post-run feedback submissions");
-assert.match(server, /url\.pathname === "\/api\/prompt" && req\.method === "POST"[\s\S]*?handleNativeSlashCommand\(tab, body\)/, "POST /api/prompt should intercept native slash commands before normal prompt forwarding");
+assert.match(server, /url\.pathname === "\/api\/prompt" && req\.method === "POST"[\s\S]*?handleNativeSlashCommand\(tab, body, req\)/, "POST /api/prompt should intercept native slash commands before normal prompt forwarding with request context");
 assert.match(server, /function fastPicksStorageFile\(/, "server should define a persistent fast-picks storage file");
 assert.match(server, /PI_WEBUI_FAST_PICKS_FILE/, "server should allow overriding the fast-picks storage path");
 assert.match(server, /async function getPathSuggestionData\(tab, rawQuery\)/, "server should compute @ file\/path reference suggestions for the active tab cwd");
@@ -613,8 +698,16 @@ assert.match(readme, /## Optional companion packages/, "README should document o
 assert.match(readme, /checks loaded Pi capabilities directly through RPC-visible commands and live widget events/, "README should document capability-based startup checks");
 assert.match(readme, /side panel shows each optional feature as enabled, disabled, or install-needed/, "README should document optional feature side-panel controls");
 assert.match(readme, /Installing a missing feature is an explicit, warned action/, "README should document optional feature install warning behavior");
+assert.match(readme, /\.\/start-webui\.sh --dev --cwd \/path\/to\/project/, "README should document the dev helper launcher");
+assert.match(startScript, /--dev\)/, "start-webui.sh should accept a --dev flag");
+assert.match(startScript, /local_pi_webui_bin\(\)/, "start-webui.sh should resolve this checkout's local server entrypoint");
+assert.match(startScript, /webui_cmd=\(node "\$local_webui_bin"\)/, "start-webui.sh --dev should run the local bin with node");
+assert.match(startScript, /"\$\{webui_cmd\[@\]\}" --cwd "\$cwd" --host "\$host" --port "\$port" "\$\{pass_args\[@\]\}"/, "start-webui.sh should launch through the selected server command without forwarding --dev");
 
-assert.equal(pkg.scripts?.test, "node tests/mobile-static.test.mjs", "package test script should run the mobile static harness");
+assert.match(pkg.scripts?.test || "", /node tests\/mobile-static\.test\.mjs/, "package test script should run the mobile static harness");
+assert.match(pkg.scripts?.test || "", /node tests\/native-parity\.test\.mjs/, "package test script should run the native parity harness");
+assert.ok(pkg.files?.includes("start-webui.sh"), "npm package should include the Bash helper launcher");
+assert.ok(pkg.files?.includes("start-webui.ps1"), "npm package should include the PowerShell helper launcher");
 for (const [name, range] of Object.entries(companionDependencies)) {
   assert.equal(pkg.optionalDependencies?.[name], range, `webui package should optionally depend on ${name}`);
   assert.equal(pkg.dependencies?.[name], undefined, `webui package should not require optional companion ${name}`);
