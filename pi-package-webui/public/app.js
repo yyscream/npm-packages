@@ -63,6 +63,8 @@ const elements = {
   agentDoneNotificationsToggle: $("#agentDoneNotificationsToggle"),
   agentDoneNotificationsStatus: $("#agentDoneNotificationsStatus"),
   optionalFeaturesBox: $("#optionalFeaturesBox"),
+  codexUsageBox: $("#codexUsageBox"),
+  refreshCodexUsageButton: $("#refreshCodexUsageButton"),
   toggleSidePanelButton: $("#toggleSidePanelButton"),
   sidePanelExpandButton: $("#sidePanelExpandButton"),
   sidePanelBackdrop: $("#sidePanelBackdrop"),
@@ -146,6 +148,11 @@ let pathSuggestAbortController = null;
 let latestStats = null;
 let latestWorkspace = null;
 let latestNetwork = null;
+let latestCodexUsage = null;
+let codexUsageError = null;
+let codexUsageLoading = false;
+let refreshCodexUsageTimer = null;
+let codexUsageRenderTimer = null;
 let backendOffline = false;
 let backendOfflineNoticeShown = false;
 let latestMessages = [];
@@ -220,6 +227,8 @@ const STICKY_USER_PROMPT_TOP_GAP_PX = 12;
 const CHAT_FOLLOW_SETTLE_DELAY_MS = 80;
 const CHAT_PROGRAMMATIC_SCROLL_GRACE_MS = 500;
 const CHAT_USER_SCROLL_INTENT_MS = 700;
+const CODEX_USAGE_REFRESH_MS = 5 * 60 * 1000;
+const CODEX_USAGE_RENDER_TICK_MS = 30 * 1000;
 const RUN_INDICATOR_TICK_MS = 1000;
 const RUN_INDICATOR_START_GRACE_MS = 2500;
 const RUN_INDICATOR_STATE_RECHECK_MS = 5000;
@@ -3582,6 +3591,197 @@ function scheduleRefreshFooter(delay = 300, tabContext = activeTabContext()) {
       if (isCurrentTabContext(tabContext)) addEvent(error.message, "error");
     });
   }, delay);
+}
+
+function formatCodexPlanType(value) {
+  const text = String(value || "").trim();
+  if (!text) return "unknown plan";
+  return text.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function formatCodexPercent(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? `${Math.max(0, Math.min(100, Math.round(number)))}%` : "—";
+}
+
+function codexWindowDurationMinutes(window) {
+  const minutes = Number(window?.windowDurationMins);
+  if (Number.isFinite(minutes) && minutes > 0) return minutes;
+  const seconds = Number(window?.windowDurationSeconds);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds / 60 : null;
+}
+
+function formatCodexWindowDuration(window) {
+  const minutes = codexWindowDurationMinutes(window);
+  if (!minutes) return "window";
+  if (minutes >= 280 && minutes <= 320) return "5h window";
+  if (minutes >= 9500 && minutes <= 10550) return "weekly window";
+  if (minutes >= 60 * 24) {
+    const days = minutes / (60 * 24);
+    return `${days >= 10 ? Math.round(days) : Number(days.toFixed(1))}d window`;
+  }
+  if (minutes >= 60) {
+    const hours = minutes / 60;
+    return `${Number.isInteger(hours) ? hours : Number(hours.toFixed(1))}h window`;
+  }
+  return `${Math.round(minutes)}m window`;
+}
+
+function formatDurationParts(milliseconds) {
+  if (!Number.isFinite(Number(milliseconds))) return "now";
+  const totalMinutes = Math.max(0, Math.ceil(Number(milliseconds) / 60000));
+  if (totalMinutes <= 1) return "<1m";
+  if (totalMinutes < 60) return `${totalMinutes}m`;
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours < 48) return minutes ? `${hours}h ${minutes}m` : `${hours}h`;
+  const days = Math.floor(hours / 24);
+  const remHours = hours % 24;
+  return remHours ? `${days}d ${remHours}h` : `${days}d`;
+}
+
+function codexWindowResetDate(window) {
+  const resetAt = window?.resetsAt ? new Date(window.resetsAt) : null;
+  if (resetAt && Number.isFinite(resetAt.getTime())) return resetAt;
+  const resetAfterSeconds = Number(window?.resetAfterSeconds);
+  if (Number.isFinite(resetAfterSeconds) && resetAfterSeconds >= 0) return new Date(Date.now() + resetAfterSeconds * 1000);
+  return null;
+}
+
+function formatCodexReset(window) {
+  const resetDate = codexWindowResetDate(window);
+  if (!resetDate) return "reset unknown";
+  const diff = resetDate.getTime() - Date.now();
+  if (diff <= 0) return "resetting now";
+  return `resets in ${formatDurationParts(diff)}`;
+}
+
+function codexSnapshotName(snapshot) {
+  return snapshot?.limitName || snapshot?.limitId || "codex";
+}
+
+function codexUsageBuckets(data) {
+  const buckets = [];
+  const selected = data?.selected || data?.rateLimits || null;
+  const snapshots = Array.isArray(data?.snapshots) ? data.snapshots : selected ? [selected] : [];
+  const selectedKey = selected?.limitId || selected?.limitName || "codex";
+  const pushWindow = (snapshot, kind, window, { prefix } = {}) => {
+    if (!window) return;
+    const durationLabel = formatCodexWindowDuration(window);
+    const baseLabel = kind === "secondary" && durationLabel === "window" ? "secondary window" : durationLabel;
+    buckets.push({
+      key: `${snapshot?.limitId || snapshot?.limitName || buckets.length}-${kind}`,
+      label: prefix ? `${prefix} · ${baseLabel}` : baseLabel,
+      window,
+    });
+  };
+
+  if (selected) {
+    pushWindow(selected, "primary", selected.primary);
+    pushWindow(selected, "secondary", selected.secondary);
+  }
+  for (const snapshot of snapshots) {
+    const key = snapshot?.limitId || snapshot?.limitName;
+    if (!snapshot || snapshot === selected || key === selectedKey) continue;
+    const name = codexSnapshotName(snapshot);
+    pushWindow(snapshot, "primary", snapshot.primary, { prefix: name });
+    pushWindow(snapshot, "secondary", snapshot.secondary, { prefix: name });
+  }
+  return buckets.slice(0, 6);
+}
+
+function renderCodexUsage() {
+  const box = elements.codexUsageBox;
+  if (!box) return;
+  if (elements.refreshCodexUsageButton) {
+    elements.refreshCodexUsageButton.disabled = codexUsageLoading;
+    elements.refreshCodexUsageButton.textContent = codexUsageLoading ? "Refreshing…" : "Refresh usage";
+  }
+
+  box.replaceChildren();
+  box.classList.toggle("muted", !latestCodexUsage);
+
+  if (!latestCodexUsage && codexUsageLoading) {
+    box.textContent = "Checking Codex usage…";
+    return;
+  }
+  if (!latestCodexUsage && codexUsageError) {
+    const title = make("div", "codex-usage-unavailable", "Usage unavailable");
+    const detail = make("div", "codex-usage-detail", codexUsageError.message || String(codexUsageError));
+    box.append(title, detail);
+    return;
+  }
+  if (!latestCodexUsage) {
+    box.textContent = "Codex usage has not loaded yet.";
+    return;
+  }
+
+  const header = make("div", "codex-usage-summary");
+  header.append(
+    make("span", "codex-usage-plan", formatCodexPlanType(latestCodexUsage.planType)),
+    make("span", "codex-usage-fetched", latestCodexUsage.fetchedAt ? `updated ${formatDurationParts(Date.now() - new Date(latestCodexUsage.fetchedAt).getTime())} ago` : "updated now"),
+  );
+  box.append(header);
+
+  const buckets = codexUsageBuckets(latestCodexUsage);
+  if (buckets.length === 0) {
+    box.append(make("div", "codex-usage-detail", "No Codex rate-limit windows were returned."));
+  } else {
+    for (const bucket of buckets) {
+      const usedPercent = Number(bucket.window?.usedPercent);
+      const fillPercent = Number.isFinite(usedPercent) ? Math.max(0, Math.min(100, usedPercent)) : 0;
+      const item = make("div", "codex-usage-bucket");
+      const row = make("div", "codex-usage-row");
+      row.append(
+        make("span", "codex-usage-label", bucket.label),
+        make("strong", "codex-usage-percent", formatCodexPercent(bucket.window?.usedPercent)),
+      );
+      const meter = make("div", "codex-usage-meter");
+      const fill = make("span", "codex-usage-meter-fill");
+      fill.style.width = `${fillPercent}%`;
+      meter.append(fill);
+      item.append(row, meter, make("div", "codex-usage-reset", formatCodexReset(bucket.window)));
+      box.append(item);
+    }
+  }
+
+  if (latestCodexUsage.rateLimitReachedType) {
+    box.append(make("div", "codex-usage-warning", `Limit status: ${latestCodexUsage.rateLimitReachedType}`));
+  }
+  if (codexUsageError) {
+    box.append(make("div", "codex-usage-detail", `Latest refresh failed: ${codexUsageError.message || codexUsageError}`));
+  }
+}
+
+async function refreshCodexUsage({ forceAuthRefresh = false } = {}) {
+  if (codexUsageLoading) return;
+  codexUsageLoading = true;
+  renderCodexUsage();
+  try {
+    const suffix = forceAuthRefresh ? "?refresh=1" : "";
+    const response = await api(`/api/codex-usage${suffix}`, { scoped: false });
+    latestCodexUsage = response.data || null;
+    codexUsageError = null;
+  } catch (error) {
+    codexUsageError = error;
+  } finally {
+    codexUsageLoading = false;
+    renderCodexUsage();
+  }
+}
+
+function scheduleRefreshCodexUsage(delay = CODEX_USAGE_REFRESH_MS) {
+  clearTimeout(refreshCodexUsageTimer);
+  refreshCodexUsageTimer = setTimeout(() => {
+    refreshCodexUsage().finally(() => scheduleRefreshCodexUsage());
+  }, delay);
+}
+
+function initializeCodexUsage() {
+  renderCodexUsage();
+  refreshCodexUsage().finally(() => scheduleRefreshCodexUsage());
+  clearInterval(codexUsageRenderTimer);
+  codexUsageRenderTimer = setInterval(renderCodexUsage, CODEX_USAGE_RENDER_TICK_MS);
 }
 
 function renderStatus() {
@@ -8166,6 +8366,7 @@ function handleEvent(event) {
       scheduleRefreshState();
       scheduleRefreshMessages();
       scheduleRefreshFooter();
+      scheduleRefreshCodexUsage(2200);
       renderFeedbackTray();
       {
         const workflowTabId = event.tabId || activeTabId;
@@ -8561,6 +8762,9 @@ window.addEventListener("keydown", (event) => {
   }
 });
 
+elements.refreshCodexUsageButton?.addEventListener("click", () => {
+  refreshCodexUsage({ forceAuthRefresh: true }).finally(() => scheduleRefreshCodexUsage());
+});
 elements.pathPickerAddFastPickButton.addEventListener("click", () => addCurrentFastPick().catch((error) => addEvent(error.message, "error")));
 elements.pathPickerCancelButton.addEventListener("click", () => closePathPicker(null));
 elements.pathPickerChooseButton.addEventListener("click", () => closePathPicker(pathPickerState?.cwd || null));
@@ -8657,6 +8861,7 @@ restoreThinkingVisibilitySetting();
 restoreSidePanelSectionState();
 bindSidePanelSectionToggles();
 restoreSidePanelState();
+initializeCodexUsage();
 bindMobileViewChanges();
 registerPwaServiceWorker();
 renderServerOfflinePanel();

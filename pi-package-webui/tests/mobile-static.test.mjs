@@ -51,6 +51,8 @@ assert.match(html, /id="thinkingVisibilityStatus"/, "thinking-output visibility 
 assert.match(html, /id="nativeCommandDialog"/, "native slash selector UI should have a dedicated dialog");
 assert.match(html, /id="nativeCommandSearch"[^>]*type="search"/, "native slash selector dialog should expose a filter box");
 assert.match(html, /id="optionalFeaturesBox"/, "side panel should expose optional feature status and controls");
+assert.match(html, /id="codexUsageBox"/, "side panel should expose Codex subscription usage status");
+assert.match(html, /data-side-panel-section="codex-usage"/, "Codex usage should live in a collapsible side-panel section");
 assert.match(html, /id="serverOfflinePanel"/, "PWA/offline shell should expose a backend-offline recovery panel");
 assert.match(html, /id="copyServerCommandButton"/, "backend-offline recovery panel should expose a start-command copy button");
 assert.match(html, /id="retryServerConnectionButton"/, "backend-offline recovery panel should expose a retry button");
@@ -258,6 +260,8 @@ assert.match(app, /Optional feature detection intentionally checks loaded Pi cap
 assert.match(app, /function resetOptionalFeatureAvailability\(\)/, "optional feature state should reset across active-tab and reload boundaries");
 assert.match(app, /function renderOptionalFeaturePanel\(\)/, "side panel should render optional feature installed/enabled state");
 assert.match(app, /function setSidePanelSectionCollapsed\(record, collapsed/, "side panel sections should have explicit collapse/expand behavior");
+assert.match(app, /function renderCodexUsage\(\)/, "frontend should render Codex usage buckets in the side panel");
+assert.match(app, /api\(`\/api\/codex-usage\$\{suffix\}`, \{ scoped: false \}\)/, "Codex usage should load through a server endpoint without browser credentials");
 assert.match(app, /restoreSidePanelSectionState\(\);\nbindSidePanelSectionToggles\(\);/, "side panel section state should restore before toggles are bound");
 assert.match(app, /OPTIONAL_FEATURES_STORAGE_KEY/, "optional feature disable toggles should persist in browser storage");
 assert.match(app, /function renderOptionalFeatureDependentDisplays\(\)[\s\S]*renderOptionalFeatureControls\(\);[\s\S]*renderThemeSelect\(\);[\s\S]*renderWidgets\(\);[\s\S]*renderStatus\(\);[\s\S]*renderCommands\(\);[\s\S]*renderAllMessages\(\{ preserveScroll: true \}\);[\s\S]*if \(streamRawText\) renderStreamingAssistantText\(\);/, "optional feature toggles should immediately refresh visible controls, commands, transcript, and live stream displays");
@@ -490,6 +494,10 @@ assert.ok(icon512.length > icon192.length, "PWA 512px icon should be present and
 assert.ok(matrixBackground.length > 100000, "Matrix background image should be present as an optimized WebP asset");
 assert.ok(mochaBackground.length > 8000, "Catppuccin Mocha background image should be present as a compact PNG asset");
 
+assert.match(server, /AuthStorage, SessionManager/, "server should import AuthStorage for safe OAuth token refresh");
+assert.match(server, /const CODEX_TOKEN_REFRESH_SKEW_MS = 5 \* 60 \* 1000/, "server should refresh Codex OAuth tokens before they expire");
+assert.match(server, /url\.pathname === "\/api\/codex-usage" && req\.method === "GET"/, "server should expose a sanitized Codex usage endpoint");
+assert.match(server, /OPENAI_CODEX_USAGE_ENDPOINT/, "server should query Codex usage from the backend, not the browser");
 assert.match(server, /const NATIVE_SLASH_COMMANDS = \[/, "server should define Pi native slash commands for autocomplete");
 assert.match(server, /\{ name: "reload", description: "Reload keybindings, extensions, skills, prompts, and themes" \}/, "native /reload should be advertised for autocomplete");
 assert.match(server, /function parseSlashCommand\(message\)/, "server should parse native slash commands before prompt forwarding");

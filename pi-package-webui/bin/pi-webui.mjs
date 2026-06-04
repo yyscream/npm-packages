@@ -8,7 +8,7 @@ import { homedir, networkInterfaces, tmpdir } from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { AuthStorage, SessionManager } from "@earendil-works/pi-coding-agent";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -19,6 +19,10 @@ const packageJson = JSON.parse(await readFile(path.join(packageRoot, "package.js
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 31415;
 const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
+const CODEX_USAGE_TIMEOUT_MS = 15 * 1000;
+const CODEX_TOKEN_REFRESH_SKEW_MS = 5 * 60 * 1000;
+const OPENAI_CODEX_PROVIDER_ID = "openai-codex";
+const OPENAI_CODEX_USAGE_ENDPOINT = process.env.PI_WEBUI_CODEX_USAGE_URL || "https://chatgpt.com/backend-api/wham/usage";
 const BODY_LIMIT_BYTES = 1024 * 1024;
 const PROMPT_BODY_LIMIT_BYTES = 24 * 1024 * 1024;
 const UPLOAD_BODY_LIMIT_BYTES = 96 * 1024 * 1024;
@@ -837,6 +841,302 @@ async function readJsonFileIfExists(filePath) {
     console.warn(`failed to read ${filePath}: ${sanitizeError(error)}`);
     return undefined;
   }
+}
+
+function firstDefined(...values) {
+  return values.find((value) => value !== undefined && value !== null);
+}
+
+function numericValue(value) {
+  if (value === undefined || value === null || value === "") return undefined;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : undefined;
+}
+
+function booleanValue(value) {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function isoTimestamp(value) {
+  const number = numericValue(value);
+  if (number !== undefined) {
+    const milliseconds = number > 1e12 ? number : number * 1000;
+    const date = new Date(milliseconds);
+    return Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
+  }
+  if (typeof value === "string" && value.trim()) {
+    const date = new Date(value);
+    return Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
+  }
+  return undefined;
+}
+
+function decodeJwtPayload(token) {
+  try {
+    const payload = String(token || "").split(".")[1];
+    if (!payload) return null;
+    const padded = `${payload}${"=".repeat((4 - (payload.length % 4)) % 4)}`;
+    return JSON.parse(Buffer.from(padded.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function codexAccountIdFromAccessToken(accessToken) {
+  const payload = decodeJwtPayload(accessToken);
+  const auth = payload?.["https://api.openai.com/auth"];
+  const accountId = auth?.chatgpt_account_id;
+  return typeof accountId === "string" && accountId ? accountId : null;
+}
+
+function normalizeCodexRateLimitWindow(rawWindow) {
+  if (!rawWindow || typeof rawWindow !== "object") return null;
+  const windowDurationSeconds = firstDefined(
+    numericValue(rawWindow.windowDurationSeconds),
+    numericValue(rawWindow.limitWindowSeconds),
+    numericValue(rawWindow.limit_window_seconds),
+    numericValue(rawWindow.windowDurationMins) !== undefined ? numericValue(rawWindow.windowDurationMins) * 60 : undefined,
+  );
+  const windowDurationMins = firstDefined(
+    numericValue(rawWindow.windowDurationMins),
+    windowDurationSeconds !== undefined ? windowDurationSeconds / 60 : undefined,
+  );
+  const normalized = {
+    usedPercent: numericValue(firstDefined(rawWindow.usedPercent, rawWindow.used_percent)),
+    windowDurationSeconds,
+    windowDurationMins,
+    resetAfterSeconds: numericValue(firstDefined(rawWindow.resetAfterSeconds, rawWindow.reset_after_seconds)),
+    resetsAt: isoTimestamp(firstDefined(rawWindow.resetsAt, rawWindow.resetAt, rawWindow.reset_at)),
+  };
+  return Object.values(normalized).some((value) => value !== undefined) ? normalized : null;
+}
+
+function normalizeCodexCredits(rawCredits) {
+  if (!rawCredits || typeof rawCredits !== "object") return null;
+  return {
+    hasCredits: booleanValue(firstDefined(rawCredits.hasCredits, rawCredits.has_credits)),
+    unlimited: booleanValue(rawCredits.unlimited),
+    balance: firstDefined(rawCredits.balance),
+    approxLocalMessages: firstDefined(rawCredits.approxLocalMessages, rawCredits.approx_local_messages),
+    approxCloudMessages: firstDefined(rawCredits.approxCloudMessages, rawCredits.approx_cloud_messages),
+  };
+}
+
+function normalizeCodexRateLimitDetails(rawDetails) {
+  if (!rawDetails || typeof rawDetails !== "object") return { primary: null, secondary: null };
+  return {
+    allowed: booleanValue(rawDetails.allowed),
+    limitReached: booleanValue(firstDefined(rawDetails.limitReached, rawDetails.limit_reached)),
+    primary: normalizeCodexRateLimitWindow(firstDefined(rawDetails.primary, rawDetails.primaryWindow, rawDetails.primary_window)),
+    secondary: normalizeCodexRateLimitWindow(firstDefined(rawDetails.secondary, rawDetails.secondaryWindow, rawDetails.secondary_window)),
+  };
+}
+
+function normalizeCodexRateLimitReachedType(rawType) {
+  if (typeof rawType === "string" && rawType) return rawType;
+  if (rawType && typeof rawType === "object") {
+    const value = firstDefined(rawType.type, rawType.kind);
+    return typeof value === "string" && value ? value : null;
+  }
+  return null;
+}
+
+function makeCodexUsageSnapshot({ limitId, limitName, rateLimit, credits, planType, rateLimitReachedType }) {
+  const details = normalizeCodexRateLimitDetails(rateLimit);
+  return {
+    limitId: limitId || null,
+    limitName: limitName || null,
+    primary: details.primary,
+    secondary: details.secondary,
+    allowed: details.allowed,
+    limitReached: details.limitReached,
+    credits: normalizeCodexCredits(credits),
+    planType: planType || null,
+    rateLimitReachedType: rateLimitReachedType || null,
+  };
+}
+
+function normalizeCodexUsagePayload(rawPayload) {
+  const payload = rawPayload && typeof rawPayload === "object" ? rawPayload : {};
+  const planType = firstDefined(payload.planType, payload.plan_type, null);
+  const rateLimitReachedType = normalizeCodexRateLimitReachedType(firstDefined(payload.rateLimitReachedType, payload.rate_limit_reached_type));
+  const snapshotsByKey = new Map();
+  const addSnapshot = (snapshot) => {
+    if (!snapshot) return;
+    const key = snapshot.limitId || snapshot.limitName || `snapshot-${snapshotsByKey.size + 1}`;
+    if (!snapshotsByKey.has(key)) snapshotsByKey.set(key, snapshot);
+  };
+
+  const directRateLimits = firstDefined(payload.rateLimits, payload.rate_limits);
+  if (directRateLimits && typeof directRateLimits === "object" && (directRateLimits.primary || directRateLimits.primary_window || directRateLimits.primaryWindow)) {
+    addSnapshot(makeCodexUsageSnapshot({
+      limitId: firstDefined(directRateLimits.limitId, directRateLimits.limit_id, "codex"),
+      limitName: firstDefined(directRateLimits.limitName, directRateLimits.limit_name),
+      rateLimit: directRateLimits,
+      credits: firstDefined(directRateLimits.credits, payload.credits),
+      planType: firstDefined(directRateLimits.planType, directRateLimits.plan_type, planType),
+      rateLimitReachedType: firstDefined(directRateLimits.rateLimitReachedType, directRateLimits.rate_limit_reached_type, rateLimitReachedType),
+    }));
+  } else {
+    addSnapshot(makeCodexUsageSnapshot({
+      limitId: "codex",
+      rateLimit: firstDefined(payload.rateLimit, payload.rate_limit),
+      credits: payload.credits,
+      planType,
+      rateLimitReachedType,
+    }));
+  }
+
+  const byLimitId = firstDefined(payload.rateLimitsByLimitId, payload.rate_limits_by_limit_id);
+  if (byLimitId && typeof byLimitId === "object" && !Array.isArray(byLimitId)) {
+    for (const [limitId, rawSnapshot] of Object.entries(byLimitId)) {
+      if (!rawSnapshot || typeof rawSnapshot !== "object") continue;
+      addSnapshot(makeCodexUsageSnapshot({
+        limitId: firstDefined(rawSnapshot.limitId, rawSnapshot.limit_id, limitId),
+        limitName: firstDefined(rawSnapshot.limitName, rawSnapshot.limit_name),
+        rateLimit: rawSnapshot,
+        credits: rawSnapshot.credits,
+        planType: firstDefined(rawSnapshot.planType, rawSnapshot.plan_type, planType),
+        rateLimitReachedType: firstDefined(rawSnapshot.rateLimitReachedType, rawSnapshot.rate_limit_reached_type),
+      }));
+    }
+  }
+
+  const additionalRateLimits = firstDefined(payload.additionalRateLimits, payload.additional_rate_limits);
+  if (Array.isArray(additionalRateLimits)) {
+    for (const item of additionalRateLimits) {
+      if (!item || typeof item !== "object") continue;
+      addSnapshot(makeCodexUsageSnapshot({
+        limitId: firstDefined(item.limitId, item.limit_id, item.meteredFeature, item.metered_feature, item.limitName, item.limit_name),
+        limitName: firstDefined(item.limitName, item.limit_name),
+        rateLimit: firstDefined(item.rateLimit, item.rate_limit),
+        credits: item.credits,
+        planType,
+      }));
+    }
+  }
+
+  const snapshots = [...snapshotsByKey.values()];
+  const selected = snapshots.find((snapshot) => snapshot.limitId === "codex") || snapshots[0] || null;
+  const rateLimitsByLimitId = Object.fromEntries(snapshots.filter((snapshot) => snapshot.limitId).map((snapshot) => [snapshot.limitId, snapshot]));
+  return {
+    planType: planType || selected?.planType || null,
+    rateLimitReachedType: rateLimitReachedType || selected?.rateLimitReachedType || null,
+    credits: normalizeCodexCredits(payload.credits) || selected?.credits || null,
+    selected,
+    snapshots,
+    rateLimits: selected,
+    rateLimitsByLimitId,
+  };
+}
+
+async function getOpenAICodexUsageCredentials({ forceRefresh = false } = {}) {
+  const authStorage = AuthStorage.create();
+  const stored = authStorage.get(OPENAI_CODEX_PROVIDER_ID);
+  const storedExpires = numericValue(stored?.expires);
+  const shouldRefresh = stored?.type === "oauth" && (forceRefresh || storedExpires === undefined || Date.now() + CODEX_TOKEN_REFRESH_SKEW_MS >= storedExpires);
+  let accessToken;
+  let refreshed = false;
+
+  if (shouldRefresh) {
+    try {
+      const refreshResult = await authStorage.refreshOAuthTokenWithLock(OPENAI_CODEX_PROVIDER_ID);
+      if (refreshResult?.apiKey) {
+        accessToken = refreshResult.apiKey;
+        refreshed = forceRefresh || refreshResult.newCredentials?.access !== stored?.access;
+      }
+    } catch (error) {
+      if (forceRefresh || !storedExpires || Date.now() >= storedExpires) {
+        throw makeHttpError(401, "OpenAI Codex OAuth token refresh failed. Run /login and choose ChatGPT Plus/Pro (Codex Subscription) to re-authenticate.");
+      }
+      console.warn(`OpenAI Codex token refresh warning: ${sanitizeError(error)}`);
+    }
+  }
+
+  if (!accessToken) {
+    accessToken = await authStorage.getApiKey(OPENAI_CODEX_PROVIDER_ID, { includeFallback: false });
+  }
+  if (!accessToken) {
+    const status = authStorage.getAuthStatus(OPENAI_CODEX_PROVIDER_ID);
+    if (status.configured) throw makeHttpError(401, "OpenAI Codex OAuth token is expired or unavailable. Run /login to refresh credentials.");
+    throw makeHttpError(401, "OpenAI Codex OAuth is not configured. Run /login and choose ChatGPT Plus/Pro (Codex Subscription).");
+  }
+
+  const latest = authStorage.get(OPENAI_CODEX_PROVIDER_ID) || stored || {};
+  const accountId = latest.accountId || codexAccountIdFromAccessToken(accessToken);
+  if (!accountId) {
+    throw makeHttpError(401, "OpenAI Codex account id is unavailable. Run /login and choose ChatGPT Plus/Pro (Codex Subscription) again.");
+  }
+
+  return {
+    accessToken,
+    accountId,
+    refreshed,
+    source: latest.type === "oauth" ? "stored-oauth" : "api-key",
+    expiresAt: numericValue(latest.expires) ? new Date(numericValue(latest.expires)).toISOString() : undefined,
+  };
+}
+
+async function fetchOpenAICodexUsagePayload(credentials) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CODEX_USAGE_TIMEOUT_MS);
+  timer.unref?.();
+  try {
+    const response = await fetch(OPENAI_CODEX_USAGE_ENDPOINT, {
+      method: "GET",
+      headers: {
+        accept: "application/json",
+        authorization: `Bearer ${credentials.accessToken}`,
+        "chatgpt-account-id": credentials.accountId,
+        originator: "pi-webui",
+      },
+      signal: controller.signal,
+    });
+    const text = await response.text().catch(() => "");
+    if (!response.ok) {
+      const error = makeHttpError(response.status === 401 ? 401 : 502, `OpenAI Codex usage request failed (${response.status}${response.statusText ? ` ${response.statusText}` : ""})`);
+      error.openaiStatus = response.status;
+      throw error;
+    }
+    try {
+      return JSON.parse(text || "{}");
+    } catch {
+      throw makeHttpError(502, "OpenAI Codex usage response was not valid JSON");
+    }
+  } catch (error) {
+    if (error?.name === "AbortError") throw makeHttpError(504, "OpenAI Codex usage request timed out");
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function getOpenAICodexUsageStatus({ forceRefresh = false } = {}) {
+  let credentials = await getOpenAICodexUsageCredentials({ forceRefresh });
+  let rawPayload;
+  try {
+    rawPayload = await fetchOpenAICodexUsagePayload(credentials);
+  } catch (error) {
+    if (error?.openaiStatus === 401 && !credentials.refreshed) {
+      credentials = await getOpenAICodexUsageCredentials({ forceRefresh: true });
+      rawPayload = await fetchOpenAICodexUsagePayload(credentials);
+    } else {
+      throw error;
+    }
+  }
+
+  return {
+    available: true,
+    providerId: OPENAI_CODEX_PROVIDER_ID,
+    source: "chatgpt.com",
+    fetchedAt: new Date().toISOString(),
+    auth: {
+      source: credentials.source,
+      expiresAt: credentials.expiresAt,
+      refreshed: credentials.refreshed,
+    },
+    ...normalizeCodexUsagePayload(rawPayload),
+  };
 }
 
 async function configuredScopedModelPatterns(cwd = options.cwd) {
@@ -2951,6 +3251,16 @@ const server = createServer(async (req, res) => {
 
     if (url.pathname === "/api/themes" && req.method === "GET") {
       sendJson(res, 200, { ok: true, data: await readBundledThemes() });
+      return;
+    }
+
+    if (url.pathname === "/api/codex-usage" && req.method === "GET") {
+      try {
+        const forceRefresh = ["1", "true", "yes"].includes(String(url.searchParams.get("refresh") || "").toLowerCase());
+        sendJson(res, 200, { ok: true, data: await getOpenAICodexUsageStatus({ forceRefresh }) });
+      } catch (error) {
+        sendJson(res, error?.statusCode || 500, { ok: false, error: error?.message || "Failed to read OpenAI Codex usage" });
+      }
       return;
     }
 
