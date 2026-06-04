@@ -66,30 +66,18 @@ pi-webui --cwd /path/to/project
 
 ## Features
 
-- Browser chat with Pi over RPC
-- Isolated terminal tabs: each Web UI tab starts its own separate `pi --mode rpc` subprocess, event stream, session state, and prompt draft
-- Automatic tab naming from the first prompt on default-named tabs, plus `/name <title>` to manually sync the Pi session and browser tab name
-- Per-tab activity indicators for idle, working, blocked, and completed unseen work, with browser notifications when a tab needs an extension UI response and an optional side-panel toggle for agent-done notifications
-- Live assistant text streaming, including streamed thinking blocks when exposed by the provider
-- Prompt, steer, follow-up, abort, new session, and manual compact controls
-- Attachment button plus drag/drop and clipboard paste for images, documents, video, audio, and other files; uploaded files are saved to a server temp path and supported images are also sent through Pi RPC image attachments
-- Busy-session behavior selector for follow-up vs steer
-- Model and thinking-level controls
-- Browser-native selector dialogs for native slash commands such as `/model`, `/settings`, `/theme`, `/fork`, `/clone`, `/resume`, and `/tree`; `/login`/`/logout` currently show non-secret guidance rather than accepting credentials in the browser
-- Slash-command autocomplete while typing `/...`
-- `@` file/path references with live suggestions from the active tab cwd
-- Tool, process, compaction, queue, and extension event log
-- Collapsible side panel with independently collapsible sections for controls, optional features, session state, queue, available commands, events, local-network exposure status/control, and a theme picker
-- Pi-style footer with token, cache, estimated Pi-context tokens, speed, cost, context usage, clickable per-tab cwd picker with server-persisted fast picks, git branch, changes, runtime, model, and thinking level
-- Guided Git workflow: `git add .`, ask Pi to run `/git-staged-msg`, preview short/long messages, commit with the selected message, and `git push`
-- Hover-expand Publish workflow menu beside Git workflow, currently offering NPM Release and AUR Release
-- Basic rendering for user, assistant, tool result, bash execution, and thinking messages
-- Feedback reactions (`👍`, `👎`, `?`) on final assistant output plus tool/bash action cards, with queued post-run submission that asks Pi to create/update a LEARNING
-- Basic extension UI bridge for `notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`, `select`, `confirm`, `input`, and `editor`
-- Specialized `/release-npm` and `/release-aur` widget rendering with scrollable live logs plus toggle/abort actions
-- Side-panel theme picker backed by optional `@firstpick/pi-themes-bundle` themes when loaded
-- PWA metadata, icons, and service worker for install-to-home-screen support when served from a secure context
-- Static frontend: no bundler, no frontend install step
+- Local browser chat over Pi RPC with isolated terminal tabs; each tab has its own `pi --mode rpc` subprocess, event stream, session state, prompt draft, cwd, and activity indicator.
+- Automatic tab naming from the first prompt on default-named tabs, plus `/name <title>` to manually sync the Pi session and browser tab name.
+- Live transcript with streamed assistant text/thinking, Markdown output, active-run status, tool/bash cards, queue/compaction events, jump-to-latest, sticky last-prompt navigation, and abort by button, Esc, or long press.
+- Prompt composer for prompts, steer/follow-up, busy-session behavior, model/thinking controls, manual compact/new session, uploads by button/drag/drop/paste, slash-command autocomplete, and `@` file/path references with live suggestions.
+- Browser-native selector dialogs for `/model`, `/settings`, `/theme`, `/fork`, `/clone`, `/resume`, `/tree`, and `/scoped-models`; `/login`/`/logout` show non-secret guidance instead of accepting credentials in the browser.
+- Session/workspace helpers for per-tab cwd changes, a clickable footer cwd picker with server-persisted fast picks, fork/clone/resume/tree navigation, and restart-safe restoration of currently open tabs.
+- Collapsible side-panel control deck for model/thinking/settings, optional features, Codex usage, session/queue/commands/events, local-network exposure, browser notifications, and Web UI themes/custom backgrounds.
+- Pi-style footer with token/cache/context/cost/speed telemetry, estimated Pi-context tokens, cwd/git/runtime/model/thinking metadata, and a scoped-model picker.
+- Optional companion management with capability-based enabled/disabled/install-needed status, localhost-only warned installs, Side-panel theme picker backed by optional `@firstpick/pi-themes-bundle` themes when loaded, guided Git commit/push workflow, NPM/AUR Publish menu, todo-progress rendering, and richer git/status/stats widgets.
+- Extension UI bridge for `notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`, `select`, `confirm`, `input`, and `editor`, with browser notifications when a tab needs an extension UI response and an optional side-panel toggle for agent-done notifications.
+- Feedback reactions (`👍`, `👎`, `?`) on final assistant output plus tool/bash action cards, with queued post-run submission that asks Pi to create/update a LEARNING.
+- Mobile/PWA support: installable app shell, service worker/icons, backend-offline recovery panel, touch-friendly composer/tabs/footer, and a static frontend with no bundler or frontend install step.
 
 ## Mobile/PWA notes
 
