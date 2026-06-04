@@ -4,13 +4,14 @@
 # What this script does:
 # - Discovers local Pi package.json files in this repository for extensions, skills, and packages
 #   (pi-extension-*/, pi-skill-*/, pi-package-*/).
-# - Lets you choose which packages to install/update (interactive by default), or installs all actionable packages with --all.
+# - Lets you choose which packages to install/update (interactive by default), or installs all actionable packages with --non-interactive/--all.
 # - Compares local package versions with Pi-installed versions and hides unchanged ones unless --force is used.
 # - Runs `pi install npm:<package>` for each selected package (or only prints commands with --dry-run).
 #
 # How to use:
 # - Run `./dev/scripts/install-pi-add.sh` for interactive selection.
-# - Run `./dev/scripts/install-pi-add.sh --all` for non-interactive install/update of actionable packages.
+# - Run `./dev/scripts/install-pi-add.sh --non-interactive` for non-interactive install/update of actionable packages.
+# - `--all` remains supported as a short alias for `--non-interactive`.
 # - Add `--dry-run` to preview actions and `--force` to show/reinstall same-version packages.
 #
 # Why this script exists:
@@ -32,22 +33,23 @@ Usage:
 Discovers and installs local Pi extension/skill/package npm packages.
 
 Options:
-  --all          Install/update all actionable packages (non-interactive)
-  --dry-run      Print install commands without running them
-  --force        Show and allow reinstalling packages already at the same version
-  -h, --help     Show this help
+  --non-interactive  Install/update all actionable packages without prompting
+  --all              Alias for --non-interactive
+  --dry-run          Print install commands without running them
+  --force            Show and allow reinstalling packages already at the same version
+  -h, --help         Show this help
 
 Examples:
   ./dev/scripts/install-pi-add.sh
-  ./dev/scripts/install-pi-add.sh --all
-  ./dev/scripts/install-pi-add.sh --all --force
-  ./dev/scripts/install-pi-add.sh --dry-run
+  ./dev/scripts/install-pi-add.sh --non-interactive
+  ./dev/scripts/install-pi-add.sh --non-interactive --force
+  ./dev/scripts/install-pi-add.sh --all --dry-run
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --all)
+    --all|--non-interactive)
       INSTALL_ALL=1
       shift
       ;;
@@ -312,7 +314,7 @@ if [[ $INSTALL_ALL -eq 1 ]]; then
   done
 else
   if [[ ! -t 0 ]]; then
-    echo "ERROR: interactive mode requires a TTY. Use --all for non-interactive usage." >&2
+    echo "ERROR: interactive mode requires a TTY. Use --non-interactive or --all for non-interactive usage." >&2
     exit 1
   fi
 
