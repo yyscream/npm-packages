@@ -120,8 +120,8 @@ assert.match(css, /#promptInput \{[\s\S]*?overflow-y:\s*hidden/, "prompt input s
 assert.match(css, /\.sticky-user-prompt-button \{[\s\S]*?grid-template-columns:\s*auto minmax\(0, 1fr\) auto/, "last-user-prompt jump control should render as a fixed transcript header");
 assert.match(css, /\.message\.extension,[\s\S]*?\.message\.native/, "extension and native command output should have visible transcript styling");
 assert.match(css, /\.message\.run-indicator-message \{[\s\S]*?border-color/, "active agent runs should render a visible transcript indicator card");
-assert.match(css, /\.message\.action-enter \{[\s\S]*?action-card-slide-in/, "new action cards should subtly slide in from the bottom");
-assert.match(css, /@keyframes action-card-slide-in \{[\s\S]*?translateY\(0\.42rem\)/, "action-card entry animation should start below the final position");
+assert.match(css, /\.message\.action-enter \{[\s\S]*?action-card-slide-in 340ms/, "new action cards should visibly slide in from the bottom");
+assert.match(css, /@keyframes action-card-slide-in \{[\s\S]*?translate3d\(0, 1\.45rem, 0\)/, "action-card entry animation should start well below the final position");
 assert.match(css, /\.message\.thinking,\n\.message\.toolCall,\n\.message\.assistantEvent/, "thinking and assistant events should have non-assistant transcript card styling");
 assert.doesNotMatch(css, /\.message\.thinking\.streaming\.complete[\s\S]*?content:\s*" done"/, "completed live thinking cards should not append a green DONE label");
 assert.doesNotMatch(css, /\.thinking-block\.streaming-thinking\.complete[\s\S]*?content:\s*" done"/, "completed thinking details should not append a green DONE label");
@@ -143,7 +143,9 @@ assert.match(css, /\.todo-widget-summary \{[\s\S]*?cursor:\s*pointer/, "todo-pro
 assert.match(css, /\.todo-widget-body \{[\s\S]*?max-height:/, "expanded todo-progress details should be height-limited");
 assert.match(css, /\.todo-widget-item\.partial \.todo-widget-marker/, "todo-progress partial items should have distinct styling");
 assert.match(css, /\.todo-widget-item\.done \.todo-widget-text[\s\S]*?text-decoration:\s*line-through/, "todo-progress completed items should be visually crossed out");
-assert.match(css, /\.release-npm-widget \{[\s\S]*?display:\s*grid/, "release-npm output should render as a specialized Web UI widget");
+assert.match(css, /\.release-npm-widget \{[\s\S]*?border-left:\s*0\.28rem solid/, "release-npm output should stand apart from the page background");
+assert.match(css, /\.release-npm-stream-header \{[\s\S]*?text-transform:\s*uppercase/, "release-npm output should label the output stream clearly");
+assert.match(css, /\.release-npm-terminal \{[\s\S]*?rgba\(3, 4, 10, 0\.98\)/, "release-npm terminal should use a high-contrast stream panel");
 assert.match(css, /\.release-aur-widget \{[\s\S]*?border-color/, "release-aur output should render as a specialized Web UI widget variant");
 assert.match(css, /\.widget-area \.widget:not\(\.todo-widget\):not\(\.release-npm-widget\)/, "mobile widget filtering should keep release workflow output visible");
 assert.match(css, /\.message\.warn \.message-role \{ color: var\(--ctp-yellow\); \}/, "warning-level command output should be visually distinct");
@@ -322,6 +324,7 @@ assert.match(app, /function bindGitWorkflowToActiveTab\(\) \{\n\s+gitWorkflow = 
 assert.match(app, /function setGitWorkflow\(patch, \{ tabId = activeTabId \} = \{\}\)[\s\S]*if \(tabId === activeTabId\) \{[\s\S]*renderGitWorkflow\(\);/, "guided git workflow should not render inactive terminal workflows globally");
 assert.doesNotMatch(app, /gitWorkflowVisibleTabId|Workflow belongs to/, "guided git workflow should not pin or show workflows outside their owning terminal tab");
 assert.match(app, /function renderReleaseNpmOutputWidget\(\)/, "release-npm live output should use a specialized Web UI renderer");
+assert.match(app, /releaseNpmStreamHeader\("Live output stream", outputLines\.length, \{ live: true \}\)/, "release-npm live output should expose a clear stream heading");
 assert.match(app, /function renderReleaseAurOutputWidget\(\)/, "release-aur live output should use a specialized Web UI renderer");
 assert.match(app, /releaseNpmActionButton\("Abort", "\/release-abort", "danger"\)/, "release-npm Web UI output should expose an abort action");
 assert.match(app, /releaseNpmActionButton\("Abort", "\/release-aur abort", "danger"\)/, "release-aur Web UI output should expose an abort action");
@@ -438,7 +441,7 @@ assert.match(app, /item\.addEventListener\("pointermove", \(event\) => setActive
 assert.match(app, /item\.addEventListener\("pointermove", \(event\) => setActiveCommandSuggestionFromPointerMove\(index, event\)\);[\s\S]*?item\.addEventListener\("click", \(\) => insertPathSuggestion\(index\)\);/, "path autocomplete should only follow pointer movement before click insertion");
 assert.doesNotMatch(app, /addEventListener\("mouseenter", \(\) => setActiveCommandSuggestion\(index\)\)/, "autocomplete should not change active selection on stationary mouseenter");
 assert.match(app, /function resizePromptInput\(\)/, "prompt textarea should auto-resize from a one-line default");
-assert.match(app, /elements\.promptInput\.addEventListener\("input", \(\) => \{\n\s+resizePromptInput\(\);/, "prompt textarea should resize whenever the user edits it");
+assert.match(app, /elements\.promptInput\.addEventListener\("input", \(\) => \{[\s\S]*?resizePromptInput\(\);/, "prompt textarea should resize whenever the user edits it");
 assert.match(app, /function updateComposerModeButtons\(\)/, "composer should relocate Steer and Follow-up based on run state");
 assert.match(app, /const target = runActive \? elements\.composerRow : elements\.composerActionsPanel/, "Steer and Follow-up should move into the bottom row only while an agent run is active");
 assert.match(app, /const before = runActive \? elements\.abortButton : null/, "active Steer and Follow-up controls should sit before Abort and Send");
@@ -468,6 +471,11 @@ assert.match(app, /function openNativeTreeSelector\(\)[\s\S]*?\/api\/session-tre
 assert.match(app, /Provider credential entry is intentionally not implemented in the browser yet/, "native /login should remain a safe non-secret guidance dialog");
 assert.match(app, /const HIDDEN_COMMAND_NAMES = new Set\(\["webui-tree-navigate"\]\)/, "internal Web UI helper commands should stay out of command pickers");
 assert.match(app, /function shouldSendPromptFromEnter\(event\)/, "prompt keyboard handling should be centralized");
+assert.match(app, /const PROMPT_HISTORY_STORAGE_KEY = "pi-webui-prompt-history"/, "prompt history should be persisted per browser for keyboard recall");
+assert.match(app, /function recallPreviousPromptFromHistory\(\)/, "prompt history should support recalling older prompts from the textarea");
+assert.match(app, /event\.key === "ArrowUp" && recallPreviousPromptFromHistory\(\)/, "plain Up should recall prompt history after command suggestions decline it");
+assert.match(app, /function recallNextPromptFromHistory\(\)/, "prompt history should support returning toward the current draft");
+assert.match(app, /syncPromptHistoryFromMessages\(latestMessages\)/, "message refresh should seed prompt history from existing user prompts");
 assert.match(app, /function handleNativeAppShortcut\(event\)/, "native app shortcut handling should be centralized");
 assert.match(app, /window\.addEventListener\("keydown", handleNativeAppShortcut, \{ capture: true \}\)/, "native shortcuts should run before textarea-specific key handling");
 assert.match(app, /cycleModelFromShortcut\(event\.shiftKey \? "backward" : "forward"\)/, "Ctrl+P and Shift+Ctrl+P should cycle models");
@@ -505,6 +513,11 @@ assert.match(app, /let tabSeenCompletionSerials = new Map\(\)/, "frontend should
 assert.match(app, /let activeTabGeneration = 0/, "frontend should version active-tab UI state to reject stale async work");
 assert.match(app, /function isCurrentTabContext\(context\)/, "frontend should identify stale active-tab refresh contexts");
 assert.match(app, /function connectEvents\(tabContext = activeTabContext\(\)\)[\s\S]*?eventSource !== source/, "frontend should ignore stale SSE messages from old active tabs");
+assert.match(app, /let foregroundReconcileTimer = null/, "frontend should debounce foreground resume reconciliation");
+assert.match(app, /case "webui_connected":[\s\S]*?scheduleForegroundReconcile\("event stream reconnect", 0\)/, "SSE reconnect should reconcile authoritative state and messages instead of only tabs");
+assert.match(app, /async function reconcileForegroundState\(reason = "resume"\)[\s\S]*?refreshTabs\(\)[\s\S]*?ensureActiveEventStream\(tabContext\)[\s\S]*?refreshAll\(tabContext\)/, "foreground reconciliation should refresh tabs plus active transcript after mobile backgrounding");
+assert.match(app, /document\.addEventListener\("visibilitychange"[\s\S]*?scheduleForegroundReconcile\("visibility resume", 0\)/, "returning to a hidden mobile tab should force a server snapshot refresh");
+assert.match(app, /window\.addEventListener\("pageshow", \(\) => scheduleForegroundReconcile\("page show", 0\)\)/, "BFCache or PWA page resume should force a server snapshot refresh");
 assert.match(app, /async function refreshMessages\(tabContext = activeTabContext\(\)\)[\s\S]*?if \(!isCurrentTabContext\(tabContext\)\) return;/, "message refreshes should not render after the user switches tabs");
 assert.match(app, /function tabIndicator\(tab\)/, "frontend should derive idle, working, blocked, and work-done tab indicator states");
 assert.match(app, /pendingBlockerCount > 0[\s\S]*?state: "blocked"/, "frontend should show blocked tabs when extension UI blockers are pending");

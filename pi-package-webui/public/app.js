@@ -128,6 +128,7 @@ let refreshMessagesTimer = null;
 let refreshStateTimer = null;
 let refreshFooterTimer = null;
 let refreshTabsTimer = null;
+let foregroundReconcileTimer = null;
 let eventSource = null;
 let activeDialog = null;
 let nativeCommandTabId = null;
@@ -157,6 +158,8 @@ let codexUsageRenderTimer = null;
 let backendOffline = false;
 let backendOfflineNoticeShown = false;
 let latestMessages = [];
+let promptHistoryByTab = new Map();
+let promptHistoryNavigation = null;
 let transientMessages = [];
 let actionEntrySeenKeysByTab = new Map();
 let actionEntryAnimationPrimedTabs = new Set();
@@ -218,6 +221,8 @@ const DEFAULT_WEBUI_PORT = "31415";
 const CUSTOM_BACKGROUND_MAX_FILE_BYTES = 24 * 1024 * 1024;
 const OPTIONAL_FEATURES_STORAGE_KEY = "pi-webui-optional-features-disabled";
 const LAST_USER_PROMPT_STORAGE_KEY = "pi-webui-last-user-prompts";
+const PROMPT_HISTORY_STORAGE_KEY = "pi-webui-prompt-history";
+const PROMPT_HISTORY_LIMIT_PER_TAB = 50;
 const ATTACHMENT_MAX_FILES = 12;
 const ATTACHMENT_MAX_FILE_BYTES = 64 * 1024 * 1024;
 const ATTACHMENT_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
@@ -248,6 +253,7 @@ const TODO_PROGRESS_LINE_REGEX = /^\s*(?:(?:[-*]|\d+[.)])\s*)?\[(?: |x|X|-)\]\s+
 const TODO_PROGRESS_PARTIAL_LINE_REGEX = /^\s*(?:(?:[-*]|\d+[.)])\s*)?\[(?: |x|X|-)?\]?\s*.*$/;
 const CHAT_SCROLL_KEYS = new Set(["ArrowDown", "ArrowUp", "End", "Home", "PageDown", "PageUp", " "]);
 const TAB_ACTIVITY_IDLE_RECONCILE_GRACE_MS = 1200;
+const FOREGROUND_RECONCILE_DELAY_MS = 120;
 const TAB_GROUP_STATUS_PRIORITY = ["blocked", "done", "idle", "working"];
 const EXTENSION_UI_BLOCKING_METHODS = new Set(["select", "confirm", "input", "editor"]);
 const BLOCKED_TAB_NOTIFICATION_TAG_PREFIX = "pi-webui-blocked-tab";
@@ -2263,6 +2269,7 @@ function saveActiveDraft() {
 }
 
 function restoreActiveDraft() {
+  resetPromptHistoryNavigation();
   elements.promptInput.value = activeTabId ? tabDrafts.get(activeTabId) || "" : "";
   resizePromptInput();
   renderCommandSuggestions();
@@ -4163,6 +4170,17 @@ function releaseNpmActionButton(label, command, className = "") {
   return button;
 }
 
+function releaseNpmStreamHeader(label, lineCount, { live = false } = {}) {
+  const header = make("div", "release-npm-stream-header");
+  const safeLineCount = Math.max(0, Number(lineCount) || 0);
+  header.append(
+    make("span", `release-npm-stream-dot${live ? " live" : ""}`),
+    make("span", "release-npm-stream-title", label),
+    make("span", "release-npm-stream-count", `${safeLineCount} line${safeLineCount === 1 ? "" : "s"}`),
+  );
+  return header;
+}
+
 function renderReleaseNpmOutputWidget() {
   if (!isOptionalFeatureEnabled("releaseNpm")) return null;
   const outputLines = getWidgetLines("release-npm:output");
@@ -4188,15 +4206,17 @@ function renderReleaseNpmOutputWidget() {
   );
   header.append(titleWrap, meta, actions);
 
+  const streamLines = outputLines.length ? outputLines : ["Waiting for release output..."];
+  const streamHeader = releaseNpmStreamHeader("Live output stream", outputLines.length, { live: true });
   const terminal = make("div", "release-npm-terminal");
   terminal.setAttribute("role", "log");
   terminal.setAttribute("aria-live", "polite");
-  for (const line of (outputLines.length ? outputLines : ["Waiting for release output..."])) {
+  for (const line of streamLines) {
     appendReleaseNpmTerminalLine(terminal, line);
   }
 
   const controls = make("div", "release-npm-controls", details.controls || "Controls: /release-toggle expands/collapses · /release-abort stops subprocess");
-  node.append(header, terminal, controls);
+  node.append(header, streamHeader, terminal, controls);
   requestAnimationFrame(() => { terminal.scrollTop = terminal.scrollHeight; });
   return node;
 }
@@ -4220,11 +4240,13 @@ function renderReleaseNpmLogWidget() {
   actions.append(releaseNpmActionButton("Close log", "/release-npm-logs close"));
   header.append(titleWrap, meta, actions);
 
+  const logLines = lines.slice(2).filter((line, index) => index > 0 || stripAnsi(line).trim());
+  const streamHeader = releaseNpmStreamHeader("Saved output stream", logLines.length);
   const terminal = make("div", "release-npm-terminal");
-  for (const line of lines.slice(2).filter((line, index) => index > 0 || stripAnsi(line).trim())) {
+  for (const line of logLines) {
     appendReleaseNpmTerminalLine(terminal, line);
   }
-  node.append(header, terminal);
+  node.append(header, streamHeader, terminal);
   requestAnimationFrame(() => { terminal.scrollTop = terminal.scrollHeight; });
   return node;
 }
@@ -4254,15 +4276,17 @@ function renderReleaseAurOutputWidget() {
   );
   header.append(titleWrap, meta, actions);
 
+  const streamLines = outputLines.length ? outputLines : ["Waiting for release-aur output..."];
+  const streamHeader = releaseNpmStreamHeader("Live AUR output stream", outputLines.length, { live: true });
   const terminal = make("div", "release-npm-terminal");
   terminal.setAttribute("role", "log");
   terminal.setAttribute("aria-live", "polite");
-  for (const line of (outputLines.length ? outputLines : ["Waiting for release-aur output..."])) {
+  for (const line of streamLines) {
     appendReleaseNpmTerminalLine(terminal, line);
   }
 
   const controls = make("div", "release-npm-controls", details.controls || "Controls: /release-aur toggle expands/collapses · /release-aur abort stops subprocess");
-  node.append(header, terminal, controls);
+  node.append(header, streamHeader, terminal, controls);
   requestAnimationFrame(() => { terminal.scrollTop = terminal.scrollHeight; });
   return node;
 }
@@ -4286,11 +4310,13 @@ function renderReleaseAurLogWidget() {
   actions.append(releaseNpmActionButton("Close log", "/release-aur logs close"));
   header.append(titleWrap, meta, actions);
 
+  const logLines = lines.slice(2).filter((line, index) => index > 0 || stripAnsi(line).trim());
+  const streamHeader = releaseNpmStreamHeader("Saved AUR output stream", logLines.length);
   const terminal = make("div", "release-npm-terminal");
-  for (const line of lines.slice(2).filter((line, index) => index > 0 || stripAnsi(line).trim())) {
+  for (const line of logLines) {
     appendReleaseNpmTerminalLine(terminal, line);
   }
-  node.append(header, terminal);
+  node.append(header, streamHeader, terminal);
   requestAnimationFrame(() => { terminal.scrollTop = terminal.scrollHeight; });
   return node;
 }
@@ -5403,6 +5429,136 @@ function messageUserPromptText(message) {
 
 function stickyUserPromptPreview(message) {
   return stickyUserPromptPreviewText(messageUserPromptText(message));
+}
+
+function promptHistoryText(value) {
+  return stripAnsi(String(value ?? "")).replace(/\r\n?/g, "\n").trim();
+}
+
+function promptHistoryMessageText(message) {
+  if (message?.role !== "user") return "";
+  const text = promptHistoryText(textFromContent(message.content));
+  return text.startsWith("/") ? "" : text;
+}
+
+function promptHistoryForTab(tabId = activeTabId) {
+  if (!tabId) return [];
+  return promptHistoryByTab.get(tabId) || [];
+}
+
+function promptHistoryWithEntry(history, text) {
+  const prompt = promptHistoryText(text);
+  if (!prompt) return history || [];
+  return [...(history || []).filter((entry) => entry !== prompt), prompt].slice(-PROMPT_HISTORY_LIMIT_PER_TAB);
+}
+
+function promptHistoryEqual(left = [], right = []) {
+  return left.length === right.length && left.every((entry, index) => entry === right[index]);
+}
+
+function setPromptHistoryForTab(tabId, history, { persist = true } = {}) {
+  if (!tabId) return;
+  const entries = (history || []).map(promptHistoryText).filter(Boolean).slice(-PROMPT_HISTORY_LIMIT_PER_TAB);
+  if (entries.length) promptHistoryByTab.set(tabId, entries);
+  else promptHistoryByTab.delete(tabId);
+  if (persist) persistPromptHistoryCache();
+}
+
+function loadPromptHistoryCache() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(PROMPT_HISTORY_STORAGE_KEY) || "{}");
+    promptHistoryByTab = new Map(Object.entries(raw)
+      .map(([tabId, entries]) => [tabId, Array.isArray(entries) ? entries.map(promptHistoryText).filter(Boolean).slice(-PROMPT_HISTORY_LIMIT_PER_TAB) : []])
+      .filter(([, entries]) => entries.length));
+  } catch {
+    promptHistoryByTab = new Map();
+  }
+}
+
+function persistPromptHistoryCache() {
+  try {
+    const entries = [...promptHistoryByTab.entries()]
+      .filter(([tabId, history]) => tabId && Array.isArray(history) && history.length)
+      .slice(-24)
+      .map(([tabId, history]) => [tabId, history.slice(-PROMPT_HISTORY_LIMIT_PER_TAB)]);
+    localStorage.setItem(PROMPT_HISTORY_STORAGE_KEY, JSON.stringify(Object.fromEntries(entries)));
+  } catch {
+    // Ignore storage failures; in-memory prompt history still works for this page load.
+  }
+}
+
+function rememberPromptHistory(text, { tabId = activeTabId } = {}) {
+  if (!tabId) return;
+  setPromptHistoryForTab(tabId, promptHistoryWithEntry(promptHistoryForTab(tabId), text));
+}
+
+function syncPromptHistoryFromMessages(messages = latestMessages) {
+  if (!activeTabId) return;
+  const prompts = (messages || []).map(promptHistoryMessageText).filter(Boolean);
+  if (!prompts.length) return;
+  const currentHistory = promptHistoryForTab(activeTabId);
+  let nextHistory = currentHistory;
+  for (const prompt of prompts) nextHistory = promptHistoryWithEntry(nextHistory, prompt);
+  if (!promptHistoryEqual(currentHistory, nextHistory)) setPromptHistoryForTab(activeTabId, nextHistory);
+}
+
+function resetPromptHistoryNavigation() {
+  promptHistoryNavigation = null;
+}
+
+function activePromptHistoryNavigation(history = promptHistoryForTab()) {
+  if (!promptHistoryNavigation || promptHistoryNavigation.tabId !== activeTabId) return null;
+  const index = promptHistoryNavigation.index;
+  if (!Number.isInteger(index) || index < 0 || index >= history.length || elements.promptInput.value !== history[index]) {
+    resetPromptHistoryNavigation();
+    return null;
+  }
+  return promptHistoryNavigation;
+}
+
+function applyPromptHistoryValue(value) {
+  const input = elements.promptInput;
+  input.value = value || "";
+  resizePromptInput();
+  try {
+    input.setSelectionRange(input.value.length, input.value.length);
+  } catch {
+    // Some input implementations can reject selection updates; history recall still worked.
+  }
+  hideCommandSuggestions();
+}
+
+function recallPreviousPromptFromHistory() {
+  if (!activeTabId) return false;
+  const history = promptHistoryForTab(activeTabId);
+  if (!history.length) return false;
+  const navigation = activePromptHistoryNavigation(history);
+  if (!navigation && elements.promptInput.value.trim()) return false;
+  const index = navigation ? Math.max(0, navigation.index - 1) : history.length - 1;
+  promptHistoryNavigation = {
+    tabId: activeTabId,
+    index,
+    draft: navigation ? navigation.draft : elements.promptInput.value || "",
+  };
+  applyPromptHistoryValue(history[index]);
+  return true;
+}
+
+function recallNextPromptFromHistory() {
+  if (!activeTabId) return false;
+  const history = promptHistoryForTab(activeTabId);
+  const navigation = activePromptHistoryNavigation(history);
+  if (!navigation) return false;
+  if (navigation.index >= history.length - 1) {
+    const draft = navigation.draft || "";
+    resetPromptHistoryNavigation();
+    applyPromptHistoryValue(draft);
+    return true;
+  }
+  const index = navigation.index + 1;
+  promptHistoryNavigation = { ...navigation, index };
+  applyPromptHistoryValue(history[index]);
+  return true;
 }
 
 function loadLastUserPromptCache() {
@@ -7365,6 +7521,7 @@ function renderMessages(messages) {
   latestMessages = messages || [];
   cleanupLiveToolRunsForMessages(latestMessages);
   syncLastUserPromptFromMessages(latestMessages);
+  syncPromptHistoryFromMessages(latestMessages);
   renderAllMessages();
   renderFooter();
   renderFeedbackTray();
@@ -8144,6 +8301,35 @@ async function refreshAll(tabContext = activeTabContext()) {
   resumeGitWorkflowForActiveTab(tabContext);
 }
 
+function ensureActiveEventStream(tabContext = activeTabContext()) {
+  if (!tabContext.tabId || !isCurrentTabContext(tabContext)) return;
+  if (!eventSource || eventSource.readyState === EventSource.CLOSED) connectEvents(tabContext);
+}
+
+async function reconcileForegroundState(reason = "resume") {
+  if (document.visibilityState === "hidden") return;
+
+  const tabResult = await Promise.allSettled([refreshTabs()]);
+  const tabContext = activeTabContext();
+  ensureActiveEventStream(tabContext);
+
+  const results = [...tabResult];
+  if (tabContext.tabId) results.push(...(await Promise.allSettled([refreshAll(tabContext)])));
+  if (!isCurrentTabContext(tabContext)) return;
+
+  for (const result of results) {
+    if (result.status === "rejected") addEvent(`foreground refresh failed after ${reason}: ${result.reason?.message || String(result.reason)}`, "error");
+  }
+}
+
+function scheduleForegroundReconcile(reason = "resume", delay = FOREGROUND_RECONCILE_DELAY_MS) {
+  clearTimeout(foregroundReconcileTimer);
+  foregroundReconcileTimer = setTimeout(() => {
+    foregroundReconcileTimer = null;
+    reconcileForegroundState(reason).catch((error) => addEvent(`foreground refresh failed after ${reason}: ${error.message || String(error)}`, "error"));
+  }, delay);
+}
+
 async function openToNetwork() {
   if (latestNetwork?.open) {
     await closeNetworkAccess();
@@ -8461,7 +8647,10 @@ async function sendPrompt(kind = "prompt", explicitMessage) {
     message = composeMessageWithAttachments(originalMessage, prepared.uploadedFiles, prepared.inlineImageIds);
     const bodyBase = { message };
     if (prepared.images.length) bodyBase.images = prepared.images;
-    if (kind === "prompt" && !message.startsWith("/")) rememberLastUserPrompt(message, { tabId: targetTabId });
+    if (!message.startsWith("/")) {
+      rememberPromptHistory(message, { tabId: targetTabId });
+      if (kind === "prompt") rememberLastUserPrompt(message, { tabId: targetTabId });
+    }
     if (startsRun && isCurrentTabContext(tabContext)) setRunIndicatorActivity("Sending prompt to Pi…");
 
     let response;
@@ -8701,7 +8890,7 @@ function handleEvent(event) {
   switch (event.type) {
     case "webui_connected":
       addEvent(`connected to ${event.tabTitle || "terminal"} for ${event.cwd}`);
-      refreshTabs().catch((error) => addEvent(error.message, "error"));
+      scheduleForegroundReconcile("event stream reconnect", 0);
       break;
     case "webui_tab_renamed":
       applyTabMetadata(event.tab || { id: event.tabId, title: event.tabTitle, activity: event.tabActivity });
@@ -9229,6 +9418,12 @@ function handleNativeAppShortcut(event) {
 }
 
 window.addEventListener("keydown", handleNativeAppShortcut, { capture: true });
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") scheduleForegroundReconcile("visibility resume", 0);
+});
+window.addEventListener("pageshow", () => scheduleForegroundReconcile("page show", 0));
+window.addEventListener("focus", () => scheduleForegroundReconcile("window focus"));
+window.addEventListener("online", () => scheduleForegroundReconcile("network online", 0));
 window.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
   if (elements.dialog?.open || elements.pathPickerDialog?.open) return;
@@ -9318,9 +9513,18 @@ elements.promptInput.addEventListener("keydown", (event) => {
       hideCommandSuggestions();
     }
   }
+
+  if (!event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && event.key === "ArrowUp" && recallPreviousPromptFromHistory()) {
+    event.preventDefault();
+    return;
+  }
+  if (!event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && event.key === "ArrowDown" && recallNextPromptFromHistory()) {
+    event.preventDefault();
+  }
 });
 
 elements.promptInput.addEventListener("input", () => {
+  resetPromptHistoryNavigation();
   resizePromptInput();
   renderCommandSuggestions();
 });
@@ -9329,6 +9533,7 @@ elements.promptInput.addEventListener("focus", () => {
   setTimeout(updateVisualViewportVars, 0);
 });
 elements.promptInput.addEventListener("click", () => {
+  resetPromptHistoryNavigation();
   updateVisualViewportVars();
   syncMobileChatToBottomForInput();
   renderCommandSuggestions();
@@ -9349,6 +9554,7 @@ focusPromptInput({ defer: true });
 updateComposerModeButtons();
 updateOptionalFeatureAvailability();
 loadLastUserPromptCache();
+loadPromptHistoryCache();
 installViewportHandlers();
 currentThemeName = storedThemeName();
 renderBackgroundControl();
