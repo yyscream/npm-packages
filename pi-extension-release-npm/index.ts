@@ -517,6 +517,20 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
         return;
       }
 
+      ctx.ui.notify("Checking npm authentication with npm whoami...", "info");
+      const authResult = await verifyNpmAuth(ctx.cwd);
+      if (!authResult.ok) {
+        const detail = redactTokenLikeOutput(authResult.output);
+        ctx.ui.notify(
+          `npm whoami failed; aborting /release-npm before release preflight. Run /release-npm-setup or npm login, then retry.${detail ? ` ${detail}` : ""}`,
+          "error",
+        );
+        return;
+      }
+
+      const username = authResult.output.trim();
+      ctx.ui.notify(`npm authentication verified${username ? ` as ${username}` : ""}. Starting release preflight...`, "success");
+
       const runLog = createReleaseRunLog(ctx.cwd);
       let cleanupReleaseUi: (() => void) | undefined;
       void (async () => {

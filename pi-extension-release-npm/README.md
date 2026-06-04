@@ -6,6 +6,7 @@ Release orchestration command for this npm-packages workspace.
 
 - Adds `/release-npm` command.
 - Adds `/release-npm-setup` command to configure the npm auth token via Pi native input.
+- Checks npm authentication with `npm whoami` before release preflight starts.
 - Runs release preflight checks before asking to publish.
 - Shows a summary of planned version changes and publish actions in the confirmation prompt.
 - Publishes only after explicit confirmation.
@@ -30,7 +31,9 @@ pi install npm:@firstpick/pi-extension-release-npm
 
 ## Configuration
 
-Publishing requires valid npm credentials. Run `/release-npm-setup`, paste an npm access token, and the extension will run:
+Publishing requires valid npm credentials. `/release-npm` checks `npm whoami` before it starts preflight work and aborts immediately if npm is not authenticated.
+
+Run `/release-npm-setup`, paste an npm access token, and the extension will run:
 
 ```bash
 npm config set //registry.npmjs.org/:_authToken "<token>"
@@ -101,7 +104,7 @@ Readiness checks require or verify:
 ## Commands
 
 - `/release-npm-setup` — prompts for an npm token with Pi native input, saves it using `npm config set //registry.npmjs.org/:_authToken <token>`, then verifies with `npm whoami`.
-- `/release-npm` — runs `./dev/scripts/release-workflow.sh --plan --all`, shows the planned version/publish summary plus exact package targets, prompts for confirmation, then runs `./dev/scripts/release-workflow.sh --publish --target <dir>` only for those detected targets. It does not install packages after publishing.
+- `/release-npm` — checks `npm whoami` first, runs `./dev/scripts/release-workflow.sh --plan --all`, shows the planned version/publish summary plus exact package targets, prompts for confirmation, then runs `./dev/scripts/release-workflow.sh --publish --target <dir>` only for those detected targets. It does not install packages after publishing.
 - `/release-toggle` — toggles active release output between compact and expanded mode (`Ctrl+O` also toggles in TUI).
 - `/release-abort` — aborts the active release subprocess (`Ctrl+C` also aborts in TUI while the release subprocess is active).
 - `/release-npm-logs` — select a saved release run and display it above the editor; press `Esc`/`q` in TUI or run `/release-npm-logs close` to close it.
