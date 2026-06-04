@@ -2,6 +2,8 @@
 
 Local browser companion for [Pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent).
 
+![Pi Web UI main window showing multi-tab chat, controls, theme picker, and local status](https://unpkg.com/@firstpick/pi-package-webui/images/Main_Window_v0.1.7.png)
+
 This package provides:
 
 - `pi-webui`: a local HTTP/SSE server that starts `pi --mode rpc`, serves the static browser UI, and proxies browser actions to Pi RPC commands.

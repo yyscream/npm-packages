@@ -51,6 +51,9 @@ assert.match(html, /id="thinkingVisibilityStatus"/, "thinking-output visibility 
 assert.match(html, /id="nativeCommandDialog"/, "native slash selector UI should have a dedicated dialog");
 assert.match(html, /id="nativeCommandSearch"[^>]*type="search"/, "native slash selector dialog should expose a filter box");
 assert.match(html, /id="optionalFeaturesBox"/, "side panel should expose optional feature status and controls");
+assert.match(html, /id="serverOfflinePanel"/, "PWA/offline shell should expose a backend-offline recovery panel");
+assert.match(html, /id="copyServerCommandButton"/, "backend-offline recovery panel should expose a start-command copy button");
+assert.match(html, /id="retryServerConnectionButton"/, "backend-offline recovery panel should expose a retry button");
 assert.match(html, /data-side-panel-section="controls"/, "side panel controls should live in a collapsible section");
 assert.match(html, /data-side-panel-section="commands"/, "side panel commands should live in a collapsible section");
 assert.match(html, /class="side-panel-section-toggle"[^>]*aria-controls="sidePanelSectionControls"/, "side panel section toggles should target their content panels");
@@ -158,6 +161,7 @@ assert.match(css, /\.terminal-tab\.activity-done/, "completed unseen work should
 assert.match(css, /\.terminal-tabs[\s\S]*?position:\s*absolute/, "expanded mobile tabs should overlay instead of consuming transcript space");
 assert.match(css, /body\.mobile-keyboard-open \.terminal-tabs-shell,[\s\S]*?body\.mobile-keyboard-open \.widget-area,[\s\S]*?body\.mobile-keyboard-open \.statusbar/, "mobile keyboard mode should hide header, widgets, and footer");
 assert.match(css, /body\.mobile-keyboard-open \.composer-actions-button,[\s\S]*?body\.mobile-keyboard-open \.composer-actions-panel/, "mobile keyboard mode should hide the secondary actions sheet while keeping active-run controls available");
+assert.match(css, /\.server-offline-panel/, "PWA/offline shell should style a backend-offline recovery panel");
 assert.match(css, /body:not\(\.pi-run-active\):not\(\.mobile-keyboard-open\) \.composer-row button\.primary \{ grid-column: span 4; \}/, "idle mobile composer should keep Actions and Send on one compact row");
 assert.match(css, /button\[hidden\] \{ display: none !important; \}/, "hidden bottom-row controls should not occupy layout space");
 assert.match(css, /\.footer-details-toggle \{ display: none; \}/, "footer details toggle should be hidden outside mobile CSS");
@@ -223,6 +227,10 @@ assert.match(app, /async function initializeTabs\(\)[\s\S]*?restoreActiveDraft\(
 assert.match(app, /resizePromptInput\(\);\nfocusPromptInput\(\{ defer: true \}\);\nupdateComposerModeButtons\(\);/, "startup should request prompt focus before waiting for tab state refreshes");
 assert.match(app, /elements\.promptInput\.addEventListener\("focus", \(\) => \{\n\s+syncMobileChatToBottomForInput\(\);/, "focusing mobile input should scroll output to bottom");
 assert.match(app, /navigator\.serviceWorker\.register\("\/service-worker\.js"\)/, "PWA service worker should be registered by the app");
+assert.match(app, /function serverStartCommandText\(\)[\s\S]*pi-webui --cwd/, "PWA/offline shell should build a pi-webui --cwd recovery command");
+assert.match(app, /Pi Web UI server is offline/, "PWA/offline shell should clearly report backend-down state");
+assert.match(app, /navigator\.clipboard\.writeText\(text\)/, "backend-offline recovery panel should copy the start command when possible");
+assert.match(app, /retryServerConnectionButton.*retryServerConnection/s, "backend-offline recovery panel should wire a retry action");
 assert.match(app, /function isChatNearBottom\(/, "chat should detect whether the user is reading above the bottom");
 assert.match(app, /function scheduleChatFollowScroll\(/, "chat auto-follow should retry after layout settles during fast streaming");
 assert.match(app, /function setChatScrollTopInstant\(top\)[\s\S]*?scrollBehavior = "auto"/, "chat auto-follow should bypass smooth scrolling while chasing fast output");
@@ -279,7 +287,14 @@ assert.match(app, /function toolResultPreviewText\(message, lineLimit = 10\)/, "
 assert.match(app, /function renderToolExecution\(parent, message\)[\s\S]*?WEBUI_TOOL_RENDERERS/, "paired tool cards should use the browser-side built-in tool renderer registry");
 assert.match(app, /appendToolRawDetails\(parent, tool\)/, "paired tool cards should keep a safe raw-data expander for debugging renderer mismatches");
 assert.match(app, /function toolStateMeta\(tool\)/, "tool cards should expose consistent status and elapsed metadata across built-in renderers");
-assert.match(app, /function handleToolExecutionUpdate\(event\)[\s\S]*?event\.partialResult/, "live tool_execution_update events should update transcript-visible tool cards");
+assert.match(app, /const TOOL_LIVE_UPDATE_THROTTLE_MS = 80/, "live tool cards should coalesce rapid partial updates before re-rendering");
+assert.match(app, /function updateLiveToolCard\(bubble, message\)[\s\S]*?body\.replaceChildren\(\);[\s\S]*?renderToolExecution\(body, message\);/, "live tool card updates should re-render the existing card body in place");
+assert.match(app, /function scheduleLiveToolRunRender\(run[\s\S]*?liveToolRenderQueue\.set[\s\S]*?TOOL_LIVE_UPDATE_THROTTLE_MS/, "live tool update events should be queued and throttled for smoother browser output");
+assert.match(app, /function handleToolExecutionUpdate\(event\)[\s\S]*?event\.partialResult[\s\S]*?scheduleLiveToolRunRender\(run, \{ scroll: false \}\)/, "live tool_execution_update events should update transcript-visible tool cards without replacing them per event");
+assert.match(app, /function captureReusableToolCards\(\)[\s\S]*?\.message\.toolExecution\[data-tool-call-id\]/, "full transcript re-renders should capture existing tool cards before clearing the chat");
+assert.match(app, /function appendMessage\(message,[\s\S]*?reusableToolCards = null[\s\S]*?reuseToolExecutionBubble\(reusableToolCards, message/, "message rendering should reuse matching tool cards instead of replacing them during refreshes");
+assert.match(app, /function renderAllMessages\(\{ preserveScroll = false \} = \{\}\)[\s\S]*?const reusableToolCards = captureReusableToolCards\(\);[\s\S]*?appendTranscriptMessage\(item\.message,[\s\S]*?reusableToolCards,/, "transcript refreshes should pass reusable tool cards through to item rendering");
+assert.match(app, /const keyedToolExecution = message\.role === "toolExecution" && message\.toolCallId[\s\S]*?keyedToolExecution \? "toolExecution"[\s\S]*?keyedToolExecution \? "" : message\.title[\s\S]*?keyedToolExecution \? "" : message\.timestamp/, "tool action entry identity should stay stable when live transient cards become persisted transcript cards");
 assert.match(app, /appendText\(preview, toolResultPreviewText\(message, 10\), "code-block tool-result-preview-text"\)/, "collapsed tool results should render the first ten preview lines by default");
 assert.match(app, /function assistantDisplayMessages\(message\)/, "assistant history should split thinking and tool-call parts out of the final Assistant output card");
 assert.match(app, /function assistantHasToolCallAfter\(content, index\)/, "assistant text that precedes a tool call should be detectable and suppressible");

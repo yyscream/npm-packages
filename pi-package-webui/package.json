@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-package-webui",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Pi Web UI companion package with a local browser UI CLI plus /webui-start and /webui-status commands.",
   "license": "MIT",
   "type": "module",
@@ -14,6 +14,7 @@
     "extension"
   ],
   "pi": {
+    "image": "https://unpkg.com/@firstpick/pi-package-webui/images/Main_Window_v0.1.7.png",
     "extensions": [
       "./index.ts",
       "../pi-extension-git-footer-status/index.ts",
@@ -63,6 +64,7 @@
     "index.ts",
     "bin",
     "public",
+    "images",
     "tests",
     "README.md",
     "LICENSE"

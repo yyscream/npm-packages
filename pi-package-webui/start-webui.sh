@@ -1,0 +1,393 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2016
+set -euo pipefail
+
+PACKAGE_NAME="@firstpick/pi-package-webui"
+DEFAULT_HOST="127.0.0.1"
+DEFAULT_PORT="31415"
+SERVER_PID=""
+
+cleanup() {
+  if [[ -n "${SERVER_PID:-}" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
+    kill "$SERVER_PID" 2>/dev/null || true
+  fi
+}
+
+choose_cwd() {
+  local cwd="${PI_WEBUI_CWD:-${PWD:-}}"
+
+  if [[ -z "$cwd" || ! -d "$cwd" ]]; then
+    cwd="${HOME:-}"
+  fi
+
+  if [[ -z "$cwd" || ! -d "$cwd" ]]; then
+    cwd="$(pwd -P)"
+  fi
+
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*)
+      if command -v cygpath >/dev/null 2>&1; then
+        cwd="$(cygpath -m "$cwd")"
+      fi
+      ;;
+  esac
+
+  printf '%s\n' "$cwd"
+}
+
+ensure_pi_webui() {
+  if command -v pi-webui >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "pi-webui is not installed or not available on PATH."
+
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "npm is required to install it globally. Install Node.js/npm, then run:" >&2
+    echo "  npm install -g $PACKAGE_NAME" >&2
+    return 1
+  fi
+
+  if [[ ! -t 0 ]]; then
+    echo "Non-interactive shell; refusing to install without confirmation." >&2
+    echo "Run manually:" >&2
+    echo "  npm install -g $PACKAGE_NAME" >&2
+    return 1
+  fi
+
+  local answer=""
+  if ! read -r -p "Install $PACKAGE_NAME globally now? [y/N] " answer; then
+    answer=""
+  fi
+
+  case "$answer" in
+    y|Y|yes|YES|Yes)
+      npm install -g "$PACKAGE_NAME"
+      ;;
+    *)
+      echo "Aborted. Install later with:" >&2
+      echo "  npm install -g $PACKAGE_NAME" >&2
+      return 1
+      ;;
+  esac
+
+  if ! command -v pi-webui >/dev/null 2>&1; then
+    echo "Installed, but pi-webui is still not on PATH. Check your npm global bin directory." >&2
+    return 1
+  fi
+}
+
+browser_host_for_url() {
+  local host="$1"
+
+  case "$host" in
+    ""|"0.0.0.0") printf '%s\n' "127.0.0.1" ;;
+    "::") printf '%s\n' "[::1]" ;;
+    \[*\]) printf '%s\n' "$host" ;;
+    *:*) printf '[%s]\n' "$host" ;;
+    *) printf '%s\n' "$host" ;;
+  esac
+}
+
+connect_host_for_port() {
+  local host="$1"
+
+  case "$host" in
+    ""|"0.0.0.0") printf '%s\n' "127.0.0.1" ;;
+    "::") printf '%s\n' "::1" ;;
+    \[*\])
+      host="${host#\[}"
+      host="${host%\]}"
+      printf '%s\n' "$host"
+      ;;
+    *) printf '%s\n' "$host" ;;
+  esac
+}
+
+open_url() {
+  local url="$1"
+  local platform=""
+  platform="$(uname -s 2>/dev/null || true)"
+
+  case "$platform" in
+    MINGW*|MSYS*|CYGWIN*)
+      if command -v cmd.exe >/dev/null 2>&1; then
+        cmd.exe /c start "" "$url" </dev/null >/dev/null 2>&1 &
+        return 0
+      fi
+      if command -v powershell.exe >/dev/null 2>&1; then
+        powershell.exe -NoProfile -Command 'Start-Process -FilePath $args[0]' "$url" </dev/null >/dev/null 2>&1 &
+        return 0
+      fi
+      ;;
+    Linux*)
+      if grep -qi microsoft /proc/version 2>/dev/null; then
+        if command -v wslview >/dev/null 2>&1; then
+          wslview "$url" </dev/null >/dev/null 2>&1 &
+          return 0
+        fi
+        if command -v cmd.exe >/dev/null 2>&1; then
+          cmd.exe /c start "" "$url" </dev/null >/dev/null 2>&1 &
+          return 0
+        fi
+      fi
+      ;;
+  esac
+
+  if command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$url" </dev/null >/dev/null 2>&1 &
+  elif command -v open >/dev/null 2>&1; then
+    open "$url" </dev/null >/dev/null 2>&1 &
+  elif command -v wslview >/dev/null 2>&1; then
+    wslview "$url" </dev/null >/dev/null 2>&1 &
+  elif command -v cmd.exe >/dev/null 2>&1; then
+    cmd.exe /c start "" "$url" </dev/null >/dev/null 2>&1 &
+  elif command -v powershell.exe >/dev/null 2>&1; then
+    powershell.exe -NoProfile -Command 'Start-Process -FilePath $args[0]' "$url" </dev/null >/dev/null 2>&1 &
+  else
+    echo "Could not find a browser opener. Open manually:" >&2
+    echo "  $url" >&2
+    return 1
+  fi
+}
+
+http_ok() {
+  local url="$1"
+
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS --max-time 2 "$url" >/dev/null 2>&1
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q --timeout=2 --tries=1 --spider "$url" >/dev/null 2>&1
+  else
+    return 1
+  fi
+}
+
+webui_is_running() {
+  local base_url="${1%/}"
+
+  http_ok "$base_url/api/webui-status" || http_ok "$base_url/api/webui-status?detailed=1"
+}
+
+http_get() {
+  local url="$1"
+
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS --max-time 5 "$url"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q --timeout=5 --tries=1 -O - "$url"
+  else
+    return 1
+  fi
+}
+
+http_post_json() {
+  local url="$1"
+  local body="$2"
+
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS --max-time 10 -X POST "$url" -H "Content-Type: application/json" --data "$body"
+  else
+    return 1
+  fi
+}
+
+json_quote() {
+  local value="$1"
+
+  if command -v node >/dev/null 2>&1; then
+    node -e 'process.stdout.write(JSON.stringify(process.argv[1] ?? ""))' "$value"
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import json,sys; print(json.dumps(sys.argv[1]), end="")' "$value"
+  else
+    return 1
+  fi
+}
+
+extract_tab_id_for_cwd() {
+  local cwd="$1"
+
+  if command -v node >/dev/null 2>&1; then
+    node -e '
+const fs = require("fs");
+const data = JSON.parse(fs.readFileSync(0, "utf8"));
+const target = normalize(process.argv[1]);
+const tabs = data?.data?.tabs || [];
+const tab = tabs.find((item) => normalize(item?.cwd) === target);
+if (tab?.id) process.stdout.write(String(tab.id));
+function normalize(value) {
+  let text = String(value || "").replace(/\\/g, "/");
+  if (/^\/[a-zA-Z]\//.test(text)) text = `${text[1]}:${text.slice(2)}`;
+  return process.platform === "win32" ? text.toLowerCase() : text;
+}
+' "$cwd"
+  else
+    return 1
+  fi
+}
+
+extract_created_tab_id() {
+  if command -v node >/dev/null 2>&1; then
+    node -e '
+const fs = require("fs");
+const data = JSON.parse(fs.readFileSync(0, "utf8"));
+const id = data?.data?.tab?.id;
+if (id) process.stdout.write(String(id));
+'
+  else
+    return 1
+  fi
+}
+
+webui_url_for_cwd() {
+  local base_url cwd tabs_json tab_id json_cwd body created_json
+  base_url="${1%/}"
+  cwd="$2"
+
+  if tabs_json="$(http_get "$base_url/api/tabs" 2>/dev/null)"; then
+    tab_id="$(printf '%s' "$tabs_json" | extract_tab_id_for_cwd "$cwd" 2>/dev/null || true)"
+    if [[ -n "$tab_id" ]]; then
+      printf '%s/?tab=%s\n' "$base_url" "$tab_id"
+      return 0
+    fi
+  fi
+
+  if json_cwd="$(json_quote "$cwd" 2>/dev/null)"; then
+    body="{\"cwd\":$json_cwd}"
+    if created_json="$(http_post_json "$base_url/api/tabs" "$body" 2>/dev/null)"; then
+      tab_id="$(printf '%s' "$created_json" | extract_created_tab_id 2>/dev/null || true)"
+      if [[ -n "$tab_id" ]]; then
+        printf '%s/?tab=%s\n' "$base_url" "$tab_id"
+        return 0
+      fi
+    fi
+  fi
+
+  printf '%s/\n' "$base_url"
+}
+
+port_is_in_use() {
+  local host port
+  host="$(connect_host_for_port "$1")"
+  port="$2"
+
+  if command -v nc >/dev/null 2>&1 && nc -z "$host" "$port" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if command -v lsof >/dev/null 2>&1 && lsof -iTCP:"$port" -sTCP:LISTEN -Pn >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | awk -v port="$port" 'NR > 1 { split($4, parts, ":"); if (parts[length(parts)] == port) found = 1 } END { exit(found ? 0 : 1) }'; then
+    return 0
+  fi
+
+  if [[ "$host" != *:* ]] && (echo >"/dev/tcp/$host/$port") >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if command -v netstat >/dev/null 2>&1 && netstat -an 2>/dev/null | grep -E "[.:]${port}[[:space:]]" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  return 1
+}
+
+wait_until_ready() {
+  local url="$1"
+  local pid="$2"
+
+  if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+    sleep 1
+    return 0
+  fi
+
+  for _ in {1..50}; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      return 2
+    fi
+
+    http_ok "$url" && return 0
+    sleep 0.2
+  done
+
+  return 1
+}
+
+main() {
+  local cwd host port browser_host connect_host url target_url i ready_status
+  local args=("$@")
+  cwd="$(choose_cwd)"
+  host="${PI_WEBUI_HOST:-$DEFAULT_HOST}"
+  port="${PI_WEBUI_PORT:-$DEFAULT_PORT}"
+
+  for ((i = 0; i < ${#args[@]}; i++)); do
+    case "${args[$i]}" in
+      --)
+        break
+        ;;
+      --cwd)
+        if ((i + 1 < ${#args[@]})); then cwd="${args[$((i + 1))]}"; fi
+        ;;
+      --host)
+        if ((i + 1 < ${#args[@]})); then host="${args[$((i + 1))]}"; fi
+        ;;
+      --port)
+        if ((i + 1 < ${#args[@]})); then port="${args[$((i + 1))]}"; fi
+        ;;
+    esac
+  done
+
+  browser_host="$(browser_host_for_url "$host")"
+  connect_host="$(connect_host_for_port "$host")"
+  url="http://$browser_host:$port/"
+
+  if webui_is_running "$url"; then
+    target_url="$(webui_url_for_cwd "$url" "$cwd")"
+    echo "Pi Web UI already appears to be running at: $url"
+    echo "Opening: $target_url"
+    open_url "$target_url" || true
+    exit 0
+  fi
+
+  if port_is_in_use "$host" "$port"; then
+    echo "Port $port is already in use on $connect_host; not starting Pi Web UI." >&2
+    if http_ok "$url"; then
+      echo "An HTTP server responded at $url, but it did not expose Pi Web UI status." >&2
+    else
+      echo "No Pi Web UI status endpoint responded at $url." >&2
+    fi
+    exit 1
+  fi
+
+  ensure_pi_webui
+
+  echo "Starting Pi Web UI in: $cwd"
+  echo "Web UI URL: $url"
+
+  pi-webui --cwd "$cwd" --host "$host" --port "$port" "$@" &
+  SERVER_PID="$!"
+
+  trap cleanup EXIT
+  trap 'cleanup; exit 130' INT
+  trap 'cleanup; exit 143' TERM
+
+  if wait_until_ready "$url" "$SERVER_PID"; then
+    open_url "$url" || true
+  else
+    ready_status="$?"
+    if [[ "$ready_status" -eq 2 ]]; then
+      echo "Pi Web UI exited before it became ready." >&2
+      wait "$SERVER_PID"
+      exit $?
+    fi
+
+    echo "Server did not respond yet; opening the URL anyway." >&2
+    open_url "$url" || true
+  fi
+
+  wait "$SERVER_PID"
+}
+
+main "$@"

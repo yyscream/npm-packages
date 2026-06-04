@@ -7,6 +7,11 @@ const elements = {
   newTabButton: $("#newTabButton"),
   closeAllTabsButton: $("#closeAllTabsButton"),
   statusBar: $("#statusBar"),
+  serverOfflinePanel: $("#serverOfflinePanel"),
+  serverOfflineCommand: $("#serverOfflineCommand"),
+  serverOfflineSlashCommand: $("#serverOfflineSlashCommand"),
+  copyServerCommandButton: $("#copyServerCommandButton"),
+  retryServerConnectionButton: $("#retryServerConnectionButton"),
   widgetArea: $("#widgetArea"),
   stickyUserPromptButton: $("#stickyUserPromptButton"),
   chat: $("#chat"),
@@ -141,6 +146,8 @@ let pathSuggestAbortController = null;
 let latestStats = null;
 let latestWorkspace = null;
 let latestNetwork = null;
+let backendOffline = false;
+let backendOfflineNoticeShown = false;
 let latestMessages = [];
 let transientMessages = [];
 let actionEntrySeenKeysByTab = new Map();
@@ -193,6 +200,8 @@ const CUSTOM_BACKGROUNDS_STORAGE_KEY = "pi-webui-custom-backgrounds";
 const CUSTOM_BACKGROUND_IDB_NAME = "pi-webui-custom-background";
 const CUSTOM_BACKGROUND_IDB_STORE = "backgrounds";
 const CUSTOM_BACKGROUND_LEGACY_ID = "active";
+const SERVER_START_CWD_STORAGE_KEY = "pi-webui-last-server-cwd";
+const DEFAULT_WEBUI_PORT = "31415";
 const CUSTOM_BACKGROUND_MAX_FILE_BYTES = 24 * 1024 * 1024;
 const OPTIONAL_FEATURES_STORAGE_KEY = "pi-webui-optional-features-disabled";
 const LAST_USER_PROMPT_STORAGE_KEY = "pi-webui-last-user-prompts";
@@ -218,6 +227,7 @@ const ABORT_LONG_PRESS_MS = 700;
 const STREAM_OUTPUT_HIDE_DELAY_MS = 300;
 const STREAM_OUTPUT_TOOLCALL_GUARD_MS = 220;
 const STREAM_OUTPUT_MIN_VISIBLE_MS = 900;
+const TOOL_LIVE_UPDATE_THROTTLE_MS = 80;
 const TODO_PROGRESS_LINE_REGEX = /^\s*(?:(?:[-*]|\d+[.)])\s*)?\[(?: |x|X|-)\]\s+.+$/;
 const TODO_PROGRESS_PARTIAL_LINE_REGEX = /^\s*(?:(?:[-*]|\d+[.)])\s*)?\[(?: |x|X|-)?\]?\s*.*$/;
 const CHAT_SCROLL_KEYS = new Set(["ArrowDown", "ArrowUp", "End", "Home", "PageDown", "PageUp", " "]);
@@ -232,6 +242,8 @@ const statusEntries = new Map();
 const widgets = new Map();
 const liveToolRuns = new Map();
 const liveToolCards = new Map();
+const liveToolRenderQueue = new Map();
+let liveToolRenderTimer = null;
 // Optional feature detection intentionally checks loaded Pi capabilities (RPC-visible
 // commands and live widget events), not npm package folders. This keeps local dev
 // symlinks and independently installed packages working.
@@ -307,16 +319,56 @@ const OPTIONAL_COMMAND_FEATURES = new Map([
 const HIDDEN_COMMAND_NAMES = new Set(["webui-tree-navigate"]);
 const NATIVE_SELECTOR_COMMANDS = new Set(["model", "settings", "theme", "fork", "clone", "resume", "tree", "login", "logout", "scoped-models"]);
 const optionalFeatureInstallInProgress = new Set();
-const gitWorkflow = {
-  active: false,
-  step: "idle",
-  busy: false,
-  runId: 0,
-  output: "",
-  error: "",
-  message: null,
-  messageRequestedAt: 0,
-};
+
+function createGitWorkflowState() {
+  return {
+    active: false,
+    step: "idle",
+    busy: false,
+    runId: 0,
+    output: "",
+    error: "",
+    message: null,
+    messageRequestedAt: 0,
+  };
+}
+
+const gitWorkflowsByTab = new Map();
+let gitWorkflow = createGitWorkflowState();
+
+function gitWorkflowForTab(tabId = activeTabId, { create = true } = {}) {
+  if (!tabId) return null;
+  let workflow = gitWorkflowsByTab.get(tabId);
+  if (!workflow && create) {
+    workflow = createGitWorkflowState();
+    gitWorkflowsByTab.set(tabId, workflow);
+  }
+  return workflow || null;
+}
+
+function bindGitWorkflowToActiveTab() {
+  gitWorkflow = gitWorkflowForTab(activeTabId) || createGitWorkflowState();
+  return gitWorkflow;
+}
+
+function resetGitWorkflowForTab(tabId = activeTabId) {
+  if (!tabId) return;
+  gitWorkflowsByTab.set(tabId, createGitWorkflowState());
+  if (tabId === activeTabId) {
+    bindGitWorkflowToActiveTab();
+    renderGitWorkflow();
+  }
+}
+
+function clearGitWorkflowForTab(tabId) {
+  if (!tabId) return;
+  gitWorkflowsByTab.delete(tabId);
+  if (tabId === activeTabId) {
+    bindGitWorkflowToActiveTab();
+    renderGitWorkflow();
+  }
+}
+
 const GIT_WORKFLOW_STEPS = ["Stage", "Message", "Commit", "Push"];
 const ACTION_FEEDBACK_REACTIONS = {
   up: { icon: "👍", label: "Good job", title: "Good job!" },
@@ -702,6 +754,120 @@ function registerPwaServiceWorker() {
   });
 }
 
+function readStoredServerStartCwd() {
+  try {
+    return localStorage.getItem(SERVER_START_CWD_STORAGE_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function rememberServerStartCwd(cwd) {
+  const value = typeof cwd === "string" ? cwd.trim() : "";
+  if (!value) return;
+  try {
+    localStorage.setItem(SERVER_START_CWD_STORAGE_KEY, value);
+  } catch {
+    // Ignore storage failures; the offline start helper can still show a generic command.
+  }
+  if (backendOffline) renderServerOfflinePanel();
+}
+
+function quoteCommandArg(value) {
+  const text = String(value || ".");
+  if (!/[\s"'`$]/.test(text)) return text;
+  if (!text.includes("'")) return `'${text}'`;
+  return `"${text.replace(/(["`$])/g, "\\$1")}"`;
+}
+
+function currentPortArg() {
+  const port = window.location.port || "";
+  return port && port !== DEFAULT_WEBUI_PORT ? ` --port ${port}` : "";
+}
+
+function serverStartCommandText() {
+  const cwd = readStoredServerStartCwd() || ".";
+  return `pi-webui --cwd ${quoteCommandArg(cwd)}${currentPortArg()}`;
+}
+
+function serverStartSlashCommandText() {
+  return `/webui-start${currentPortArg()}`;
+}
+
+function renderServerOfflinePanel() {
+  if (elements.serverOfflineCommand) elements.serverOfflineCommand.textContent = serverStartCommandText();
+  if (elements.serverOfflineSlashCommand) elements.serverOfflineSlashCommand.textContent = serverStartSlashCommandText();
+}
+
+function setBackendOffline(offline, error) {
+  backendOffline = !!offline;
+  document.body.classList.toggle("server-offline", backendOffline);
+  if (elements.serverOfflinePanel) elements.serverOfflinePanel.hidden = !backendOffline;
+  renderServerOfflinePanel();
+  if (backendOffline) {
+    if (!backendOfflineNoticeShown) {
+      backendOfflineNoticeShown = true;
+      addEvent(`Pi Web UI server is offline${error?.message ? `: ${error.message}` : ""}`, "warn");
+    }
+    return;
+  }
+  if (backendOfflineNoticeShown) addEvent("Pi Web UI server is back online", "info");
+  backendOfflineNoticeShown = false;
+}
+
+async function copyText(text) {
+  if (navigator.clipboard?.writeText && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.append(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) throw new Error("Clipboard copy failed");
+}
+
+async function copyServerStartCommand() {
+  const command = serverStartCommandText();
+  try {
+    await copyText(command);
+    addEvent("copied Pi Web UI start command", "info");
+  } catch (error) {
+    addEvent(`copy failed; manually run: ${command}`, "warn");
+  }
+}
+
+async function retryServerConnection() {
+  const button = elements.retryServerConnectionButton;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Retrying…";
+  }
+  try {
+    await api("/api/health", { scoped: false });
+  } catch (error) {
+    setBackendOffline(true, error);
+    addEvent("Pi Web UI server is still offline", "warn");
+    return;
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "Retry connection";
+    }
+  }
+
+  try {
+    await initializeTabs();
+  } catch (error) {
+    addEvent(error.message || String(error), "error");
+  }
+}
+
 function scopedApiPath(path, tabId = activeTabId) {
   if (!tabId || !path.startsWith("/api/") || path === "/api/tabs" || path.startsWith("/api/tabs?") || path.startsWith("/api/tabs/")) return path;
   const url = new URL(path, window.location.origin);
@@ -710,12 +876,21 @@ function scopedApiPath(path, tabId = activeTabId) {
 }
 
 async function api(path, { method = "GET", body, tabId = activeTabId, scoped = true, signal } = {}) {
-  const response = await fetch(scoped ? scopedApiPath(path, tabId) : path, {
-    method,
-    headers: body === undefined ? undefined : { "content-type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    signal,
-  });
+  let response;
+  try {
+    response = await fetch(scoped ? scopedApiPath(path, tabId) : path, {
+      method,
+      headers: body === undefined ? undefined : { "content-type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal,
+    });
+  } catch (error) {
+    const offlineError = error instanceof Error ? error : new Error(String(error));
+    offlineError.backendOffline = true;
+    setBackendOffline(true, offlineError);
+    throw offlineError;
+  }
+  setBackendOffline(false);
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error(data.error || data.message || JSON.stringify(data));
@@ -1703,6 +1878,7 @@ function setActiveTabId(tabId, { remember = false } = {}) {
   const nextTabId = tabId || null;
   if (nextTabId !== activeTabId) activeTabGeneration += 1;
   activeTabId = nextTabId;
+  bindGitWorkflowToActiveTab();
   if (remember) rememberActiveTab();
   return activeTabContext(nextTabId);
 }
@@ -1779,6 +1955,7 @@ function syncTabMetadata(nextTabs = []) {
       tabActivities.delete(tabId);
       tabSeenCompletionSerials.delete(tabId);
       actionFeedbackByTab.delete(tabId);
+      clearGitWorkflowForTab(tabId);
     }
   }
 }
@@ -1959,6 +2136,15 @@ function restoreStoredTabId() {
   }
 }
 
+function requestedTabIdFromUrl() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("tab") || params.get("tabId") || null;
+  } catch {
+    return null;
+  }
+}
+
 function updateDocumentTitle() {
   const tab = activeTab();
   document.title = tab ? `Pi Web UI · ${tab.title}` : "Pi Web UI";
@@ -2016,6 +2202,7 @@ function cancelPendingDialogs() {
 
 function resetActiveTabUi() {
   clearRefreshTimers();
+  clearLiveToolRenderQueue();
   eventSource?.close();
   eventSource = null;
   currentState = null;
@@ -2043,15 +2230,7 @@ function resetActiveTabUi() {
   cancelPendingDialogs();
   if (elements.nativeCommandDialog.open) closeNativeCommandDialog();
   if (pathPickerState) closePathPicker(null);
-  Object.assign(gitWorkflow, {
-    active: false,
-    step: "idle",
-    busy: false,
-    output: "",
-    error: "",
-    message: null,
-    messageRequestedAt: 0,
-  });
+  bindGitWorkflowToActiveTab();
   resetChatOutput();
   elements.stateDetails.replaceChildren();
   elements.eventLog.replaceChildren();
@@ -2302,10 +2481,12 @@ async function refreshTabs({ selectStored = false } = {}) {
   syncTabMetadata(tabs);
   syncBlockedTabNotificationsFromTabs(tabs, previousTabs);
   syncAgentDoneNotificationsFromTabs(tabs, previousTabs);
+  const requested = selectStored ? requestedTabIdFromUrl() : null;
   const stored = selectStored ? restoreStoredTabId() : null;
   if (!activeTabId || !tabs.some((tab) => tab.id === activeTabId)) {
-    setActiveTabId((stored && tabs.some((tab) => tab.id === stored) ? stored : tabs[0]?.id) || null, { remember: true });
+    setActiveTabId((requested && tabs.some((tab) => tab.id === requested) ? requested : stored && tabs.some((tab) => tab.id === stored) ? stored : tabs[0]?.id) || null, { remember: true });
   }
+  rememberServerStartCwd(tabs.find((tab) => tab.id === activeTabId)?.cwd || tabs[0]?.cwd);
   renderTabs();
   return tabs;
 }
@@ -2395,6 +2576,7 @@ async function closeTerminalTabs(tabIds, { label = "selected terminal tabs" } = 
     for (const id of closedIds) {
       tabDrafts.delete(id);
       clearAttachments(id);
+      clearGitWorkflowForTab(id);
     }
     clearOpenTerminalTabGroup(null, { force: true });
 
@@ -3299,6 +3481,7 @@ async function changeActiveTabCwd() {
       return;
     }
     const nextContext = setActiveTabId(response.data?.tab?.id || activeTabId);
+    resetGitWorkflowForTab(nextContext.tabId);
     resetActiveTabUi();
     renderTabs();
     restoreActiveDraft();
@@ -3827,18 +4010,27 @@ function renderWidgets() {
   }
 }
 
-function setGitWorkflow(patch) {
-  Object.assign(gitWorkflow, patch);
-  renderGitWorkflow();
+function setGitWorkflow(patch, { tabId = activeTabId } = {}) {
+  const workflow = gitWorkflowForTab(tabId);
+  if (!workflow) return null;
+  Object.assign(workflow, patch);
+  if (tabId === activeTabId) {
+    gitWorkflow = workflow;
+    renderGitWorkflow();
+  }
+  return workflow;
 }
 
-function isCurrentGitWorkflowRun(runId) {
-  return gitWorkflow.active && gitWorkflow.runId === runId;
+function isCurrentGitWorkflowRun(runId, tabId = activeTabId) {
+  const workflow = gitWorkflowForTab(tabId, { create: false });
+  return !!workflow?.active && workflow.runId === runId;
 }
 
-function appendGitWorkflowOutput(text) {
-  const next = `${gitWorkflow.output || ""}${gitWorkflow.output ? "\n" : ""}${text}`;
-  setGitWorkflow({ output: next.slice(-60000) });
+function appendGitWorkflowOutput(text, { tabId = activeTabId } = {}) {
+  const workflow = gitWorkflowForTab(tabId);
+  if (!workflow) return;
+  const next = `${workflow.output || ""}${workflow.output ? "\n" : ""}${text}`;
+  setGitWorkflow({ output: next.slice(-60000) }, { tabId });
 }
 
 function formatGitCommandResult(result) {
@@ -3941,9 +4133,11 @@ function renderGitWorkflow() {
   }
 }
 
-async function gitWorkflowRequest(path, { method = "POST", body = {}, runId = gitWorkflow.runId } = {}) {
-  const response = await api(path, method === "GET" ? { method } : { method, body });
-  if (!isCurrentGitWorkflowRun(runId)) return null;
+async function gitWorkflowRequest(path, { method = "POST", body = {}, runId, tabId = activeTabId } = {}) {
+  const workflow = gitWorkflowForTab(tabId, { create: false });
+  const expectedRunId = runId ?? workflow?.runId;
+  const response = await api(path, method === "GET" ? { method, tabId } : { method, body, tabId });
+  if (expectedRunId !== undefined && !isCurrentGitWorkflowRun(expectedRunId, tabId)) return null;
   if (!response.ok) {
     const detail = response.data ? `\n\n${formatGitCommandResult(response.data)}` : "";
     throw new Error(`${response.error || "Git workflow request failed"}${detail}`);
@@ -3951,27 +4145,32 @@ async function gitWorkflowRequest(path, { method = "POST", body = {}, runId = gi
   return response.data;
 }
 
-function failGitWorkflow(error, step = gitWorkflow.step) {
+function failGitWorkflow(error, step, { tabId = activeTabId } = {}) {
+  const workflow = gitWorkflowForTab(tabId);
+  if (!workflow) return;
   const message = error?.message || String(error);
   setGitWorkflow({
-    step,
+    step: step || workflow.step || "error",
     busy: false,
     error: message,
-    output: `${gitWorkflow.output || ""}${gitWorkflow.output ? "\n\n" : ""}ERROR: ${message}`.slice(-60000),
-  });
+    output: `${workflow.output || ""}${workflow.output ? "\n\n" : ""}ERROR: ${message}`.slice(-60000),
+  }, { tabId });
 }
 
 function startGitWorkflow() {
+  const tabId = activeTabId;
+  if (!tabId) return;
   if (!isOptionalFeatureEnabled("gitWorkflow")) {
-    const tabContext = activeTabContext();
+    const tabContext = activeTabContext(tabId);
     addEvent(commandUnavailableMessage("git-staged-msg"), "warn");
     refreshCommands(tabContext).catch((error) => {
       if (isCurrentTabContext(tabContext)) addEvent(error.message || String(error), "error");
     });
     return;
   }
-  if (gitWorkflow.active && !["done", "cancelled", "error"].includes(gitWorkflow.step) && !confirm("Restart the active git workflow?")) return;
-  gitWorkflow.runId += 1;
+  const workflow = gitWorkflowForTab(tabId);
+  if (workflow.active && !["done", "cancelled", "error"].includes(workflow.step) && !confirm("Restart the active git workflow?")) return;
+  workflow.runId += 1;
   setGitWorkflow({
     active: true,
     step: "add",
@@ -3980,40 +4179,52 @@ function startGitWorkflow() {
     error: "",
     message: null,
     messageRequestedAt: 0,
-  });
+  }, { tabId });
 }
 
 async function cancelGitWorkflow() {
-  const shouldAbortPi = gitWorkflow.step === "generating";
-  gitWorkflow.runId += 1;
-  setGitWorkflow({ step: "cancelled", busy: false, error: "", output: `${gitWorkflow.output || ""}${gitWorkflow.output ? "\n\n" : ""}Cancelled by user.` });
-  if (shouldAbortPi) setRunIndicatorActivity("Abort requested; checking whether Pi stopped…");
+  const tabId = activeTabId;
+  const tabContext = activeTabContext(tabId);
+  const workflow = gitWorkflowForTab(tabId, { create: false });
+  if (!workflow?.active) return;
+  const shouldAbortPi = workflow.step === "generating";
+  workflow.runId += 1;
+  setGitWorkflow({ step: "cancelled", busy: false, error: "", output: `${workflow.output || ""}${workflow.output ? "\n\n" : ""}Cancelled by user.` }, { tabId });
+  if (shouldAbortPi && isCurrentTabContext(tabContext)) setRunIndicatorActivity("Abort requested; checking whether Pi stopped…");
   await Promise.allSettled([
-    api("/api/git-workflow/cancel", { method: "POST", body: {} }),
-    shouldAbortPi ? api("/api/abort", { method: "POST", body: {} }) : Promise.resolve(),
+    api("/api/git-workflow/cancel", { method: "POST", body: {}, tabId }),
+    shouldAbortPi ? api("/api/abort", { method: "POST", body: {}, tabId }) : Promise.resolve(),
   ]);
-  if (shouldAbortPi) scheduleAbortStateChecks();
+  if (shouldAbortPi && isCurrentTabContext(tabContext)) scheduleAbortStateChecks();
 }
 
 async function runGitAdd() {
-  const runId = gitWorkflow.runId;
-  setGitWorkflow({ step: "add", busy: true, error: "", output: "Running git add ." });
+  const tabId = activeTabId;
+  const tabContext = activeTabContext(tabId);
+  const workflow = gitWorkflowForTab(tabId, { create: false });
+  if (!workflow) return;
+  const runId = workflow.runId;
+  setGitWorkflow({ step: "add", busy: true, error: "", output: "Running git add ." }, { tabId });
   try {
-    const result = await gitWorkflowRequest("/api/git-workflow/add", { runId });
+    const result = await gitWorkflowRequest("/api/git-workflow/add", { runId, tabId });
     if (!result) return;
-    setGitWorkflow({ step: "generate", busy: false, output: `${formatGitCommandResult(result)}\n\nStaged. Next: run /git-staged-msg.` });
-    scheduleRefreshFooter();
+    setGitWorkflow({ step: "generate", busy: false, output: `${formatGitCommandResult(result)}\n\nStaged. Next: run /git-staged-msg.` }, { tabId });
+    if (isCurrentTabContext(tabContext)) scheduleRefreshFooter();
   } catch (error) {
-    if (isCurrentGitWorkflowRun(runId)) failGitWorkflow(error, "add");
+    if (isCurrentGitWorkflowRun(runId, tabId)) failGitWorkflow(error, "add", { tabId });
   }
 }
 
 async function runGitMessagePrompt() {
+  const tabId = activeTabId;
+  const tabContext = activeTabContext(tabId);
   if (currentState?.isStreaming) {
-    failGitWorkflow(new Error("Pi is currently running. Wait for it to finish or abort before generating a staged commit message."), "generate");
+    failGitWorkflow(new Error("Pi is currently running. Wait for it to finish or abort before generating a staged commit message."), "generate", { tabId });
     return;
   }
-  const runId = gitWorkflow.runId;
+  const workflow = gitWorkflowForTab(tabId, { create: false });
+  if (!workflow) return;
+  const runId = workflow.runId;
   const requestedAt = Date.now();
   setGitWorkflow({
     step: "generating",
@@ -4021,32 +4232,37 @@ async function runGitMessagePrompt() {
     error: "",
     messageRequestedAt: requestedAt,
     output: "Sending /git-staged-msg to Pi.\n\nCancel will request Pi abort.",
-  });
-  setRunIndicatorActivity("Sending /git-staged-msg to Pi…");
+  }, { tabId });
+  if (isCurrentTabContext(tabContext)) setRunIndicatorActivity("Sending /git-staged-msg to Pi…");
   try {
-    await api("/api/prompt", { method: "POST", body: { message: "/git-staged-msg" } });
-    if (!isCurrentGitWorkflowRun(runId)) return;
-    appendGitWorkflowOutput("/git-staged-msg accepted. Waiting for agent_end, then the message files will be loaded.");
-    scheduleRefreshState();
+    await api("/api/prompt", { method: "POST", body: { message: "/git-staged-msg" }, tabId });
+    if (!isCurrentGitWorkflowRun(runId, tabId)) return;
+    appendGitWorkflowOutput("/git-staged-msg accepted. Waiting for agent_end, then the message files will be loaded.", { tabId });
+    if (isCurrentTabContext(tabContext)) scheduleRefreshState(120, tabContext);
     setTimeout(() => {
-      if (isCurrentGitWorkflowRun(runId) && gitWorkflow.step === "generating" && !currentState?.isStreaming) {
-        loadGitWorkflowMessage({ requireFresh: true, retries: 1, runId });
+      const currentWorkflow = gitWorkflowForTab(tabId, { create: false });
+      if (isCurrentTabContext(tabContext) && isCurrentGitWorkflowRun(runId, tabId) && currentWorkflow?.step === "generating" && !currentState?.isStreaming) {
+        loadGitWorkflowMessage({ requireFresh: true, retries: 1, runId, tabId });
       }
     }, 2500);
   } catch (error) {
-    if (isCurrentGitWorkflowRun(runId)) {
-      clearRunIndicatorActivity();
-      failGitWorkflow(error, "generate");
+    if (isCurrentGitWorkflowRun(runId, tabId)) {
+      if (isCurrentTabContext(tabContext)) clearRunIndicatorActivity();
+      failGitWorkflow(error, "generate", { tabId });
     }
   }
 }
 
-async function loadGitWorkflowMessage({ requireFresh = false, retries = 0, runId = gitWorkflow.runId } = {}) {
+async function loadGitWorkflowMessage({ requireFresh = false, retries = 0, runId, tabId = activeTabId } = {}) {
+  const workflow = gitWorkflowForTab(tabId, { create: false });
+  const expectedRunId = runId ?? workflow?.runId;
   try {
-    const message = await gitWorkflowRequest("/api/git-workflow/message", { method: "GET", runId });
+    const message = await gitWorkflowRequest("/api/git-workflow/message", { method: "GET", runId: expectedRunId, tabId });
     if (!message) return;
+    const currentWorkflow = gitWorkflowForTab(tabId, { create: false });
+    if (!currentWorkflow) return;
     const newestMtime = Math.max(message.shortMtimeMs || 0, message.longMtimeMs || 0);
-    if (requireFresh && gitWorkflow.messageRequestedAt && newestMtime + 10000 < gitWorkflow.messageRequestedAt) {
+    if (requireFresh && currentWorkflow.messageRequestedAt && newestMtime + 10000 < currentWorkflow.messageRequestedAt) {
       throw new Error("Generated message files have not refreshed yet.");
     }
     setGitWorkflow({
@@ -4055,40 +4271,63 @@ async function loadGitWorkflowMessage({ requireFresh = false, retries = 0, runId
       error: "",
       message,
       output: formatCommitMessagePreview(message),
-    });
+    }, { tabId });
   } catch (error) {
-    if (!isCurrentGitWorkflowRun(runId)) return;
+    if (!isCurrentGitWorkflowRun(expectedRunId, tabId)) return;
     if (retries > 0) {
-      setTimeout(() => loadGitWorkflowMessage({ requireFresh, retries: retries - 1, runId }), 1400);
+      setTimeout(() => loadGitWorkflowMessage({ requireFresh, retries: retries - 1, runId: expectedRunId, tabId }), 1400);
       return;
     }
-    failGitWorkflow(error, gitWorkflow.step === "generating" ? "generate" : gitWorkflow.step);
+    const currentWorkflow = gitWorkflowForTab(tabId, { create: false });
+    failGitWorkflow(error, currentWorkflow?.step === "generating" ? "generate" : currentWorkflow?.step, { tabId });
   }
 }
 
 async function commitGitWorkflow(variant) {
-  const runId = gitWorkflow.runId;
-  setGitWorkflow({ step: "committing", busy: true, error: "", output: `${formatCommitMessagePreview(gitWorkflow.message)}\n\nRunning native ${variant} commit…` });
+  const tabId = activeTabId;
+  const tabContext = activeTabContext(tabId);
+  const workflow = gitWorkflowForTab(tabId, { create: false });
+  if (!workflow) return;
+  const runId = workflow.runId;
+  setGitWorkflow({ step: "committing", busy: true, error: "", output: `${formatCommitMessagePreview(workflow.message)}\n\nRunning native ${variant} commit…` }, { tabId });
   try {
-    const result = await gitWorkflowRequest("/api/git-workflow/commit", { body: { variant }, runId });
+    const result = await gitWorkflowRequest("/api/git-workflow/commit", { body: { variant }, runId, tabId });
     if (!result) return;
-    setGitWorkflow({ step: "push", busy: false, output: `${formatGitCommandResult(result)}\n\nCommit created. Next: git push.` });
-    scheduleRefreshFooter();
+    setGitWorkflow({ step: "push", busy: false, output: `${formatGitCommandResult(result)}\n\nCommit created. Next: git push.` }, { tabId });
+    if (isCurrentTabContext(tabContext)) scheduleRefreshFooter();
   } catch (error) {
-    if (isCurrentGitWorkflowRun(runId)) failGitWorkflow(error, "message");
+    if (isCurrentGitWorkflowRun(runId, tabId)) failGitWorkflow(error, "message", { tabId });
   }
 }
 
 async function pushGitWorkflow() {
-  const runId = gitWorkflow.runId;
-  setGitWorkflow({ step: "pushing", busy: true, error: "", output: "Running git push…" });
+  const tabId = activeTabId;
+  const tabContext = activeTabContext(tabId);
+  const workflow = gitWorkflowForTab(tabId, { create: false });
+  if (!workflow) return;
+  const runId = workflow.runId;
+  setGitWorkflow({ step: "pushing", busy: true, error: "", output: "Running git push…" }, { tabId });
   try {
-    const result = await gitWorkflowRequest("/api/git-workflow/push", { runId });
+    const result = await gitWorkflowRequest("/api/git-workflow/push", { runId, tabId });
     if (!result) return;
-    setGitWorkflow({ step: "done", busy: false, output: formatGitCommandResult(result) || "git push finished." });
-    scheduleRefreshFooter();
+    setGitWorkflow({ step: "done", busy: false, output: formatGitCommandResult(result) || "git push finished." }, { tabId });
+    if (isCurrentTabContext(tabContext)) scheduleRefreshFooter();
   } catch (error) {
-    if (isCurrentGitWorkflowRun(runId)) failGitWorkflow(error, "push");
+    if (isCurrentGitWorkflowRun(runId, tabId)) failGitWorkflow(error, "push", { tabId });
+  }
+}
+
+function resumeGitWorkflowForActiveTab(tabContext = activeTabContext()) {
+  if (!isCurrentTabContext(tabContext)) return;
+  bindGitWorkflowToActiveTab();
+  renderGitWorkflow();
+  if (gitWorkflow.active && gitWorkflow.step === "generating" && !currentState?.isStreaming) {
+    const retryDelayMs = Math.max(0, 2500 - (Date.now() - (gitWorkflow.messageRequestedAt || 0)));
+    if (retryDelayMs > 0) {
+      setTimeout(() => resumeGitWorkflowForActiveTab(tabContext), retryDelayMs);
+      return;
+    }
+    loadGitWorkflowMessage({ requireFresh: true, retries: 3, runId: gitWorkflow.runId, tabId: tabContext.tabId });
   }
 }
 
@@ -4992,7 +5231,10 @@ function toolResultForCallId(toolCallId, messages = latestMessages) {
 function cleanupLiveToolRunsForMessages(messages = latestMessages) {
   const results = buildToolResultMap(messages);
   for (const id of liveToolRuns.keys()) {
-    if (results.has(id)) liveToolRuns.delete(id);
+    if (results.has(id)) {
+      liveToolRuns.delete(id);
+      cancelQueuedLiveToolRunRender(id);
+    }
   }
 }
 
@@ -5306,12 +5548,143 @@ function liveToolRunMessage(run) {
   };
 }
 
+function applyToolExecutionBubbleState(bubble, message) {
+  const status = toolExecutionStatus(message);
+  bubble.classList.remove("tool-pending", "tool-running", "tool-success", "tool-error", "error");
+  bubble.classList.add(`tool-${status}`);
+  if (message.isError || status === "error") bubble.classList.add("error");
+  if (message.toolCallId) {
+    const id = String(message.toolCallId);
+    bubble.dataset.toolCallId = id;
+    if (message.live) liveToolCards.set(id, bubble);
+  }
+}
+
+function toolDetailsStateKey(details, counts) {
+  const classKey = Array.from(details.classList || []).sort().join(".") || "details";
+  const summaryText = details.querySelector("summary")?.textContent || "";
+  const summaryKey = summaryText.replace(/\s*\([^)]*\)\s*$/g, "").trim();
+  const base = `${classKey}|${summaryKey}`;
+  const index = counts.get(base) || 0;
+  counts.set(base, index + 1);
+  return `${base}|${index}`;
+}
+
+function captureToolDetailsOpenState(root) {
+  const state = new Set();
+  const counts = new Map();
+  for (const details of root.querySelectorAll("details")) {
+    const key = toolDetailsStateKey(details, counts);
+    if (details.open) state.add(key);
+  }
+  return state;
+}
+
+function restoreToolDetailsOpenState(root, state) {
+  if (!state?.size) return;
+  const counts = new Map();
+  for (const details of root.querySelectorAll("details")) {
+    if (state.has(toolDetailsStateKey(details, counts))) details.open = true;
+  }
+}
+
+function captureReusableToolCards() {
+  const cards = new Map();
+  for (const bubble of elements.chat.querySelectorAll(".message.toolExecution[data-tool-call-id]")) {
+    const id = bubble.dataset.toolCallId;
+    if (id) cards.set(id, bubble);
+  }
+  return cards;
+}
+
+function reuseToolExecutionBubble(reusableToolCards, message, { streaming = false, messageIndex = -1, transient = false } = {}) {
+  if (streaming || message?.role !== "toolExecution" || !message.toolCallId || !reusableToolCards) return null;
+  const id = String(message.toolCallId);
+  const bubble = reusableToolCards.get(id);
+  if (!bubble) return null;
+  reusableToolCards.delete(id);
+  const body = bubble.querySelector(":scope > .message-body");
+  if (!body || !updateLiveToolCard(bubble, message)) return null;
+  bubble.classList.remove("action-enter", "streaming", "has-action-feedback");
+  bubble.querySelector(":scope > .action-feedback-controls")?.remove();
+  if (!transient && messageIndex >= 0) {
+    bubble.dataset.messageIndex = String(messageIndex);
+    bubble.removeAttribute("data-user-prompt");
+  } else {
+    bubble.removeAttribute("data-message-index");
+    bubble.removeAttribute("data-user-prompt");
+  }
+  if (!streaming && !transient) renderActionFeedbackControls(bubble, message, messageIndex);
+  elements.chat.append(bubble);
+  return { bubble, body };
+}
+
+function updateLiveToolCard(bubble, message) {
+  if (!bubble) return false;
+  const header = bubble.querySelector(":scope > .message-header");
+  const body = bubble.querySelector(":scope > .message-body");
+  if (!body) return false;
+  applyToolExecutionBubbleState(bubble, message);
+  const role = header?.querySelector(".message-role");
+  if (role) role.textContent = messageTitle(message);
+  const timestamp = header?.querySelector(".muted");
+  if (timestamp) timestamp.textContent = formatDate(message.timestamp);
+  const detailsOpenState = captureToolDetailsOpenState(body);
+  body.replaceChildren();
+  renderToolExecution(body, message);
+  restoreToolDetailsOpenState(body, detailsOpenState);
+  return true;
+}
+
+function cancelQueuedLiveToolRunRender(toolCallId = "") {
+  if (toolCallId) liveToolRenderQueue.delete(String(toolCallId));
+  else liveToolRenderQueue.clear();
+  if (liveToolRenderQueue.size === 0) {
+    clearTimeout(liveToolRenderTimer);
+    liveToolRenderTimer = null;
+  }
+}
+
+function clearLiveToolRenderQueue() {
+  cancelQueuedLiveToolRunRender();
+}
+
+function flushLiveToolRunRenderQueue() {
+  const entries = Array.from(liveToolRenderQueue.values());
+  clearLiveToolRenderQueue();
+  for (const entry of entries) renderLiveToolRun(entry.run, { scroll: entry.scroll });
+}
+
+function scheduleLiveToolRunRender(run, { scroll = false } = {}) {
+  if (!run?.toolCallId) return;
+  const id = String(run.toolCallId);
+  const existing = liveToolRenderQueue.get(id);
+  liveToolRenderQueue.set(id, { run, scroll: !!(existing?.scroll || scroll) });
+  if (liveToolRenderTimer) return;
+  liveToolRenderTimer = setTimeout(() => {
+    liveToolRenderTimer = null;
+    const flush = () => flushLiveToolRunRenderQueue();
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(flush);
+    else flush();
+  }, TOOL_LIVE_UPDATE_THROTTLE_MS);
+}
+
 function renderLiveToolRun(run, { scroll = true } = {}) {
   if (!run?.toolCallId) return;
-  const existing = liveToolCards.get(run.toolCallId);
+  const id = String(run.toolCallId);
+  cancelQueuedLiveToolRunRender(id);
+  const existing = liveToolCards.get(id);
+  const existingConnected = !!(existing?.isConnected && existing.parentElement === elements.chat);
   const shouldFollow = scroll && (autoFollowChat || isChatNearBottom());
-  const created = appendMessage(liveToolRunMessage(run), { transient: true, animateEntry: !existing });
-  if (existing?.isConnected && existing !== created.bubble) existing.replaceWith(created.bubble);
+  const message = liveToolRunMessage(run);
+  rememberActionEntries([{ message, messageIndex: -1, transient: true }]);
+  if (existingConnected && updateLiveToolCard(existing, message)) {
+    renderRunIndicator({ scroll: false });
+    if (shouldFollow) scrollChatToBottom();
+    return;
+  }
+  const created = appendMessage(message, { transient: true, animateEntry: !existingConnected });
+  if (existingConnected && existing !== created.bubble) existing.replaceWith(created.bubble);
   renderRunIndicator({ scroll: false });
   if (shouldFollow) scrollChatToBottom();
 }
@@ -5345,7 +5718,7 @@ function handleToolExecutionStart(event) {
 function handleToolExecutionUpdate(event) {
   const result = { ...(event.partialResult || {}), isError: false };
   const run = upsertLiveToolRun(event, { result, isPartial: true, isError: false });
-  if (run) renderLiveToolRun(run, { scroll: false });
+  if (run) scheduleLiveToolRunRender(run, { scroll: false });
 }
 
 function handleToolExecutionEnd(event) {
@@ -5377,19 +5750,13 @@ function jumpToStickyUserPrompt() {
   requestAnimationFrame(updateStickyUserPromptButton);
 }
 
-function appendMessage(message, { streaming = false, messageIndex = -1, transient = false, animateEntry = false } = {}) {
+function appendMessage(message, { streaming = false, messageIndex = -1, transient = false, animateEntry = false, reusableToolCards = null } = {}) {
+  const reused = reuseToolExecutionBubble(reusableToolCards, message, { streaming, messageIndex, transient });
+  if (reused) return reused;
   const role = String(message.role || "message");
   const safeRole = role.replace(/[^a-z0-9_-]/gi, "");
   const bubble = make("article", `message ${safeRole}${message.level ? ` ${message.level}` : ""}${streaming ? " streaming" : ""}${animateEntry ? " action-enter" : ""}`);
-  if (message.role === "toolExecution") {
-    const status = toolExecutionStatus(message);
-    bubble.classList.add(`tool-${status}`);
-    if (message.isError || status === "error") bubble.classList.add("error");
-    if (message.toolCallId) {
-      bubble.dataset.toolCallId = String(message.toolCallId);
-      if (message.live) liveToolCards.set(String(message.toolCallId), bubble);
-    }
-  }
+  if (message.role === "toolExecution") applyToolExecutionBubbleState(bubble, message);
   if (!transient && messageIndex >= 0) {
     bubble.dataset.messageIndex = String(messageIndex);
     if (role === "user") bubble.dataset.userPrompt = "true";
@@ -5443,9 +5810,9 @@ function appendMessage(message, { streaming = false, messageIndex = -1, transien
   return { bubble, body };
 }
 
-function appendTranscriptMessage(message, { streaming = false, messageIndex = -1, transient = false, animateEntry = false } = {}) {
+function appendTranscriptMessage(message, { streaming = false, messageIndex = -1, transient = false, animateEntry = false, reusableToolCards = null } = {}) {
   if (streaming || transient || message?.role !== "assistant") {
-    return appendMessage(message, { streaming, messageIndex, transient, animateEntry });
+    return appendMessage(message, { streaming, messageIndex, transient, animateEntry, reusableToolCards });
   }
 
   let finalOutput = null;
@@ -5474,6 +5841,7 @@ function appendTranscriptMessage(message, { streaming = false, messageIndex = -1
       messageIndex: ["assistant", "toolExecution"].includes(transcriptMessage.role) ? messageIndex : -1,
       transient: false,
       animateEntry: animateEntry && isActionTranscriptMessage(transcriptMessage),
+      reusableToolCards,
     });
     if (transcriptMessage.role === "assistant") finalOutput = created;
   });
@@ -5692,16 +6060,17 @@ function actionEntrySeenKeys(tabId = activeTabId) {
 
 function actionEntryKey(item) {
   const message = item?.message || {};
+  const keyedToolExecution = message.role === "toolExecution" && message.toolCallId;
   return [
-    item?.transient ? "transient" : "message",
-    item?.messageIndex ?? -1,
+    keyedToolExecution ? "toolExecution" : item?.transient ? "transient" : "message",
+    keyedToolExecution ? "" : (item?.messageIndex ?? -1),
     message.role || "message",
     message.toolName || "",
     message.toolCallId || "",
-    message.command || "",
-    message.title || "",
-    message.timestamp || "",
-    textFromContent(message.content).slice(0, 240),
+    keyedToolExecution ? "" : message.command || "",
+    keyedToolExecution ? "" : message.title || "",
+    keyedToolExecution ? "" : message.timestamp || "",
+    keyedToolExecution ? "" : textFromContent(message.content).slice(0, 240),
   ].join("|");
 }
 
@@ -5743,6 +6112,7 @@ function orderedTranscriptItems() {
 function renderAllMessages({ preserveScroll = false } = {}) {
   const shouldFollow = !preserveScroll && (autoFollowChat || isChatNearBottom());
   const previousScrollTop = elements.chat.scrollTop;
+  const reusableToolCards = captureReusableToolCards();
   resetChatOutput();
   const transcriptItems = orderedTranscriptItems();
   for (const item of transcriptItems) {
@@ -5750,6 +6120,7 @@ function renderAllMessages({ preserveScroll = false } = {}) {
       messageIndex: item.messageIndex,
       transient: item.transient,
       animateEntry: shouldAnimateActionEntry(item),
+      reusableToolCards,
     });
   }
   rememberActionEntries(transcriptItems);
@@ -6819,6 +7190,7 @@ async function refreshWorkspace(tabContext = activeTabContext()) {
   }
   if (!isCurrentTabContext(tabContext)) return;
   latestWorkspace = nextWorkspace;
+  rememberServerStartCwd(nextWorkspace?.cwd);
   renderFooter();
 }
 
@@ -7357,6 +7729,7 @@ async function refreshAll(tabContext = activeTabContext()) {
   for (const result of results) {
     if (result.status === "rejected") addEvent(result.reason.message || String(result.reason), "error");
   }
+  resumeGitWorkflowForActiveTab(tabContext);
 }
 
 async function openToNetwork() {
@@ -7794,8 +8167,12 @@ function handleEvent(event) {
       scheduleRefreshMessages();
       scheduleRefreshFooter();
       renderFeedbackTray();
-      if (gitWorkflow.active && gitWorkflow.step === "generating") {
-        loadGitWorkflowMessage({ requireFresh: true, retries: 3 });
+      {
+        const workflowTabId = event.tabId || activeTabId;
+        const workflow = gitWorkflowForTab(workflowTabId, { create: false });
+        if (workflow?.active && workflow.step === "generating") {
+          loadGitWorkflowMessage({ requireFresh: true, retries: 3, runId: workflow.runId, tabId: workflowTabId });
+        }
       }
       break;
     case "message_start":
@@ -7882,7 +8259,11 @@ function handleEvent(event) {
         syncRunIndicatorFromState(currentState);
         renderStatus();
       } else if (["set_model", "set_thinking_level", "new_session", "compact"].includes(event.command)) {
-        if (event.command === "new_session") forgetLastUserPrompt(event.tabId || activeTabId);
+        if (event.command === "new_session") {
+          const tabId = event.tabId || activeTabId;
+          forgetLastUserPrompt(tabId);
+          resetGitWorkflowForTab(tabId);
+        }
         scheduleRefreshState();
         scheduleRefreshMessages();
         scheduleRefreshFooter();
@@ -7908,10 +8289,14 @@ function connectEvents(tabContext = activeTabContext()) {
     }
   };
   source.onerror = () => {
-    if (eventSource === source && isCurrentTabContext(tabContext)) addEvent("event stream disconnected; browser will retry", "warn");
+    if (eventSource !== source || !isCurrentTabContext(tabContext)) return;
+    addEvent("event stream disconnected; browser will retry", "warn");
+    fetch("/api/health", { cache: "no-store" }).catch((error) => setBackendOffline(true, error));
   };
 }
 
+elements.copyServerCommandButton?.addEventListener("click", copyServerStartCommand);
+elements.retryServerConnectionButton?.addEventListener("click", retryServerConnection);
 elements.sendFeedbackButton.addEventListener("click", () => submitQueuedActionFeedback());
 elements.composer.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -8016,6 +8401,7 @@ elements.newSessionButton.addEventListener("click", async () => {
     const response = await api("/api/new-session", { method: "POST", body: {}, tabId: tabContext.tabId });
     applyResponseTab(response);
     forgetLastUserPrompt(tabContext.tabId);
+    resetGitWorkflowForTab(tabContext.tabId);
     if (!isCurrentTabContext(tabContext)) return;
     await refreshAll(tabContext);
     if (isCurrentTabContext(tabContext)) focusPromptInput({ defer: true });
@@ -8273,4 +8659,5 @@ bindSidePanelSectionToggles();
 restoreSidePanelState();
 bindMobileViewChanges();
 registerPwaServiceWorker();
+renderServerOfflinePanel();
 initializeTabs().catch((error) => addEvent(error.message, "error"));
