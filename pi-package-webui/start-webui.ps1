@@ -32,7 +32,52 @@ function Get-LaunchCwd {
     return $cwd
 }
 
+function Get-PiManagedPiWebui {
+    $node = Get-Command "node" -ErrorAction SilentlyContinue
+    if (-not $node) {
+        return $null
+    }
+
+    $script = @'
+const { homedir } = require("node:os");
+const { join } = require("node:path");
+
+let agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+if (agentDir === "~") {
+  agentDir = homedir();
+} else if (agentDir.startsWith("~/") || (process.platform === "win32" && agentDir.startsWith("~\\"))) {
+  agentDir = join(homedir(), agentDir.slice(2));
+}
+
+const binName = process.platform === "win32" ? "pi-webui.cmd" : "pi-webui";
+for (const candidate of [
+  join(agentDir, "npm", "node_modules", ".bin", binName),
+  join(agentDir, "npm", "node_modules", ".bin", "pi-webui"),
+]) {
+  process.stdout.write(`${candidate}\n`);
+}
+'@
+
+    $candidates = @(& $node.Source -e $script 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+        return $null
+    }
+
+    foreach ($candidate in $candidates) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate) -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+            return $candidate
+        }
+    }
+
+    return $null
+}
+
 function Ensure-PiWebui {
+    $managed = Get-PiManagedPiWebui
+    if ($managed) {
+        return $managed
+    }
+
     $command = Get-Command "pi-webui" -ErrorAction SilentlyContinue
     if ($command) {
         return $command.Source

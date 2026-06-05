@@ -5,14 +5,14 @@
 # - Discovers local Pi package.json files in this repository for extensions, skills, and packages
 #   (pi-extension-*/, pi-skill-*/, pi-package-*/).
 # - Lets you choose which packages to install/update (interactive by default), or installs all actionable packages with --non-interactive/--all.
-# - Compares local package versions with Pi-installed versions and hides unchanged ones unless --force is used.
-# - Runs `pi install npm:<package>` for each selected package (or only prints commands with --dry-run).
+# - Compares npm latest versions with Pi-installed versions and hides unchanged ones unless --force is used.
+# - Runs `pi install npm:<package>@latest` for each selected package (or only prints commands with --dry-run).
 #
 # How to use:
 # - Run `./dev/scripts/install-pi-add.sh` for interactive selection.
 # - Run `./dev/scripts/install-pi-add.sh --non-interactive` for non-interactive install/update of actionable packages.
 # - `--all` remains supported as a short alias for `--non-interactive`.
-# - Add `--dry-run` to preview actions and `--force` to show/reinstall same-version packages.
+# - Add `--dry-run` to preview actions and `--force` to show/reinstall latest-version packages.
 #
 # Why this script exists:
 # - It provides a repeatable, repo-local workflow to install/test this repo's Pi npm packages
@@ -30,13 +30,13 @@ usage() {
 Usage:
   install-pi-add.sh [options]
 
-Discovers and installs local Pi extension/skill/package npm packages.
+Discovers local Pi extension/skill/package npm packages and installs their latest npm-published versions.
 
 Options:
   --non-interactive  Install/update all actionable packages without prompting
   --all              Alias for --non-interactive
   --dry-run          Print install commands without running them
-  --force            Show and allow reinstalling packages already at the same version
+  --force            Show and allow reinstalling packages already at the latest npm version
   -h, --help         Show this help
 
 Examples:
@@ -136,6 +136,22 @@ render_check_progress() {
     "$(format_duration "$elapsed")" "$(format_duration "$remaining")"
 }
 
+npm_latest_version_for() {
+  local package_name="$1"
+  local output=""
+  local latest=""
+
+  output="$(npm view "${package_name}@latest" version 2>/dev/null || true)"
+  while IFS= read -r line; do
+    line="${line//$'\r'/}"
+    if [[ -n "$line" ]]; then
+      latest="$line"
+    fi
+  done <<< "$output"
+
+  printf '%s' "$latest"
+}
+
 PACKAGE_JSON_FILES=()
 for pattern in \
   "$ROOT_DIR"/pi-extension-*/package.json \
@@ -175,6 +191,7 @@ echo "Discovered ${#PACKAGE_JSON_FILES[@]} local Pi package(s) (extensions/skill
 
 PACKAGE_NAMES=()
 PACKAGE_REPO_VERSIONS=()
+PACKAGE_NPM_LATEST_VERSIONS=()
 PACKAGE_KINDS=()
 PACKAGE_INSTALLED_VERSIONS=()
 PACKAGE_STATUS_LABELS=()
@@ -182,6 +199,7 @@ NEW_INSTALL_CANDIDATES=()
 UPDATE_CANDIDATES=()
 UP_TO_DATE_CANDIDATES=()
 FORCE_REINSTALL_CANDIDATES=()
+NPM_QUERY_FAILED_CANDIDATES=()
 SELECTABLE_PACKAGE_INDEXES=()
 CHECK_PROGRESS_ENABLED=0
 CHECK_PROGRESS_TOTAL=${#PACKAGE_JSON_FILES[@]}
@@ -230,9 +248,24 @@ for package_json in "${PACKAGE_JSON_FILES[@]}"; do
     continue
   fi
 
+  npm_latest_version="$(npm_latest_version_for "$package_name")"
+  if [[ -z "$npm_latest_version" ]]; then
+    if [[ $CHECK_PROGRESS_ENABLED -eq 1 ]]; then
+      echo
+    fi
+    echo "WARN: skipping '$package_name' because npm latest version could not be resolved." >&2
+    NPM_QUERY_FAILED_CANDIDATES+=("$package_name")
+    CHECK_PROGRESS_COUNT=$((CHECK_PROGRESS_COUNT + 1))
+    if [[ $CHECK_PROGRESS_ENABLED -eq 1 ]]; then
+      render_check_progress "$CHECK_PROGRESS_COUNT" "$CHECK_PROGRESS_TOTAL" "$CHECK_PROGRESS_START_SECONDS"
+    fi
+    continue
+  fi
+
   package_index="${#PACKAGE_NAMES[@]}"
   PACKAGE_NAMES+=("$package_name")
   PACKAGE_REPO_VERSIONS+=("$package_version")
+  PACKAGE_NPM_LATEST_VERSIONS+=("$npm_latest_version")
   PACKAGE_KINDS+=("$package_kind")
 
   installed_package_json=""
@@ -255,23 +288,29 @@ for package_json in "${PACKAGE_JSON_FILES[@]}"; do
     installed_version="$(node -p "require(process.argv[1]).version" "$installed_package_json" 2>/dev/null || true)"
   fi
 
+  target_version="$npm_latest_version"
+  version_note=""
+  if [[ "$package_version" != "$target_version" ]]; then
+    version_note=" (repo package.json $package_version)"
+  fi
+
   PACKAGE_INSTALLED_VERSIONS+=("$installed_version")
   if [[ -z "$installed_version" ]]; then
-    PACKAGE_STATUS_LABELS+=("new install -> $package_version")
-    NEW_INSTALL_CANDIDATES+=("${package_name}@${package_version}")
+    PACKAGE_STATUS_LABELS+=("new install -> $target_version$version_note")
+    NEW_INSTALL_CANDIDATES+=("${package_name}@${target_version}")
     SELECTABLE_PACKAGE_INDEXES+=("$package_index")
-  elif [[ "$installed_version" == "$package_version" ]]; then
+  elif [[ "$installed_version" == "$target_version" ]]; then
     if [[ $FORCE_INSTALL -eq 1 ]]; then
-      PACKAGE_STATUS_LABELS+=("force reinstall $package_version")
-      FORCE_REINSTALL_CANDIDATES+=("${package_name}@${package_version}")
+      PACKAGE_STATUS_LABELS+=("force reinstall $target_version$version_note")
+      FORCE_REINSTALL_CANDIDATES+=("${package_name}@${target_version}")
       SELECTABLE_PACKAGE_INDEXES+=("$package_index")
     else
-      PACKAGE_STATUS_LABELS+=("up to date $package_version")
-      UP_TO_DATE_CANDIDATES+=("${package_name}@${package_version}")
+      PACKAGE_STATUS_LABELS+=("up to date $target_version$version_note")
+      UP_TO_DATE_CANDIDATES+=("${package_name}@${target_version}")
     fi
   else
-    PACKAGE_STATUS_LABELS+=("update $installed_version -> $package_version")
-    UPDATE_CANDIDATES+=("${package_name} (${installed_version} -> ${package_version})")
+    PACKAGE_STATUS_LABELS+=("update $installed_version -> $target_version$version_note")
+    UPDATE_CANDIDATES+=("${package_name} (${installed_version} -> ${target_version})")
     SELECTABLE_PACKAGE_INDEXES+=("$package_index")
   fi
 
@@ -285,7 +324,7 @@ if [[ $CHECK_PROGRESS_ENABLED -eq 1 ]]; then
 fi
 
 if [[ ${#PACKAGE_NAMES[@]} -eq 0 ]]; then
-  echo "No valid package names discovered."
+  echo "No packages with resolvable npm latest versions discovered."
   exit 1
 fi
 
@@ -297,6 +336,7 @@ if [[ $FORCE_INSTALL -eq 1 ]]; then
 else
   echo "  Already up to date (hidden; use --force to show/reinstall): ${#UP_TO_DATE_CANDIDATES[@]}"
 fi
+echo "  Skipped (npm latest unavailable): ${#NPM_QUERY_FAILED_CANDIDATES[@]}"
 
 if [[ ${#SELECTABLE_PACKAGE_INDEXES[@]} -eq 0 ]]; then
   if [[ $FORCE_INSTALL -eq 1 ]]; then
@@ -382,25 +422,31 @@ for package_name in "${SELECTED_PACKAGES[@]}"; do
   fi
 
   repo_version="${PACKAGE_REPO_VERSIONS[$package_index]}"
+  target_version="${PACKAGE_NPM_LATEST_VERSIONS[$package_index]}"
   installed_version="${PACKAGE_INSTALLED_VERSIONS[$package_index]}"
   package_kind="${PACKAGE_KINDS[$package_index]}"
 
-  if [[ $FORCE_INSTALL -eq 0 && -n "$installed_version" && "$installed_version" == "$repo_version" ]]; then
-    echo "Skipping ${package_kind} npm:${package_name} (already installed at version $installed_version)"
+  if [[ $FORCE_INSTALL -eq 0 && -n "$installed_version" && "$installed_version" == "$target_version" ]]; then
+    echo "Skipping ${package_kind} npm:${package_name} (already installed at latest npm version $installed_version)"
     SKIPPED_UP_TO_DATE+=("${package_name}@${installed_version}")
     continue
   fi
 
-  install_target="npm:${package_name}"
-  if [[ $FORCE_INSTALL -eq 1 && -n "$installed_version" && "$installed_version" == "$repo_version" ]]; then
-    echo "Installing ${package_kind} $install_target (force reinstall version $repo_version)"
-    REINSTALLED_PACKAGES+=("${package_name}@${repo_version}")
+  install_target="npm:${package_name}@latest"
+  repo_note=""
+  if [[ "$repo_version" != "$target_version" ]]; then
+    repo_note=" (repo package.json $repo_version)"
+  fi
+
+  if [[ $FORCE_INSTALL -eq 1 && -n "$installed_version" && "$installed_version" == "$target_version" ]]; then
+    echo "Installing ${package_kind} $install_target (force reinstall version $target_version$repo_note)"
+    REINSTALLED_PACKAGES+=("${package_name}@${target_version}")
   elif [[ -n "$installed_version" ]]; then
-    echo "Installing ${package_kind} $install_target (updating $installed_version -> $repo_version)"
-    UPDATED_PACKAGES+=("${package_name} (${installed_version} -> ${repo_version})")
+    echo "Installing ${package_kind} $install_target (updating $installed_version -> $target_version$repo_note)"
+    UPDATED_PACKAGES+=("${package_name} (${installed_version} -> ${target_version})")
   else
-    echo "Installing ${package_kind} $install_target (target version $repo_version)"
-    NEWLY_INSTALLED+=("${package_name}@${repo_version}")
+    echo "Installing ${package_kind} $install_target (target version $target_version$repo_note)"
+    NEWLY_INSTALLED+=("${package_name}@${target_version}")
   fi
 
   if [[ $DRY_RUN -eq 1 ]]; then

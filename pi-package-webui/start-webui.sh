@@ -6,6 +6,7 @@ PACKAGE_NAME="@firstpick/pi-package-webui"
 DEFAULT_HOST="127.0.0.1"
 DEFAULT_PORT="31415"
 SERVER_PID=""
+PI_WEBUI_COMMAND=""
 
 script_dir() {
   local source dir
@@ -37,6 +38,44 @@ local_pi_webui_bin() {
   printf '%s\n' "$candidate"
 }
 
+pi_managed_pi_webui_bin() {
+  local candidates candidate
+
+  if ! command -v node >/dev/null 2>&1; then
+    return 1
+  fi
+
+  candidates="$(node <<'NODE'
+const { homedir } = require("node:os");
+const { join } = require("node:path");
+
+let agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+if (agentDir === "~") {
+  agentDir = homedir();
+} else if (agentDir.startsWith("~/") || (process.platform === "win32" && agentDir.startsWith("~\\"))) {
+  agentDir = join(homedir(), agentDir.slice(2));
+}
+
+const binName = process.platform === "win32" ? "pi-webui.cmd" : "pi-webui";
+for (const candidate of [
+  join(agentDir, "npm", "node_modules", ".bin", "pi-webui"),
+  join(agentDir, "npm", "node_modules", ".bin", binName),
+]) {
+  process.stdout.write(`${candidate.replace(/\\/g, "/")}\n`);
+}
+NODE
+)"
+
+  while IFS= read -r candidate; do
+    if [[ -n "$candidate" && -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done <<< "$candidates"
+
+  return 1
+}
+
 cleanup() {
   if [[ -n "${SERVER_PID:-}" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
     kill "$SERVER_PID" 2>/dev/null || true
@@ -66,7 +105,15 @@ choose_cwd() {
 }
 
 ensure_pi_webui() {
+  local managed_bin
+
+  if managed_bin="$(pi_managed_pi_webui_bin 2>/dev/null)" && [[ -n "$managed_bin" ]]; then
+    PI_WEBUI_COMMAND="$managed_bin"
+    return 0
+  fi
+
   if command -v pi-webui >/dev/null 2>&1; then
+    PI_WEBUI_COMMAND="$(command -v pi-webui)"
     return 0
   fi
 
@@ -105,6 +152,8 @@ ensure_pi_webui() {
     echo "Installed, but pi-webui is still not on PATH. Check your npm global bin directory." >&2
     return 1
   fi
+
+  PI_WEBUI_COMMAND="$(command -v pi-webui)"
 }
 
 browser_host_for_url() {
@@ -428,7 +477,7 @@ main() {
     echo "Dev mode: using local Pi Web UI server: $local_webui_bin"
   else
     ensure_pi_webui
-    webui_cmd=(pi-webui)
+    webui_cmd=("$PI_WEBUI_COMMAND")
   fi
 
   echo "Starting Pi Web UI in: $cwd"
