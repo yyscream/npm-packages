@@ -2,7 +2,7 @@
 
 Enhanced Pi footer with git health and model/token telemetry.
 
-![Status bar with metrics and git context](images/Statusbar_v0.1.5.png)
+![Status bar with metrics and git context](https://unpkg.com/@firstpick/pi-extension-git-footer-status/images/Statusbar_v0.1.5.png)
 
 ## What it does
 

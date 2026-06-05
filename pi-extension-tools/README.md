@@ -2,7 +2,7 @@
 
 Interactive active-tool manager for Pi.
 
-![Interactive active-tool manager](images/tools_v0.1.2.png)
+![Interactive active-tool manager](https://unpkg.com/@firstpick/pi-extension-tools/images/tools_v0.1.2.png)
 
 ## Commands
 

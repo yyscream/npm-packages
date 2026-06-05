@@ -2,7 +2,7 @@
 
 Token and cost analytics for Pi session history.
 
-![Token stats dashboard](images/stats_v0.1.2.png)
+![Token stats dashboard](https://unpkg.com/@firstpick/pi-extension-stats/images/stats_v0.1.2.png)
 
 ## What it does
 

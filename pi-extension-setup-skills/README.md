@@ -2,7 +2,7 @@
 
 Adds `/skills`, an interactive Pi UI for enabling/disabling skills.
 
-![Interactive skill manager](images/setup_skills_v0.1.3.png)
+![Interactive skill manager](https://unpkg.com/@firstpick/pi-extension-setup-skills/images/setup_skills_v0.1.3.png)
 
 ## Usage
 

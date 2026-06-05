@@ -2,7 +2,7 @@
 
 Auto todo/progress tracking for multi-goal prompts.
 
-![Todo progress widget](images/todo_progress_v0.1.8.png)
+![Todo progress widget](https://unpkg.com/@firstpick/pi-extension-todo-progress/images/todo_progress_v0.1.8.png)
 
 ## What it does
 
