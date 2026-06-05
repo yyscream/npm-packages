@@ -517,7 +517,12 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
         return;
       }
 
-      ctx.ui.notify("Checking npm authentication with npm whoami...", "info");
+      const notifyProgress = (message: string, type: "info" | "success" | "warning" | "error" = "info") => {
+        if (ctx.mode === "rpc") return;
+        ctx.ui.notify(message, type);
+      };
+
+      notifyProgress("Checking npm authentication with npm whoami...", "info");
       const authResult = await verifyNpmAuth(ctx.cwd);
       if (!authResult.ok) {
         const detail = redactTokenLikeOutput(authResult.output);
@@ -529,7 +534,8 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
       }
 
       const username = authResult.output.trim();
-      ctx.ui.notify(`npm authentication verified${username ? ` as ${username}` : ""}. Starting release preflight...`, "success");
+      const authSummary = `npm authentication verified${username ? ` as ${username}` : ""}.`;
+      notifyProgress(`${authSummary} Starting release preflight...`, "success");
 
       const runLog = createReleaseRunLog(ctx.cwd);
       let cleanupReleaseUi: (() => void) | undefined;
@@ -620,7 +626,7 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
 
       if (ctx.hasUI) {
         ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg("accent", "Release:Checking"));
-        ctx.ui.notify("Running release preflight checks. Output stays above input; controls are below input.", "info");
+        notifyProgress("Running release preflight checks. Output stays above input; controls are below input.", "info");
         renderReleaseUi(true);
         startElapsedTimer();
         unsubscribeKeys = ctx.ui.onTerminalInput((data) => {
@@ -637,7 +643,8 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
       }
 
       const planCommand = releaseScriptCommand(ctx.cwd, "release-workflow.sh", ["--plan", "--all"]);
-      ctx.ui.notify("Running release-workflow.sh --plan --all...", "info");
+      notifyProgress("Running release-workflow.sh --plan --all...", "info");
+      appendOutput(`${authSummary}\n`);
       appendOutput(`$ ${planCommand}\n`);
       const plan = await runScriptLive(ctx.cwd, planCommand, appendOutput, (child) => { currentChild = child; });
       currentChild = undefined;
@@ -700,7 +707,7 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
       activeReleaseRun = { abort: abortCurrentStep, toggleOutput };
       if (ctx.hasUI) {
         ctx.ui.setStatus(RELEASE_STATUS_KEY, ctx.ui.theme.fg("accent", "Release:Publishing"));
-        ctx.ui.notify("Starting publish workflow. Output stays above input; controls are below input.", "info");
+        notifyProgress("Starting publish workflow. Output stays above input; controls are below input.", "info");
         renderReleaseUi(true);
         startElapsedTimer();
       }
@@ -712,7 +719,8 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
         return;
       }
 
-      ctx.ui.notify(`Running publish workflow for ${plannedTargetResolution.targets.length} preflight-detected target(s)...`, "info");
+      notifyProgress(`Running publish workflow for ${plannedTargetResolution.targets.length} preflight-detected target(s)...`, "info");
+      appendOutput(`Running publish workflow for ${plannedTargetResolution.targets.length} preflight-detected target(s)...\n`);
       const updated: string[] = [];
       const skipped: string[] = [];
       const firstRelease: string[] = [];
@@ -804,7 +812,7 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
       for (const [index, target] of plannedTargetResolution.targets.entries()) {
         const publishCommand = releaseScriptCommand(ctx.cwd, "release-workflow.sh", ["--publish", "--target", target.target]);
         setPhase(`Release publishing ${index + 1}/${plannedTargetResolution.targets.length}: ${target.target}`);
-        ctx.ui.notify(`Running release-workflow.sh --publish --target ${target.target}...`, "info");
+        notifyProgress(`Running release-workflow.sh --publish --target ${target.target}...`, "info");
         appendOutput(`\n==> Publishing target ${index + 1}/${plannedTargetResolution.targets.length}: ${target.target} (${target.label})\n`);
         appendOutput(`$ ${publishCommand}\n`);
         const publish = await runScriptLive(ctx.cwd, publishCommand, appendOutput, (child) => { currentChild = child; });
