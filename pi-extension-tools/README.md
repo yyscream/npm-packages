@@ -2,6 +2,8 @@
 
 Interactive active-tool manager for Pi.
 
+![Interactive active-tool manager](images/tools_v0.1.2.png)
+
 ## Commands
 
 - `/tools` — open a TUI to enable/disable individual tools, then press `Ctrl+S` to save or `q` to cancel.

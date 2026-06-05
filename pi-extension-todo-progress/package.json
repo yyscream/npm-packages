@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-extension-todo-progress",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Aggressive automatic todo progress widget for multi-goal prompts in Pi.",
   "license": "MIT",
   "keywords": [
@@ -11,6 +11,7 @@
     "progress"
   ],
   "pi": {
+    "image": "https://unpkg.com/@firstpick/pi-extension-todo-progress/images/todo_progress_v0.1.8.png",
     "extensions": [
       "./index.ts"
     ]
@@ -21,6 +22,7 @@
   },
   "files": [
     "index.ts",
+    "images",
     "README.md",
     "LICENSE"
   ]

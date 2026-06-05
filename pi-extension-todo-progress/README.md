@@ -2,6 +2,8 @@
 
 Auto todo/progress tracking for multi-goal prompts.
 
+![Todo progress widget](images/todo_progress_v0.1.8.png)
+
 ## What it does
 
 - Instructs the agent to create concise, agent-authored todos for multi-step work.

@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-extension-setup-skills",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Interactive Pi command to enable or disable local skills from a multi-selection list.",
   "license": "MIT",
   "keywords": [
@@ -11,6 +11,7 @@
     "skills"
   ],
   "pi": {
+    "image": "https://unpkg.com/@firstpick/pi-extension-setup-skills/images/setup_skills_v0.1.3.png",
     "extensions": [
       "./index.ts"
     ]
@@ -20,6 +21,7 @@
   },
   "files": [
     "index.ts",
+    "images",
     "README.md",
     "LICENSE"
   ]

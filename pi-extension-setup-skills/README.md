@@ -2,6 +2,8 @@
 
 Adds `/skills`, an interactive Pi UI for enabling/disabling skills.
 
+![Interactive skill manager](images/setup_skills_v0.1.3.png)
+
 ## Usage
 
 ```text
