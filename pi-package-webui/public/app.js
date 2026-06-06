@@ -1,13 +1,16 @@
 const $ = (selector) => document.querySelector(selector);
 
 const elements = {
-  sessionLine: $("#sessionLine"),
+  webuiVersionBadge: $("#webuiVersionBadge"),
+  webuiDevBadge: $("#webuiDevBadge"),
   tabBar: $("#tabBar"),
   terminalTabsToggleButton: $("#terminalTabsToggleButton"),
   newTabButton: $("#newTabButton"),
   closeAllTabsButton: $("#closeAllTabsButton"),
   statusBar: $("#statusBar"),
   serverOfflinePanel: $("#serverOfflinePanel"),
+  serverRestartPanel: $("#serverRestartPanel"),
+  serverRestartMessage: $("#serverRestartMessage"),
   serverOfflineCommand: $("#serverOfflineCommand"),
   serverOfflineSlashCommand: $("#serverOfflineSlashCommand"),
   copyServerCommandButton: $("#copyServerCommandButton"),
@@ -60,7 +63,9 @@ const elements = {
   backgroundStatus: $("#backgroundStatus"),
   networkStatus: $("#networkStatus"),
   openNetworkButton: $("#openNetworkButton"),
-  stopServerButton: $("#stopServerButton"),
+  serverActionSelect: $("#serverActionSelect"),
+  runServerActionButton: $("#runServerActionButton"),
+  serverActionStatus: $("#serverActionStatus"),
   agentDoneNotificationsToggle: $("#agentDoneNotificationsToggle"),
   agentDoneNotificationsStatus: $("#agentDoneNotificationsStatus"),
   optionalFeaturesBox: $("#optionalFeaturesBox"),
@@ -150,12 +155,15 @@ let pathSuggestAbortController = null;
 let latestStats = null;
 let latestWorkspace = null;
 let latestNetwork = null;
+let webuiVersion = "";
+let webuiDevServer = false;
 let latestCodexUsage = null;
 let codexUsageError = null;
 let codexUsageLoading = false;
 let refreshCodexUsageTimer = null;
 let codexUsageRenderTimer = null;
 let backendOffline = false;
+let serverRestartInProgress = false;
 let backendOfflineNoticeShown = false;
 let latestMessages = [];
 let promptHistoryByTab = new Map();
@@ -899,13 +907,22 @@ function renderServerOfflinePanel() {
   if (elements.serverOfflineSlashCommand) elements.serverOfflineSlashCommand.textContent = serverStartSlashCommandText();
 }
 
+function setServerRestartOverlay(active, message = "Waiting for the server to come back…") {
+  serverRestartInProgress = !!active;
+  document.body.classList.toggle("server-restarting", serverRestartInProgress);
+  if (elements.serverRestartPanel) elements.serverRestartPanel.hidden = !serverRestartInProgress;
+  if (elements.serverRestartMessage) elements.serverRestartMessage.textContent = message;
+  if (serverRestartInProgress && elements.serverOfflinePanel) elements.serverOfflinePanel.hidden = true;
+}
+
 function setBackendOffline(offline, error) {
   backendOffline = !!offline;
-  document.body.classList.toggle("server-offline", backendOffline);
-  if (elements.serverOfflinePanel) elements.serverOfflinePanel.hidden = !backendOffline;
+  const showOfflinePanel = backendOffline && !serverRestartInProgress;
+  document.body.classList.toggle("server-offline", showOfflinePanel);
+  if (elements.serverOfflinePanel) elements.serverOfflinePanel.hidden = !showOfflinePanel;
   renderServerOfflinePanel();
   if (backendOffline) {
-    if (!backendOfflineNoticeShown) {
+    if (!serverRestartInProgress && !backendOfflineNoticeShown) {
       backendOfflineNoticeShown = true;
       addEvent(`Pi Web UI server is offline${error?.message ? `: ${error.message}` : ""}`, "warn");
     }
@@ -1013,6 +1030,52 @@ async function api(path, { method = "GET", body, tabId = activeTabId, scoped = t
     throw error;
   }
   return data;
+}
+
+function formatWebuiVersion(version) {
+  const text = String(version || "").trim();
+  if (!text) return "";
+  return text.startsWith("v") ? text : `v${text}`;
+}
+
+function isWebuiDevMetadata(data) {
+  return data?.webuiDev === true || String(data?.webuiMode || "").toLowerCase() === "dev";
+}
+
+function renderWebuiVersion() {
+  const badge = elements.webuiVersionBadge;
+  if (!badge) return;
+  const label = formatWebuiVersion(webuiVersion);
+  badge.hidden = !label;
+  badge.textContent = label;
+  if (label) badge.title = `Pi Web UI ${label}`;
+}
+
+function renderWebuiDevBadge() {
+  const badge = elements.webuiDevBadge;
+  if (!badge) return;
+  badge.hidden = !webuiDevServer;
+  badge.title = "Pi Web UI dev server";
+}
+
+function setWebuiVersion(version) {
+  const text = String(version || "").trim();
+  if (text === webuiVersion) return;
+  webuiVersion = text;
+  renderWebuiVersion();
+}
+
+function setWebuiDevServer(dev) {
+  const next = !!dev;
+  if (next === webuiDevServer) return;
+  webuiDevServer = next;
+  renderWebuiDevBadge();
+}
+
+async function refreshWebuiVersion() {
+  const health = await api("/api/health", { scoped: false });
+  setWebuiVersion(health.webuiVersion);
+  setWebuiDevServer(isWebuiDevMetadata(health));
 }
 
 function formatBytes(bytes) {
@@ -2357,7 +2420,6 @@ function resetActiveTabUi() {
   }
   elements.commandsBox.textContent = "Loading…";
   elements.commandsBox.classList.add("muted");
-  elements.sessionLine.textContent = activeTab() ? "Connecting…" : "No terminal tabs.";
   renderWidgets();
   renderGitWorkflow();
   renderFooter();
@@ -3899,13 +3961,6 @@ function renderStatus() {
   updateComposerModeButtons();
   const running = state?.isStreaming ? "running" : "idle";
   const compacting = state?.isCompacting ? " · compacting" : "";
-  const queue = state?.pendingMessageCount ? ` · queued ${state.pendingMessageCount}` : "";
-  const extra = [...statusEntries.entries()].map(([key, value]) => formatStatusEntry(key, value)).filter(Boolean).join(" · ");
-  const statusText = state?.isStreaming ? "Running" : "Idle";
-  const compactingText = state?.isCompacting ? " · Compacting" : "";
-  const queueText = state?.pendingMessageCount ? ` · Queue: ${state.pendingMessageCount}` : "";
-
-  elements.sessionLine.textContent = `Status: ${statusText}${compactingText}${queueText}${extra ? ` · ${extra}` : ""} · Model: ${modelLabel(state?.model)} · Session: ${shortSessionLabel(state)}`;
 
   elements.stateDetails.replaceChildren();
   const details = {
@@ -8293,6 +8348,7 @@ async function refreshAll(tabContext = activeTabContext()) {
     refreshStats(tabContext),
     refreshWorkspace(tabContext),
     refreshNetworkStatus(),
+    refreshWebuiVersion(),
   ]);
   if (!isCurrentTabContext(tabContext)) return;
   for (const result of results) {
@@ -8404,12 +8460,108 @@ async function closeNetworkAccess() {
   }
 }
 
+function setServerActionStatus(message = "", level = "info") {
+  const status = elements.serverActionStatus;
+  if (!status) return;
+  status.textContent = message;
+  status.hidden = !message;
+  status.className = `server-action-status ${level} ${message ? "" : "muted"}`.trim();
+}
+
+function updateServerActionButton() {
+  const action = elements.serverActionSelect?.value || "";
+  const button = elements.runServerActionButton;
+  if (!button) return;
+  button.disabled = !action;
+  button.textContent = action === "restart" ? "Restart" : action === "stop" ? "Stop" : "Run";
+  button.classList.toggle("danger", action === "stop");
+  if (action) setServerActionStatus(action === "restart" ? "Ready to restart the Web UI server." : "Ready to stop the Web UI server.", "info");
+  else setServerActionStatus();
+}
+
+function setServerActionBusy(label) {
+  if (elements.serverActionSelect) elements.serverActionSelect.disabled = true;
+  if (elements.runServerActionButton) {
+    elements.runServerActionButton.disabled = true;
+    elements.runServerActionButton.textContent = label;
+  }
+}
+
+function resetServerActionControls() {
+  if (elements.serverActionSelect) {
+    elements.serverActionSelect.disabled = false;
+    elements.serverActionSelect.value = "";
+  }
+  updateServerActionButton();
+}
+
+async function waitForServerRestart() {
+  for (let attempt = 0; attempt < 40; attempt++) {
+    await delay(attempt === 0 ? 900 : 500);
+    const message = `Restarting… reconnect attempt ${attempt + 1}/40`;
+    setServerActionStatus(message, "warn");
+    setServerRestartOverlay(true, message);
+    try {
+      await api("/api/health", { scoped: false });
+      setBackendOffline(false);
+      await initializeTabs();
+      setServerRestartOverlay(false);
+      setServerActionStatus("Server restarted and reconnected.", "success");
+      addEvent("Pi Web UI server restarted", "warn");
+      return true;
+    } catch (error) {
+      setBackendOffline(true, error);
+    }
+  }
+  return false;
+}
+
+async function restartServer() {
+  if (!confirm("Restart the Pi Web UI server?\n\nThis briefly disconnects browser clients and restarts the Pi tabs managed by this Web UI.")) return;
+
+  setServerActionBusy("Restarting…");
+  setServerActionStatus("Restart requested. Waiting for the server to come back…", "warn");
+  setServerRestartOverlay(true, "Restart requested. Waiting for the server to come back…");
+  try {
+    await api("/api/restart", { method: "POST", scoped: false });
+    addEvent("Pi Web UI server restart requested", "warn");
+  } catch (error) {
+    if (!error?.backendOffline) {
+      const missingRestartEndpoint = error.statusCode === 404 || /not found/i.test(error.message || "");
+      const message = missingRestartEndpoint
+        ? "Restart is not available in the currently running server. Stop/start manually once to load the new backend."
+        : error.message || String(error);
+      addEvent(message, "error");
+      setServerRestartOverlay(false);
+      resetServerActionControls();
+      setServerActionStatus(message, "error");
+      return;
+    }
+    addEvent("Pi Web UI server connection dropped during restart request", "warn");
+  }
+
+  setBackendOffline(true, new Error("restart requested from side panel"));
+  const restarted = await waitForServerRestart();
+  if (elements.serverActionSelect) {
+    elements.serverActionSelect.disabled = false;
+    elements.serverActionSelect.value = "";
+  }
+  updateServerActionButton();
+  if (restarted) {
+    setServerActionStatus("Server restarted and reconnected.", "success");
+  } else {
+    setServerRestartOverlay(false);
+    setBackendOffline(true, new Error("restart reconnect timed out"));
+    setServerActionStatus("Restart requested, but the server did not reconnect automatically.", "error");
+    addEvent("Pi Web UI server did not come back online after restart request", "error");
+  }
+}
+
 async function stopServer() {
   if (!confirm("Stop the Pi Web UI server?\n\nThis disconnects all browser clients and stops the Pi tabs managed by this Web UI.")) return;
 
-  const button = elements.stopServerButton;
-  button.disabled = true;
-  button.textContent = "Stopping…";
+  setServerActionBusy("Stopping…");
+  setServerActionStatus("Stop requested. The Web UI will disconnect.", "warn");
   try {
     await api("/api/shutdown", { method: "POST", scoped: false });
     addEvent("Pi Web UI server stop requested", "warn");
@@ -8421,9 +8573,15 @@ async function stopServer() {
       return;
     }
     addEvent(error.message || String(error), "error");
-    button.disabled = false;
-    button.textContent = "Stop Server";
+    resetServerActionControls();
+    setServerActionStatus(error.message || String(error), "error");
   }
+}
+
+async function runSelectedServerAction() {
+  const action = elements.serverActionSelect?.value || "";
+  if (action === "restart") await restartServer();
+  else if (action === "stop") await stopServer();
 }
 
 function appShortcutModelLabel(model) {
@@ -8889,6 +9047,8 @@ function handleEvent(event) {
   const tabContext = activeTabContext(event.tabId || activeTabId);
   switch (event.type) {
     case "webui_connected":
+      setWebuiVersion(event.version);
+      setWebuiDevServer(isWebuiDevMetadata(event));
       addEvent(`connected to ${event.tabTitle || "terminal"} for ${event.cwd}`);
       scheduleForegroundReconcile("event stream reconnect", 0);
       break;
@@ -9299,7 +9459,9 @@ if (elements.backgroundClearButton) {
   elements.backgroundClearButton.addEventListener("click", () => clearCustomBackground().catch((error) => addEvent(error.message || String(error), "error")));
 }
 elements.openNetworkButton.addEventListener("click", openToNetwork);
-elements.stopServerButton.addEventListener("click", stopServer);
+elements.serverActionSelect.addEventListener("change", updateServerActionButton);
+elements.runServerActionButton.addEventListener("click", () => runSelectedServerAction().catch((error) => addEvent(error.message || String(error), "error")));
+updateServerActionButton();
 elements.agentDoneNotificationsToggle.addEventListener("change", () => {
   setAgentDoneNotificationsEnabled(elements.agentDoneNotificationsToggle.checked, {
     requestPermission: elements.agentDoneNotificationsToggle.checked,

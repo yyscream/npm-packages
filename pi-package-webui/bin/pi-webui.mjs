@@ -17,6 +17,7 @@ const packageRoot = path.resolve(__dirname, "..");
 const publicDir = path.join(packageRoot, "public");
 const packageJson = JSON.parse(await readFile(path.join(packageRoot, "package.json"), "utf8"));
 const nativeParityMatrix = JSON.parse(await readFile(path.join(packageRoot, "WEBUI_TUI_NATIVE_PARITY.json"), "utf8"));
+const webuiDevServer = isTruthyEnv(process.env.PI_WEBUI_DEV) || isSourceCheckout(packageRoot);
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 31415;
@@ -99,6 +100,15 @@ const MIME_TYPES = new Map([
   [".webp", "image/webp"],
   [".webmanifest", "application/manifest+json; charset=utf-8"],
 ]);
+
+function isTruthyEnv(value) {
+  return ["1", "true", "yes", "dev"].includes(String(value || "").trim().toLowerCase());
+}
+
+function isSourceCheckout(root) {
+  const normalized = String(root || "").replace(/\\/g, "/");
+  return normalized.includes("/npm-packages/") && !normalized.includes("/node_modules/");
+}
 
 function nativeParitySurfaces(matrix = nativeParityMatrix) {
   return Array.isArray(matrix?.surfaces) ? matrix.surfaces : [];
@@ -2004,6 +2014,12 @@ if (options.version) {
   process.exit(0);
 }
 
+const startupDelayMs = Number.parseInt(process.env.PI_WEBUI_START_DELAY_MS || "", 10);
+delete process.env.PI_WEBUI_START_DELAY_MS;
+if (Number.isFinite(startupDelayMs) && startupDelayMs > 0) {
+  await delay(Math.min(startupDelayMs, 10_000));
+}
+
 const restoreTabs = readRestoreTabsFromEnv();
 
 function normalizedRestoreString(value, maxLength) {
@@ -2545,6 +2561,33 @@ function mergeRestorableTabDescriptors(...sources) {
   return merged
     .sort((a, b) => restorableTabSortIndex(a) - restorableTabSortIndex(b) || String(a.title || "").localeCompare(String(b.title || "")))
     .slice(0, RESTORE_TAB_LIMIT);
+}
+
+async function restorableTabsForRestart() {
+  const liveDescriptors = await Promise.all([...tabs.values()].map(async (tab) => {
+    const state = await currentSessionState(tab).catch(() => tab.lastState || null);
+    return restorableTabDescriptor(tab, state);
+  }));
+  return mergeRestorableTabDescriptors(liveDescriptors, closedRestorableTabs);
+}
+
+function spawnRestartServer(restorableTabs) {
+  const env = {
+    ...process.env,
+    PI_WEBUI_RESTORE_TABS: JSON.stringify(restorableTabs || []),
+    PI_WEBUI_START_DELAY_MS: "1200",
+  };
+  if (webuiDevServer) env.PI_WEBUI_DEV = "1";
+  else delete env.PI_WEBUI_DEV;
+  const child = spawn(process.execPath, process.argv.slice(1), {
+    cwd: process.cwd(),
+    env,
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  child.unref();
+  return child;
 }
 
 function rememberClosedRestorableTab(tab, state = null) {
@@ -3461,6 +3504,8 @@ async function webuiStatus({ detailed = false, eventLimit = 40 } = {}) {
   const data = {
     online: true,
     webuiVersion: packageJson.version,
+    webuiDev: webuiDevServer,
+    webuiMode: webuiDevServer ? "dev" : "production",
     webuiPid: process.pid,
     startedAt: serverStartedAt,
     cwd: options.cwd,
@@ -3537,6 +3582,8 @@ const server = createServer(async (req, res) => {
       sendSse(res, {
         type: "webui_connected",
         version: packageJson.version,
+        webuiDev: webuiDevServer,
+        webuiMode: webuiDevServer ? "dev" : "production",
         tabId: tab.id,
         tabTitle: tab.title,
         pid: tab.rpc.child?.pid,
@@ -3559,6 +3606,8 @@ const server = createServer(async (req, res) => {
       sendJson(res, 200, {
         ok: true,
         webuiVersion: status.webuiVersion,
+        webuiDev: status.webuiDev,
+        webuiMode: status.webuiMode,
         webuiPid: status.webuiPid,
         piPid: status.piPid,
         piRunning: status.piRunning,
@@ -3626,6 +3675,15 @@ const server = createServer(async (req, res) => {
       if (shouldClose) {
         setTimeout(() => closeNetworkAccess().catch((error) => console.error("network close failed:", sanitizeError(error))), NETWORK_REBIND_DELAY_MS).unref();
       }
+      return;
+    }
+
+    if (url.pathname === "/api/restart" && req.method === "POST") {
+      if (!isLocalAddress(req.socket.remoteAddress)) throw makeHttpError(403, "Restart is only allowed from localhost");
+      const restorableTabs = await restorableTabsForRestart();
+      const child = spawnRestartServer(restorableTabs);
+      sendJson(res, 200, { ok: true, message: "Pi Web UI restarting", webuiPid: process.pid, nextWebuiPid: child.pid, restorableTabCount: restorableTabs.length });
+      setTimeout(() => shutdown("api restart"), 20).unref();
       return;
     }
 
@@ -3879,7 +3937,15 @@ server.listen(options.port, currentHost, () => {
 
 function shutdown(signal) {
   console.log(`\n${signal}: shutting down Pi Web UI...`);
-  server.close(() => process.exit(0));
+  const forceCloseTimer = setTimeout(() => {
+    server.closeAllConnections?.();
+  }, NETWORK_REBIND_FORCE_CLOSE_MS);
+  forceCloseTimer.unref?.();
+  server.close(() => {
+    clearTimeout(forceCloseTimer);
+    process.exit(0);
+  });
+  server.closeIdleConnections?.();
   for (const tab of tabs.values()) tab.rpc.stop();
   setTimeout(() => process.exit(0), 4000).unref();
 }

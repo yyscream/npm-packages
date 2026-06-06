@@ -161,7 +161,7 @@ This requires `/git-staged-msg` from `@firstpick/pi-prompts-git-pr`. Review the 
 ## Network safety
 
 - Default bind is localhost-only: `127.0.0.1:31415`.
-- The side-panel **Open to network** button rebinds the server to `0.0.0.0` and shows LAN URLs when available.
+- The side-panel **Open to network** button rebinds the server to `0.0.0.0`, shows LAN URLs when available, and toggles to "Close for network".
 - `--host 0.0.0.0` also exposes the Web UI to the local network.
 - Any connected browser client can control Pi and run Web UI bash actions as the Web UI process user.
 - Treat Pi Web UI as a local companion, not a hardened multi-user web service.

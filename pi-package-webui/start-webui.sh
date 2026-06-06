@@ -183,51 +183,10 @@ connect_host_for_port() {
   esac
 }
 
-open_url() {
+print_manual_url() {
   local url="$1"
-  local platform=""
-  platform="$(uname -s 2>/dev/null || true)"
 
-  case "$platform" in
-    MINGW*|MSYS*|CYGWIN*)
-      if command -v cmd.exe >/dev/null 2>&1; then
-        cmd.exe /c start "" "$url" </dev/null >/dev/null 2>&1 &
-        return 0
-      fi
-      if command -v powershell.exe >/dev/null 2>&1; then
-        powershell.exe -NoProfile -Command 'Start-Process -FilePath $args[0]' "$url" </dev/null >/dev/null 2>&1 &
-        return 0
-      fi
-      ;;
-    Linux*)
-      if grep -qi microsoft /proc/version 2>/dev/null; then
-        if command -v wslview >/dev/null 2>&1; then
-          wslview "$url" </dev/null >/dev/null 2>&1 &
-          return 0
-        fi
-        if command -v cmd.exe >/dev/null 2>&1; then
-          cmd.exe /c start "" "$url" </dev/null >/dev/null 2>&1 &
-          return 0
-        fi
-      fi
-      ;;
-  esac
-
-  if command -v xdg-open >/dev/null 2>&1; then
-    xdg-open "$url" </dev/null >/dev/null 2>&1 &
-  elif command -v open >/dev/null 2>&1; then
-    open "$url" </dev/null >/dev/null 2>&1 &
-  elif command -v wslview >/dev/null 2>&1; then
-    wslview "$url" </dev/null >/dev/null 2>&1 &
-  elif command -v cmd.exe >/dev/null 2>&1; then
-    cmd.exe /c start "" "$url" </dev/null >/dev/null 2>&1 &
-  elif command -v powershell.exe >/dev/null 2>&1; then
-    powershell.exe -NoProfile -Command 'Start-Process -FilePath $args[0]' "$url" </dev/null >/dev/null 2>&1 &
-  else
-    echo "Could not find a browser opener. Open manually:" >&2
-    echo "  $url" >&2
-    return 1
-  fi
+  echo "Open manually: $url"
 }
 
 http_ok() {
@@ -456,8 +415,7 @@ main() {
     if [[ "$dev_mode" -eq 1 ]]; then
       echo "--dev only affects newly started servers; stop the existing server first to run this checkout."
     fi
-    echo "Opening: $target_url"
-    open_url "$target_url" || true
+    print_manual_url "$target_url"
     exit 0
   fi
 
@@ -474,10 +432,12 @@ main() {
   if [[ "$dev_mode" -eq 1 ]]; then
     local_webui_bin="$(local_pi_webui_bin)"
     webui_cmd=(node "$local_webui_bin")
+    export PI_WEBUI_DEV=1
     echo "Dev mode: using local Pi Web UI server: $local_webui_bin"
   else
     ensure_pi_webui
     webui_cmd=("$PI_WEBUI_COMMAND")
+    unset PI_WEBUI_DEV
   fi
 
   echo "Starting Pi Web UI in: $cwd"
@@ -491,7 +451,8 @@ main() {
   trap 'cleanup; exit 143' TERM
 
   if wait_until_ready "$url" "$SERVER_PID"; then
-    open_url "$url" || true
+    echo "Pi Web UI is ready."
+    print_manual_url "$url"
   else
     ready_status="$?"
     if [[ "$ready_status" -eq 2 ]]; then
@@ -500,8 +461,8 @@ main() {
       exit $?
     fi
 
-    echo "Server did not respond yet; opening the URL anyway." >&2
-    open_url "$url" || true
+    echo "Server did not respond yet; not opening a browser automatically." >&2
+    print_manual_url "$url"
   fi
 
   wait "$SERVER_PID"

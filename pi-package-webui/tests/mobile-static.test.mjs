@@ -41,11 +41,15 @@ assert.match(html, /<link rel="apple-touch-icon" href="\/apple-touch-icon\.png" 
 assert.match(html, /id="terminalTabsToggleButton"/, "mobile should expose a compact terminal-tabs toggle");
 assert.match(html, /id="closeAllTabsButton"[\s\S]*?>Close all Tabs<\/button>/, "tab header should expose a top-right close-all tabs action");
 assert.match(html, /id="sidePanelBackdrop"/, "mobile side panel needs an overlay/backdrop close target");
+assert.match(html, /<strong class="side-panel-title">[\s\S]*Control Deck[\s\S]*id="webuiVersionBadge"[\s\S]*id="webuiDevBadge"/, "Control Deck title should expose Web UI version and dev badges");
+assert.doesNotMatch(html, /id="sessionLine"/, "Control Deck title should not show verbose session status metadata");
 assert.match(html, /id="themeSelect"/, "side panel should expose a theme selector");
 assert.match(html, /<label for="themeSelect">Theme<\/label>/, "theme selector should be labeled in side-panel controls");
 assert.match(html, /id="backgroundInput"[^>]*type="file"[^>]*accept="image\/png,image\/jpeg,image\/webp,image\/gif"/, "side panel should expose an image picker for custom backgrounds");
 assert.match(html, /id="backgroundClearButton"[\s\S]*?>×<\/button>/, "side-panel background control should expose an X remove button");
-assert.match(html, /id="stopServerButton"[^>]*?>Stop Server<\/button>/, "side panel should expose a Stop Server button");
+assert.match(html, /id="serverActionSelect"[\s\S]*<option value="restart">Restart Server<\/option>[\s\S]*<option value="stop">Stop Server<\/option>/, "side panel should expose restart and stop server actions in a dropdown");
+assert.match(html, /id="runServerActionButton"[^>]*disabled[^>]*>Run<\/button>/, "side panel should expose a guarded button for selected server actions");
+assert.match(html, /id="serverActionStatus"[^>]*aria-live="polite"/, "server actions should expose visible restart feedback");
 assert.match(html, /id="agentDoneNotificationsToggle"/, "side panel should expose an agent-done notifications toggle");
 assert.match(html, /id="agentDoneNotificationsStatus"/, "agent-done notifications toggle should expose status text");
 assert.match(html, /id="thinkingVisibilityToggle"/, "side panel should expose a thinking-output visibility toggle");
@@ -56,6 +60,7 @@ assert.match(html, /id="optionalFeaturesBox"/, "side panel should expose optiona
 assert.match(html, /id="codexUsageBox"/, "side panel should expose Codex subscription usage status");
 assert.match(html, /data-side-panel-section="codex-usage"/, "Codex usage should live in a collapsible side-panel section");
 assert.match(html, /id="serverOfflinePanel"/, "PWA/offline shell should expose a backend-offline recovery panel");
+assert.match(html, /id="serverRestartPanel"[\s\S]*id="serverRestartMessage"/, "server restart should expose a loading overlay instead of the generic offline shell");
 assert.match(html, /id="copyServerCommandButton"/, "backend-offline recovery panel should expose a start-command copy button");
 assert.match(html, /id="retryServerConnectionButton"/, "backend-offline recovery panel should expose a retry button");
 assert.match(html, /data-side-panel-section="controls"/, "side panel controls should live in a collapsible section");
@@ -135,6 +140,10 @@ assert.match(css, /\.message-collapse\[open\] \+ \.tool-result-preview \{[\s\S]*
 assert.match(css, /\.run-indicator-pulse \{[\s\S]*?animation:\s*run-indicator-pulse/, "active agent run indicator should have an animated pulse");
 assert.match(css, /\.optional-features-box \{[\s\S]*?display:\s*grid/, "optional features should render as a side-panel feature list");
 assert.match(css, /\.side-panel-section-toggle \{[\s\S]*?justify-content:\s*space-between/, "side panel section toggles should align labels and chevrons");
+assert.match(css, /\.server-restart-panel \{[\s\S]*?z-index:\s*62/, "server restart overlay should render above the offline shell");
+assert.match(css, /@keyframes server-restart-spin/, "server restart overlay should show a loading spinner");
+assert.match(css, /\.webui-version-badge,\n\.webui-dev-badge \{[\s\S]*?border-radius:\s*999px/, "Web UI version and dev indicators should render as compact title badges");
+assert.match(css, /\.webui-dev-badge \{[\s\S]*?color:\s*var\(--ctp-yellow\)/, "Web UI dev indicator should have distinct warning styling");
 assert.match(css, /\.side-panel-section\.collapsed \.side-panel-section-content,\n\.side-panel-section-content\[hidden\] \{\n\s+display:\s*none;/, "collapsed side panel section content should be hidden");
 assert.match(css, /\.side-panel-section:not\(\.collapsed\) \.side-panel-section-chevron/, "expanded side panel sections should rotate the chevron");
 assert.match(css, /\.optional-feature-pill\.enabled/, "optional features should visually distinguish enabled state");
@@ -239,8 +248,22 @@ assert.match(app, /Restart Web UI to load themes/, "frontend should explain when
 assert.match(app, /themeSelect\.addEventListener\("change"/, "side-panel theme selector should switch themes immediately");
 assert.match(app, /open \? "Close for network" : "Open to network"/, "network button should toggle from open to close action");
 assert.match(app, /api\("\/api\/network\/close", \{ method: "POST"/, "network close action should call the close endpoint");
-assert.match(app, /stopServerButton\.addEventListener\("click", stopServer\)/, "Stop Server button should be wired to the shutdown handler");
+assert.match(app, /webuiVersionBadge: \$\("#webuiVersionBadge"\)/, "frontend should bind the Control Deck version badge");
+assert.match(app, /webuiDevBadge: \$\("#webuiDevBadge"\)/, "frontend should bind the Control Deck dev badge");
+assert.match(app, /function refreshWebuiVersion\(\)[\s\S]*api\("\/api\/health", \{ scoped: false \}\)[\s\S]*setWebuiVersion\(health\.webuiVersion\)[\s\S]*setWebuiDevServer\(isWebuiDevMetadata\(health\)\)/, "frontend should load Web UI version and dev mode from health metadata");
+assert.match(app, /case "webui_connected":[\s\S]*setWebuiVersion\(event\.version\)[\s\S]*setWebuiDevServer\(isWebuiDevMetadata\(event\)\)/, "frontend should refresh Web UI version and dev mode from reconnect events");
+assert.match(server, /const webuiDevServer = isTruthyEnv\(process\.env\.PI_WEBUI_DEV\) \|\| isSourceCheckout\(packageRoot\)/, "server should derive dev mode from PI_WEBUI_DEV or a source checkout");
+assert.match(server, /webuiDev: webuiDevServer,[\s\S]*webuiMode: webuiDevServer \? "dev" : "production"/, "server status should expose Web UI dev mode");
+assert.match(server, /type: "webui_connected",[\s\S]*webuiDev: webuiDevServer,[\s\S]*webuiMode: webuiDevServer \? "dev" : "production"/, "SSE connect event should expose Web UI dev mode");
+assert.match(app, /serverActionSelect\.addEventListener\("change", updateServerActionButton\)/, "Server action dropdown should control the guarded run button");
+assert.match(app, /runServerActionButton\.addEventListener\("click"[\s\S]*runSelectedServerAction/, "Server action run button should execute the selected action");
+assert.match(app, /api\("\/api\/restart", \{ method: "POST", scoped: false \}\)/, "Restart Server action should call the unscoped restart endpoint");
+assert.match(app, /setServerActionStatus\(message, "warn"\);\n\s+setServerRestartOverlay\(true, message\)/, "Restart Server action should show reconnect progress in the side panel and loading overlay");
+assert.match(app, /const showOfflinePanel = backendOffline && !serverRestartInProgress/, "intentional restart should suppress the generic offline shell while reconnecting");
 assert.match(app, /api\("\/api\/shutdown", \{ method: "POST", scoped: false \}\)/, "Stop Server action should call the unscoped shutdown endpoint");
+assert.match(server, /url\.pathname === "\/api\/restart" && req\.method === "POST"/, "server should expose restart endpoint");
+assert.match(server, /PI_WEBUI_RESTORE_TABS: JSON\.stringify\(restorableTabs \|\| \[\]\)/, "server restart should preserve restorable tab metadata");
+assert.match(server, /if \(webuiDevServer\) env\.PI_WEBUI_DEV = "1";/, "server restart should explicitly preserve dev mode");
 assert.match(server, /async function closeNetworkAccess\(\)/, "server should expose a local-only rebind helper for closing network access");
 assert.match(server, /url\.pathname === "\/api\/network\/close" && req\.method === "POST"/, "server should route network close requests");
 assert.match(server, /server\.closeAllConnections\?\.\(\)/, "network rebind should force-close long-lived clients so close-to-localhost can complete");
@@ -566,7 +589,7 @@ assert.equal(manifest.start_url, "/", "PWA manifest should start at the web UI r
 assert.ok(manifest.icons?.some((icon) => icon.src === "/apple-touch-icon.png" && icon.sizes === "180x180"), "PWA manifest should include a conventional 180px apple touch icon");
 assert.ok(manifest.icons?.some((icon) => icon.src === "/icon-192.png" && icon.sizes === "192x192"), "PWA manifest should include a 192px icon");
 assert.ok(manifest.icons?.some((icon) => icon.src === "/icon-512.png" && icon.sizes === "512x512"), "PWA manifest should include a 512px icon");
-assert.match(serviceWorker, /const CACHE_NAME = "pi-webui-pwa-v16"/, "PWA service worker should define an app-shell cache");
+assert.match(serviceWorker, /const CACHE_NAME = "pi-webui-pwa-v18"/, "PWA service worker should define an app-shell cache");
 assert.match(serviceWorker, /self\.addEventListener\("notificationclick"/, "PWA service worker should focus Web UI when blocked-tab notifications are clicked");
 assert.match(serviceWorker, /event\.notification\.data\?\.url/, "blocked-tab notifications should carry a URL for service-worker click handling");
 assert.match(serviceWorker, /"\/apple-touch-icon\.png"/, "PWA service worker should cache the apple touch icon");
@@ -715,6 +738,7 @@ assert.match(readme, /\.\/start-webui\.sh --dev --cwd \/path\/to\/project/, "REA
 assert.match(startScript, /--dev\)/, "start-webui.sh should accept a --dev flag");
 assert.match(startScript, /local_pi_webui_bin\(\)/, "start-webui.sh should resolve this checkout's local server entrypoint");
 assert.match(startScript, /webui_cmd=\(node "\$local_webui_bin"\)/, "start-webui.sh --dev should run the local bin with node");
+assert.match(startScript, /export PI_WEBUI_DEV=1/, "start-webui.sh --dev should mark the Web UI server as dev mode");
 assert.match(startScript, /"\$\{webui_cmd\[@\]\}" --cwd "\$cwd" --host "\$host" --port "\$port" "\$\{pass_args\[@\]\}"/, "start-webui.sh should launch through the selected server command without forwarding --dev");
 
 assert.match(pkg.scripts?.test || "", /node tests\/mobile-static\.test\.mjs/, "package test script should run the mobile static harness");

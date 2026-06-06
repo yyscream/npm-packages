@@ -36,6 +36,15 @@
       </div>
     </section>
 
+    <section id="serverRestartPanel" class="server-restart-panel" aria-live="assertive" hidden>
+      <div class="server-restart-card" role="status">
+        <div class="server-restart-spinner" aria-hidden="true"></div>
+        <span class="server-restart-kicker">Restarting</span>
+        <h1>Restarting Pi Web UI server</h1>
+        <p id="serverRestartMessage">Waiting for the server to come back…</p>
+      </div>
+    </section>
+
     <main class="layout">
       <section class="chat-panel">
         <header class="terminal-tabs-shell">
@@ -151,8 +160,11 @@
         <div class="side-panel-header">
           <div>
             <span class="side-panel-kicker">Pi Web UI</span>
-            <strong>Control Deck</strong>
-            <p id="sessionLine" class="side-panel-session-line muted">Connecting…</p>
+            <strong class="side-panel-title">
+              <span>Control Deck</span>
+              <span id="webuiVersionBadge" class="webui-version-badge" aria-label="Pi Web UI version" hidden></span>
+              <span id="webuiDevBadge" class="webui-dev-badge" aria-label="Pi Web UI dev server" hidden>DEV</span>
+            </strong>
           </div>
           <button id="toggleSidePanelButton" class="side-panel-toggle-button" type="button" aria-controls="sidePanel" aria-expanded="true" aria-label="Collapse side panel" title="Collapse side panel">
             <span class="side-panel-button-icon" aria-hidden="true">
@@ -217,8 +229,16 @@
                   <button id="openNetworkButton" type="button">Open to network</button>
                 </div>
                 <div class="control-field server-control-field">
-                  <label>Server</label>
-                  <button id="stopServerButton" class="danger" type="button" title="Stop the Pi Web UI server and disconnect all browser clients" aria-label="Stop the Pi Web UI server">Stop Server</button>
+                  <label for="serverActionSelect">Server</label>
+                  <div class="server-action-row">
+                    <select id="serverActionSelect" title="Server action" aria-label="Server action">
+                      <option value="" selected>Choose action…</option>
+                      <option value="restart">Restart Server</option>
+                      <option value="stop">Stop Server</option>
+                    </select>
+                    <button id="runServerActionButton" type="button" disabled>Run</button>
+                  </div>
+                  <div id="serverActionStatus" class="server-action-status muted" role="status" aria-live="polite"></div>
                 </div>
                 <div class="control-field notification-control-field">
                   <span class="control-label">Notifications</span>
