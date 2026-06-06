@@ -56,6 +56,8 @@ const requiredNativeCommands = [
   "model",
   "theme",
   "scoped-models",
+  "tools",
+  "skills",
   "export",
   "import",
   "share",
@@ -116,6 +118,17 @@ assert.match(server, /function nativeCommandUnavailable\(command, details = \{\}
 assert.match(server, /default:\n\s+return nativeCommandUnavailable\(parsed\.name\)/, "unsupported native commands should return structured unavailable cards instead of raw HTTP errors");
 assert.match(server, /url\.pathname === "\/api\/native-parity" && req\.method === "GET"/, "server should expose the native parity matrix for clients/tests");
 assert.match(server, /const NATIVE_DOWNLOAD_TOKEN_TTL_MS = 10 \* 60 \* 1000/, "native downloads should use short-lived tokens");
+assert.match(server, /const WEBUI_HELPER_COMMAND = "webui-helper"/, "server should declare the hidden Web UI RPC helper command");
+assert.match(server, /args\.push\("--extension", webuiHelperExtensionPath\)/, "Web UI tabs should force-load the browser-native RPC helper extension");
+assert.match(server, /url\.pathname === "\/api\/tools" && req\.method === "GET"/, "server should expose GET /api/tools for native /tools");
+assert.match(server, /url\.pathname === "\/api\/tools" && req\.method === "POST"/, "server should expose POST /api/tools for native /tools updates");
+assert.match(server, /url\.pathname === "\/api\/skills" && req\.method === "GET"/, "server should expose GET /api/skills for native /skills");
+assert.match(server, /url\.pathname === "\/api\/skills" && req\.method === "POST"/, "server should expose POST /api/skills for native /skills updates");
+assert.match(app, /const HIDDEN_COMMAND_NAMES = new Set\(\["webui-tree-navigate", "webui-helper"\]\)/, "frontend should hide Web UI internal helper commands");
+assert.match(app, /"scoped-models", "tools", "skills"/, "frontend native selector commands should include /tools and /skills");
+assert.match(app, /return match \? match\[1\]\.toLowerCase\(\) : ""/, "frontend native slash command matching should be case-insensitive");
+assert.match(app, /async function openNativeToolsSelector\(\)/, "frontend should implement a browser-native /tools selector");
+assert.match(app, /async function openNativeSkillsSelector\(\)/, "frontend should implement a browser-native /skills selector");
 assert.match(server, /function registerNativeDownload\(filePath, \{ fileName, contentType, command = "native" \} = \{\}\)/, "server should register opaque native download tokens");
 assert.match(server, /url\.pathname\.startsWith\("\/api\/native-download\/"\) && req\.method === "GET"/, "server should expose opaque native download endpoint");
 assert.match(server, /case "export": \{\n\s+return handleNativeExportCommand\(tab, parsed\.args, req\);\n\s+\}/, "native /export should route through the native command adapter");
@@ -146,3 +159,4 @@ assert.match(app, /enqueueUserBashCommand\(parsed, \{ usesPromptInput, targetTab
 assert.match(server, /function sendQueuedBashCommand\(tab, command\)/, "server should serialize user bash commands per tab");
 assert.match(server, /command\.type === "bash" \? await sendQueuedBashCommand\(tab, command\) : await tab\.rpc\.send\(command\)/, "generic POST handling should route bash through the FIFO queue");
 assert.ok(pkg.files.includes("WEBUI_TUI_NATIVE_PARITY.json"), "published package should include the native parity matrix");
+assert.ok(pkg.files.includes("webui-rpc-helper.mjs"), "published package should include the Web UI RPC helper extension");

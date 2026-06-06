@@ -154,6 +154,10 @@ assert.match(css, /\.todo-widget-item\.partial \.todo-widget-marker/, "todo-prog
 assert.match(css, /\.todo-widget-item\.done \.todo-widget-text[\s\S]*?text-decoration:\s*line-through/, "todo-progress completed items should be visually crossed out");
 assert.match(css, /\.release-npm-widget \{[\s\S]*?border-left:\s*0\.28rem solid/, "release-npm output should stand apart from the page background");
 assert.match(css, /\.release-npm-stream-header \{[\s\S]*?text-transform:\s*uppercase/, "release-npm output should label the output stream clearly");
+assert.match(css, /\.release-npm-output-summary \{[\s\S]*?cursor:\s*pointer/, "release-npm output should expose a local expand/collapse summary");
+assert.match(css, /\.release-npm-output-details\[open\] \.release-npm-output-toggle/, "release-npm expanded output should rotate the summary chevron");
+assert.match(css, /\.widget-area:has\(\.release-npm-live-widget \.release-npm-output-details\[open\]\)[\s\S]*?flex:\s*0 0 min\(44rem, 68dvh\)/, "live release output should reserve a stable widget slot instead of resizing the transcript while streaming");
+assert.match(css, /\.release-npm-live-widget \.release-npm-output-details\[open\] \.release-npm-terminal,[\s\S]*?height:\s*clamp\(15rem, 42dvh, 31rem\)/, "live release terminals should keep a fixed viewport height while output streams");
 assert.match(css, /\.release-npm-terminal \{[\s\S]*?rgba\(3, 4, 10, 0\.98\)/, "release-npm terminal should use a high-contrast stream panel");
 assert.match(css, /\.release-aur-widget \{[\s\S]*?border-color/, "release-aur output should render as a specialized Web UI widget variant");
 assert.match(css, /\.widget-area \.widget:not\(\.todo-widget\):not\(\.release-npm-widget\)/, "mobile widget filtering should keep release workflow output visible");
@@ -347,7 +351,10 @@ assert.match(app, /function bindGitWorkflowToActiveTab\(\) \{\n\s+gitWorkflow = 
 assert.match(app, /function setGitWorkflow\(patch, \{ tabId = activeTabId \} = \{\}\)[\s\S]*if \(tabId === activeTabId\) \{[\s\S]*renderGitWorkflow\(\);/, "guided git workflow should not render inactive terminal workflows globally");
 assert.doesNotMatch(app, /gitWorkflowVisibleTabId|Workflow belongs to/, "guided git workflow should not pin or show workflows outside their owning terminal tab");
 assert.match(app, /function renderReleaseNpmOutputWidget\(\)/, "release-npm live output should use a specialized Web UI renderer");
+assert.match(app, /const releaseNpmOutputExpandedByTab = new Map\(\)/, "release-npm output collapse state should be tracked per browser tab");
+assert.match(app, /function renderReleaseNpmOutputDetails\(key, streamHeader, terminal, controls = null\)[\s\S]*node\.open = releaseNpmOutputExpandedByTab\.get\(stateKey\) !== false[\s\S]*release-npm-output-toggle/, "release-npm output should render as a browser-side details expander");
 assert.match(app, /releaseNpmStreamHeader\("Live output stream", outputLines\.length, \{ live: true \}\)/, "release-npm live output should expose a clear stream heading");
+assert.match(app, /renderReleaseNpmOutputDetails\("release-npm:output", streamHeader, terminal, controls\)/, "release-npm live stream should be wrapped in the local expander");
 assert.match(app, /function renderReleaseAurOutputWidget\(\)/, "release-aur live output should use a specialized Web UI renderer");
 assert.match(app, /releaseNpmActionButton\("Abort", "\/release-abort", "danger"\)/, "release-npm Web UI output should expose an abort action");
 assert.match(app, /releaseNpmActionButton\("Abort", "\/release-aur abort", "danger"\)/, "release-aur Web UI output should expose an abort action");
@@ -483,7 +490,7 @@ assert.match(app, /async function sendPrompt\(kind = "prompt", explicitMessage\)
 assert.match(app, /const rawMessage = usesPromptInput \? elements\.promptInput\.value : explicitMessage/, "direct prompt sends should not read the input textarea");
 assert.match(app, /if \(usesPromptInput\) \{[\s\S]*?if \(targetStillActive\) \{[\s\S]*?elements\.promptInput\.value = "";/, "direct prompt sends should preserve the input textarea draft");
 assert.match(app, /make\("button", "command-item"\)[\s\S]*?sendPrompt\("prompt", `\/\$\{command\.name\}`\)/, "side-panel command clicks should send the slash command directly");
-assert.match(app, /const NATIVE_SELECTOR_COMMANDS = new Set\(\["model", "settings", "theme", "fork", "clone", "resume", "tree", "login", "logout", "scoped-models"\]\)/, "frontend should route native slash commands into selector UIs");
+assert.match(app, /const NATIVE_SELECTOR_COMMANDS = new Set\(\["model", "settings", "theme", "fork", "clone", "resume", "tree", "login", "logout", "scoped-models", "tools", "skills"\]\)/, "frontend should route native slash commands into selector UIs");
 assert.match(app, /async function handleNativeSlashSelectorCommand\(message/, "frontend should intercept exact native slash commands before prompt forwarding");
 assert.match(app, /kind === "prompt" && attachments\.length === 0 && await handleNativeSlashSelectorCommand/, "prompt sending should open native selector dialogs before marking a run active");
 assert.match(app, /function openNativeModelSelector\(\)[\s\S]*?nativeCommandApi\("\/api\/models"\)/, "native /model selector should load models through the active tab API");
@@ -492,7 +499,7 @@ assert.match(app, /function openNativeForkSelector\(\)[\s\S]*?\/api\/fork-messag
 assert.match(app, /function openNativeResumeSelector\(scope = "current"\)[\s\S]*?\/api\/sessions\?scope=\$\{encodeURIComponent\(selectedScope\)\}/, "native /resume selector should list current-cwd or all sessions");
 assert.match(app, /function openNativeTreeSelector\(\)[\s\S]*?\/api\/session-tree[\s\S]*?\/api\/tree-navigate/, "native /tree selector should list tree entries and navigate through the backend helper");
 assert.match(app, /Provider credential entry is intentionally not implemented in the browser yet/, "native /login should remain a safe non-secret guidance dialog");
-assert.match(app, /const HIDDEN_COMMAND_NAMES = new Set\(\["webui-tree-navigate"\]\)/, "internal Web UI helper commands should stay out of command pickers");
+assert.match(app, /const HIDDEN_COMMAND_NAMES = new Set\(\["webui-tree-navigate", "webui-helper"\]\)/, "internal Web UI helper commands should stay out of command pickers");
 assert.match(app, /function shouldSendPromptFromEnter\(event\)/, "prompt keyboard handling should be centralized");
 assert.match(app, /const PROMPT_HISTORY_STORAGE_KEY = "pi-webui-prompt-history"/, "prompt history should be persisted per browser for keyboard recall");
 assert.match(app, /function recallPreviousPromptFromHistory\(\)/, "prompt history should support recalling older prompts from the textarea");
@@ -589,7 +596,7 @@ assert.equal(manifest.start_url, "/", "PWA manifest should start at the web UI r
 assert.ok(manifest.icons?.some((icon) => icon.src === "/apple-touch-icon.png" && icon.sizes === "180x180"), "PWA manifest should include a conventional 180px apple touch icon");
 assert.ok(manifest.icons?.some((icon) => icon.src === "/icon-192.png" && icon.sizes === "192x192"), "PWA manifest should include a 192px icon");
 assert.ok(manifest.icons?.some((icon) => icon.src === "/icon-512.png" && icon.sizes === "512x512"), "PWA manifest should include a 512px icon");
-assert.match(serviceWorker, /const CACHE_NAME = "pi-webui-pwa-v18"/, "PWA service worker should define an app-shell cache");
+assert.match(serviceWorker, /const CACHE_NAME = "pi-webui-pwa-v20"/, "PWA service worker should define an app-shell cache");
 assert.match(serviceWorker, /self\.addEventListener\("notificationclick"/, "PWA service worker should focus Web UI when blocked-tab notifications are clicked");
 assert.match(serviceWorker, /event\.notification\.data\?\.url/, "blocked-tab notifications should carry a URL for service-worker click handling");
 assert.match(serviceWorker, /"\/apple-touch-icon\.png"/, "PWA service worker should cache the apple touch icon");

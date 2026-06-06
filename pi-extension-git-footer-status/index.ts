@@ -101,6 +101,26 @@ type PromptEstimateCache = {
   tokens: number;
 };
 
+type FooterUsageSnapshot = {
+  totalInput: number;
+  totalOutput: number;
+  totalCacheRead: number;
+  totalCacheWrite: number;
+  totalCost: number;
+  historicalTokenSpeed: number | null;
+};
+
+function emptyFooterUsageSnapshot(): FooterUsageSnapshot {
+  return {
+    totalInput: 0,
+    totalOutput: 0,
+    totalCacheRead: 0,
+    totalCacheWrite: 0,
+    totalCost: 0,
+    historicalTokenSpeed: null,
+  };
+}
+
 function formatTokenSpeed(tokensPerSecond: number): string {
   if (tokensPerSecond < 100) {
     if (tokensPerSecond >= 10) return tokensPerSecond.toFixed(1);
@@ -368,6 +388,7 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
   let latestMeasuredTokenSpeed: number | null = null;
   let promptEstimateCache: PromptEstimateCache | null = null;
   let promptEstimateRequestId = 0;
+  let footerUsageSnapshot: FooterUsageSnapshot = emptyFooterUsageSnapshot();
   let requestFooterRender: (() => void) | null = null;
 
   const getPromptCalibration = (ctx: ExtensionContext) => collectInitialPromptCalibration(ctx.sessionManager.getSessionDir());
@@ -409,13 +430,62 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
     }
   };
 
-  const getFooterPromptInjectionTokens = (ctx: ExtensionContext): number => {
-    const fallback = getFallbackPromptEstimate(ctx);
-    if (!promptEstimateCache || promptEstimateCache.key !== fallback.key) {
-      promptEstimateCache = { key: fallback.key, tokens: fallback.estimate.total };
-      void refreshPromptInjectionEstimate(ctx);
+  const getFooterPromptInjectionTokens = (): number => promptEstimateCache?.tokens ?? 0;
+
+  const recomputeFooterUsageSnapshot = (ctx: ExtensionContext): FooterUsageSnapshot => {
+    const snapshot = emptyFooterUsageSnapshot();
+    const entries = ctx.sessionManager.getEntries();
+
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
+      if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+
+      const message = entry.message as AssistantMessage;
+      snapshot.totalInput += message.usage?.input ?? 0;
+      snapshot.totalOutput += message.usage?.output ?? 0;
+      snapshot.totalCacheRead += message.usage?.cacheRead ?? 0;
+      snapshot.totalCacheWrite += message.usage?.cacheWrite ?? 0;
+      snapshot.totalCost += message.usage?.cost?.total ?? 0;
+
+      const outputTokens = message.usage?.output ?? 0;
+      if (outputTokens <= 0) continue;
+
+      const endMs = getEntryTimestampMs(entry);
+      if (endMs === null) continue;
+
+      let fallbackSpeed: number | null = null;
+      for (let j = i - 1; j >= 0; j--) {
+        const previous = entries[j];
+        if (previous.type !== "message") continue;
+
+        // Skip assistant-to-assistant deltas (too noisy for speed).
+        if (previous.message.role === "assistant") continue;
+
+        const startMs = getEntryTimestampMs(previous);
+        if (startMs === null || endMs <= startMs) continue;
+
+        const elapsedSeconds = (endMs - startMs) / 1000;
+        if (elapsedSeconds <= 0) continue;
+
+        const speed = outputTokens / elapsedSeconds;
+        if (!isReasonableTokenSpeed(speed)) continue;
+
+        // Prefer user-anchored speed (best approximation of full turn latency).
+        if (previous.message.role === "user") {
+          snapshot.historicalTokenSpeed = speed;
+          break;
+        }
+
+        // Keep first non-assistant speed as fallback if no user message is found.
+        if (fallbackSpeed === null) fallbackSpeed = speed;
+      }
+
+      if (fallbackSpeed !== null && snapshot.historicalTokenSpeed === null) {
+        snapshot.historicalTokenSpeed = fallbackSpeed;
+      }
     }
-    return promptEstimateCache.tokens;
+
+    return snapshot;
   };
 
   const recordAssistantSpeed = (message: AssistantMessage, endMs = Date.now()): boolean => {
@@ -476,6 +546,7 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     promptEstimateCache = null;
+    footerUsageSnapshot = recomputeFooterUsageSnapshot(ctx);
     void refreshPromptInjectionEstimate(ctx);
 
     ctx.ui.setFooter((tui, theme, footerData) => {
@@ -490,70 +561,22 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
         },
         invalidate() {},
         render(width: number): string[] {
-          let totalInput = 0;
-          let totalOutput = 0;
-          let totalCacheRead = 0;
-          let totalCacheWrite = 0;
-          let totalCost = 0;
+          const {
+            totalInput,
+            totalOutput,
+            totalCacheRead,
+            totalCacheWrite,
+            totalCost,
+            historicalTokenSpeed,
+          } = footerUsageSnapshot;
           const liveOutputTokens = currentAssistantStartMs !== null ? currentAssistantEstimatedOutputTokens : 0;
           let latestTokenSpeed: number | null = currentAssistantStartMs !== null ? currentAssistantLiveTokenSpeed : latestMeasuredTokenSpeed;
-          let historicalTokenSpeed: number | null = null;
-
-          const entries = ctx.sessionManager.getEntries();
-          for (let i = 0; i < entries.length; i++) {
-            const entry = entries[i];
-            if (entry.type === "message" && entry.message.role === "assistant") {
-              const message = entry.message as AssistantMessage;
-              totalInput += message.usage?.input ?? 0;
-              totalOutput += message.usage?.output ?? 0;
-              totalCacheRead += message.usage?.cacheRead ?? 0;
-              totalCacheWrite += message.usage?.cacheWrite ?? 0;
-              totalCost += message.usage?.cost?.total ?? 0;
-
-              if (latestMeasuredTokenSpeed === null && (message.usage?.output ?? 0) > 0) {
-                const endMs = getEntryTimestampMs(entry);
-                if (endMs !== null) {
-                  let fallbackSpeed: number | null = null;
-
-                  for (let j = i - 1; j >= 0; j--) {
-                    const previous = entries[j];
-                    if (previous.type !== "message") continue;
-
-                    // Skip assistant-to-assistant deltas (too noisy for speed).
-                    if (previous.message.role === "assistant") continue;
-
-                    const startMs = getEntryTimestampMs(previous);
-                    if (startMs === null || endMs <= startMs) continue;
-
-                    const elapsedSeconds = (endMs - startMs) / 1000;
-                    if (elapsedSeconds <= 0) continue;
-
-                    const speed = (message.usage?.output ?? 0) / elapsedSeconds;
-                    if (!isReasonableTokenSpeed(speed)) continue;
-
-                    // Prefer user-anchored speed (best approximation of full turn latency).
-                    if (previous.message.role === "user") {
-                      historicalTokenSpeed = speed;
-                      break;
-                    }
-
-                    // Keep first non-assistant speed as fallback if no user message is found.
-                    if (fallbackSpeed === null) fallbackSpeed = speed;
-                  }
-
-                  if (fallbackSpeed !== null && historicalTokenSpeed === null) {
-                    historicalTokenSpeed = fallbackSpeed;
-                  }
-                }
-              }
-            }
-          }
 
           if (latestTokenSpeed === null && historicalTokenSpeed !== null) {
             latestTokenSpeed = historicalTokenSpeed;
           }
 
-          const currentPromptInjectionTokens = getFooterPromptInjectionTokens(ctx);
+          const currentPromptInjectionTokens = getFooterPromptInjectionTokens();
 
           const contextUsage = ctx.getContextUsage();
           const contextWindow = contextUsage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
@@ -730,6 +753,8 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
       recordAssistantSpeed(event.message as AssistantMessage);
       resetLiveAssistantState();
     }
+    footerUsageSnapshot = recomputeFooterUsageSnapshot(ctx);
+    requestFooterRender?.();
     void refreshPromptInjectionEstimate(ctx);
     await refresh(ctx);
   });

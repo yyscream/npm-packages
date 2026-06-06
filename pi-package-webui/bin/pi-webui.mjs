@@ -8,13 +8,15 @@ import { access, copyFile, mkdir, readFile, readdir, rename, stat, writeFile } f
 import { homedir, networkInterfaces, tmpdir } from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import { fileURLToPath } from "node:url";
-import { AuthStorage, SessionManager } from "@earendil-works/pi-coding-agent";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { AuthStorage, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 const packageRoot = path.resolve(__dirname, "..");
 const publicDir = path.join(packageRoot, "public");
+const webuiHelperExtensionPath = path.join(packageRoot, "webui-rpc-helper.mjs");
+const agentDir = process.env.PI_CODING_AGENT_DIR || path.join(homedir(), ".pi", "agent");
 const packageJson = JSON.parse(await readFile(path.join(packageRoot, "package.json"), "utf8"));
 const nativeParityMatrix = JSON.parse(await readFile(path.join(packageRoot, "WEBUI_TUI_NATIVE_PARITY.json"), "utf8"));
 const webuiDevServer = isTruthyEnv(process.env.PI_WEBUI_DEV) || isSourceCheckout(packageRoot);
@@ -22,6 +24,9 @@ const webuiDevServer = isTruthyEnv(process.env.PI_WEBUI_DEV) || isSourceCheckout
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 31415;
 const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
+const WEBUI_HELPER_TIMEOUT_MS = 8 * 1000;
+const WEBUI_HELPER_COMMAND = "webui-helper";
+const WEBUI_HELPER_RESPONSE_PREFIX = "__PI_WEBUI_HELPER_RESPONSE__:";
 const CODEX_USAGE_TIMEOUT_MS = 15 * 1000;
 const CODEX_TOKEN_REFRESH_SKEW_MS = 5 * 60 * 1000;
 const OPENAI_CODEX_PROVIDER_ID = "openai-codex";
@@ -2067,6 +2072,11 @@ function buildPiArgsForTab(tabIndex, title) {
   const args = ["--mode", "rpc"];
   if (options.noSession) args.push("--no-session");
 
+  // Load a browser-safe RPC helper into every Web UI tab. It exposes hidden
+  // extension commands for Web UI-native /tools and /skills selectors without
+  // depending on TUI-only extension UIs.
+  args.push("--extension", webuiHelperExtensionPath);
+
   // Keep tab naming inside Web UI metadata. Some bundled Pi CLI versions do not
   // support --name, and passing Web UI-generated tab titles through to child
   // RPC processes makes every tab after the first exit immediately.
@@ -2434,6 +2444,7 @@ function attachRpcToTab(tab, rpc) {
   tab.rpcUnsubscribe?.();
   tab.rpc = rpc;
   tab.rpcUnsubscribe = rpc.onEvent((event) => {
+    if (resolveWebuiHelperResponse(tab, event) || resolveWebuiHelperRpcResponse(tab, event)) return;
     updateTabActivityFromEvent(tab, event);
     let scopedEvent = { ...event, tabId: tab.id, tabTitle: tab.title, tabActivity: tabActivitySnapshot(tab) };
     if (event?.type === "pi_process_exit" || event?.type === "pi_process_error") clearPendingExtensionUiRequests(tab);
@@ -2470,6 +2481,8 @@ async function createTab({ id: requestedId, index, title, titleSource, conversat
     lastState: null,
     activity: createTabActivity(createdAt),
     pendingExtensionUiRequests: new Map(),
+    webuiHelperRequests: new Map(),
+    webuiHelperResponseIds: new Set(),
     bashQueue: [],
     bashQueueDraining: false,
     rpc: undefined,
@@ -2760,11 +2773,271 @@ async function safeRpcResponse(tab, command, timeoutMs = REQUEST_TIMEOUT_MS) {
   }
 }
 
+function parseWebuiHelperResponseEvent(event) {
+  if (event?.type !== "extension_ui_request" || event.method !== "notify") return undefined;
+  const message = String(event.message || "");
+  if (!message.startsWith(WEBUI_HELPER_RESPONSE_PREFIX)) return undefined;
+  try {
+    return JSON.parse(message.slice(WEBUI_HELPER_RESPONSE_PREFIX.length));
+  } catch (error) {
+    return { ok: false, error: `Invalid Web UI helper response: ${sanitizeError(error)}` };
+  }
+}
+
+function resolveWebuiHelperResponse(tab, event) {
+  const payload = parseWebuiHelperResponseEvent(event);
+  if (!payload) return false;
+  const requestId = String(payload.requestId || "");
+  const pending = tab?.webuiHelperRequests?.get(requestId);
+  if (pending) {
+    tab.webuiHelperRequests.delete(requestId);
+    clearTimeout(pending.timeout);
+    if (payload.ok === false) pending.reject(makeHttpError(400, payload.error || "Web UI helper command failed"));
+    else pending.resolve(payload.data || {});
+  }
+  return true;
+}
+
+function resolveWebuiHelperRpcResponse(tab, event) {
+  if (event?.type !== "response" || event.command !== "prompt" || !event.id) return false;
+  return tab?.webuiHelperResponseIds?.delete(String(event.id)) === true;
+}
+
+function webuiHelperRequestMap(tab) {
+  if (!tab.webuiHelperRequests) tab.webuiHelperRequests = new Map();
+  return tab.webuiHelperRequests;
+}
+
+async function sendWebuiHelperCommand(tab, action, payload = {}, timeoutMs = WEBUI_HELPER_TIMEOUT_MS) {
+  const requestId = randomUUID();
+  const pending = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      webuiHelperRequestMap(tab).delete(requestId);
+      tab.webuiHelperResponseIds?.delete(requestId);
+      reject(makeHttpError(504, `Timed out waiting for Web UI helper action: ${action}. Try /reload in this tab, then retry.`));
+    }, timeoutMs);
+    webuiHelperRequestMap(tab).set(requestId, { resolve, reject, timeout });
+  });
+  pending.catch(() => {});
+
+  try {
+    tab.webuiHelperResponseIds?.add(requestId);
+    const response = await tab.rpc.send({
+      id: requestId,
+      type: "prompt",
+      message: `/${WEBUI_HELPER_COMMAND} ${JSON.stringify({ requestId, action, payload })}`,
+    }, timeoutMs);
+    if (response.success === false) throw makeHttpError(400, response.error || `Web UI helper action failed: ${action}`);
+    return await pending;
+  } catch (error) {
+    tab.webuiHelperResponseIds?.delete(requestId);
+    const request = webuiHelperRequestMap(tab).get(requestId);
+    if (request) {
+      clearTimeout(request.timeout);
+      webuiHelperRequestMap(tab).delete(requestId);
+    }
+    throw error;
+  }
+}
+
+async function getToolConfigData(tab) {
+  return sendWebuiHelperCommand(tab, "tools-state");
+}
+
+let packageManagerModulePromise;
+async function loadPackageManagerModule() {
+  if (!packageManagerModulePromise) {
+    const packageMain = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
+    const codingAgentRoot = path.dirname(path.dirname(packageMain));
+    packageManagerModulePromise = import(pathToFileURL(path.join(codingAgentRoot, "dist", "core", "package-manager.js")).href);
+  }
+  return packageManagerModulePromise;
+}
+
+function parseSkillFrontmatter(text, filePath) {
+  const frontmatter = String(text || "").match(/^---\s*\n([\s\S]*?)\n---/);
+  const fields = {};
+  if (frontmatter) {
+    for (const line of frontmatter[1].split(/\r?\n/)) {
+      const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+      if (match) fields[match[1]] = match[2].replace(/^['"]|['"]$/g, "").trim();
+    }
+  }
+  const parent = path.basename(path.dirname(filePath));
+  const base = path.basename(filePath, path.extname(filePath));
+  return {
+    name: fields.name || (path.basename(filePath) === "SKILL.md" ? parent : base),
+    description: fields.description || "",
+  };
+}
+
+function sourceInfoFromResolvedResource(resource) {
+  const metadata = resource?.metadata || {};
+  return {
+    path: resource?.path,
+    source: metadata.source,
+    scope: metadata.scope,
+    origin: metadata.origin,
+    baseDir: metadata.baseDir,
+  };
+}
+
+async function resolveSkillResources(tab) {
+  const { DefaultPackageManager } = await loadPackageManagerModule();
+  const settingsManager = SettingsManager.create(tab?.cwd || options.cwd, agentDir);
+  const packageManager = new DefaultPackageManager({ cwd: tab?.cwd || options.cwd, agentDir, settingsManager });
+  const resolved = await packageManager.resolve();
+  const skills = [];
+  for (const resource of resolved.skills || []) {
+    try {
+      const metadata = parseSkillFrontmatter(await readFile(resource.path, "utf8"), resource.path);
+      skills.push({
+        ...metadata,
+        filePath: resource.path,
+        enabled: resource.enabled === true,
+        configEnabled: resource.enabled === true,
+        configManaged: true,
+        sourceInfo: sourceInfoFromResolvedResource(resource),
+      });
+    } catch {
+      // Ignore unreadable skill candidates; Pi will also skip invalid resources.
+    }
+  }
+  return { skills, settingsManager };
+}
+
+function skillResourceKey(skill) {
+  return skill.filePath || skill.name;
+}
+
+function mergeRuntimeAndResolvedSkills(runtimeSkills, resolvedSkills) {
+  const byName = new Map();
+  for (const skill of resolvedSkills) byName.set(skill.name, { ...skill });
+  for (const skill of runtimeSkills || []) {
+    const existing = byName.get(skill.name);
+    byName.set(skill.name, existing ? { ...existing, ...skill, configManaged: existing.configManaged, configEnabled: existing.configEnabled, filePath: existing.filePath || skill.filePath, sourceInfo: existing.sourceInfo || skill.sourceInfo } : { ...skill, configManaged: false, configEnabled: true });
+  }
+  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+async function getMergedSkillConfigData(tab) {
+  const [runtime, resolved] = await Promise.all([
+    getSkillConfigDataFromRuntime(tab).catch(() => ({ skills: [] })),
+    resolveSkillResources(tab).catch((error) => {
+      console.warn(`failed to resolve configured skills: ${sanitizeError(error)}`);
+      return { skills: [] };
+    }),
+  ]);
+  return { skills: mergeRuntimeAndResolvedSkills(runtime.skills || [], resolved.skills || []) };
+}
+
+function getResourcePatternForSkill(tab, skill) {
+  const info = skill.sourceInfo || {};
+  const baseDir = info.baseDir || (info.scope === "project" ? path.join(tab?.cwd || options.cwd, ".pi") : agentDir);
+  return path.relative(baseDir, skill.filePath);
+}
+
+async function setToolConfigData(tab, body) {
+  return sendWebuiHelperCommand(tab, "tools-set", {
+    enabledTools: Array.isArray(body.enabledTools) ? body.enabledTools : undefined,
+    disabledTools: Array.isArray(body.disabledTools) ? body.disabledTools : undefined,
+  });
+}
+
+async function getSkillConfigDataFromRuntime(tab) {
+  return sendWebuiHelperCommand(tab, "skills-state");
+}
+
+function desiredSkillEnabledFromBody(skillName, body) {
+  if (Array.isArray(body.enabledSkills)) return body.enabledSkills.map(String).includes(skillName);
+  if (Array.isArray(body.disabledSkills)) return !body.disabledSkills.map(String).includes(skillName);
+  throw makeHttpError(400, "Skill update requires enabledSkills or disabledSkills");
+}
+
+function updatePatternListForResource(current, pattern, enabled) {
+  const updated = (current || []).filter((item) => {
+    const text = String(item || "");
+    const stripped = text.startsWith("!") || text.startsWith("+") || text.startsWith("-") ? text.slice(1) : text;
+    return stripped !== pattern;
+  });
+  updated.push(`${enabled ? "+" : "-"}${pattern}`);
+  return updated;
+}
+
+function setSkillPathsForScope(settingsManager, scope, updated) {
+  if (scope === "project") settingsManager.setProjectSkillPaths(updated);
+  else settingsManager.setSkillPaths(updated);
+}
+
+function toggleConfiguredSkill(tab, settingsManager, skill, enabled) {
+  const info = skill.sourceInfo || {};
+  const scope = info.scope === "project" ? "project" : "user";
+  if (info.origin === "package") {
+    const settings = scope === "project" ? settingsManager.getProjectSettings() : settingsManager.getGlobalSettings();
+    const packages = [...(settings.packages || [])];
+    const packageIndex = packages.findIndex((item) => (typeof item === "string" ? item : item?.source) === info.source);
+    if (packageIndex < 0) return false;
+    let packageEntry = packages[packageIndex];
+    if (typeof packageEntry === "string") {
+      packageEntry = { source: packageEntry };
+      packages[packageIndex] = packageEntry;
+    }
+    const pattern = path.relative(info.baseDir || path.dirname(skill.filePath), skill.filePath);
+    packageEntry.skills = updatePatternListForResource(packageEntry.skills || [], pattern, enabled);
+    if (scope === "project") settingsManager.setProjectPackages(packages);
+    else settingsManager.setPackages(packages);
+    return true;
+  }
+
+  const settings = scope === "project" ? settingsManager.getProjectSettings() : settingsManager.getGlobalSettings();
+  const pattern = getResourcePatternForSkill(tab, skill);
+  setSkillPathsForScope(settingsManager, scope, updatePatternListForResource(settings.skills || [], pattern, enabled));
+  return true;
+}
+
+async function setSkillConfigData(tab, body) {
+  const { skills, settingsManager } = await resolveSkillResources(tab);
+  let configChanged = false;
+  for (const skill of skills) {
+    const desiredEnabled = desiredSkillEnabledFromBody(skill.name, body);
+    if (skill.configEnabled !== desiredEnabled && toggleConfiguredSkill(tab, settingsManager, skill, desiredEnabled)) configChanged = true;
+  }
+
+  const runtimeOnly = skills.length === 0;
+  if (runtimeOnly) {
+    await sendWebuiHelperCommand(tab, "skills-set", {
+      enabledSkills: Array.isArray(body.enabledSkills) ? body.enabledSkills : undefined,
+      disabledSkills: Array.isArray(body.disabledSkills) ? body.disabledSkills : undefined,
+    });
+  }
+
+  const activeTab = configChanged ? await restartTabRpc(tab, "skills-config") : tab;
+  return getMergedSkillConfigData(activeTab);
+}
+
+async function annotateSkillCommandState(tab, commands) {
+  let disabledSkills = new Set();
+  try {
+    const state = await getMergedSkillConfigData(tab);
+    disabledSkills = new Set((state.skills || []).filter((skill) => skill.enabled === false).map((skill) => skill.name));
+  } catch {
+    // Commands should remain available even if an older tab has not loaded the helper yet.
+  }
+
+  return commands
+    .filter((command) => command?.name !== WEBUI_HELPER_COMMAND)
+    .map((command) => {
+      const skillName = command?.source === "skill" && String(command.name || "").startsWith("skill:") ? String(command.name).slice("skill:".length) : "";
+      return skillName ? { ...command, enabled: !disabledSkills.has(skillName) } : command;
+    });
+}
+
 async function getCommandData(tab) {
   try {
     const response = await tab.rpc.send({ type: "get_commands" });
     if (response.success === false) throw makeHttpError(400, response.error || "failed to load commands");
-    return { commands: [...NATIVE_SLASH_COMMANDS, ...(response.data?.commands || [])], rpcRunning: true };
+    const rpcCommands = await annotateSkillCommandState(tab, response.data?.commands || []);
+    return { commands: [...NATIVE_SLASH_COMMANDS, ...rpcCommands], rpcRunning: true };
   } catch (error) {
     const message = sanitizeError(error);
     if (!/Pi RPC process is not running/i.test(message)) throw error;
@@ -3805,6 +4078,32 @@ const server = createServer(async (req, res) => {
       const body = await readJsonBody(req);
       const data = await installOptionalFeaturePackage(String(body.featureId || ""));
       sendJson(res, 200, { ok: true, data });
+      return;
+    }
+
+    if (url.pathname === "/api/tools" && req.method === "GET") {
+      const tab = getRequestedTab(req, url);
+      sendJson(res, 200, { ok: true, data: await getToolConfigData(tab) });
+      return;
+    }
+
+    if (url.pathname === "/api/tools" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const tab = getRequestedTab(req, url, body);
+      sendJson(res, 200, { ok: true, data: await setToolConfigData(tab, body) });
+      return;
+    }
+
+    if (url.pathname === "/api/skills" && req.method === "GET") {
+      const tab = getRequestedTab(req, url);
+      sendJson(res, 200, { ok: true, data: await getMergedSkillConfigData(tab) });
+      return;
+    }
+
+    if (url.pathname === "/api/skills" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const tab = getRequestedTab(req, url, body);
+      sendJson(res, 200, { ok: true, data: await setSkillConfigData(tab, body) });
       return;
     }
 

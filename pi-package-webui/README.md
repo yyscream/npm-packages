@@ -119,7 +119,7 @@ Environment variables:
 - Multi-tab Pi sessions with isolated processes, working directories, prompt drafts, and activity state.
 - Streaming chat transcript with Markdown, thinking output, tool/bash cards, queue and compaction events, and abort controls.
 - Prompt composer with uploads, drag/drop/paste, inline image support, slash-command autocomplete, and `@` file/path references.
-- Browser dialogs for common Pi selectors such as `/model`, `/settings`, `/theme`, `/fork`, `/clone`, `/resume`, `/tree`, and `/scoped-models`.
+- Browser dialogs for common Pi selectors such as `/model`, `/settings`, `/theme`, `/fork`, `/clone`, `/resume`, `/tree`, `/scoped-models`, `/tools`, and `/skills`.
 - Model, thinking, session, workspace, theme, optional-feature, Codex usage, network, event, and notification controls in the side panel.
 - Per-tab cwd changes, a clickable footer cwd picker, saved path fast picks, and restart-safe restoration of open tabs.
 - Browser support for Pi extension UI prompts, widgets, status updates, and notifications.

@@ -16,10 +16,11 @@ function statusLabel(status: TodoStatus): string {
 }
 
 function clear(ctx: ExtensionContext, s: TodoState) {
+  const hadWidget = s.visible || s.items.length > 0;
   s.visible = false;
   s.items = [];
   s.offset = 0;
-  if (ctx.hasUI) ctx.ui.setWidget(KEY, undefined);
+  if (ctx.hasUI && hadWidget) ctx.ui.setWidget(KEY, undefined);
 }
 
 function render(ctx: ExtensionContext, s: TodoState) {

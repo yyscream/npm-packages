@@ -57,6 +57,32 @@
       "targetBehavior": "Searchable model table, provider toggles, ordered explicit provider/model IDs, advanced patterns, and safe global/project persistence."
     },
     {
+      "id": "/tools",
+      "kind": "slash-command",
+      "category": "native-command",
+      "title": "Tool enable/disable selector",
+      "command": { "name": "tools", "description": "Enable/disable tools for the active tab" },
+      "webStatus": "implemented",
+      "priority": "P1",
+      "sensitive": false,
+      "guards": ["confirmation"],
+      "currentBehavior": "Browser-native selector uses a hidden Web UI RPC helper extension to read all tools, set active tools, and persist selection on the session branch.",
+      "targetBehavior": "Keep browser-native runtime tool toggles in parity with Pi's TUI tools extension while exposing provenance and branch-persistent state."
+    },
+    {
+      "id": "/skills",
+      "kind": "slash-command",
+      "category": "native-command",
+      "title": "Skill enable/disable selector",
+      "command": { "name": "skills", "description": "Enable/disable skills for automatic model invocation" },
+      "webStatus": "implemented",
+      "priority": "P1",
+      "sensitive": false,
+      "guards": ["confirmation"],
+      "currentBehavior": "Browser-native selector uses a hidden Web UI RPC helper extension to filter disabled skills out of the system prompt, block disabled /skill:name invocations, and persist selection on the session branch.",
+      "targetBehavior": "Keep browser-native skill toggles runtime-scoped with clear distinction from package-level pi config enable/disable."
+    },
+    {
       "id": "/export",
       "kind": "slash-command",
       "category": "native-command",

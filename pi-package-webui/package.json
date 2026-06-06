@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-package-webui",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Pi Web UI companion package with a local browser UI CLI plus /webui-start and /webui-status commands.",
   "license": "MIT",
   "type": "module",
@@ -45,7 +45,7 @@
     "pi-webui": "./bin/pi-webui.mjs"
   },
   "scripts": {
-    "check": "node --check public/app.js && node --check bin/pi-webui.mjs && node tests/mobile-static.test.mjs && node tests/native-parity.test.mjs",
+    "check": "node --check public/app.js && node --check bin/pi-webui.mjs && node --check webui-rpc-helper.mjs && node tests/mobile-static.test.mjs && node tests/native-parity.test.mjs",
     "test": "node tests/mobile-static.test.mjs && node tests/native-parity.test.mjs"
   },
   "dependencies": {
@@ -62,6 +62,7 @@
   },
   "files": [
     "index.ts",
+    "webui-rpc-helper.mjs",
     "bin",
     "public",
     "images",

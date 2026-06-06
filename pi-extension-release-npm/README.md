@@ -133,7 +133,7 @@ Will skip:
 Blocked:
   none
 
-Publish eligible packages now?  No / Yes
+Publish eligible packages now?  All eligible packages / Publish selected packages / [ ] package buttons / Cancel
 
 Release workflow
   Publish candidates from version planning:
@@ -147,4 +147,4 @@ Publish summary:
   - failed: 0
 ```
 
-The command checks first, asks only after showing the preflight summary, and keeps release output visible in Pi.
+The command checks first, asks only after showing the preflight summary, then shows an All button plus per-package toggle buttons so you can publish every eligible package or only selected publish/update targets. It keeps release output visible in Pi.

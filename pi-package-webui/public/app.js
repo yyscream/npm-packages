@@ -271,6 +271,7 @@ const mobileViewMedia = window.matchMedia?.(MOBILE_VIEW_QUERY) || null;
 const statusEntries = new Map();
 const widgets = new Map();
 const todoProgressWidgetExpandedByTab = new Map();
+const releaseNpmOutputExpandedByTab = new Map();
 const liveToolRuns = new Map();
 const liveToolCards = new Map();
 const liveToolRenderQueue = new Map();
@@ -347,8 +348,8 @@ const OPTIONAL_COMMAND_FEATURES = new Map([
   ["git-footer-refresh", "gitFooterStatus"],
   ["todo-progress-status", "todoProgressWidget"],
 ]);
-const HIDDEN_COMMAND_NAMES = new Set(["webui-tree-navigate"]);
-const NATIVE_SELECTOR_COMMANDS = new Set(["model", "settings", "theme", "fork", "clone", "resume", "tree", "login", "logout", "scoped-models"]);
+const HIDDEN_COMMAND_NAMES = new Set(["webui-tree-navigate", "webui-helper"]);
+const NATIVE_SELECTOR_COMMANDS = new Set(["model", "settings", "theme", "fork", "clone", "resume", "tree", "login", "logout", "scoped-models", "tools", "skills"]);
 const optionalFeatureInstallInProgress = new Set();
 
 function createGitWorkflowState() {
@@ -4236,6 +4237,26 @@ function releaseNpmStreamHeader(label, lineCount, { live = false } = {}) {
   return header;
 }
 
+function renderReleaseNpmOutputDetails(key, streamHeader, terminal, controls = null) {
+  const tabId = activeTabId || "default";
+  const stateKey = `${tabId}:${key}`;
+  const node = make("details", "release-npm-output-details");
+  node.open = releaseNpmOutputExpandedByTab.get(stateKey) !== false;
+  node.addEventListener("toggle", () => {
+    releaseNpmOutputExpandedByTab.set(stateKey, node.open);
+    if (node.open) requestAnimationFrame(() => { terminal.scrollTop = terminal.scrollHeight; });
+  });
+
+  const summary = make("summary", "release-npm-output-summary");
+  summary.title = "Expand or collapse command output in the Web UI";
+  const toggle = make("span", "release-npm-output-toggle", "›");
+  toggle.setAttribute("aria-hidden", "true");
+  summary.append(toggle, streamHeader);
+  node.append(summary, terminal);
+  if (controls) node.append(controls);
+  return node;
+}
+
 function renderReleaseNpmOutputWidget() {
   if (!isOptionalFeatureEnabled("releaseNpm")) return null;
   const outputLines = getWidgetLines("release-npm:output");
@@ -4271,8 +4292,9 @@ function renderReleaseNpmOutputWidget() {
   }
 
   const controls = make("div", "release-npm-controls", details.controls || "Controls: /release-toggle expands/collapses · /release-abort stops subprocess");
-  node.append(header, streamHeader, terminal, controls);
-  requestAnimationFrame(() => { terminal.scrollTop = terminal.scrollHeight; });
+  const outputDetails = renderReleaseNpmOutputDetails("release-npm:output", streamHeader, terminal, controls);
+  node.append(header, outputDetails);
+  requestAnimationFrame(() => { if (outputDetails.open) terminal.scrollTop = terminal.scrollHeight; });
   return node;
 }
 
@@ -4301,8 +4323,9 @@ function renderReleaseNpmLogWidget() {
   for (const line of logLines) {
     appendReleaseNpmTerminalLine(terminal, line);
   }
-  node.append(header, streamHeader, terminal);
-  requestAnimationFrame(() => { terminal.scrollTop = terminal.scrollHeight; });
+  const outputDetails = renderReleaseNpmOutputDetails("release-npm:logs", streamHeader, terminal);
+  node.append(header, outputDetails);
+  requestAnimationFrame(() => { if (outputDetails.open) terminal.scrollTop = terminal.scrollHeight; });
   return node;
 }
 
@@ -4341,8 +4364,9 @@ function renderReleaseAurOutputWidget() {
   }
 
   const controls = make("div", "release-npm-controls", details.controls || "Controls: /release-aur toggle expands/collapses · /release-aur abort stops subprocess");
-  node.append(header, streamHeader, terminal, controls);
-  requestAnimationFrame(() => { terminal.scrollTop = terminal.scrollHeight; });
+  const outputDetails = renderReleaseNpmOutputDetails("release-aur:output", streamHeader, terminal, controls);
+  node.append(header, outputDetails);
+  requestAnimationFrame(() => { if (outputDetails.open) terminal.scrollTop = terminal.scrollHeight; });
   return node;
 }
 
@@ -4371,8 +4395,9 @@ function renderReleaseAurLogWidget() {
   for (const line of logLines) {
     appendReleaseNpmTerminalLine(terminal, line);
   }
-  node.append(header, streamHeader, terminal);
-  requestAnimationFrame(() => { terminal.scrollTop = terminal.scrollHeight; });
+  const outputDetails = renderReleaseNpmOutputDetails("release-aur:logs", streamHeader, terminal);
+  node.append(header, outputDetails);
+  requestAnimationFrame(() => { if (outputDetails.open) terminal.scrollTop = terminal.scrollHeight; });
   return node;
 }
 
@@ -6905,6 +6930,7 @@ function optionalFeatureIdForCommand(name) {
 
 function isCommandVisible(command) {
   if (HIDDEN_COMMAND_NAMES.has(command.name)) return false;
+  if (command.enabled === false) return false;
   const featureId = optionalFeatureIdForCommand(command.name);
   return !featureId || isOptionalFeatureEnabled(featureId);
 }
@@ -7106,7 +7132,7 @@ function runPublishWorkflow(command) {
 
 function slashCommandName(message) {
   const match = String(message || "").trim().match(/^\/([^\s]+)$/);
-  return match ? match[1] : "";
+  return match ? match[1].toLowerCase() : "";
 }
 
 function openNativeCommandDialog({ title, message = "", searchPlaceholder = "" } = {}) {
@@ -7179,7 +7205,17 @@ function renderNativeSelectorItems(items, { emptyText = "No choices.", onSelect,
     button.addEventListener("click", () => onSelect?.(item));
     const title = make("span", "native-selector-title");
     title.append(make("strong", undefined, item.label || item.id || "choice"));
-    if (item.badge) title.append(make("span", "native-selector-badge", item.badge));
+    if (item.badge) {
+      const badgeState = String(item.badge).toLowerCase();
+      const badge = make("span", `native-selector-badge${item.badgeClass ? ` ${item.badgeClass}` : ""}`, item.badge);
+      badge.dataset.badgeState = badgeState;
+      if (badgeState === "disabled" || String(item.badgeClass || "").includes("disabled")) {
+        badge.style.borderColor = "rgba(255, 159, 67, 0.62)";
+        badge.style.color = "#ff9f43";
+        badge.style.background = "rgba(255, 159, 67, 0.10)";
+      }
+      title.append(badge);
+    }
     const detail = make("span", "native-selector-detail", item.description || "");
     const meta = make("span", "native-selector-meta", item.meta || "");
     button.append(title);
@@ -7513,6 +7549,145 @@ function openNativeScopedModelsInfo() {
   elements.nativeCommandBody.append(make("p", "native-command-note", "Use the footer model chip to choose among scoped models. The full native scoped-models editor is still TUI-only."));
 }
 
+function nativeResourceSourceLabel(resource) {
+  const info = resource?.sourceInfo || {};
+  return [info.source, info.scope, info.origin].filter(Boolean).join(" · ") || resource?.location || "loaded resource";
+}
+
+function nativeResourceCounts(resources) {
+  const disabled = resources.filter((resource) => resource.enabled === false).length;
+  return { total: resources.length, disabled, enabled: resources.length - disabled };
+}
+
+function nativeResourceFilterMatches(resource, filter) {
+  if (filter === "enabled") return resource.enabled !== false;
+  if (filter === "disabled") return resource.enabled === false;
+  return true;
+}
+
+function renderNativeResourceToggles(resources, { savingName, filter = "all", onToggle } = {}) {
+  const filteredResources = resources.filter((resource) => nativeResourceFilterMatches(resource, filter));
+  const counts = nativeResourceCounts(resources);
+  const items = filteredResources.map((resource) => ({
+    id: resource.name,
+    label: resource.name,
+    description: resource.description || "No description provided.",
+    meta: nativeResourceSourceLabel(resource),
+    badge: resource.enabled === false ? "disabled" : "enabled",
+    badgeClass: resource.enabled === false ? "disabled native-selector-badge-disabled" : "enabled native-selector-badge-enabled",
+    disabled: Boolean(savingName),
+    resource,
+  }));
+  const filterLabel = filter === "enabled" ? "enabled" : filter === "disabled" ? "disabled" : "all";
+  renderNativeSelectorItems(items, {
+    emptyText: `No ${filterLabel} entries match this filter.`,
+    onSelect: (item) => onToggle?.(item.resource),
+  });
+  elements.nativeCommandBody.prepend(make("div", "native-resource-summary muted", `${counts.total} total · ${counts.enabled} enabled · ${counts.disabled} disabled · showing ${filterLabel}`));
+}
+
+function renderNativeResourceFilterActions(filter, setFilter, render) {
+  elements.nativeCommandActions.replaceChildren();
+  for (const option of [
+    { value: "all", label: "All" },
+    { value: "enabled", label: "Enabled" },
+    { value: "disabled", label: "Disabled" },
+  ]) {
+    addNativeCommandAction(option.label, () => {
+      setFilter(option.value);
+      render();
+    }, filter === option.value ? "primary" : undefined);
+  }
+  addNativeCommandAction("Cancel", closeNativeCommandDialog);
+}
+
+async function openNativeToolsSelector() {
+  openNativeCommandDialog({ title: "/tools", message: "Enable or disable tools for the active Pi tab. Changes apply to the next model turn and persist on this session branch.", searchPlaceholder: "Filter tools…" });
+  renderNativeLoading("Loading tools…");
+  let tools = [];
+  let savingName = "";
+  let filter = "all";
+  const render = () => {
+    renderNativeResourceToggles(tools, {
+      savingName,
+      filter,
+      onToggle: async (tool) => {
+        if (!tool || savingName) return;
+        const enabledTools = new Set(tools.filter((item) => item.enabled !== false).map((item) => item.name));
+        if (tool.enabled === false) enabledTools.add(tool.name);
+        else enabledTools.delete(tool.name);
+        savingName = tool.name;
+        setNativeCommandError("");
+        render();
+        try {
+          const response = await nativeCommandApi("/api/tools", { method: "POST", body: { enabledTools: [...enabledTools] } });
+          tools = Array.isArray(response.data?.tools) ? response.data.tools : [];
+          addTransientMessage({ role: "native", title: "/tools", content: `Tool ${tool.name} ${enabledTools.has(tool.name) ? "enabled" : "disabled"}.`, level: "info" });
+        } catch (error) {
+          setNativeCommandError(error.message || String(error));
+        } finally {
+          savingName = "";
+          render();
+        }
+      },
+    });
+    renderNativeResourceFilterActions(filter, (value) => { filter = value; }, render);
+  };
+  try {
+    const response = await nativeCommandApi("/api/tools");
+    tools = Array.isArray(response.data?.tools) ? response.data.tools : [];
+    elements.nativeCommandSearch.oninput = render;
+    render();
+  } catch (error) {
+    setNativeCommandError(error.message || String(error));
+    elements.nativeCommandBody.replaceChildren();
+  }
+}
+
+async function openNativeSkillsSelector() {
+  openNativeCommandDialog({ title: "/skills", message: "Enable or disable skills for automatic model invocation in the active Pi tab. Disabled skills are removed from the system prompt and their /skill:name commands are blocked by Web UI.", searchPlaceholder: "Filter skills…" });
+  renderNativeLoading("Loading skills…");
+  let skills = [];
+  let savingName = "";
+  let filter = "all";
+  const render = () => {
+    renderNativeResourceToggles(skills, {
+      savingName,
+      filter,
+      onToggle: async (skill) => {
+        if (!skill || savingName) return;
+        const enabledSkills = new Set(skills.filter((item) => item.enabled !== false).map((item) => item.name));
+        if (skill.enabled === false) enabledSkills.add(skill.name);
+        else enabledSkills.delete(skill.name);
+        savingName = skill.name;
+        setNativeCommandError("");
+        render();
+        try {
+          const response = await nativeCommandApi("/api/skills", { method: "POST", body: { enabledSkills: [...enabledSkills] } });
+          skills = Array.isArray(response.data?.skills) ? response.data.skills : [];
+          addTransientMessage({ role: "native", title: "/skills", content: `Skill ${skill.name} ${enabledSkills.has(skill.name) ? "enabled" : "disabled"}.`, level: "info" });
+          refreshCommands(activeTabContext()).catch((error) => addEvent(error.message || String(error), "error"));
+        } catch (error) {
+          setNativeCommandError(error.message || String(error));
+        } finally {
+          savingName = "";
+          render();
+        }
+      },
+    });
+    renderNativeResourceFilterActions(filter, (value) => { filter = value; }, render);
+  };
+  try {
+    const response = await nativeCommandApi("/api/skills");
+    skills = Array.isArray(response.data?.skills) ? response.data.skills : [];
+    elements.nativeCommandSearch.oninput = render;
+    render();
+  } catch (error) {
+    setNativeCommandError(error.message || String(error));
+    elements.nativeCommandBody.replaceChildren();
+  }
+}
+
 function openNativeAuthInfo(mode) {
   const command = mode === "logout" ? "/logout" : "/login";
   openNativeCommandDialog({ title: command, message: "Provider credential entry is intentionally not implemented in the browser yet." });
@@ -7556,6 +7731,12 @@ async function handleNativeSlashSelectorCommand(message, { usesPromptInput = fal
       return true;
     case "scoped-models":
       openNativeScopedModelsInfo();
+      return true;
+    case "tools":
+      await openNativeToolsSelector();
+      return true;
+    case "skills":
+      await openNativeSkillsSelector();
       return true;
     case "login":
     case "logout":
@@ -7952,6 +8133,7 @@ function normalizeCommands(commands) {
       description: String(command.description || "").trim(),
       source: String(command.source || "command").trim(),
       location: String(command.location || "").trim(),
+      enabled: command.enabled !== false,
     }))
     .filter((command) => {
       if (!command.name || seen.has(command.name)) return false;
@@ -8998,8 +9180,11 @@ function showNextDialog() {
       button.type = "button";
       if (isGuardrailDialog && /^Block$/i.test(optionLabel)) button.classList.add("guardrail-safe-action");
       if (isGuardrailDialog && /^Allow/i.test(optionLabel)) button.classList.add("guardrail-allow-action");
-      if (isReleaseDialog && /^Yes$/i.test(optionLabel)) button.classList.add("primary", "release-publish-action");
-      if (isReleaseDialog && /^No$/i.test(optionLabel)) button.classList.add("release-cancel-action");
+      if (isReleaseDialog && /^(?:Yes|All eligible packages\b|Publish selected packages \([1-9]\d*\))/.test(optionLabel)) button.classList.add("primary", "release-publish-action");
+      if (isReleaseDialog && /^Publish selected packages \(select at least one\)$/i.test(optionLabel)) button.classList.add("release-publish-disabled-action");
+      if (isReleaseDialog && /^\[x\]/.test(optionLabel)) button.classList.add("release-target-option", "release-target-selected");
+      if (isReleaseDialog && /^\[ \]/.test(optionLabel)) button.classList.add("release-target-option");
+      if (isReleaseDialog && /^(?:No|Cancel)$/i.test(optionLabel)) button.classList.add("release-cancel-action");
       button.addEventListener("click", () => sendDialogResponse({ type: "extension_ui_response", id: request.id, value: optionLabel, tabId: request.tabId }));
       options.append(button);
     }

@@ -688,9 +688,56 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
         return;
       }
 
-      const choice = await ctx.ui.select(`${preflightSummary}\n\n${targetSummary}\n\nPublish eligible packages now?`, ["Yes", "No"]);
-      appendReleaseLog(runLog, `\n--- user confirmation ---\nchoice=${choice ?? "<none>"}\n`);
-      if (choice !== "Yes") {
+      const allTargetsChoice = `All eligible packages (${plannedTargetResolution.targets.length})`;
+      const cancelChoice = "Cancel";
+      const publishSelectedChoice = (count: number) => count > 0
+        ? `Publish selected packages (${count})`
+        : "Publish selected packages (select at least one)";
+      const formatSelectableTarget = (target: PlannedPublishTarget, selected: boolean) => `${selected ? "[x]" : "[ ]"} ${target.target}`;
+      const selectedTargetsText = (selectedTargets: Set<string>) => {
+        const selected = plannedTargetResolution.targets.filter((target) => selectedTargets.has(target.target));
+        return selected.length
+          ? selected.map((target) => `  - ${target.label} (${target.action}; target ${target.target})`).join("\n")
+          : "  none selected yet";
+      };
+      const choosePublishTargets = async (): Promise<PlannedPublishTarget[] | undefined> => {
+        const selectedTargets = new Set<string>();
+        while (true) {
+          const targetOptionMap = new Map<string, PlannedPublishTarget>();
+          const targetOptions = plannedTargetResolution.targets.map((target) => {
+            const option = formatSelectableTarget(target, selectedTargets.has(target.target));
+            targetOptionMap.set(option, target);
+            return option;
+          });
+          const choice = await ctx.ui.select(
+            `${preflightSummary}\n\n${targetSummary}\n\nPublish eligible packages now?\nUse All to publish every eligible package, or toggle package buttons and then publish the selected set.\n\nSelected:\n${selectedTargetsText(selectedTargets)}`,
+            [allTargetsChoice, publishSelectedChoice(selectedTargets.size), ...targetOptions, cancelChoice],
+          );
+          if (choice === allTargetsChoice) return plannedTargetResolution.targets;
+          if (choice === cancelChoice || !choice) return undefined;
+          if (choice === publishSelectedChoice(selectedTargets.size)) {
+            if (selectedTargets.size === 0) {
+              ctx.ui.notify("Select at least one package, choose All, or cancel the release.", "warning");
+              continue;
+            }
+            return plannedTargetResolution.targets.filter((target) => selectedTargets.has(target.target));
+          }
+
+          const target = targetOptionMap.get(choice);
+          if (!target) continue;
+          if (selectedTargets.has(target.target)) selectedTargets.delete(target.target);
+          else selectedTargets.add(target.target);
+        }
+      };
+
+      const selectedPublishTargets = await choosePublishTargets();
+      appendReleaseLog(runLog, [
+        "\n--- user publish target selection ---",
+        `selected=${selectedPublishTargets?.length ? selectedPublishTargets.map((target) => target.target).join(",") : "<none>"}`,
+        selectedPublishTargets?.length ? "packages:" : undefined,
+        ...(selectedPublishTargets?.map((target) => `  ${target.label} (${target.action}; target=${target.target})`) || []),
+      ].filter((line): line is string => line !== undefined).join("\n") + "\n");
+      if (!selectedPublishTargets?.length) {
         closeReleaseUi();
         if (ctx.hasUI) {
           ctx.ui.setWidget(RELEASE_STATUS_KEY, undefined);
@@ -712,15 +759,8 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
         startElapsedTimer();
       }
 
-      if (plannedTargetResolution.targets.length === 0) {
-        const logPath = finishLog("no-targets", preflightSummary);
-        closeReleaseUi();
-        ctx.ui.notify(`No publish targets were detected in the pre-confirmation plan; nothing to publish.${logPath ? ` Log: ${logPath}` : ""}`, "info");
-        return;
-      }
-
-      notifyProgress(`Running publish workflow for ${plannedTargetResolution.targets.length} preflight-detected target(s)...`, "info");
-      appendOutput(`Running publish workflow for ${plannedTargetResolution.targets.length} preflight-detected target(s)...\n`);
+      notifyProgress(`Running publish workflow for ${selectedPublishTargets.length} selected target(s)...`, "info");
+      appendOutput(`Running publish workflow for ${selectedPublishTargets.length} selected target(s)...\n`);
       const updated: string[] = [];
       const skipped: string[] = [];
       const firstRelease: string[] = [];
@@ -809,11 +849,11 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
         `  - ${failed.length ? failed.map((f) => `${f.pkg}: ${f.reason}`).join(" | ") : "none"}`,
       ].join("\n");
 
-      for (const [index, target] of plannedTargetResolution.targets.entries()) {
+      for (const [index, target] of selectedPublishTargets.entries()) {
         const publishCommand = releaseScriptCommand(ctx.cwd, "release-workflow.sh", ["--publish", "--target", target.target]);
-        setPhase(`Release publishing ${index + 1}/${plannedTargetResolution.targets.length}: ${target.target}`);
+        setPhase(`Release publishing ${index + 1}/${selectedPublishTargets.length}: ${target.target}`);
         notifyProgress(`Running release-workflow.sh --publish --target ${target.target}...`, "info");
-        appendOutput(`\n==> Publishing target ${index + 1}/${plannedTargetResolution.targets.length}: ${target.target} (${target.label})\n`);
+        appendOutput(`\n==> Publishing target ${index + 1}/${selectedPublishTargets.length}: ${target.target} (${target.label})\n`);
         appendOutput(`$ ${publishCommand}\n`);
         const publish = await runScriptLive(ctx.cwd, publishCommand, appendOutput, (child) => { currentChild = child; });
         currentChild = undefined;
