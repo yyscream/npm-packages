@@ -117,18 +117,34 @@ Environment variables:
 ## Main features
 
 - Multi-tab Pi sessions with isolated processes, working directories, prompt drafts, and activity state.
+- Automatic tab naming from the first prompt, with `--name <name>` still available for an explicit initial tab name.
 - Streaming chat transcript with Markdown, thinking output, tool/bash cards, queue and compaction events, and abort controls.
-- Prompt composer with uploads, drag/drop/paste, inline image support, slash-command autocomplete, and `@` file/path references.
+- Prompt composer with uploads, drag/drop/paste, inline image support, slash-command autocomplete, and `@` file/path references with live suggestions.
 - Browser dialogs for common Pi selectors such as `/model`, `/settings`, `/theme`, `/fork`, `/clone`, `/resume`, `/tree`, `/scoped-models`, `/tools`, and `/skills`.
 - Model, thinking, session, workspace, theme, optional-feature, Codex usage, network, event, and notification controls in the side panel.
-- Per-tab cwd changes, a clickable footer cwd picker, saved path fast picks, and restart-safe restoration of open tabs.
-- Browser support for Pi extension UI prompts, widgets, status updates, and notifications.
-- Feedback reactions (`👍`, `👎`, `?`) on assistant output and action cards, which can ask Pi to create or update a LEARNING.
+- Side-panel theme picker backed by optional `@firstpick/pi-themes-bundle` themes when loaded.
+- Per-tab cwd changes, a clickable footer cwd picker, saved path fast picks, server-persisted fast picks, and restart-safe restoration of open tabs.
+- Browser support for Pi extension UI prompts, widgets, status updates, browser notifications when a tab needs an extension UI response and an optional side-panel toggle for agent-done notifications.
+- Feedback reactions (`👍`, `👎`, `?`) on final assistant output plus tool/bash action cards, which can ask Pi to create or update a LEARNING.
 - Mobile-friendly layout and PWA install support where the browser allows it.
 
-## Optional companion features
+Useful browser endpoints exposed by the local server include:
 
-A normal Pi/npm install includes the optional companion packages unless optional dependencies are disabled. If a feature is missing, the side panel shows it as install-needed. Installing from the side panel is localhost-only, limited to known packages, and requires reloading the active Pi tab after installation.
+- `GET /api/path-suggestions?tab=<tabId>&query=<path>` for `@` file/path references with live suggestions.
+- `POST /api/action-feedback?tab=<tabId>` for feedback on final assistant output and action cards.
+- `POST /api/optional-feature-install` for installing known optional companion packages from the side panel.
+
+For local development, run the checkout helper directly, for example:
+
+```bash
+./start-webui.sh --dev --cwd /path/to/project
+```
+
+## Optional companion packages
+
+A normal Pi/npm install includes the optional companion packages unless optional dependencies are disabled. Startup checks loaded Pi capabilities directly through RPC-visible commands and live widget events, then the side panel shows each optional feature as enabled, disabled, or install-needed. Installing a missing feature is an explicit, warned action; it is localhost-only, limited to known packages, and requires reloading the active Pi tab after installation.
+
+When the standalone global `pi-webui` launcher is used, optional companion installs should target the Pi agent npm root instead of the global npm prefix. Override the target explicitly with `PI_WEBUI_OPTIONAL_FEATURE_INSTALL_ROOT=/path/to/package-root` when needed.
 
 Optional companions:
 
@@ -157,7 +173,7 @@ This requires `/git-staged-msg` from `@firstpick/pi-prompts-git-pr`. Review the 
 ## Mobile and PWA notes
 
 - The mobile composer starts as a compact `Ask Pi…` input and grows as you type.
-- Installable PWA support and notifications depend on browser support and usually require `localhost` or HTTPS.
+- Installable PWA support, blocked-tab browser notifications, and optional agent-done notifications require browser service-worker/notification support and usually require `localhost` or HTTPS.
 - Plain `http://<LAN-IP>` can show the app, but some browsers disable PWA install and notifications there.
 
 ## Network safety

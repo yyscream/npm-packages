@@ -720,6 +720,9 @@ assert.match(server, /const OPTIONAL_FEATURE_PACKAGES = new Map/, "server should
 assert.match(server, /\["tuiSkillsCommand", "@firstpick\/pi-extension-setup-skills"\]/, "server should allow installing the TUI skills optional feature");
 assert.match(server, /\["tuiToolsCommand", "@firstpick\/pi-extension-tools"\]/, "server should allow installing the TUI tools optional feature");
 assert.match(server, /function installOptionalFeaturePackage\(featureId\)/, "server should provide optional feature package installation helper");
+assert.match(server, /PI_WEBUI_OPTIONAL_FEATURE_INSTALL_ROOT/, "optional feature installs should support an explicit package-manager root override");
+assert.match(server, /function configuredAgentNpmRoot\(\)/, "global Web UI launches should install optional feature packages into Pi's agent npm root, not the npm global prefix");
+assert.match(server, /installRootDeclaresPackage\(.*?@firstpick\/pi-package-webui/s, "optional feature installs should only reuse a node_modules parent that declares the Web UI package dependency");
 assert.match(server, /url\.pathname === "\/api\/optional-feature-install" && req\.method === "POST"/, "server should expose optional feature install endpoint");
 assert.match(server, /Installing optional Web UI features is only allowed from localhost/, "optional feature install endpoint should be localhost-only");
 assert.match(server, /url\.pathname === "\/api\/themes" && req\.method === "GET"/, "server should expose GET /api/themes");

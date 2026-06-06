@@ -17,6 +17,7 @@ const packageRoot = path.resolve(__dirname, "..");
 const publicDir = path.join(packageRoot, "public");
 const webuiHelperExtensionPath = path.join(packageRoot, "webui-rpc-helper.mjs");
 const agentDir = process.env.PI_CODING_AGENT_DIR || path.join(homedir(), ".pi", "agent");
+const OPTIONAL_FEATURE_INSTALL_ROOT_ENV = "PI_WEBUI_OPTIONAL_FEATURE_INSTALL_ROOT";
 const packageJson = JSON.parse(await readFile(path.join(packageRoot, "package.json"), "utf8"));
 const nativeParityMatrix = JSON.parse(await readFile(path.join(packageRoot, "WEBUI_TUI_NATIVE_PARITY.json"), "utf8"));
 const webuiDevServer = isTruthyEnv(process.env.PI_WEBUI_DEV) || isSourceCheckout(packageRoot);
@@ -768,14 +769,46 @@ function runCommand(command, args, { cwd, timeoutMs = 2000, maxOutputLength = 20
   });
 }
 
-function optionalDependencyInstallRoot() {
-  const parts = packageRoot.split(path.sep);
+function nodeModulesParentForPackageRoot(root = packageRoot) {
+  const parts = root.split(path.sep);
   const nodeModulesIndex = parts.lastIndexOf("node_modules");
   if (nodeModulesIndex >= 0) {
-    const root = parts.slice(0, nodeModulesIndex).join(path.sep);
-    return root || path.parse(packageRoot).root;
+    const parent = parts.slice(0, nodeModulesIndex).join(path.sep);
+    return parent || path.parse(root).root;
   }
-  return packageRoot;
+  return root;
+}
+
+function declaredDependencySpec(pkg, packageName) {
+  return firstDefined(
+    pkg?.dependencies?.[packageName],
+    pkg?.optionalDependencies?.[packageName],
+    pkg?.devDependencies?.[packageName],
+    pkg?.peerDependencies?.[packageName],
+  );
+}
+
+async function installRootDeclaresPackage(root, packageName) {
+  const pkg = await readJsonFileIfExists(path.join(root, "package.json"));
+  return declaredDependencySpec(pkg, packageName) !== undefined;
+}
+
+function configuredAgentNpmRoot() {
+  const root = process.env.PI_CODING_AGENT_DIR ? path.resolve(expandUserPath(process.env.PI_CODING_AGENT_DIR)) : agentDir;
+  return path.join(root, "npm");
+}
+
+async function optionalDependencyInstallRoot() {
+  const configuredRoot = process.env[OPTIONAL_FEATURE_INSTALL_ROOT_ENV];
+  if (configuredRoot) return path.resolve(expandUserPath(configuredRoot));
+
+  const installRoot = nodeModulesParentForPackageRoot(packageRoot);
+  if (await installRootDeclaresPackage(installRoot, "@firstpick/pi-package-webui")) return installRoot;
+
+  const agentNpmRoot = configuredAgentNpmRoot();
+  if (installRoot !== agentNpmRoot && await installRootDeclaresPackage(agentNpmRoot, "@firstpick/pi-package-webui")) return agentNpmRoot;
+
+  return installRoot;
 }
 
 function formatCommandForDisplay(command, args) {
@@ -786,7 +819,7 @@ async function installOptionalFeaturePackage(featureId) {
   const packageName = OPTIONAL_FEATURE_PACKAGES.get(featureId);
   if (!packageName) throw makeHttpError(400, `Unknown optional feature: ${featureId}`);
 
-  const installRoot = optionalDependencyInstallRoot();
+  const installRoot = await optionalDependencyInstallRoot();
   const npmCommand = process.env.PI_WEBUI_NPM_BIN || "npm";
   const args = ["install", "--prefix", installRoot, packageName];
   const result = await runCommand(npmCommand, args, {
