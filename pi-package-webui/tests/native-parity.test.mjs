@@ -146,6 +146,10 @@ assert.match(app, /api\("\/api\/abort-bash", \{ method: "POST", body: \{\}, tabI
 assert.match(server, /async function cycleTabModel\(tab, direction = "forward"\)/, "server should provide scoped\/all model cycling helper");
 assert.match(server, /url\.pathname === "\/api\/model-cycle" && req\.method === "POST"/, "server should expose model-cycle endpoint for shortcuts");
 assert.match(server, /case "\/api\/thinking-cycle":[\s\S]*?type: "cycle_thinking_level"/, "server should expose thinking-cycle endpoint for shortcuts");
+assert.match(server, /async function setThinkingLevelForTab\(tab, level, \{ allowPending = true \} = \{\}\)[\s\S]*?stateIsBusyForSettings\(stateResult\.data\)[\s\S]*?tab\.pendingThinkingLevel = level/, "server should queue side-panel thinking changes while a tab is running");
+assert.match(server, /const pendingThinkingResponse = await applyPendingThinkingBeforePrompt\(tab\)/, "server should apply queued thinking level before the next prompt");
+assert.match(app, /pendingThinkingLevel[\s\S]*?next prompt/, "frontend should show queued thinking changes as applying on the next prompt");
+assert.match(app, /response\.data\?\.pending[\s\S]*?will apply to the next prompt/, "frontend should announce queued side-panel thinking changes");
 assert.match(app, /function handleNativeAppShortcut\(event\)/, "frontend should centralize native app shortcut handling");
 assert.match(app, /openNativeModelSelector\(\)/, "Ctrl+L shortcut should open the native model selector");
 assert.match(app, /cycleModelFromShortcut\(event\.shiftKey \? "backward" : "forward"\)/, "Ctrl+P shortcuts should cycle models forward and backward");
@@ -157,6 +161,6 @@ assert.match(app, /event\.altKey && key === "ArrowUp"[\s\S]*?restoreQueuedMessag
 assert.match(app, /let userBashQueuesByTab = new Map\(\)/, "frontend should track per-tab user bash FIFO queues");
 assert.match(app, /enqueueUserBashCommand\(parsed, \{ usesPromptInput, targetTabId \}\)/, "user bash should enqueue while an active or queued bash command exists");
 assert.match(server, /function sendQueuedBashCommand\(tab, command\)/, "server should serialize user bash commands per tab");
-assert.match(server, /command\.type === "bash" \? await sendQueuedBashCommand\(tab, command\) : await tab\.rpc\.send\(command\)/, "generic POST handling should route bash through the FIFO queue");
+assert.match(server, /command\.type === "bash"[\s\S]*?await sendQueuedBashCommand\(tab, command\)[\s\S]*?: await tab\.rpc\.send\(command\)/, "generic POST handling should route bash through the FIFO queue");
 assert.ok(pkg.files.includes("WEBUI_TUI_NATIVE_PARITY.json"), "published package should include the native parity matrix");
 assert.ok(pkg.files.includes("webui-rpc-helper.mjs"), "published package should include the Web UI RPC helper extension");

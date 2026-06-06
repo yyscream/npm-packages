@@ -41,6 +41,7 @@ const ATTACHMENT_UPLOAD_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
 const INLINE_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
 const INLINE_IMAGE_TOTAL_MAX_BYTES = 16 * 1024 * 1024;
 const RPC_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"];
 const EVENT_HISTORY_LIMIT = 200;
 const EXTENSION_UI_BLOCKING_METHODS = new Set(["select", "confirm", "input", "editor"]);
 const STATUS_RPC_TIMEOUT_MS = 1_800;
@@ -808,7 +809,12 @@ async function optionalDependencyInstallRoot() {
   const agentNpmRoot = configuredAgentNpmRoot();
   if (installRoot !== agentNpmRoot && await installRootDeclaresPackage(agentNpmRoot, "@firstpick/pi-package-webui")) return agentNpmRoot;
 
-  return installRoot;
+  if (webuiDevServer) return installRoot;
+
+  throw makeHttpError(
+    500,
+    `Could not determine a safe optional feature install root. Set ${OPTIONAL_FEATURE_INSTALL_ROOT_ENV} to the Pi package root.`,
+  );
 }
 
 function formatCommandForDisplay(command, args) {
@@ -1991,7 +1997,7 @@ function commandFromPost(pathname, body) {
     }
     case "/api/thinking": {
       const level = String(body.level || "").trim();
-      if (!["off", "minimal", "low", "medium", "high", "xhigh"].includes(level)) {
+      if (!THINKING_LEVELS.includes(level)) {
         throw new Error("Invalid thinking level");
       }
       return { type: "set_thinking_level", level };
@@ -2154,10 +2160,21 @@ function rememberTabState(tab, state) {
   if (!options.noSession && Object.prototype.hasOwnProperty.call(state, "sessionFile")) tab.sessionFile = sessionFileFromState(state);
 }
 
+function stateWithPendingThinking(tab, state) {
+  if (!state || typeof state !== "object" || !tab?.pendingThinkingLevel) return state;
+  return { ...state, pendingThinkingLevel: tab.pendingThinkingLevel };
+}
+
+function responseWithPendingThinking(tab, response) {
+  if (!response || typeof response !== "object" || response.success === false || response.command !== "get_state") return response;
+  return { ...response, data: stateWithPendingThinking(tab, response.data) };
+}
+
 function forgetTabState(tab) {
   if (!tab) return;
   tab.lastState = null;
   tab.sessionFile = undefined;
+  tab.pendingThinkingLevel = undefined;
 }
 
 function tabRestorableSessionFile(tab) {
@@ -2514,6 +2531,7 @@ async function createTab({ id: requestedId, index, title, titleSource, conversat
     createdAt,
     sessionFile: options.noSession ? undefined : normalizedRestoreString(sessionFile, 4096),
     lastState: null,
+    pendingThinkingLevel: undefined,
     activity: createTabActivity(createdAt),
     pendingExtensionUiRequests: new Map(),
     webuiHelperRequests: new Map(),
@@ -2556,6 +2574,7 @@ function tabMeta(tab) {
     conversationStarted: !!tab.conversationStarted,
     cwd: tab.cwd,
     sessionFile: tabRestorableSessionFile(tab),
+    pendingThinkingLevel: tab.pendingThinkingLevel || null,
     createdAt: tab.createdAt,
     startedAt: tab.rpc.startedAt,
     pid: tab.rpc.child?.pid,
@@ -2800,10 +2819,10 @@ function fallbackRpcResponse(tab, command, error) {
 
 async function safeRpcResponse(tab, command, timeoutMs = REQUEST_TIMEOUT_MS) {
   try {
-    return await tab.rpc.send(command, timeoutMs);
+    return responseWithPendingThinking(tab, await tab.rpc.send(command, timeoutMs));
   } catch (error) {
     const message = sanitizeError(error);
-    if (/Pi RPC process is not running/i.test(message)) return fallbackRpcResponse(tab, command, error);
+    if (/Pi RPC process is not running/i.test(message)) return responseWithPendingThinking(tab, fallbackRpcResponse(tab, command, error));
     throw error;
   }
 }
@@ -3765,10 +3784,36 @@ async function safeRpcData(tab, command, timeoutMs = STATUS_RPC_TIMEOUT_MS) {
     const response = await tab.rpc.send(command, timeoutMs);
     if (response?.success === false) return { ok: false, error: response.error || `${command.type} failed` };
     if (command?.type === "get_state") rememberTabState(tab, response?.data);
-    return { ok: true, data: response?.data ?? null };
+    return { ok: true, data: command?.type === "get_state" ? stateWithPendingThinking(tab, response?.data) : response?.data ?? null };
   } catch (error) {
     return { ok: false, error: sanitizeError(error) };
   }
+}
+
+function stateIsBusyForSettings(state) {
+  return !!(state?.isStreaming || state?.isCompacting);
+}
+
+async function setThinkingLevelForTab(tab, level, { allowPending = true } = {}) {
+  if (!THINKING_LEVELS.includes(level)) throw makeHttpError(400, "Invalid thinking level");
+  const stateResult = allowPending ? await safeRpcData(tab, { type: "get_state" }, STATUS_RPC_TIMEOUT_MS) : { ok: false };
+  if (allowPending && stateResult.ok && stateIsBusyForSettings(stateResult.data)) {
+    tab.pendingThinkingLevel = level;
+    return rpcSuccess("set_thinking_level", { level, pending: true, message: `Thinking level ${level} will apply to the next prompt.` });
+  }
+  const response = await tab.rpc.send({ type: "set_thinking_level", level });
+  if (response.success !== false) tab.pendingThinkingLevel = undefined;
+  return response;
+}
+
+async function applyPendingThinkingBeforePrompt(tab) {
+  const level = tab?.pendingThinkingLevel;
+  if (!level) return null;
+  const stateResult = await safeRpcData(tab, { type: "get_state" }, STATUS_RPC_TIMEOUT_MS);
+  if (stateResult.ok && stateIsBusyForSettings(stateResult.data)) return null;
+  const response = await setThinkingLevelForTab(tab, level, { allowPending: false });
+  if (response.success === false) return response;
+  return { ...response, pendingApplied: true };
 }
 
 function providerList(models) {
@@ -4165,6 +4210,11 @@ const server = createServer(async (req, res) => {
         return;
       }
       const command = commandFromPost(url.pathname, body);
+      const pendingThinkingResponse = await applyPendingThinkingBeforePrompt(tab);
+      if (pendingThinkingResponse?.success === false) {
+        sendJson(res, 400, responseWithTab(pendingThinkingResponse, tab));
+        return;
+      }
       const startsVisibleWork = commandStartsVisibleWork(command);
       if (startsVisibleWork) {
         maybeNameTabForConversation(tab, command);
@@ -4227,7 +4277,11 @@ const server = createServer(async (req, res) => {
           maybeNameTabForConversation(tab, command);
           markTabWorking(tab);
         }
-        const response = command.type === "bash" ? await sendQueuedBashCommand(tab, command) : await tab.rpc.send(command);
+        const response = command.type === "set_thinking_level"
+          ? await setThinkingLevelForTab(tab, command.level)
+          : command.type === "bash"
+            ? await sendQueuedBashCommand(tab, command)
+            : await tab.rpc.send(command);
         if (response.success === false && startsVisibleWork) markTabIdle(tab);
         if (response.success !== false && command.type === "new_session") {
           tab.conversationStarted = false;

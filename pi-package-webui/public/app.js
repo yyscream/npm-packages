@@ -3982,10 +3982,15 @@ function renderStatus() {
   const compacting = state?.isCompacting ? " · compacting" : "";
 
   elements.stateDetails.replaceChildren();
+  const pendingThinkingLevel = state?.pendingThinkingLevel || null;
+  const shownThinkingLevel = pendingThinkingLevel || state?.thinkingLevel;
+  const thinkingDetail = pendingThinkingLevel && pendingThinkingLevel !== state?.thinkingLevel
+    ? `${state?.thinkingLevel || "unknown"} → ${pendingThinkingLevel} next prompt`
+    : state?.thinkingLevel || "unknown";
   const details = {
     Status: `${running}${compacting}`,
     Model: modelLabel(state?.model),
-    Thinking: state?.thinkingLevel || "unknown",
+    Thinking: thinkingDetail,
     Session: state?.sessionName || state?.sessionId || "unknown",
     File: state?.sessionFile || "in-memory",
     Messages: String(state?.messageCount ?? "?"),
@@ -3996,7 +4001,7 @@ function renderStatus() {
     elements.stateDetails.append(make("dt", undefined, key), make("dd", undefined, value));
   }
 
-  if (state?.thinkingLevel) elements.thinkingSelect.value = state.thinkingLevel;
+  if (shownThinkingLevel) elements.thinkingSelect.value = shownThinkingLevel;
   elements.compactButton.disabled = !!state?.isCompacting;
   elements.compactButton.textContent = state?.isCompacting ? "Compacting…" : "Compact";
   syncModelSelectToState();
@@ -9650,8 +9655,11 @@ elements.setModelButton.addEventListener("click", async () => {
 elements.setThinkingButton.addEventListener("click", async () => {
   const tabContext = activeTabContext();
   try {
-    await api("/api/thinking", { method: "POST", body: { level: elements.thinkingSelect.value }, tabId: tabContext.tabId });
-    if (isCurrentTabContext(tabContext)) await refreshState(tabContext);
+    const response = await api("/api/thinking", { method: "POST", body: { level: elements.thinkingSelect.value }, tabId: tabContext.tabId });
+    if (isCurrentTabContext(tabContext)) {
+      if (response.data?.pending) addEvent(response.data.message || `Thinking level ${response.data.level} will apply to the next prompt.`, "info");
+      await refreshState(tabContext);
+    }
   } catch (error) {
     if (isCurrentTabContext(tabContext)) addEvent(error.message, "error");
   }

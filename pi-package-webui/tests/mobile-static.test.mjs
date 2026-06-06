@@ -682,7 +682,7 @@ assert.match(app, /function triggerNativeDownload\(download\)/, "frontend should
 assert.match(server, /case "\/api\/bash": \{[\s\S]*?type: "bash", command, excludeFromContext: body\.excludeFromContext === true/, "server should expose user bash execution with exclude-from-context support");
 assert.match(server, /case "\/api\/abort-bash":[\s\S]*?type: "abort_bash"/, "server should expose user bash abort");
 assert.match(server, /function sendQueuedBashCommand\(tab, command\)/, "server should serialize user bash through a per-tab FIFO queue");
-assert.match(server, /command\.type === "bash" \? await sendQueuedBashCommand\(tab, command\) : await tab\.rpc\.send\(command\)/, "POST routing should use the bash FIFO queue before RPC send");
+assert.match(server, /command\.type === "bash"[\s\S]*?await sendQueuedBashCommand\(tab, command\)[\s\S]*?: await tab\.rpc\.send\(command\)/, "POST routing should use the bash FIFO queue before RPC send");
 assert.match(app, /function parseUserBashInput\(message\)/, "frontend should parse leading ! and !! bash commands");
 assert.match(app, /let userBashQueuesByTab = new Map\(\)/, "frontend should keep a per-tab user bash queue");
 assert.match(app, /enqueueUserBashCommand\(parsed, \{ usesPromptInput, targetTabId \}\)/, "frontend should queue additional bash commands while one is active");
@@ -723,6 +723,8 @@ assert.match(server, /function installOptionalFeaturePackage\(featureId\)/, "ser
 assert.match(server, /PI_WEBUI_OPTIONAL_FEATURE_INSTALL_ROOT/, "optional feature installs should support an explicit package-manager root override");
 assert.match(server, /function configuredAgentNpmRoot\(\)/, "global Web UI launches should install optional feature packages into Pi's agent npm root, not the npm global prefix");
 assert.match(server, /installRootDeclaresPackage\(.*?@firstpick\/pi-package-webui/s, "optional feature installs should only reuse a node_modules parent that declares the Web UI package dependency");
+assert.match(server, /if \(webuiDevServer\) return installRoot/, "source-checkout Web UI launches should still use the checkout root for optional feature installs");
+assert.match(server, /Could not determine a safe optional feature install root/, "optional feature installs should fail closed when no declared package root can be found");
 assert.match(server, /url\.pathname === "\/api\/optional-feature-install" && req\.method === "POST"/, "server should expose optional feature install endpoint");
 assert.match(server, /Installing optional Web UI features is only allowed from localhost/, "optional feature install endpoint should be localhost-only");
 assert.match(server, /url\.pathname === "\/api\/themes" && req\.method === "GET"/, "server should expose GET /api/themes");
