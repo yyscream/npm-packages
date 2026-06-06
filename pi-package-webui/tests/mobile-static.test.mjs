@@ -27,8 +27,10 @@ const companionDependencies = {
   "@firstpick/pi-extension-git-footer-status": "^0.2.1",
   "@firstpick/pi-extension-release-aur": "^0.1.3",
   "@firstpick/pi-extension-release-npm": "^0.3.3",
+  "@firstpick/pi-extension-setup-skills": "^0.1.5",
   "@firstpick/pi-extension-stats": "^0.2.0",
   "@firstpick/pi-extension-todo-progress": "^0.1.7",
+  "@firstpick/pi-extension-tools": "^0.1.4",
   "@firstpick/pi-prompts-git-pr": "^0.1.0",
   "@firstpick/pi-themes-bundle": "^0.1.1",
 };
@@ -340,7 +342,9 @@ assert.match(app, /function setOptionalControlState\(button, available, unavaila
 assert.match(app, /function renderCommands\(\)/, "side-panel commands should be re-renderable from current optional feature state");
 assert.match(app, /function installOptionalFeature\(featureId\)/, "optional features should expose an install action");
 assert.match(app, /api\("\/api\/optional-feature-install"/, "optional feature install action should call the backend installer endpoint");
-assert.match(app, /function updateOptionalFeatureAvailability\(\)[\s\S]*hasAvailableCommand\("git-staged-msg"\)[\s\S]*hasAvailableCommand\("release-npm"\)[\s\S]*hasAvailableCommand\("release-aur"\)[\s\S]*hasAvailableCommand\("todo-progress-status"\)/, "optional feature detection should call RPC-visible commands directly");
+assert.match(app, /id: "tuiSkillsCommand"[\s\S]*?@firstpick\/pi-extension-setup-skills/, "optional features should include the TUI skills command companion");
+assert.match(app, /id: "tuiToolsCommand"[\s\S]*?@firstpick\/pi-extension-tools/, "optional features should include the TUI tools command companion");
+assert.match(app, /function updateOptionalFeatureAvailability\(\)[\s\S]*hasAvailableCommand\("git-staged-msg"\)[\s\S]*hasAvailableCommand\("release-npm"\)[\s\S]*hasAvailableCommand\("release-aur"\)[\s\S]*hasLoadedRpcCommand\("skills"\)[\s\S]*hasAvailableCommand\("todo-progress-status"\)[\s\S]*hasLoadedRpcCommand\("tools"\)/, "optional feature detection should call RPC-visible commands directly and distinguish native resource selectors from TUI companions");
 assert.match(app, /if \(!isOptionalFeatureEnabled\("todoProgressWidget"\)\) return String\(text \|\| ""\)/, "todo progress line stripping should only run when the todo feature is detected and enabled");
 assert.match(app, /const releasePrompt = detectedReleasePrompt && isOptionalFeatureEnabled\(detectedReleasePrompt\.featureId\) \? detectedReleasePrompt : null/, "release confirmation dialogs should use specialized rendering only when their release optional feature is enabled");
 assert.match(app, /case "webui_tab_reloaded":[\s\S]*resetOptionalFeatureAvailability\(\)/, "optional feature state should reset when the RPC tab reloads resources");
@@ -713,6 +717,8 @@ assert.match(server, /type: "set_follow_up_mode"/, "server should expose follow-
 assert.match(server, /type: "set_auto_compaction"/, "server should expose auto-compaction changes for native /settings");
 assert.match(server, /@firstpick\/pi-themes-bundle/, "server should discover themes from the optional theme package");
 assert.match(server, /const OPTIONAL_FEATURE_PACKAGES = new Map/, "server should whitelist optional feature packages for install actions");
+assert.match(server, /\["tuiSkillsCommand", "@firstpick\/pi-extension-setup-skills"\]/, "server should allow installing the TUI skills optional feature");
+assert.match(server, /\["tuiToolsCommand", "@firstpick\/pi-extension-tools"\]/, "server should allow installing the TUI tools optional feature");
 assert.match(server, /function installOptionalFeaturePackage\(featureId\)/, "server should provide optional feature package installation helper");
 assert.match(server, /url\.pathname === "\/api\/optional-feature-install" && req\.method === "POST"/, "server should expose optional feature install endpoint");
 assert.match(server, /Installing optional Web UI features is only allowed from localhost/, "optional feature install endpoint should be localhost-only");
@@ -761,13 +767,17 @@ for (const extensionPath of [
   "../pi-extension-git-footer-status/index.ts",
   "../pi-extension-release-aur/index.ts",
   "../pi-extension-release-npm/index.ts",
+  "../pi-extension-setup-skills/index.ts",
   "../pi-extension-stats/index.ts",
   "../pi-extension-todo-progress/index.ts",
+  "../pi-extension-tools/index.ts",
   "node_modules/@firstpick/pi-extension-git-footer-status/index.ts",
   "node_modules/@firstpick/pi-extension-release-aur/index.ts",
   "node_modules/@firstpick/pi-extension-release-npm/index.ts",
+  "node_modules/@firstpick/pi-extension-setup-skills/index.ts",
   "node_modules/@firstpick/pi-extension-stats/index.ts",
   "node_modules/@firstpick/pi-extension-todo-progress/index.ts",
+  "node_modules/@firstpick/pi-extension-tools/index.ts",
 ]) {
   assert.ok(pkg.pi?.extensions?.includes(extensionPath), `webui Pi manifest should load ${extensionPath} when present`);
 }

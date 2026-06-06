@@ -20,13 +20,17 @@
       "../pi-extension-git-footer-status/index.ts",
       "../pi-extension-release-aur/index.ts",
       "../pi-extension-release-npm/index.ts",
+      "../pi-extension-setup-skills/index.ts",
       "../pi-extension-stats/index.ts",
       "../pi-extension-todo-progress/index.ts",
+      "../pi-extension-tools/index.ts",
       "node_modules/@firstpick/pi-extension-git-footer-status/index.ts",
       "node_modules/@firstpick/pi-extension-release-aur/index.ts",
       "node_modules/@firstpick/pi-extension-release-npm/index.ts",
+      "node_modules/@firstpick/pi-extension-setup-skills/index.ts",
       "node_modules/@firstpick/pi-extension-stats/index.ts",
-      "node_modules/@firstpick/pi-extension-todo-progress/index.ts"
+      "node_modules/@firstpick/pi-extension-todo-progress/index.ts",
+      "node_modules/@firstpick/pi-extension-tools/index.ts"
     ],
     "skills": [
       "../pi-extension-release-aur/skills",
@@ -55,8 +59,10 @@
     "@firstpick/pi-extension-git-footer-status": "^0.2.1",
     "@firstpick/pi-extension-release-aur": "^0.1.3",
     "@firstpick/pi-extension-release-npm": "^0.3.3",
+    "@firstpick/pi-extension-setup-skills": "^0.1.5",
     "@firstpick/pi-extension-stats": "^0.2.0",
     "@firstpick/pi-extension-todo-progress": "^0.1.7",
+    "@firstpick/pi-extension-tools": "^0.1.4",
     "@firstpick/pi-prompts-git-pr": "^0.1.0",
     "@firstpick/pi-themes-bundle": "^0.1.1"
   },

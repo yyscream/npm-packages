@@ -144,6 +144,7 @@ let pathFastPicksLoadPromise = null;
 let mobileTabsExpanded = false;
 let openTerminalTabGroupKey = null;
 let availableCommands = [];
+let rawAvailableCommands = [];
 let commandSuggestions = [];
 let pathSuggestions = [];
 let suggestionMode = "none";
@@ -285,7 +286,9 @@ const optionalFeatureAvailability = {
   releaseAur: false,
   statsCommand: false,
   gitFooterStatus: false,
+  tuiSkillsCommand: false,
   todoProgressWidget: false,
+  tuiToolsCommand: false,
   themeBundle: false,
 };
 const OPTIONAL_FEATURES = [
@@ -311,11 +314,25 @@ const OPTIONAL_FEATURES = [
     description: "Publish menu action, setup helpers, skills, and AUR release widgets.",
   },
   {
+    id: "tuiSkillsCommand",
+    label: "TUI Skills command",
+    packageName: "@firstpick/pi-extension-setup-skills",
+    capabilityLabel: "RPC /skills from setup-skills extension",
+    description: "Terminal-native skill setup command alongside WebUI-native /skills toggles.",
+  },
+  {
     id: "todoProgressWidget",
     label: "Todo progress widget",
     packageName: "@firstpick/pi-extension-todo-progress",
     capabilityLabel: "/todo-progress-status or todo-progress widget event",
     description: "Styled live checklist rendering for assistant todo updates.",
+  },
+  {
+    id: "tuiToolsCommand",
+    label: "TUI Tools command",
+    packageName: "@firstpick/pi-extension-tools",
+    capabilityLabel: "RPC /tools from tools extension",
+    description: "Terminal-native active-tool manager alongside WebUI-native /tools toggles.",
   },
   {
     id: "gitFooterStatus",
@@ -2398,6 +2415,7 @@ function resetActiveTabUi() {
   liveToolRuns.clear();
   liveToolCards.clear();
   availableCommands = [];
+  rawAvailableCommands = [];
   resetOptionalFeatureAvailability();
   commandSuggestions = [];
   pathSuggestions = [];
@@ -6943,6 +6961,10 @@ function hasAvailableCommand(name) {
   return availableCommands.some((command) => command.name === name);
 }
 
+function hasLoadedRpcCommand(name) {
+  return rawAvailableCommands.some((command) => command.name === name && command.source !== "native");
+}
+
 function optionalFeatureUnavailableMessage(featureId) {
   const feature = OPTIONAL_FEATURE_BY_ID.get(featureId);
   if (!feature) return "Optional feature unavailable.";
@@ -6989,7 +7011,9 @@ function updateOptionalFeatureAvailability() {
   optionalFeatureAvailability.releaseAur = hasAvailableCommand("release-aur");
   optionalFeatureAvailability.statsCommand = hasAvailableCommand("stats");
   optionalFeatureAvailability.gitFooterStatus = hasAvailableCommand("git-footer-refresh") || optionalFeatureAvailability.gitFooterStatus || statusEntries.has("git-footer");
+  optionalFeatureAvailability.tuiSkillsCommand = hasLoadedRpcCommand("skills");
   optionalFeatureAvailability.todoProgressWidget = hasAvailableCommand("todo-progress-status") || optionalFeatureAvailability.todoProgressWidget || widgets.has("todo-progress");
+  optionalFeatureAvailability.tuiToolsCommand = hasLoadedRpcCommand("tools");
   optionalFeatureAvailability.themeBundle = availableThemes.length > 0;
   renderOptionalFeatureControls();
 }
@@ -8125,7 +8149,7 @@ function syncModelSelectToState() {
   }
 }
 
-function normalizeCommands(commands) {
+function normalizeCommands(commands, { dedupe = true } = {}) {
   const seen = new Set();
   return (commands || [])
     .map((command) => ({
@@ -8136,7 +8160,9 @@ function normalizeCommands(commands) {
       enabled: command.enabled !== false,
     }))
     .filter((command) => {
-      if (!command.name || seen.has(command.name)) return false;
+      if (!command.name) return false;
+      if (!dedupe) return true;
+      if (seen.has(command.name)) return false;
       seen.add(command.name);
       return true;
     })
@@ -8515,6 +8541,7 @@ async function refreshCommands(tabContext = activeTabContext()) {
   if (!tabContext.tabId) return;
   const response = await api("/api/commands", { tabId: tabContext.tabId });
   if (!isCurrentTabContext(tabContext)) return;
+  rawAvailableCommands = normalizeCommands(response.data?.commands || [], { dedupe: false });
   availableCommands = normalizeCommands(response.data?.commands || []);
   updateOptionalFeatureAvailability();
   renderCommands();

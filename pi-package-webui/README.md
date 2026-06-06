@@ -135,7 +135,9 @@ Optional companions:
 - `@firstpick/pi-prompts-git-pr` — guided Git commit/push workflow.
 - `@firstpick/pi-extension-release-npm` — NPM publish menu and release widgets.
 - `@firstpick/pi-extension-release-aur` — AUR publish menu and release widgets.
+- `@firstpick/pi-extension-setup-skills` — TUI `/skills` setup command alongside WebUI-native skill toggles.
 - `@firstpick/pi-extension-todo-progress` — todo-progress rendering.
+- `@firstpick/pi-extension-tools` — TUI `/tools` active-tool manager alongside WebUI-native tool toggles.
 - `@firstpick/pi-extension-git-footer-status` — richer git/footer status.
 - `@firstpick/pi-extension-stats` — stats commands and status data.
 - `@firstpick/pi-themes-bundle` — Web UI and Pi theme resources.
