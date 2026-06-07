@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title><!-- Aktuellen Präsentationstitel einsetzen --></title>
+  <link rel="stylesheet" href="lab-qc-theme.css" />
+</head>
+<body>
+  <div class="ambient ambient-a" aria-hidden="true"></div>
+  <div class="ambient ambient-b" aria-hidden="true"></div>
+
+  <div class="deck-shell">
+    <header class="topbar" aria-label="Präsentationssteuerung">
+      <div class="brand-lockup">
+        <!-- Falls ein Logo bereitgestellt wird: neben diese Datei kopieren und src entsprechend setzen. -->
+        <img src="company-logo.webp" alt="Firmenlogo" class="brand-logo" />
+        <div>
+          <strong>QC-Labor chemische Produktion</strong>
+          <span><!-- Untertitel der Präsentation einsetzen --></span>
+        </div>
+      </div>
+      <div class="control-strip">
+        <button type="button" id="overviewBtn">Übersicht</button>
+        <button type="button" id="notesBtn">Notizen</button>
+        <button type="button" id="printBtn">PDF</button>
+      </div>
+    </header>
+
+    <main id="deck" class="deck" tabindex="0">
+      <section class="slide hero" data-title="Start">
+        <div class="hero-grid">
+          <div class="hero-copy">
+            <p class="eyebrow"><!-- aktuelle Abschnittsmarke --></p>
+            <h1><!-- aktueller Präsentationstitel --></h1>
+            <p class="lead"><!-- aktueller Untertitel / Nutzenversprechen --></p>
+            <div class="role-row">
+              <span>Labortechnikerinnen und Labortechniker</span>
+              <span>Wissenschaftlerinnen und Wissenschaftler</span>
+              <span>QC-Teamleitung</span>
+            </div>
+          </div>
+          <div class="hero-card logo-card">
+            <img src="company-logo.webp" alt="Firmenlogo" />
+            <div class="molecule-mark" aria-hidden="true"></div>
+          </div>
+        </div>
+        <aside class="notes"><!-- optionale Sprechernotiz --></aside>
+      </section>
+
+      <section class="slide" data-title="Ersetzen">
+        <p class="eyebrow"><!-- Abschnittsmarke --></p>
+        <h2><!-- Folientitel aus aktuellem Inhalt --></h2>
+        <div class="three-cards">
+          <article class="card role-card"><h3>Labortechnik</h3><p><!-- aktueller Inhalt --></p></article>
+          <article class="card role-card"><h3>Wissenschaft</h3><p><!-- aktueller Inhalt --></p></article>
+          <article class="card role-card"><h3>QC-Teamleitung</h3><p><!-- aktueller Inhalt --></p></article>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footerbar">
+      <div class="progress-track"><div id="progressBar" class="progress-bar"></div></div>
+      <div class="slide-status"><span id="slideNumber">1</span>/<span id="slideTotal">1</span></div>
+      <div class="shortcut-hint">← → Leertaste · O Übersicht · N Notizen · P PDF</div>
+    </footer>
+  </div>
+
+  <div id="overview" class="overview" hidden>
+    <div class="overview-panel">
+      <div class="overview-head">
+        <h2>Folienübersicht</h2>
+        <button type="button" id="closeOverview">Schließen</button>
+      </div>
+      <div id="overviewGrid" class="overview-grid"></div>
+    </div>
+  </div>
+
+  <script src="lab-qc-deck.js"></script>
+</body>
+</html>

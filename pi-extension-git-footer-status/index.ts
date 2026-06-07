@@ -581,7 +581,7 @@ function buildWebuiFooterPayload(ctx: ExtensionContext, snapshot: GitSnapshot | 
       key: "cache",
       icon: "💾",
       label: "cache",
-      value: `R${footerMetricValue(telemetry.totalCacheRead)}${telemetry.totalCacheWrite ? ` · W${footerMetricValue(telemetry.totalCacheWrite)}` : ""}`,
+      value: `R${footerMetricValue(telemetry.totalCacheRead)} · W${footerMetricValue(telemetry.totalCacheWrite)}`,
       tone: "blue",
     });
   }
@@ -952,8 +952,9 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
           if (telemetry.totalOutput) ioItems.push(`↓${formatTokens(telemetry.totalOutput)}`);
 
           const cacheItems: string[] = [];
-          if (telemetry.totalCacheRead) cacheItems.push(`R${formatTokens(telemetry.totalCacheRead)}`);
-          if (telemetry.totalCacheWrite) cacheItems.push(`W${formatTokens(telemetry.totalCacheWrite)}`);
+          if (telemetry.totalCacheRead || telemetry.totalCacheWrite) {
+            cacheItems.push(`R${formatTokens(telemetry.totalCacheRead)}`, `W${formatTokens(telemetry.totalCacheWrite)}`);
+          }
 
           const segments: string[] = [];
           if (ioItems.length > 0) segments.push(`${theme.fg("muted", "🪙")} ${ioItems.join(` ${itemSep} `)}`);

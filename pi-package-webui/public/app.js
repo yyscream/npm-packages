@@ -32,7 +32,6 @@ const elements = {
   attachmentTray: $("#attachmentTray"),
   attachButton: $("#attachButton"),
   attachmentInput: $("#attachmentInput"),
-  busyBehavior: $("#busyBehavior"),
   steerButton: $("#steerButton"),
   followUpButton: $("#followUpButton"),
   abortButton: $("#abortButton"),
@@ -91,6 +90,25 @@ const elements = {
   sidePanel: $("#sidePanel"),
   stateDetails: $("#stateDetails"),
   queueBox: $("#queueBox"),
+  queueCountBadge: $("#queueCountBadge"),
+  createPromptListButton: $("#createPromptListButton"),
+  loadPromptListButton: $("#loadPromptListButton"),
+  runLoadedPromptListButton: $("#runLoadedPromptListButton"),
+  loadedPromptListBox: $("#loadedPromptListBox"),
+  promptListDialog: $("#promptListDialog"),
+  promptListDialogTitle: $("#promptListDialogTitle"),
+  promptListNameInput: $("#promptListNameInput"),
+  promptListEditorRows: $("#promptListEditorRows"),
+  promptListAddPromptButton: $("#promptListAddPromptButton"),
+  promptListLoadPanel: $("#promptListLoadPanel"),
+  promptListSelect: $("#promptListSelect"),
+  promptListLoadSelectedButton: $("#promptListLoadSelectedButton"),
+  promptListDeleteSelectedButton: $("#promptListDeleteSelectedButton"),
+  promptListStatus: $("#promptListStatus"),
+  promptListCloseButton: $("#promptListCloseButton"),
+  promptListDialogLoadButton: $("#promptListDialogLoadButton"),
+  promptListSaveButton: $("#promptListSaveButton"),
+  promptListRunListButton: $("#promptListRunListButton"),
   commandSearchInput: $("#commandSearchInput"),
   commandsBox: $("#commandsBox"),
   eventLog: $("#eventLog"),
@@ -103,6 +121,11 @@ const elements = {
   pathPickerTitle: $("#pathPickerTitle"),
   pathPickerCurrent: $("#pathPickerCurrent"),
   pathPickerAddFastPickButton: $("#pathPickerAddFastPickButton"),
+  pathPickerCreateNameInput: $("#pathPickerCreateNameInput"),
+  pathPickerCreateButton: $("#pathPickerCreateButton"),
+  pathPickerSearchInput: $("#pathPickerSearchInput"),
+  pathPickerClearSearchButton: $("#pathPickerClearSearchButton"),
+  pathPickerSearchStatus: $("#pathPickerSearchStatus"),
   pathPickerFastPicks: $("#pathPickerFastPicks"),
   pathPickerRoots: $("#pathPickerRoots"),
   pathPickerList: $("#pathPickerList"),
@@ -198,6 +221,7 @@ let blockedTabNotificationFallbackNoted = false;
 let agentDoneNotificationsEnabled = false;
 let thinkingOutputVisible = true;
 let webuiSettings = {};
+let busyPromptBehavior = "followUp";
 let autocompleteMaxVisible = 12;
 let doubleEscapeAction = "none";
 let treeFilterMode = "default";
@@ -229,6 +253,8 @@ let abortRequestInFlight = false;
 let userBashByTab = new Map();
 let userBashQueuesByTab = new Map();
 let latestQueuedMessagesByTab = new Map();
+let loadedPromptList = null;
+let promptListRunning = false;
 let abortLongPressTimer = null;
 let abortLongPressHandled = false;
 const dialogQueue = [];
@@ -255,6 +281,7 @@ const GIT_FOOTER_WEBUI_PAYLOAD_VERSION = 1;
 const GIT_FOOTER_WEBUI_PAYLOAD_CACHE_KEY = "pi-webui-git-footer-webui-payload-cache";
 const LAST_USER_PROMPT_STORAGE_KEY = "pi-webui-last-user-prompts";
 const PROMPT_HISTORY_STORAGE_KEY = "pi-webui-prompt-history";
+const PROMPT_LIST_STORAGE_KEY = "pi-webui-prompt-lists";
 const PROMPT_HISTORY_LIMIT_PER_TAB = 50;
 const ATTACHMENT_MAX_FILES = 12;
 const ATTACHMENT_MAX_FILE_BYTES = 64 * 1024 * 1024;
@@ -287,7 +314,7 @@ const TODO_PROGRESS_PARTIAL_LINE_REGEX = /^\s*(?:(?:[-*]|\d+[.)])\s*)?\[(?: |x|X
 const CHAT_SCROLL_KEYS = new Set(["ArrowDown", "ArrowUp", "End", "Home", "PageDown", "PageUp", " "]);
 const TAB_ACTIVITY_IDLE_RECONCILE_GRACE_MS = 1200;
 const FOREGROUND_RECONCILE_DELAY_MS = 120;
-const TAB_GROUP_STATUS_PRIORITY = ["blocked", "done", "idle", "working"];
+const TAB_GROUP_STATUS_PRIORITY = ["blocked", "done", "working", "idle"];
 const EXTENSION_UI_BLOCKING_METHODS = new Set(["select", "confirm", "input", "editor"]);
 const BLOCKED_TAB_NOTIFICATION_TAG_PREFIX = "pi-webui-blocked-tab";
 const AGENT_DONE_NOTIFICATION_TAG_PREFIX = "pi-webui-agent-done";
@@ -2560,7 +2587,7 @@ function restoreActiveDraft() {
 
 function focusPromptInput({ defer = false } = {}) {
   const focus = () => {
-    if (!elements.promptInput || elements.dialog.open || elements.pathPickerDialog.open || elements.nativeCommandDialog.open || document.visibilityState === "hidden") return;
+    if (!elements.promptInput || elements.dialog.open || elements.pathPickerDialog.open || elements.nativeCommandDialog.open || elements.promptListDialog?.open || document.visibilityState === "hidden") return;
     try {
       elements.promptInput.focus({ preventScroll: true });
     } catch {
@@ -2631,10 +2658,7 @@ function resetActiveTabUi() {
   elements.eventLog.replaceChildren();
   const queuedSnapshot = activeTabId ? latestQueuedMessagesByTab.get(activeTabId) : null;
   if (queuedSnapshot) renderQueue({ tabId: activeTabId, ...queuedSnapshot });
-  else {
-    elements.queueBox.textContent = "No queued messages.";
-    elements.queueBox.classList.add("muted");
-  }
+  else renderQueue({ tabId: activeTabId, steering: [], followUp: [] });
   elements.commandsBox.textContent = "Loading…";
   elements.commandsBox.classList.add("muted");
   renderWidgets();
@@ -2773,8 +2797,9 @@ function renderTerminalTabGroup(group, groupCount = 1) {
   const isActive = groupTabs.some((tab) => tab.id === activeTabId);
   const isStopped = groupTabs.every((tab) => !tab.running);
   const indicator = tabGroupIndicator(groupTabs);
-  const title = tabGroupTitle(group.cwd, activeGroupTab?.title || "cwd");
-  const displayCwd = normalizeDisplayPath(group.cwd || title);
+  const cwdTitle = tabGroupTitle(group.cwd, activeGroupTab?.title || "cwd");
+  const activeTitle = activeGroupTab?.title || cwdTitle;
+  const displayCwd = normalizeDisplayPath(group.cwd || cwdTitle);
   const wrapper = make("div", `terminal-tab terminal-tab-group activity-${indicator.state}${isActive ? " active" : ""}${isStopped ? " stopped" : ""}`);
   wrapper.dataset.groupKey = group.key;
   wrapper.addEventListener("pointerenter", () => setOpenTerminalTabGroup(group.key));
@@ -2791,9 +2816,9 @@ function renderTerminalTabGroup(group, groupCount = 1) {
   button.setAttribute("aria-selected", isActive ? "true" : "false");
   button.setAttribute("aria-haspopup", "true");
   button.setAttribute("aria-expanded", group.key === openTerminalTabGroupKey ? "true" : "false");
-  button.setAttribute("aria-label", `${title} group: ${groupTabs.length} tabs, ${indicator.label}. Active ${activeGroupTab?.title || "terminal"}`);
-  button.title = `${displayCwd} · ${groupTabs.length} tabs · ${indicator.label}`;
-  appendTerminalTabContent(button, { title, indicator, meta: `${indicator.meta} · ${groupTabs.length} tabs`, count: groupTabs.length });
+  button.setAttribute("aria-label", `${cwdTitle} group: ${groupTabs.length} tabs, ${indicator.label}. Active ${activeTitle}`);
+  button.title = `${activeTitle} · ${displayCwd} · ${groupTabs.length} tabs · ${indicator.label}`;
+  appendTerminalTabContent(button, { title: activeTitle, indicator, meta: `${cwdTitle} · ${indicator.meta}`, count: groupTabs.length });
   button.addEventListener("click", () => switchTab(activeGroupTab.id));
   wrapper.append(button);
 
@@ -2854,6 +2879,8 @@ function renderTabs() {
   elements.terminalTabsToggleButton.textContent = active ? `${activeIndicator.glyph} ${active.title}${tabs.length > 1 ? ` · ${tabs.length}` : ""}` : "Tabs";
   elements.terminalTabsToggleButton.title = active ? `Show terminal tabs · active: ${active.title} · ${activeIndicator.label}` : "Show terminal tabs";
   elements.tabBar.replaceChildren();
+  elements.tabBar.dataset.tabCount = String(tabs.length);
+  elements.tabBar.classList.toggle("terminal-tabs-dense", tabs.length >= 10);
   const groups = tabCwdGroups();
   const renderedGroupKeys = new Set(groups.filter((group) => shouldRenderTerminalTabGroup(group, groups.length)).map((group) => group.key));
   if (openTerminalTabGroupKey && !renderedGroupKeys.has(openTerminalTabGroupKey)) openTerminalTabGroupKey = null;
@@ -3518,14 +3545,20 @@ function footerStatsCostDisplay(stats = latestStats) {
   return `$${Number(stats.cost || 0).toFixed(3)} (${footerCostAuthLabel()})`;
 }
 
+function footerContextDisplayWithAuto(value, state = currentState) {
+  const text = cleanStatusText(value);
+  if (!text) return "";
+  const withoutAuto = text.replace(/\s*\(auto\)\s*$/i, "");
+  return state?.autoCompactionEnabled !== false ? `${withoutAuto} (auto)` : withoutAuto;
+}
+
 function footerStatsContextDisplay(stats = latestStats) {
   const usage = stats?.contextUsage || currentState?.contextUsage;
   const contextWindow = usage?.contextWindow ?? currentState?.model?.contextWindow ?? 0;
   if (!contextWindow) return "";
   const rawPercent = Number(usage?.percent);
   const percent = Number.isFinite(rawPercent) ? `${rawPercent.toFixed(1)}%` : "?";
-  const auto = currentState?.autoCompactionEnabled !== false ? " (auto)" : "";
-  return `${percent}/${formatFooterTokenCount(contextWindow)}${auto}`;
+  return footerContextDisplayWithAuto(`${percent}/${formatFooterTokenCount(contextWindow)}`);
 }
 
 function fallbackFooterStats() {
@@ -3560,11 +3593,89 @@ function textFromContent(content) {
     .join("\n");
 }
 
+function cleanTooltipText(value) {
+  return stripAnsi(value).replace(/\r\n?/g, "\n").replace(/[^\S\n]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+let footerTooltipNode = null;
+let footerTooltipTarget = null;
+let footerTooltipEventsBound = false;
+
+function ensureFooterTooltipNode() {
+  if (!footerTooltipNode) {
+    footerTooltipNode = make("div", "footer-floating-tooltip");
+    footerTooltipNode.hidden = true;
+    document.body.append(footerTooltipNode);
+  }
+  if (!footerTooltipEventsBound) {
+    footerTooltipEventsBound = true;
+    const update = () => positionFooterTooltip(footerTooltipTarget);
+    window.addEventListener("resize", update, { passive: true });
+    window.addEventListener("scroll", update, { passive: true, capture: true });
+  }
+  return footerTooltipNode;
+}
+
+function positionFooterTooltip(target) {
+  if (!target || !footerTooltipNode || footerTooltipNode.hidden) return;
+  const gap = 8;
+  const margin = 8;
+  const rect = target.getBoundingClientRect();
+  const maxWidth = Math.max(96, Math.min(384, window.innerWidth - margin * 2));
+  footerTooltipNode.style.maxWidth = `${maxWidth}px`;
+
+  const width = footerTooltipNode.offsetWidth;
+  const height = footerTooltipNode.offsetHeight;
+  const align = target.getAttribute("data-tooltip-align") || "center";
+  let left = rect.left + rect.width / 2 - width / 2;
+  if (align === "start") left = rect.left;
+  if (align === "end") left = rect.right - width;
+  left = Math.min(Math.max(margin, left), Math.max(margin, window.innerWidth - margin - width));
+
+  let top = rect.top - gap - height;
+  if (top < margin) top = rect.bottom + gap;
+  top = Math.min(Math.max(margin, top), window.innerHeight - margin - height);
+
+  footerTooltipNode.style.left = `${Math.round(left)}px`;
+  footerTooltipNode.style.top = `${Math.round(top)}px`;
+}
+
+function showFooterTooltip(target) {
+  const text = target?.getAttribute("data-tooltip");
+  if (!text) return;
+  footerTooltipTarget = target;
+  const tooltip = ensureFooterTooltipNode();
+  tooltip.textContent = text;
+  tooltip.hidden = false;
+  tooltip.classList.add("visible");
+  positionFooterTooltip(target);
+}
+
+function hideFooterTooltip(target) {
+  if (target && target !== footerTooltipTarget) return;
+  footerTooltipTarget = null;
+  if (!footerTooltipNode) return;
+  footerTooltipNode.hidden = true;
+  footerTooltipNode.classList.remove("visible");
+}
+
+function applyFooterTooltip(node, tooltip, options = {}) {
+  const text = cleanTooltipText(tooltip);
+  if (!text) return node;
+  node.setAttribute("data-tooltip", text);
+  node.setAttribute("aria-label", text.replace(/\s+/g, " "));
+  if (options.align) node.setAttribute("data-tooltip-align", options.align);
+  node.addEventListener("mouseenter", () => showFooterTooltip(node));
+  node.addEventListener("mouseleave", () => hideFooterTooltip(node));
+  node.addEventListener("focus", () => showFooterTooltip(node));
+  node.addEventListener("blur", () => hideFooterTooltip(node));
+  return node;
+}
+
 function footerMetric(icon, label, value, tone = "", options = {}) {
   const node = make("span", `footer-metric ${tone}`.trim());
   node.append(make("span", "footer-metric-icon", icon), make("span", "footer-metric-label", label), make("span", "footer-metric-value", value));
-  node.title = options.title || `${label}: ${value}`;
-  return node;
+  return applyFooterTooltip(node, options.title || `${label}: ${value}`, { align: options.tooltipAlign });
 }
 
 function contextUsageActiveColor(percent) {
@@ -3610,8 +3721,7 @@ function footerMeta(label, value, className = "", options = {}) {
     node.addEventListener("click", options.onClick);
   }
   node.append(make("span", "footer-meta-label", label), make("span", "footer-meta-value", value));
-  node.title = options.title || `${label}: ${value}`;
-  return node;
+  return applyFooterTooltip(node, options.title || `${label}: ${value}`, { align: options.tooltipAlign });
 }
 
 const FOOTER_PAYLOAD_TONES = new Set(["pink", "blue", "mauve", "yellow", "green", "teal"]);
@@ -3627,8 +3737,25 @@ const FOOTER_META_CLASS_BY_KEY = new Map([
   ["thinking", "footer-thinking"],
 ]);
 
-function cleanFooterPayloadText(value, fallback = "") {
-  const text = cleanStatusText(value).slice(0, 240);
+const GIT_FOOTER_TOOLTIP_COPY = {
+  tokens: "Session token totals. ↑ is input/prompt tokens; ↓ is assistant output tokens.",
+  cache: "Provider prompt-cache usage. R is cache-read tokens; W is cache-write tokens.",
+  pi: "Estimated initial Pi prompt size before your message. … means the estimate is still pending.",
+  speed: "Assistant streaming speed. Shows live output tokens for the current reply and current or last tokens per second.",
+  cost: "Estimated session cost. sub means subscription-backed provider; api means metered API usage.",
+  context: "Context window pressure. Shows percent used over the model limit; auto means auto-compaction is enabled.",
+  cwd: "Active working directory for this Web UI tab.",
+  git: "Current Git branch. detached means HEAD is not on a branch; no repo means the cwd is outside a Git work tree.",
+  "git-state": "Active Git operation or detached state. Finish or abort rebase/merge/cherry-pick/revert/bisect before normal commits.",
+  sync: "Remote tracking divergence. ↑ means local commits ahead; ↓ means remote commits to pull.",
+  changes: "Working tree summary. ✅ staged, ✏️ modified unstaged, ➕ untracked, ⚠️ conflicted; clean means no changes.",
+  "git-extra": "Extra Git signals. 📦 stash, 🧩 dirty submodules, 🌳 worktrees, 🏷️ tag at HEAD, 🕒 last commit age, 🔓 signing mismatch.",
+  model: "Scoped model for this tab.",
+  thinking: "Reasoning/thinking effort for this tab.",
+};
+
+function cleanFooterPayloadText(value, fallback = "", maxLength = 240) {
+  const text = cleanStatusText(value).slice(0, maxLength);
   return text || fallback;
 }
 
@@ -3642,7 +3769,7 @@ function normalizeFooterPayloadChip(value, index) {
     value: cleanFooterPayloadText(value.value, "—"),
     icon: cleanFooterPayloadText(value.icon, "•").slice(0, 8),
     tone: FOOTER_PAYLOAD_TONES.has(value.tone) ? value.tone : "",
-    title: cleanFooterPayloadText(value.title, ""),
+    title: cleanFooterPayloadText(value.title, "", 4000),
   };
   if (value.contextUsage && typeof value.contextUsage === "object") {
     const percent = typeof value.contextUsage.percent === "number" ? value.contextUsage.percent : Number.NaN;
@@ -3721,14 +3848,19 @@ function parseGitFooterWebuiPayload() {
 }
 
 function footerPayloadWithLiveModel(payload) {
-  if (!payload || !currentState?.model) return payload;
-  const model = shortModelLabel(currentState.model);
+  if (!payload) return payload;
+  const model = currentState?.model ? shortModelLabel(currentState.model) : "";
   const effort = footerThinkingDisplay();
   const hasThinkingChip = [...payload.main, ...payload.meta].some((chip) => chip?.key === "thinking");
+  const contextChip = (chip) => {
+    const value = footerContextDisplayWithAuto(chip?.value);
+    return { ...chip, value, title: `context: ${value}` };
+  };
   const effortChip = (chip) => ({ ...chip, key: "thinking", label: "effort", value: effort, title: `effort: ${effort}`, tone: "mauve" });
   const splitChip = (chip) => {
+    if (chip?.key === "context") return [contextChip(chip)];
     if (chip?.key === "thinking") return [effortChip(chip)];
-    if (chip?.key !== "model") return [chip];
+    if (chip?.key !== "model" || !model) return [chip];
     const modelChip = { ...chip, value: model, title: `model: ${model}` };
     return hasThinkingChip ? [modelChip] : [modelChip, effortChip(chip)];
   };
@@ -3742,6 +3874,30 @@ function footerMetaClassForPayload(chip) {
   const base = FOOTER_META_CLASS_BY_KEY.get(chip.key) || "footer-extension-meta";
   const toneClass = chip.tone ? ` tone-${chip.tone}` : "";
   return `${base}${toneClass}`.trim();
+}
+
+function isRedundantFooterTooltipTitle(sourceTitle, chip, value) {
+  const normalized = cleanStatusText(sourceTitle).toLowerCase();
+  if (!normalized) return true;
+  const labels = [chip?.label, chip?.key].map((item) => cleanFooterPayloadText(item, "").toLowerCase()).filter(Boolean);
+  return [`current: ${value}`, ...labels.map((label) => `${label}: ${value}`)].some((item) => normalized === cleanStatusText(item).toLowerCase());
+}
+
+function gitFooterPayloadTooltip(chip, options = {}) {
+  const key = cleanFooterPayloadText(chip?.key, "");
+  const value = cleanFooterPayloadText(chip?.value, "—");
+  const sourceTitle = cleanFooterPayloadText(chip?.title, "", 4000);
+  const action = cleanFooterPayloadText(options.action, "", 1000);
+  const parts = [GIT_FOOTER_TOOLTIP_COPY[key] || "Extension-provided git-footer-status item.", `Current: ${value}`];
+  if (sourceTitle && !isRedundantFooterTooltipTitle(sourceTitle, chip, value)) parts.push(sourceTitle);
+  if (action) parts.push(action);
+  return parts.join("\n");
+}
+
+function gitFooterTooltipAlign(chip) {
+  if (["tokens", "cwd"].includes(chip?.key)) return "start";
+  if (["model", "thinking"].includes(chip?.key)) return "end";
+  return "center";
 }
 
 function footerTuiItem(value, className = "", options = {}) {
@@ -3776,28 +3932,35 @@ function renderTuiFooterLine({ cwd, cwdTitle, message = "", stats = [], model = 
 }
 
 function renderGitFooterPayloadMetric(chip) {
-  const node = footerMetric(chip.icon || "•", chip.label, chip.value, chip.tone ? `tone-${chip.tone}` : "", { title: chip.title || undefined });
+  const node = footerMetric(chip.icon || "•", chip.label, chip.value, chip.tone ? `tone-${chip.tone}` : "", {
+    title: gitFooterPayloadTooltip(chip),
+    tooltipAlign: gitFooterTooltipAlign(chip),
+  });
   return chip.contextUsage ? applyFooterContextUsage(node, chip.contextUsage) : node;
 }
 
 function renderGitFooterPayloadMeta(chip, tab) {
-  const options = { title: chip.title || undefined };
+  const options = {};
+  let action = "";
   if (chip.key === "cwd" && tab) {
     options.onClick = changeActiveTabCwd;
-    options.title = chip.title || `Change cwd for ${tab.title}: ${chip.value}`;
+    action = `Click to change the working directory for ${tab.title}.`;
   } else if (chip.key === "model") {
     options.onClick = () => setFooterModelPickerOpen(!footerModelPickerOpen);
-    options.title = chip.title || `Change scoped model: ${chip.value}`;
+    action = "Click to choose another model.";
   } else if (chip.key === "thinking") {
     options.onClick = () => setFooterThinkingPickerOpen(!footerThinkingPickerOpen);
-    options.title = chip.title || `Change thinking effort: ${chip.value}`;
+    action = "Click to change thinking effort.";
   }
+  options.title = gitFooterPayloadTooltip(chip, { action });
+  options.tooltipAlign = gitFooterTooltipAlign(chip);
   const node = footerMeta(chip.label, chip.value, footerMetaClassForPayload(chip), options);
   return chip.contextUsage ? applyFooterContextUsage(node, chip.contextUsage) : node;
 }
 
 function renderGitFooterPayload(payload) {
   const tab = activeTab();
+  hideFooterTooltip();
   elements.statusBar.replaceChildren();
   elements.statusBar.classList.remove("statusbar-tui-footer");
   elements.statusBar.classList.add("statusbar-git-footer");
@@ -3833,6 +3996,7 @@ function gitFooterFallbackMessage() {
 }
 
 function renderMinimalFooter() {
+  hideFooterTooltip();
   const tab = activeTab();
   const workspaceLabel = latestWorkspace?.displayCwd || (tab?.cwd ? normalizeDisplayPath(tab.cwd) : "loading…");
   const modelLine = footerModelLine();
@@ -3997,6 +4161,81 @@ function setPathPickerError(message) {
   elements.pathPickerError.hidden = !message;
 }
 
+function pathPickerCreateName() {
+  return elements.pathPickerCreateNameInput.value.trim();
+}
+
+function pathPickerCreateValidationError(name = pathPickerCreateName()) {
+  if (!name) return "Enter a directory name.";
+  if (name === "." || name === "..") return "Use a real directory name, not . or ..";
+  if (name.includes("\u0000")) return "Directory names cannot contain null bytes.";
+  if (/[\\/]/.test(name)) return "Create one directory at a time; do not include path separators.";
+  return "";
+}
+
+function updateCreateDirectoryControls() {
+  const busy = !!pathPickerState?.creatingDirectory;
+  const loading = !!pathPickerState?.loading;
+  const canCreate = !!pathPickerState?.cwd && !loading && !busy && !!pathPickerCreateName();
+  elements.pathPickerCreateNameInput.disabled = !pathPickerState || loading || busy;
+  elements.pathPickerCreateButton.disabled = !canCreate;
+  elements.pathPickerCreateButton.textContent = busy ? "Creating…" : "Create directory";
+}
+
+function pathPickerSearchQuery() {
+  return elements.pathPickerSearchInput.value.trim().toLowerCase();
+}
+
+function updatePathPickerSearchControls() {
+  const loading = !!pathPickerState?.loading;
+  const hasDirectory = !!pathPickerState?.cwd;
+  const hasQuery = !!pathPickerSearchQuery();
+  elements.pathPickerSearchInput.disabled = !pathPickerState || loading || !hasDirectory;
+  elements.pathPickerClearSearchButton.hidden = !hasQuery;
+  elements.pathPickerClearSearchButton.disabled = loading || !hasQuery;
+}
+
+function pathPickerDirectoryMatchesSearch(directory, query) {
+  if (!query) return true;
+  const haystack = String(directory?.name || "").toLowerCase();
+  return query.split(/\s+/).every((term) => haystack.includes(term));
+}
+
+function renderPathPickerDirectoryList() {
+  if (!pathPickerState) return;
+  const directories = Array.isArray(pathPickerState.directories) ? pathPickerState.directories : [];
+  const query = pathPickerSearchQuery();
+  const matches = directories.filter((directory) => pathPickerDirectoryMatchesSearch(directory, query));
+  pathPickerState.filteredDirectories = matches;
+  updatePathPickerSearchControls();
+  elements.pathPickerList.replaceChildren();
+
+  if (query) {
+    elements.pathPickerSearchStatus.textContent = matches.length === directories.length
+      ? `Showing all ${matches.length} director${matches.length === 1 ? "y" : "ies"}.`
+      : `Showing ${matches.length} of ${directories.length} directories.`;
+  } else {
+    elements.pathPickerSearchStatus.textContent = "";
+  }
+
+  if (!matches.length) {
+    elements.pathPickerList.append(make("div", "path-picker-empty muted", query ? `No directories match “${elements.pathPickerSearchInput.value.trim()}”.` : "No subdirectories."));
+    return;
+  }
+
+  for (const directory of matches) {
+    const button = pathPickerButton(`${directory.name}/`, directory.cwd, () => loadPathPickerDirectory(directory.cwd), `path-picker-directory${directory.hidden ? " hidden-directory" : ""}`);
+    button.setAttribute("role", "option");
+    elements.pathPickerList.append(button);
+  }
+}
+
+function clearPathPickerSearch({ focus = false } = {}) {
+  elements.pathPickerSearchInput.value = "";
+  renderPathPickerDirectoryList();
+  if (focus) elements.pathPickerSearchInput.focus();
+}
+
 function normalizeFastPicks(value) {
   const items = Array.isArray(value) ? value : [];
   const seen = new Set();
@@ -4137,11 +4376,17 @@ async function addCurrentFastPick() {
 function renderPathPicker(data) {
   if (!pathPickerState) return;
   pathPickerState.cwd = data.cwd;
+  pathPickerState.loading = false;
+  pathPickerState.directories = Array.isArray(data.directories) ? data.directories : [];
+  pathPickerState.filteredDirectories = pathPickerState.directories;
   elements.pathPickerCurrent.textContent = data.displayCwd || data.cwd;
   elements.pathPickerCurrent.title = data.cwd;
   elements.pathPickerChooseButton.disabled = false;
   elements.pathPickerChooseButton.textContent = "Use this directory";
+  elements.pathPickerCreateNameInput.value = "";
+  elements.pathPickerSearchInput.value = "";
   setPathPickerError(data.truncated ? "Showing the first 500 directories." : "");
+  updateCreateDirectoryControls();
   renderFastPicks();
 
   elements.pathPickerRoots.replaceChildren();
@@ -4152,25 +4397,19 @@ function renderPathPicker(data) {
     elements.pathPickerRoots.append(pathPickerButton(root.label, root.cwd, () => loadPathPickerDirectory(root.cwd), "path-picker-root-button"));
   }
 
-  elements.pathPickerList.replaceChildren();
-  if (!data.directories?.length) {
-    elements.pathPickerList.append(make("div", "path-picker-empty muted", "No subdirectories."));
-    return;
-  }
-
-  for (const directory of data.directories) {
-    const button = pathPickerButton(`${directory.name}/`, directory.cwd, () => loadPathPickerDirectory(directory.cwd), `path-picker-directory${directory.hidden ? " hidden-directory" : ""}`);
-    button.setAttribute("role", "option");
-    elements.pathPickerList.append(button);
-  }
+  renderPathPickerDirectoryList();
 }
 
 async function loadPathPickerDirectory(cwd) {
   if (!pathPickerState) return;
   const requestId = ++pathPickerState.requestId;
+  pathPickerState.loading = true;
   elements.pathPickerAddFastPickButton.disabled = true;
   elements.pathPickerChooseButton.disabled = true;
   elements.pathPickerCurrent.textContent = "Loading…";
+  elements.pathPickerSearchStatus.textContent = "";
+  updateCreateDirectoryControls();
+  updatePathPickerSearchControls();
   setPathPickerError("");
 
   try {
@@ -4180,10 +4419,45 @@ async function loadPathPickerDirectory(cwd) {
     renderPathPicker(response.data || {});
   } catch (error) {
     if (!pathPickerState || pathPickerState.requestId !== requestId) return;
+    pathPickerState.loading = false;
     elements.pathPickerChooseButton.disabled = false;
     elements.pathPickerCurrent.textContent = pathPickerState.cwd || "Unable to load directory";
     setPathPickerError(error.message);
+    updateCreateDirectoryControls();
+    updatePathPickerSearchControls();
     updateAddFastPickButton();
+  }
+}
+
+async function createPathPickerDirectory() {
+  const state = pathPickerState;
+  if (!state?.cwd || state.loading || state.creatingDirectory) return;
+  const name = pathPickerCreateName();
+  const validationError = pathPickerCreateValidationError(name);
+  if (validationError) {
+    setPathPickerError(validationError);
+    elements.pathPickerCreateNameInput.focus();
+    return;
+  }
+
+  const requestId = ++state.requestId;
+  state.creatingDirectory = true;
+  updateCreateDirectoryControls();
+  setPathPickerError("");
+  try {
+    const response = await api("/api/directories", { method: "POST", body: { parent: state.cwd, name } });
+    if (!pathPickerState || pathPickerState !== state || state.requestId !== requestId) return;
+    renderPathPicker(response.data || {});
+    elements.pathPickerChooseButton.focus({ preventScroll: true });
+  } catch (error) {
+    if (!pathPickerState || pathPickerState !== state || state.requestId !== requestId) return;
+    setPathPickerError(error.message);
+    elements.pathPickerCreateNameInput.focus();
+  } finally {
+    if (pathPickerState === state) {
+      state.creatingDirectory = false;
+      updateCreateDirectoryControls();
+    }
   }
 }
 
@@ -4199,15 +4473,20 @@ function pickCwd(tab, initialCwd) {
   if (pathPickerState) return Promise.resolve(null);
 
   return new Promise((resolve) => {
-    pathPickerState = { tabId: tab.id, cwd: initialCwd, requestId: 0, resolve };
+    pathPickerState = { tabId: tab.id, cwd: initialCwd, requestId: 0, loading: false, creatingDirectory: false, directories: [], filteredDirectories: [], resolve };
     elements.pathPickerTitle.textContent = `Choose CWD for ${tab.title}`;
     elements.pathPickerCurrent.textContent = "Loading…";
+    elements.pathPickerCreateNameInput.value = "";
+    elements.pathPickerSearchInput.value = "";
+    elements.pathPickerSearchStatus.textContent = "";
     elements.pathPickerFastPicks.replaceChildren();
     elements.pathPickerRoots.replaceChildren();
     elements.pathPickerList.replaceChildren();
     setPathPickerError("");
     elements.pathPickerAddFastPickButton.disabled = true;
     elements.pathPickerChooseButton.disabled = true;
+    updateCreateDirectoryControls();
+    updatePathPickerSearchControls();
     initializeFastPicks().catch((error) => addEvent(`failed to initialize path fast picks: ${error.message}`, "error"));
     elements.pathPickerDialog.showModal();
     loadPathPickerDirectory(initialCwd);
@@ -5283,23 +5562,72 @@ function normalizeQueuedMessages(event) {
   };
 }
 
+function queueMessageCount(snapshot) {
+  return (snapshot?.steering?.length || 0) + (snapshot?.followUp?.length || 0);
+}
+
+function updateQueueHeaderBadge(total) {
+  if (!elements.queueCountBadge) return;
+  elements.queueCountBadge.hidden = total === 0;
+  elements.queueCountBadge.textContent = String(total);
+  elements.queueCountBadge.setAttribute("aria-label", `${total} queued message${total === 1 ? "" : "s"}`);
+}
+
+function queueSummaryPill(label, count, tone) {
+  const pill = make("span", `queue-summary-pill ${tone}`.trim());
+  pill.append(make("strong", undefined, String(count)), make("span", undefined, label));
+  return pill;
+}
+
+function renderQueueGroup(label, items, tone) {
+  const group = make("section", `queue-group ${tone}`.trim());
+  const heading = make("h3", "queue-group-title");
+  heading.append(make("span", undefined, label), make("span", "queue-group-count", String(items.length)));
+  const list = make("ol", "queue-list");
+  items.forEach((item, index) => {
+    const row = make("li", "queue-item");
+    row.append(make("span", "queue-item-number", `#${index + 1}`), make("div", "queue-item-text", item));
+    list.append(row);
+  });
+  group.append(heading, list);
+  return group;
+}
+
 function renderQueue(event) {
   const snapshot = normalizeQueuedMessages(event);
   const tabId = event?.tabId || activeTabId;
   if (tabId) latestQueuedMessagesByTab.set(tabId, snapshot);
   const steering = snapshot.steering;
   const followUp = snapshot.followUp;
-  if (steering.length === 0 && followUp.length === 0) {
-    elements.queueBox.textContent = "No queued messages.";
-    elements.queueBox.classList.add("muted");
+  const total = queueMessageCount(snapshot);
+  updateQueueHeaderBadge(total);
+  elements.queueBox.replaceChildren();
+  elements.queueBox.classList.toggle("muted", total === 0);
+  elements.queueBox.classList.toggle("has-items", total > 0);
+  if (total === 0) {
+    elements.queueBox.append(make("div", "queue-empty", "No queued messages."));
+    updateStickyUserPromptButton();
     return;
   }
-  elements.queueBox.classList.remove("muted");
-  const lines = [];
-  if (steering.length) lines.push(`Steering (${steering.length}):`, ...steering.map((item) => `• ${item}`));
-  if (followUp.length) lines.push(`Follow-up (${followUp.length}):`, ...followUp.map((item) => `• ${item}`));
-  lines.push("↳ Alt+Up restores the latest observed queue snapshot to the composer (RPC queue clearing is pending upstream support).");
-  elements.queueBox.textContent = lines.join("\n");
+
+  const summary = make("div", "queue-summary");
+  summary.append(make("strong", undefined, `${total} queued message${total === 1 ? "" : "s"}`));
+  const counts = make("div", "queue-summary-counts");
+  if (steering.length) counts.append(queueSummaryPill("steering", steering.length, "steering"));
+  if (followUp.length) counts.append(queueSummaryPill("follow-up", followUp.length, "follow-up"));
+  summary.append(counts);
+
+  elements.queueBox.append(summary);
+  if (steering.length) elements.queueBox.append(renderQueueGroup("Steering", steering, "steering"));
+  if (followUp.length) elements.queueBox.append(renderQueueGroup("Follow-up", followUp, "follow-up"));
+  elements.queueBox.append(make("div", "queue-hint", "Alt+Up restores this queue snapshot to the composer. RPC queue clearing is pending upstream support."));
+  updateStickyUserPromptButton();
+}
+
+function nextQueuedFollowUpPrompt(tabId = activeTabId) {
+  const snapshot = tabId ? latestQueuedMessagesByTab.get(tabId) : null;
+  const next = Array.isArray(snapshot?.followUp) ? snapshot.followUp.find((item) => String(item || "").trim()) : null;
+  return next ? stickyUserPromptPreviewText(next) : "";
 }
 
 function queuedMessagesForComposer(tabId = activeTabId) {
@@ -5322,6 +5650,353 @@ function restoreQueuedMessagesToComposerFromShortcut() {
   focusPromptInput({ defer: true });
   addEvent(`restored ${queued.length} queued message${queued.length === 1 ? "" : "s"} to composer; Pi's RPC queue is still pending upstream clear support`, "warn");
   return true;
+}
+
+function normalizePromptListPrompts(prompts) {
+  return (Array.isArray(prompts) ? prompts : [])
+    .map((prompt) => String(prompt || "").trim())
+    .filter(Boolean);
+}
+
+function promptListStorageId() {
+  if (window.crypto?.randomUUID) return window.crypto.randomUUID();
+  return `prompt-list-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function promptListFallbackName(prompts) {
+  const first = String(prompts?.[0] || "").replace(/\s+/g, " ").trim();
+  if (!first) return "Untitled prompt list";
+  return first.length > 58 ? `${first.slice(0, 57)}…` : first;
+}
+
+function normalizePromptListRecord(record) {
+  const prompts = normalizePromptListPrompts(record?.prompts);
+  if (prompts.length === 0) return null;
+  const id = String(record?.id || "").trim() || promptListStorageId();
+  const now = new Date().toISOString();
+  const name = String(record?.name || "").trim() || promptListFallbackName(prompts);
+  return {
+    id,
+    name,
+    prompts,
+    createdAt: String(record?.createdAt || record?.updatedAt || now),
+    updatedAt: String(record?.updatedAt || now),
+  };
+}
+
+function readStoredPromptLists() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(PROMPT_LIST_STORAGE_KEY) || "[]");
+    const records = Array.isArray(raw) ? raw : Object.values(raw || {});
+    return records
+      .map(normalizePromptListRecord)
+      .filter(Boolean)
+      .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+  } catch {
+    return [];
+  }
+}
+
+function writeStoredPromptLists(lists) {
+  localStorage.setItem(PROMPT_LIST_STORAGE_KEY, JSON.stringify(lists.map(normalizePromptListRecord).filter(Boolean)));
+}
+
+function savedPromptListById(id) {
+  const key = String(id || "");
+  return readStoredPromptLists().find((list) => list.id === key) || null;
+}
+
+function deleteStoredPromptList(id) {
+  const key = String(id || "");
+  if (!key) return null;
+  const lists = readStoredPromptLists();
+  const deleted = lists.find((list) => list.id === key) || null;
+  if (!deleted) return null;
+  writeStoredPromptLists(lists.filter((list) => list.id !== key));
+  return deleted;
+}
+
+function upsertStoredPromptList(record) {
+  const normalized = normalizePromptListRecord(record);
+  if (!normalized) throw new Error("Prompt list needs at least one prompt.");
+  const existing = readStoredPromptLists().filter((list) => list.id !== normalized.id);
+  writeStoredPromptLists([normalized, ...existing]);
+  return normalized;
+}
+
+function promptListEditorValues() {
+  return Array.from(elements.promptListEditorRows?.querySelectorAll("textarea") || [])
+    .map((textarea) => textarea.value || "");
+}
+
+function currentPromptListPrompts() {
+  return normalizePromptListPrompts(promptListEditorValues());
+}
+
+function setPromptListStatus(message = "", level = "muted") {
+  if (!elements.promptListStatus) return;
+  elements.promptListStatus.textContent = message;
+  elements.promptListStatus.className = `prompt-list-status ${level || "muted"}`.trim();
+}
+
+function renderPromptListDialogControls() {
+  const hasPrompts = currentPromptListPrompts().length > 0;
+  if (elements.promptListRunListButton) elements.promptListRunListButton.disabled = promptListRunning || !hasPrompts;
+  if (elements.promptListSaveButton) elements.promptListSaveButton.disabled = promptListRunning || !hasPrompts;
+  if (elements.promptListAddPromptButton) elements.promptListAddPromptButton.disabled = promptListRunning;
+  if (elements.promptListDialogLoadButton) elements.promptListDialogLoadButton.disabled = promptListRunning;
+  if (elements.promptListLoadSelectedButton) elements.promptListLoadSelectedButton.disabled = promptListRunning || !elements.promptListSelect?.value;
+  if (elements.promptListDeleteSelectedButton) elements.promptListDeleteSelectedButton.disabled = promptListRunning || !elements.promptListSelect?.value;
+}
+
+function renderPromptListEditor(prompts = [""]) {
+  const values = (Array.isArray(prompts) && prompts.length ? prompts : [""]).map((prompt) => String(prompt || ""));
+  elements.promptListEditorRows?.replaceChildren();
+  values.forEach((value, index) => {
+    const row = make("div", "prompt-list-editor-row");
+    const label = make("label", "prompt-list-editor-label");
+    label.setAttribute("for", `promptListPrompt${index}`);
+    label.textContent = index === 0 ? "Start prompt" : `Follow-up #${index}`;
+    const textarea = make("textarea", "dialog-editor prompt-list-textarea");
+    textarea.id = `promptListPrompt${index}`;
+    textarea.rows = index === 0 ? 4 : 3;
+    textarea.placeholder = index === 0 ? "Prompt that starts the run…" : "Follow-up prompt to queue after the start prompt…";
+    textarea.value = value;
+    textarea.addEventListener("input", () => {
+      setPromptListStatus("");
+      renderPromptListDialogControls();
+    });
+    const header = make("div", "prompt-list-editor-row-header");
+    header.append(label);
+    if (index > 0) {
+      const remove = make("button", "prompt-list-remove-button", "×");
+      remove.type = "button";
+      remove.title = `Remove follow-up #${index}`;
+      remove.setAttribute("aria-label", `Remove follow-up prompt ${index}`);
+      remove.addEventListener("click", () => {
+        const next = promptListEditorValues();
+        next.splice(index, 1);
+        renderPromptListEditor(next.length ? next : [""]);
+        setPromptListStatus("Follow-up removed.", "muted");
+      });
+      header.append(remove);
+    }
+    row.append(header, textarea);
+    elements.promptListEditorRows?.append(row);
+  });
+  renderPromptListDialogControls();
+}
+
+function populatePromptListSelect(selectedId = "") {
+  if (!elements.promptListSelect) return;
+  const lists = readStoredPromptLists();
+  elements.promptListSelect.replaceChildren();
+  if (lists.length === 0) {
+    const option = make("option", undefined, "No saved prompt lists");
+    option.value = "";
+    elements.promptListSelect.append(option);
+    elements.promptListSelect.disabled = true;
+  } else {
+    elements.promptListSelect.disabled = false;
+    for (const list of lists) {
+      const option = make("option", undefined, `${list.name} (${list.prompts.length})`);
+      option.value = list.id;
+      elements.promptListSelect.append(option);
+    }
+    elements.promptListSelect.value = selectedId && lists.some((list) => list.id === selectedId) ? selectedId : lists[0].id;
+  }
+  renderPromptListDialogControls();
+}
+
+function setPromptListLoadPanelVisible(visible) {
+  if (!elements.promptListLoadPanel) return;
+  elements.promptListLoadPanel.hidden = !visible;
+  if (visible) populatePromptListSelect(elements.promptListSelect?.value || elements.promptListDialog?.dataset.promptListId || "");
+}
+
+function loadPromptListIntoEditor(record, { updateLoaded = true } = {}) {
+  const list = normalizePromptListRecord(record);
+  if (!list) return false;
+  if (elements.promptListDialog) elements.promptListDialog.dataset.promptListId = list.id;
+  if (elements.promptListNameInput) elements.promptListNameInput.value = list.name;
+  renderPromptListEditor(list.prompts);
+  setPromptListStatus(`Loaded “${list.name}”.`, "success");
+  if (updateLoaded) setLoadedPromptList(list);
+  return true;
+}
+
+function loadSelectedPromptListIntoEditor() {
+  const list = savedPromptListById(elements.promptListSelect?.value);
+  if (!list) {
+    setPromptListStatus("No saved prompt list selected.", "warn");
+    return;
+  }
+  if (loadPromptListIntoEditor(list, { updateLoaded: true })) elements.promptListDialog?.close();
+}
+
+function deleteSelectedPromptList() {
+  const list = savedPromptListById(elements.promptListSelect?.value);
+  if (!list) {
+    setPromptListStatus("No saved prompt list selected to delete.", "warn");
+    return;
+  }
+  if (!window.confirm(`Delete prompt list “${list.name}”? This cannot be undone.`)) return;
+  const deleted = deleteStoredPromptList(list.id);
+  if (!deleted) {
+    setPromptListStatus("Prompt list was already deleted.", "warn");
+    populatePromptListSelect();
+    return;
+  }
+  if (loadedPromptList?.id === deleted.id) setLoadedPromptList(null);
+  if (elements.promptListDialog?.dataset.promptListId === deleted.id) {
+    elements.promptListDialog.dataset.promptListId = "";
+    if (elements.promptListNameInput) elements.promptListNameInput.value = "";
+    renderPromptListEditor([""]);
+  }
+  populatePromptListSelect();
+  setPromptListStatus(`Deleted “${deleted.name}”.`, "success");
+  addEvent(`deleted prompt list “${deleted.name}”`);
+}
+
+function openPromptListDialog({ mode = "create", list = null } = {}) {
+  const normalized = normalizePromptListRecord(list);
+  if (elements.promptListDialog) elements.promptListDialog.dataset.promptListId = normalized?.id || "";
+  if (elements.promptListDialogTitle) elements.promptListDialogTitle.textContent = mode === "load" ? "Load prompt list" : "Create prompt list";
+  if (elements.promptListNameInput) elements.promptListNameInput.value = normalized?.name || "";
+  renderPromptListEditor(normalized?.prompts || [""]);
+  setPromptListStatus(mode === "load" ? "Choose a saved list, then load or run it." : "");
+  setPromptListLoadPanelVisible(mode === "load");
+  if (!elements.promptListDialog?.open) elements.promptListDialog?.showModal();
+  queueMicrotask(() => {
+    const target = mode === "load" && !normalized ? elements.promptListSelect : elements.promptListEditorRows?.querySelector("textarea");
+    target?.focus();
+  });
+}
+
+function displayedPromptListRecord() {
+  const prompts = currentPromptListPrompts();
+  if (prompts.length === 0) return null;
+  const id = String(elements.promptListDialog?.dataset.promptListId || "").trim() || promptListStorageId();
+  const existing = savedPromptListById(id);
+  const now = new Date().toISOString();
+  return {
+    id,
+    name: String(elements.promptListNameInput?.value || "").trim() || promptListFallbackName(prompts),
+    prompts,
+    createdAt: existing?.createdAt || now,
+    updatedAt: now,
+  };
+}
+
+function saveDisplayedPromptList() {
+  const record = displayedPromptListRecord();
+  if (!record) {
+    setPromptListStatus("Add at least one prompt before saving.", "warn");
+    return null;
+  }
+  try {
+    const saved = upsertStoredPromptList(record);
+    if (elements.promptListDialog) elements.promptListDialog.dataset.promptListId = saved.id;
+    if (elements.promptListNameInput) elements.promptListNameInput.value = saved.name;
+    populatePromptListSelect(saved.id);
+    setLoadedPromptList(saved);
+    setPromptListStatus(`Saved “${saved.name}”.`, "success");
+    addEvent(`saved prompt list “${saved.name}” with ${saved.prompts.length} prompt${saved.prompts.length === 1 ? "" : "s"}`);
+    return saved;
+  } catch (error) {
+    setPromptListStatus(error.message || "Failed to save prompt list.", "error");
+    addEvent(error.message || "failed to save prompt list", "error");
+    return null;
+  }
+}
+
+function setLoadedPromptList(record) {
+  loadedPromptList = normalizePromptListRecord(record);
+  renderLoadedPromptListPreview();
+}
+
+function renderLoadedPromptListPreview() {
+  if (elements.runLoadedPromptListButton) elements.runLoadedPromptListButton.disabled = promptListRunning || !loadedPromptList;
+  if (!elements.loadedPromptListBox) return;
+  elements.loadedPromptListBox.replaceChildren();
+  elements.loadedPromptListBox.classList.toggle("muted", !loadedPromptList);
+  if (!loadedPromptList) {
+    elements.loadedPromptListBox.textContent = "No prompt list loaded.";
+    return;
+  }
+  const total = loadedPromptList.prompts.length;
+  const followUps = Math.max(0, total - 1);
+  const summary = make("div", "loaded-prompt-list-summary");
+  summary.append(make("strong", undefined, loadedPromptList.name), make("span", undefined, `${total} prompt${total === 1 ? "" : "s"} · ${followUps} follow-up${followUps === 1 ? "" : "s"}`));
+  const preview = make("ol", "prompt-list-preview");
+  loadedPromptList.prompts.slice(0, 4).forEach((prompt, index) => {
+    const item = make("li", "prompt-list-preview-item");
+    item.append(make("span", "prompt-list-preview-index", index === 0 ? "Start" : `#${index}`), make("span", "prompt-list-preview-text", prompt));
+    preview.append(item);
+  });
+  if (loadedPromptList.prompts.length > 4) {
+    const more = make("li", "prompt-list-preview-more", `+${loadedPromptList.prompts.length - 4} more follow-up prompt${loadedPromptList.prompts.length - 4 === 1 ? "" : "s"}`);
+    preview.append(more);
+  }
+  elements.loadedPromptListBox.append(summary, preview);
+}
+
+function setPromptListRunning(running) {
+  promptListRunning = !!running;
+  renderLoadedPromptListPreview();
+  renderPromptListDialogControls();
+}
+
+async function runPromptList(prompts, { name = "Prompt list" } = {}) {
+  const listPrompts = normalizePromptListPrompts(prompts);
+  if (listPrompts.length === 0) {
+    setPromptListStatus("Add or load at least one prompt before running.", "warn");
+    return;
+  }
+  const targetTabId = activeTabId;
+  if (!targetTabId) {
+    addEvent("cannot run prompt list without an active tab", "error");
+    setPromptListStatus("No active tab available.", "error");
+    return;
+  }
+  if (promptListRunning) return;
+  const tabContext = activeTabContext(targetTabId);
+  setPromptListRunning(true);
+  setPromptListStatus(`Running “${name}”…`, "muted");
+  addEvent(`running prompt list “${name}” (${listPrompts.length} prompt${listPrompts.length === 1 ? "" : "s"})`);
+  try {
+    await sendPrompt("prompt", listPrompts[0], { targetTabId, throwOnError: true });
+    for (const prompt of listPrompts.slice(1)) {
+      await sendPrompt("follow-up", prompt, { targetTabId, throwOnError: true });
+    }
+    setPromptListStatus(`Queued “${name}”.`, "success");
+    if (isCurrentTabContext(tabContext)) {
+      addEvent(`queued prompt list “${name}”: 1 start prompt and ${Math.max(0, listPrompts.length - 1)} follow-up${listPrompts.length === 2 ? "" : "s"}`);
+      scheduleRefreshState(120, tabContext);
+    }
+  } catch (error) {
+    setPromptListStatus(error.message || "Failed to run prompt list.", "error");
+    addEvent(error.message || "failed to run prompt list", "error");
+  } finally {
+    setPromptListRunning(false);
+  }
+}
+
+async function runDisplayedPromptList() {
+  const saved = saveDisplayedPromptList();
+  if (!saved) {
+    setPromptListStatus("Save the list before running so it stays available afterward.", "warn");
+    return;
+  }
+  await runPromptList(saved.prompts, { name: saved.name });
+}
+
+async function runLoadedPromptList() {
+  if (!loadedPromptList) {
+    openPromptListDialog({ mode: "load" });
+    return;
+  }
+  await runPromptList(loadedPromptList.prompts, { name: loadedPromptList.name });
 }
 
 function appendText(parent, text, className = "text-block") {
@@ -6303,13 +6978,22 @@ function updateStickyUserPromptButton() {
   button.dataset.compacted = target.compacted ? "true" : "false";
   if (Number.isInteger(target.index) && target.index >= 0) button.dataset.messageIndex = String(target.index);
   else button.removeAttribute("data-message-index");
-  button.title = target.compacted ? `Prompt was compacted; jump to compaction summary: ${target.preview}` : `Jump to ${label.toLowerCase()}: ${target.preview}`;
-  button.setAttribute("aria-label", target.compacted ? `Prompt was compacted; jump to compaction summary: ${target.preview}` : `Jump to ${label.toLowerCase()} (${ordinal} of ${targets.length}): ${target.preview}`);
-  button.replaceChildren(
+  const nextFollowUp = nextQueuedFollowUpPrompt();
+  const baseTitle = target.compacted ? `Prompt was compacted; jump to compaction summary: ${target.preview}` : `Jump to ${label.toLowerCase()}: ${target.preview}`;
+  const baseAriaLabel = target.compacted ? `Prompt was compacted; jump to compaction summary: ${target.preview}` : `Jump to ${label.toLowerCase()} (${ordinal} of ${targets.length}): ${target.preview}`;
+  button.title = nextFollowUp ? `${baseTitle}\nNext follow-up prompt: ${nextFollowUp}` : baseTitle;
+  button.setAttribute("aria-label", nextFollowUp ? `${baseAriaLabel}. Next follow-up prompt: ${nextFollowUp}` : baseAriaLabel);
+  const children = [
     make("span", "sticky-user-prompt-label", label),
     make("span", "sticky-user-prompt-text", target.preview),
     make("span", "sticky-user-prompt-meta", meta),
-  );
+  ];
+  if (nextFollowUp) {
+    const followUp = make("span", "sticky-user-follow-up-prompt");
+    followUp.append(make("span", "sticky-user-follow-up-label", "Next follow-up"), make("span", "sticky-user-follow-up-text", nextFollowUp));
+    children.push(followUp);
+  }
+  button.replaceChildren(...children);
 }
 
 function assistantToolCallId(part) {
@@ -8071,7 +8755,7 @@ async function openNativeSettingsDialog() {
     ], "How queued follow-ups are delivered after the current response.", { label: "now", tone: "now" }),
     transport: nativeSettingSelect("Transport", settings.transport || "auto", SETTINGS_TRANSPORT_OPTIONS, "Preferred provider transport when multiple transports are supported.", { label: "reload", tone: "reload" }),
     httpIdleTimeout: nativeSettingSelect("HTTP idle timeout", currentHttpIdleTimeoutValue(settings), httpIdleTimeoutOptions(settings), "Maximum idle gap while waiting for provider HTTP data.", { label: "reload", tone: "reload" }),
-    busyBehavior: nativeSettingSelect("Busy prompt behavior", elements.busyBehavior.value || "followUp", [
+    busyBehavior: nativeSettingSelect("Busy prompt behavior", busyPromptBehavior, [
       { value: "followUp", label: "follow-up" },
       { value: "steer", label: "steer" },
     ], "When you submit a normal prompt while a tab is already busy.", { label: "browser", tone: "browser" }),
@@ -8120,7 +8804,7 @@ async function openNativeSettingsDialog() {
       if (controls.steering.select.value !== (state.steeringMode || "one-at-a-time")) requests.push(nativeCommandApi("/api/steering-mode", { method: "POST", body: { mode: controls.steering.select.value } }));
       if (controls.followUp.select.value !== (state.followUpMode || "one-at-a-time")) requests.push(nativeCommandApi("/api/follow-up-mode", { method: "POST", body: { mode: controls.followUp.select.value } }));
       if (controls.autoCompact.input.checked !== (state.autoCompactionEnabled !== false)) requests.push(nativeCommandApi("/api/auto-compaction", { method: "POST", body: { enabled: controls.autoCompact.input.checked } }));
-      elements.busyBehavior.value = controls.busyBehavior.select.value;
+      busyPromptBehavior = controls.busyBehavior.select.value;
       if (controls.thinkingOutput.input.checked !== thinkingOutputVisible) setThinkingOutputVisible(controls.thinkingOutput.input.checked);
       if (controls.doneNotifications.input.checked !== agentDoneNotificationsEnabled) await setAgentDoneNotificationsEnabled(controls.doneNotifications.input.checked);
       await Promise.all(requests);
@@ -9825,11 +10509,10 @@ async function sendUserBashCommand(parsed, { usesPromptInput = false, targetTabI
   await runUserBashCommand(parsed, { usesPromptInput, targetTabId });
 }
 
-async function sendPrompt(kind = "prompt", explicitMessage) {
+async function sendPrompt(kind = "prompt", explicitMessage, { targetTabId = activeTabId, throwOnError = false } = {}) {
   const usesPromptInput = explicitMessage === undefined;
   const rawMessage = usesPromptInput ? elements.promptInput.value : explicitMessage;
   const originalMessage = String(rawMessage || "").trim();
-  const targetTabId = activeTabId;
   if (!targetTabId) return;
   const tabContext = activeTabContext(targetTabId);
   const attachments = usesPromptInput ? [...attachmentsForTab(targetTabId)] : [];
@@ -9842,7 +10525,7 @@ async function sendPrompt(kind = "prompt", explicitMessage) {
   }
 
   const targetWasStreaming = !!currentState?.isStreaming;
-  const busyBehavior = elements.busyBehavior.value || "followUp";
+  const busyBehavior = busyPromptBehavior || "followUp";
   const startsRun = kind === "prompt" && !targetWasStreaming;
   autoFollowChat = true;
   updateJumpToLatestButton();
@@ -9923,6 +10606,7 @@ async function sendPrompt(kind = "prompt", explicitMessage) {
       addEvent(error.message, "error");
       addTransientMessage({ role: "error", title: message.startsWith("/") ? message.split(/\s+/, 1)[0] : "error", content: error.message, level: "error" });
     }
+    if (throwOnError) throw error;
   }
 }
 
@@ -10335,6 +11019,25 @@ function connectEvents(tabContext = activeTabContext()) {
 elements.copyServerCommandButton?.addEventListener("click", copyServerStartCommand);
 elements.retryServerConnectionButton?.addEventListener("click", retryServerConnection);
 elements.commandSearchInput?.addEventListener("input", renderCommands);
+elements.createPromptListButton?.addEventListener("click", () => openPromptListDialog({ mode: "create" }));
+elements.loadPromptListButton?.addEventListener("click", () => openPromptListDialog({ mode: "load", list: loadedPromptList }));
+elements.runLoadedPromptListButton?.addEventListener("click", () => runLoadedPromptList());
+elements.promptListAddPromptButton?.addEventListener("click", () => {
+  const next = promptListEditorValues();
+  next.push("");
+  renderPromptListEditor(next);
+  setPromptListStatus("Added follow-up prompt.", "muted");
+  queueMicrotask(() => elements.promptListEditorRows?.querySelector(".prompt-list-editor-row:last-child textarea")?.focus());
+});
+elements.promptListDialogLoadButton?.addEventListener("click", () => setPromptListLoadPanelVisible(elements.promptListLoadPanel?.hidden !== false));
+elements.promptListLoadSelectedButton?.addEventListener("click", loadSelectedPromptListIntoEditor);
+elements.promptListDeleteSelectedButton?.addEventListener("click", deleteSelectedPromptList);
+elements.promptListSelect?.addEventListener("change", renderPromptListDialogControls);
+elements.promptListNameInput?.addEventListener("input", () => setPromptListStatus(""));
+elements.promptListSaveButton?.addEventListener("click", saveDisplayedPromptList);
+elements.promptListRunListButton?.addEventListener("click", () => runDisplayedPromptList());
+elements.promptListCloseButton?.addEventListener("click", () => elements.promptListDialog?.close());
+elements.promptListDialog?.querySelector("form")?.addEventListener("submit", (event) => event.preventDefault());
 elements.sendFeedbackButton.addEventListener("click", () => submitQueuedActionFeedback());
 elements.composer.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -10783,6 +11486,21 @@ window.addEventListener("keydown", (event) => {
 elements.refreshCodexUsageButton?.addEventListener("click", () => {
   refreshCodexUsage({ forceAuthRefresh: true }).finally(() => scheduleRefreshCodexUsage());
 });
+elements.pathPickerCreateNameInput.addEventListener("input", updateCreateDirectoryControls);
+elements.pathPickerCreateNameInput.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  createPathPickerDirectory().catch((error) => addEvent(error.message, "error"));
+});
+elements.pathPickerCreateButton.addEventListener("click", () => createPathPickerDirectory().catch((error) => addEvent(error.message, "error")));
+elements.pathPickerSearchInput.addEventListener("input", renderPathPickerDirectoryList);
+elements.pathPickerSearchInput.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  const onlyMatch = pathPickerState?.filteredDirectories?.length === 1 ? pathPickerState.filteredDirectories[0] : null;
+  if (onlyMatch) loadPathPickerDirectory(onlyMatch.cwd);
+});
+elements.pathPickerClearSearchButton.addEventListener("click", () => clearPathPickerSearch({ focus: true }));
 elements.pathPickerAddFastPickButton.addEventListener("click", () => addCurrentFastPick().catch((error) => addEvent(error.message, "error")));
 elements.pathPickerCancelButton.addEventListener("click", () => closePathPicker(null));
 elements.pathPickerChooseButton.addEventListener("click", () => closePathPicker(pathPickerState?.cwd || null));
@@ -10876,6 +11594,7 @@ resizePromptInput();
 focusPromptInput({ defer: true });
 updateComposerModeButtons();
 updateOptionalFeatureAvailability();
+renderLoadedPromptListPreview();
 loadLastUserPromptCache();
 loadPromptHistoryCache();
 installViewportHandlers();

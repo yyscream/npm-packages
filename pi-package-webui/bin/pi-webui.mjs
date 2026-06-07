@@ -1419,6 +1419,33 @@ async function getDirectoryPickerData(viewPath, activeCwd) {
   };
 }
 
+function cleanDirectoryCreateName(value) {
+  const name = String(value || "").trim();
+  if (!name) throw makeHttpError(400, "Directory name is required");
+  if (name === "." || name === "..") throw makeHttpError(400, "Directory name cannot be . or ..");
+  if (name.includes("\u0000")) throw makeHttpError(400, "Directory name cannot contain null bytes");
+  if (name.includes("/") || name.includes("\\")) throw makeHttpError(400, "Create one directory at a time; path separators are not allowed");
+  if (name.length > 255) throw makeHttpError(400, "Directory name is too long");
+  return name;
+}
+
+async function createDirectoryPickerDirectory(parentPath, nameValue, activeCwd) {
+  const parent = await resolveCwd(parentPath || activeCwd, activeCwd);
+  const name = cleanDirectoryCreateName(nameValue);
+  const target = path.resolve(parent, name);
+  if (path.dirname(target) !== parent) throw makeHttpError(400, "Directory must be created directly under the current path");
+
+  try {
+    await mkdir(target);
+  } catch (error) {
+    if (error?.code === "EEXIST") throw makeHttpError(409, `Directory already exists: ${target}`);
+    if (["EACCES", "EPERM"].includes(error?.code)) throw makeHttpError(403, `Cannot create directory ${target}: ${sanitizeError(error)}`);
+    throw makeHttpError(400, `Cannot create directory ${target}: ${sanitizeError(error)}`);
+  }
+
+  return getDirectoryPickerData(target, activeCwd);
+}
+
 function normalizeSuggestionPath(value) {
   return String(value || "").replace(/\\/g, "/");
 }
@@ -2688,7 +2715,7 @@ async function restorableTabsForRestart() {
     const state = await currentSessionState(tab).catch(() => tab.lastState || null);
     return restorableTabDescriptor(tab, state);
   }));
-  return mergeRestorableTabDescriptors(liveDescriptors, closedRestorableTabs);
+  return mergeRestorableTabDescriptors(liveDescriptors);
 }
 
 function spawnRestartServer(restorableTabs) {
@@ -4284,6 +4311,16 @@ const server = createServer(async (req, res) => {
       sendJson(res, 200, {
         ok: true,
         data: await getDirectoryPickerData(url.searchParams.get("path"), tab.cwd),
+      });
+      return;
+    }
+
+    if (url.pathname === "/api/directories" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const tab = getRequestedTab(req, url, body);
+      sendJson(res, 201, {
+        ok: true,
+        data: await createDirectoryPickerDirectory(body.parent ?? body.cwd ?? body.path, body.name, tab.cwd),
       });
       return;
     }

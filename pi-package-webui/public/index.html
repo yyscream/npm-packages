@@ -12,7 +12,7 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <link rel="stylesheet" href="/styles.css?v=23" />
+    <link rel="stylesheet" href="/styles.css?v=24" />
   </head>
   <body>
     <button id="sidePanelExpandButton" class="side-panel-expand-button" type="button" aria-controls="sidePanel" aria-expanded="false" aria-label="Expand side panel" title="Expand side panel">
@@ -95,13 +95,6 @@
           <div class="composer-row">
             <button id="composerActionsButton" class="composer-actions-button" type="button" aria-controls="composerActionsPanel" aria-expanded="false" title="Open session, workflow, and follow-up actions">Actions</button>
             <div id="composerActionsPanel" class="composer-actions-panel" aria-label="Composer actions">
-              <label>
-                Busy prompt behavior
-                <select id="busyBehavior">
-                  <option value="followUp">follow-up</option>
-                  <option value="steer">steer</option>
-                </select>
-              </label>
               <button id="newSessionButton" class="composer-new-button" type="button">New</button>
               <button id="compactButton" class="composer-compact-button" type="button" title="Compact the current Pi session context">Compact</button>
               <button
@@ -354,10 +347,21 @@
             <h2>
               <button id="sidePanelSectionToggleQueue" class="side-panel-section-toggle" type="button" aria-expanded="false" aria-controls="sidePanelSectionQueue" aria-label="Expand Queue section" title="Expand Queue section" data-side-panel-section-toggle="queue">
                 <span class="side-panel-section-label">Queue</span>
-                <span class="side-panel-section-chevron" aria-hidden="true">›</span>
+                <span class="side-panel-section-trailing">
+                  <span id="queueCountBadge" class="side-panel-section-badge" hidden>0</span>
+                  <span class="side-panel-section-chevron" aria-hidden="true">›</span>
+                </span>
               </button>
             </h2>
             <div id="sidePanelSectionQueue" class="side-panel-section-content" hidden>
+              <div class="prompt-list-controls" aria-label="Prompt lists">
+                <button id="createPromptListButton" type="button">Create prompt list</button>
+                <div class="prompt-list-side-actions">
+                  <button id="loadPromptListButton" type="button">Load List</button>
+                  <button id="runLoadedPromptListButton" type="button" disabled>Run</button>
+                </div>
+                <div id="loadedPromptListBox" class="loaded-prompt-list-box muted">No prompt list loaded.</div>
+              </div>
               <div id="queueBox" class="queue-box muted">No queued messages.</div>
             </div>
           </section>
@@ -406,6 +410,15 @@
         </div>
         <div id="pathPickerFastPicks" class="path-picker-fast-picks" aria-label="Fast picks"></div>
         <div id="pathPickerRoots" class="path-picker-roots"></div>
+        <div class="path-picker-create-row" aria-label="Create a new directory in the current directory">
+          <input id="pathPickerCreateNameInput" class="path-picker-create-input" type="text" placeholder="New directory name" autocomplete="off" spellcheck="false" maxlength="255" aria-label="New directory name" />
+          <button id="pathPickerCreateButton" type="button" class="path-picker-create-button">Create directory</button>
+        </div>
+        <div class="path-picker-search-row" aria-label="Search directories in the current directory">
+          <input id="pathPickerSearchInput" class="path-picker-search-input" type="search" placeholder="Search current directory…" autocomplete="off" spellcheck="false" aria-label="Search current directory" />
+          <button id="pathPickerClearSearchButton" type="button" class="path-picker-clear-search-button" hidden>Clear</button>
+        </div>
+        <p id="pathPickerSearchStatus" class="path-picker-search-status muted" role="status" aria-live="polite"></p>
         <div id="pathPickerList" class="path-picker-list" role="listbox" aria-label="Directories"></div>
         <p id="pathPickerError" class="path-picker-error" hidden></p>
         <menu>
@@ -426,6 +439,34 @@
       </form>
     </dialog>
 
-    <script type="module" src="/app.js?v=23"></script>
+    <dialog id="promptListDialog" class="extension-dialog prompt-list-dialog">
+      <form method="dialog">
+        <h2 id="promptListDialogTitle">Create prompt list</h2>
+        <p class="muted">Create one start prompt, then add any number of follow-up prompts to queue behind it.</p>
+        <label class="prompt-list-name-field" for="promptListNameInput">
+          <span>List name</span>
+          <input id="promptListNameInput" class="dialog-input" type="text" autocomplete="off" placeholder="Optional name" />
+        </label>
+        <div id="promptListEditorRows" class="prompt-list-editor-rows"></div>
+        <button id="promptListAddPromptButton" class="prompt-list-add-button" type="button">+ Add follow-up prompt</button>
+        <div id="promptListLoadPanel" class="prompt-list-load-panel" hidden>
+          <label for="promptListSelect">Saved lists</label>
+          <div class="prompt-list-load-row">
+            <select id="promptListSelect" title="Saved prompt lists"></select>
+            <button id="promptListLoadSelectedButton" type="button">Load selected</button>
+            <button id="promptListDeleteSelectedButton" class="danger" type="button">Delete</button>
+          </div>
+        </div>
+        <p id="promptListStatus" class="prompt-list-status muted" role="status" aria-live="polite"></p>
+        <menu>
+          <button id="promptListCloseButton" type="button">Cancel</button>
+          <button id="promptListDialogLoadButton" type="button">Load</button>
+          <button id="promptListSaveButton" type="button">Save</button>
+          <button id="promptListRunListButton" class="primary" type="button">Run List</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <script type="module" src="/app.js?v=24"></script>
   </body>
 </html>
