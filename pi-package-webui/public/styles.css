@@ -3570,18 +3570,20 @@ summary { cursor: pointer; color: var(--warning); }
 .extension-dialog.release-dialog {
   width: min(64rem, calc(100vw - 1.5rem));
   max-height: min(82vh, 54rem);
+  overflow: hidden;
 }
 .extension-dialog.release-dialog form {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto auto;
   max-height: calc(min(82vh, 54rem) - 2rem);
+  min-height: 0;
 }
 .extension-dialog.release-dialog #dialogTitle {
   color: var(--ctp-green);
   text-shadow: 0 0 1rem rgba(166, 227, 161, 0.20);
 }
 .extension-dialog.release-dialog #dialogMessage {
-  min-height: 14rem;
+  min-height: min(14rem, 34vh);
   max-height: min(56vh, 34rem);
   margin: 0.75rem 0 1rem;
   padding: 0.9rem 1rem;
@@ -3610,6 +3612,13 @@ summary { cursor: pointer; color: var(--warning); }
 .release-dialog-danger { color: var(--ctp-red); }
 .release-dialog-muted { color: rgba(var(--ctp-subtext-rgb), 0.72); }
 .release-dialog-spacer { min-height: 0.55rem; }
+.extension-dialog.release-dialog #dialogBody {
+  min-height: 0;
+  max-height: min(23rem, 34vh);
+  overflow: auto;
+  padding-right: 0.12rem;
+  overscroll-behavior: contain;
+}
 .extension-dialog.release-dialog .dialog-options {
   grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
   gap: 0.7rem;
@@ -4622,8 +4631,11 @@ summary { cursor: pointer; color: var(--warning); }
     max-height: calc(var(--visual-viewport-height, 100dvh) - 2rem - env(safe-area-inset-top));
   }
   .extension-dialog.release-dialog #dialogMessage {
-    min-height: 10rem;
+    min-height: min(10rem, 34dvh);
     max-height: 48dvh;
+  }
+  .extension-dialog.release-dialog #dialogBody {
+    max-height: min(18rem, 32dvh);
   }
   .extension-dialog menu {
     position: sticky;

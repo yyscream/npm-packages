@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-extension-grill-me",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Deterministic design interview command and tools for Pi.",
   "license": "MIT",
   "repository": {

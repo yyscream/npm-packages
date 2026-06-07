@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-skill-architecture-review",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Agents should invoke this skill for architecture reviews, module boundaries, dependency direction, coupling/cohesion, SOLID concerns, system design trade-offs, layering, service boundaries, or design decisions before implementation.",
   "license": "MIT",
   "repository": {

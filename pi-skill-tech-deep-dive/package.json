@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-skill-tech-deep-dive",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Agents should invoke this skill when choosing or evaluating libraries, frameworks, tools, platforms, models, databases, APIs, or architectures for a use case. Produces criteria scoring, ecosystem assessment, and recommendations.",
   "license": "MIT",
   "repository": {

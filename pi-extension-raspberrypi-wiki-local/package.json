@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-extension-raspberrypi-wiki-local",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Local Raspberry Pi Documentation search and retrieval tools for Pi backed by a local documentation corpus.",
   "license": "MIT",
   "repository": {

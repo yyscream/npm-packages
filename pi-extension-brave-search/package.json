@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-extension-brave-search",
-  "version": "0.1.9",
+  "version": "0.2.0",
   "description": "Brave Search tool for Pi with API key resolution from env and .env files.",
   "license": "MIT",
   "repository": {

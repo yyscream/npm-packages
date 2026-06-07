@@ -248,7 +248,10 @@ assert.match(css, /\.native-selector-badge\.native-selector-badge-external[\s\S]
 assert.match(css, /\.native-settings-grid,[\s\S]*?\.native-tree-options \{[\s\S]*?grid-template-columns:/, "native settings and tree selector options should use responsive grids");
 assert.match(css, /\.extension-dialog\.guardrail-dialog[\s\S]*?border-color:\s*rgba\(249, 226, 175/, "guardrail dialogs should have warning-specific styling");
 assert.match(css, /\.extension-dialog\.release-dialog[\s\S]*?width:\s*min\(64rem/, "release confirmation dialogs should have more horizontal room");
+assert.match(css, /\.extension-dialog\.release-dialog[\s\S]*?overflow:\s*hidden/, "release confirmation dialogs should clip overflowing internal panes instead of bleeding over the transcript");
+assert.match(css, /\.extension-dialog\.release-dialog form[\s\S]*?min-height:\s*0/, "release confirmation layout should allow inner scroll panes to shrink inside the modal");
 assert.match(css, /\.extension-dialog\.release-dialog #dialogMessage[\s\S]*?max-height:\s*min\(56vh, 34rem\)/, "release confirmation summaries should scroll in a roomy panel");
+assert.match(css, /\.extension-dialog\.release-dialog #dialogBody[\s\S]*?max-height:\s*min\(23rem, 34vh\)[\s\S]*?overflow:\s*auto/, "release target option lists should scroll when many packages are eligible");
 assert.match(css, /\.release-dialog-success \{ color: var\(--ctp-green\); \}/, "release confirmation should color publish/update lines as success");
 assert.match(css, /\.release-dialog-danger \{ color: var\(--ctp-red\); \}/, "release confirmation should color blocked/error lines as danger");
 

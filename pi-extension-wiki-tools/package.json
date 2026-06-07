@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-extension-wiki-tools",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Pi tools and skill for scaffolding local wiki extension packages from repository templates.",
   "license": "MIT",
   "repository": {

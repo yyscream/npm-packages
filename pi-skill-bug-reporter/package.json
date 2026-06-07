@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-skill-bug-reporter",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Agents should invoke this skill when defects, regressions, failed tests, unexpected behavior, or spec mismatches are found. Produces structured reproducible bug reports with severity, evidence, environment, and actionable next steps.",
   "license": "MIT",
   "repository": {

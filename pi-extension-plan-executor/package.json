@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-extension-plan-executor",
-  "version": "0.1.9",
+  "version": "0.2.0",
   "description": "Autonomous PLAN.md execution loop for Pi that continues until all checklist items are complete.",
   "license": "MIT",
   "repository": {

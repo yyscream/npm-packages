@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-prompts-git-pr",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Reusable Pi prompt templates for commits, pull requests, and PR review workflows.",
   "license": "MIT",
   "repository": {
@@ -8,7 +8,16 @@
     "url": "git+https://github.com/Firstp1ck/npm-packages.git",
     "directory": "pi-package-prompts-git-pr"
   },
-  "keywords": ["pi-package","pi","pi-coding-agent","prompt-template","prompts","git","pull-request","commit"],
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "prompt-template",
+    "prompts",
+    "git",
+    "pull-request",
+    "commit"
+  ],
   "pi": {
     "prompts": [
       "./prompts"
