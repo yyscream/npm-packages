@@ -3,6 +3,11 @@
   "version": "0.1.1",
   "description": "Agents should invoke this skill when defects, regressions, failed tests, unexpected behavior, or spec mismatches are found. Produces structured reproducible bug reports with severity, evidence, environment, and actionable next steps.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Firstp1ck/npm-packages.git",
+    "directory": "pi-skill-bug-reporter"
+  },
   "keywords": [
     "pi-package",
     "pi",

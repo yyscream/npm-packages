@@ -3,6 +3,11 @@
   "version": "0.1.1",
   "description": "Agents should invoke this skill when comparing competing products, services, libraries, tools, vendors, or approaches for market/product positioning, feature matrices, strategic trade-offs, pricing, adoption, or differentiation.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Firstp1ck/npm-packages.git",
+    "directory": "pi-skill-competitor-analysis"
+  },
   "keywords": [
     "pi-package",
     "pi",

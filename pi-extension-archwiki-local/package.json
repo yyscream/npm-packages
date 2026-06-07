@@ -3,6 +3,11 @@
   "version": "0.1.3",
   "description": "Local ArchWiki search and retrieval tools for Pi using the installed arch-wiki-docs package.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Firstp1ck/npm-packages.git",
+    "directory": "pi-extension-archwiki-local"
+  },
   "keywords": [
     "pi-package",
     "pi",

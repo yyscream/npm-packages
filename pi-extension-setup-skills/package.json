@@ -3,6 +3,11 @@
   "version": "0.1.6",
   "description": "Interactive Pi command to enable or disable local skills from a multi-selection list.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Firstp1ck/npm-packages.git",
+    "directory": "pi-extension-setup-skills"
+  },
   "keywords": [
     "pi-package",
     "pi",

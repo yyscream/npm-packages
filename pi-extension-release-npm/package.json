@@ -3,6 +3,11 @@
   "version": "0.3.8",
   "description": "Pi command to run npm package release workflow with publish confirmation.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Firstp1ck/npm-packages.git",
+    "directory": "pi-extension-release-npm"
+  },
   "keywords": [
     "pi-package",
     "pi",

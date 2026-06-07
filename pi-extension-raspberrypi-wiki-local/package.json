@@ -3,6 +3,11 @@
   "version": "0.1.1",
   "description": "Local Raspberry Pi Documentation search and retrieval tools for Pi backed by a local documentation corpus.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Firstp1ck/npm-packages.git",
+    "directory": "pi-extension-raspberrypi-wiki-local"
+  },
   "keywords": [
     "pi-package",
     "pi",

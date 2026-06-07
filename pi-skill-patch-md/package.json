@@ -3,6 +3,11 @@
   "version": "0.1.0",
   "description": "Agents should invoke this skill to create, update, or implement standardized PATCH.md documents that describe reproducible source code patches.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Firstp1ck/npm-packages.git",
+    "directory": "pi-skill-patch-md"
+  },
   "keywords": [
     "pi-package",
     "pi",

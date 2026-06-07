@@ -3,6 +3,11 @@
   "version": "0.2.4",
   "description": "Token and cost usage analytics command for Pi session history.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Firstp1ck/npm-packages.git",
+    "directory": "pi-extension-stats"
+  },
   "keywords": [
     "pi-package",
     "pi",

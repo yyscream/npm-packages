@@ -3,6 +3,11 @@
   "version": "0.1.1",
   "description": "Agents should invoke this skill for academic or technical papers, arXiv/PubMed/IEEE/ACM links, PDFs, methodology review, limitations, practical implications, or extracting findings for engineering decisions.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Firstp1ck/npm-packages.git",
+    "directory": "pi-skill-paper-summarizer"
+  },
   "keywords": [
     "pi-package",
     "pi",

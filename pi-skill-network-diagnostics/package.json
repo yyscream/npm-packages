@@ -3,6 +3,11 @@
   "version": "0.1.1",
   "description": "Agents should invoke this skill for connectivity, DNS, Pi-hole, port reachability, routing, firewall reachability, TLS/network timeouts, or service access failures. Provides structured network troubleshooting commands and interpretation.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Firstp1ck/npm-packages.git",
+    "directory": "pi-skill-network-diagnostics"
+  },
   "keywords": [
     "pi-package",
     "pi",

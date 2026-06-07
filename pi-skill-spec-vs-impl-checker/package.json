@@ -3,6 +3,11 @@
   "version": "0.1.1",
   "description": "Agents should invoke this skill when a spec, plan, README, issue, or requirement must be verified against implementation. Traces requirements to code, checks interface contracts, and reports gaps or mismatches.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Firstp1ck/npm-packages.git",
+    "directory": "pi-skill-spec-vs-impl-checker"
+  },
   "keywords": [
     "pi-package",
     "pi",

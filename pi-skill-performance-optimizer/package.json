@@ -3,6 +3,11 @@
   "version": "0.1.1",
   "description": "Agents should invoke this skill for slow code, high CPU/memory, latency, large data processing, algorithmic complexity, profiling plans, benchmarks, or optimization requests. Profiles first and weighs trade-offs before changing code.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Firstp1ck/npm-packages.git",
+    "directory": "pi-skill-performance-optimizer"
+  },
   "keywords": [
     "pi-package",
     "pi",

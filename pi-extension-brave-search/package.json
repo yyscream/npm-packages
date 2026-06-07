@@ -3,6 +3,11 @@
   "version": "0.1.9",
   "description": "Brave Search tool for Pi with API key resolution from env and .env files.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Firstp1ck/npm-packages.git",
+    "directory": "pi-extension-brave-search"
+  },
   "keywords": [
     "pi-package",
     "pi",

@@ -3,6 +3,11 @@
   "version": "0.1.8",
   "description": "Use fish shell backend for Pi user bash commands (! and !!).",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Firstp1ck/npm-packages.git",
+    "directory": "pi-extension-fish-user-bash"
+  },
   "keywords": [
     "pi-package",
     "pi",

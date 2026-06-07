@@ -3,6 +3,11 @@
   "version": "0.1.5",
   "description": "Upgrade npm-installed Pi extensions with up-to-date checks.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Firstp1ck/npm-packages.git",
+    "directory": "pi-extension-upgrade-extensions"
+  },
   "keywords": [
     "pi-package",
     "pi",

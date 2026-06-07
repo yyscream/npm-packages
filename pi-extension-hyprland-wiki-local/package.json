@@ -3,6 +3,11 @@
   "version": "0.1.3",
   "description": "Local Hyprland Wiki search and retrieval tools for Pi backed by a cloned official hyprland-wiki repository.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Firstp1ck/npm-packages.git",
+    "directory": "pi-extension-hyprland-wiki-local"
+  },
   "keywords": [
     "pi-package",
     "pi",

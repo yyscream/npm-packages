@@ -3,6 +3,11 @@
   "version": "0.1.2",
   "description": "Local NixOS/Nix documentation search and retrieval tools for Pi backed by minimal sparse clones of official repositories.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Firstp1ck/npm-packages.git",
+    "directory": "pi-extension-nixos-wiki-local"
+  },
   "keywords": [
     "pi-package",
     "pi",

@@ -3,6 +3,11 @@
   "version": "0.1.9",
   "description": "Memory helper commands, remember_note, and per-skill memory tools for Pi.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Firstp1ck/npm-packages.git",
+    "directory": "pi-package-skill-lifecycle/vendor/pi-extension-memory-helper"
+  },
   "scripts": {
     "test": "bun test"
   },

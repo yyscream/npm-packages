@@ -3,6 +3,11 @@
   "version": "0.2.0",
   "description": "Local notes CRUD extension for Pi with optional rule-note prompt injection.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Firstp1ck/npm-packages.git",
+    "directory": "pi-extension-notes"
+  },
   "keywords": [
     "pi-package",
     "pi",
