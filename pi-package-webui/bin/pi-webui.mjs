@@ -2147,6 +2147,22 @@ function responseWithPendingThinking(tab, response) {
   return { ...response, data: stateWithPendingThinking(tab, response.data) };
 }
 
+function eventForTabClients(tab, event) {
+  return {
+    ...responseWithPendingThinking(tab, event),
+    tabId: tab.id,
+    tabTitle: tab.title,
+    tabActivity: tabActivitySnapshot(tab),
+  };
+}
+
+function broadcastPendingThinkingState(tab, state) {
+  broadcastTabEvent(tab, {
+    ...eventForTabClients(tab, { type: "response", command: "get_state", success: true, data: stateWithPendingThinking(tab, state) }),
+    pendingExtensionUiRequestCount: pendingExtensionUiRequests(tab).length,
+  });
+}
+
 function forgetTabState(tab) {
   if (!tab) return;
   tab.lastState = null;
@@ -2508,7 +2524,7 @@ function attachRpcToTab(tab, rpc) {
   tab.rpcUnsubscribe = rpc.onEvent((event) => {
     if (resolveWebuiHelperResponse(tab, event) || resolveWebuiHelperRpcResponse(tab, event)) return;
     updateTabActivityFromEvent(tab, event);
-    let scopedEvent = { ...event, tabId: tab.id, tabTitle: tab.title, tabActivity: tabActivitySnapshot(tab) };
+    let scopedEvent = eventForTabClients(tab, event);
     if (event?.type === "pi_process_exit" || event?.type === "pi_process_error") {
       clearPendingExtensionUiRequests(tab);
       clearExtensionStatuses(tab);
@@ -3817,10 +3833,16 @@ async function setThinkingLevelForTab(tab, level, { allowPending = true } = {}) 
   const stateResult = allowPending ? await safeRpcData(tab, { type: "get_state" }, STATUS_RPC_TIMEOUT_MS) : { ok: false };
   if (allowPending && stateResult.ok && stateIsBusyForSettings(stateResult.data)) {
     tab.pendingThinkingLevel = level;
+    broadcastPendingThinkingState(tab, stateResult.data);
     return rpcSuccess("set_thinking_level", { level, pending: true, message: `Thinking level ${level} will apply to the next prompt.` });
   }
   const response = await tab.rpc.send({ type: "set_thinking_level", level });
-  if (response.success !== false) tab.pendingThinkingLevel = undefined;
+  if (response.success !== false) {
+    tab.pendingThinkingLevel = undefined;
+    const updatedState = await safeRpcData(tab, { type: "get_state" }, STATUS_RPC_TIMEOUT_MS);
+    const effectiveLevel = updatedState.ok ? updatedState.data?.thinkingLevel : level;
+    return { ...response, data: { ...(response.data && typeof response.data === "object" ? response.data : {}), level: effectiveLevel || level, requestedLevel: level } };
+  }
   return response;
 }
 

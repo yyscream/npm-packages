@@ -7288,10 +7288,10 @@ function resetOptionalFeatureAvailability() {
   renderOptionalFeatureControls();
 }
 
-function requestGitFooterWebuiPayload(tabContext = activeTabContext()) {
+function requestGitFooterWebuiPayload(tabContext = activeTabContext(), { force = false } = {}) {
   if (!tabContext.tabId || isOptionalFeatureDisabled("gitFooterStatus")) return;
   if (currentState?.isStreaming || currentState?.isCompacting) return;
-  if (!hasAvailableCommand("git-footer-refresh") || statusEntries.has(GIT_FOOTER_WEBUI_STATUS_KEY)) return;
+  if (!hasAvailableCommand("git-footer-refresh") || (!force && statusEntries.has(GIT_FOOTER_WEBUI_STATUS_KEY))) return;
   if (gitFooterPayloadRefreshInFlightByTab.has(tabContext.tabId)) return;
 
   gitFooterPayloadRefreshInFlightByTab.add(tabContext.tabId);
@@ -7730,7 +7730,8 @@ function openNativeSettingsDialog() {
     setNativeCommandError("");
     try {
       const requests = [];
-      if (thinking.select.value !== state.thinkingLevel) requests.push(nativeCommandApi("/api/thinking", { method: "POST", body: { level: thinking.select.value } }));
+      const thinkingLevelChanged = thinking.select.value !== state.thinkingLevel;
+      if (thinkingLevelChanged) requests.push(nativeCommandApi("/api/thinking", { method: "POST", body: { level: thinking.select.value } }));
       if (steering.select.value !== state.steeringMode) requests.push(nativeCommandApi("/api/steering-mode", { method: "POST", body: { mode: steering.select.value } }));
       if (followUp.select.value !== state.followUpMode) requests.push(nativeCommandApi("/api/follow-up-mode", { method: "POST", body: { mode: followUp.select.value } }));
       if (autoCompact.input.checked !== state.autoCompactionEnabled) requests.push(nativeCommandApi("/api/auto-compaction", { method: "POST", body: { enabled: autoCompact.input.checked } }));
@@ -7738,6 +7739,7 @@ function openNativeSettingsDialog() {
       if (thinkingOutput.input.checked !== thinkingOutputVisible) setThinkingOutputVisible(thinkingOutput.input.checked);
       if (doneNotifications.input.checked !== agentDoneNotificationsEnabled) await setAgentDoneNotificationsEnabled(doneNotifications.input.checked);
       await Promise.all(requests);
+      if (thinkingLevelChanged) requestGitFooterWebuiPayload(activeTabContext(), { force: true });
       addTransientMessage({ role: "native", title: "/settings", content: "Settings updated.", level: "info" });
       closeNativeCommandDialog();
       await refreshState();
@@ -8335,15 +8337,26 @@ function handleMessageUpdate(event) {
   }
 }
 
+function modelStateKey(model) {
+  return model ? `${model.provider || ""}/${model.id || ""}` : "";
+}
+
+function gitFooterRelevantStateChanged(previousState, nextState) {
+  if (!previousState || !nextState) return false;
+  return previousState.thinkingLevel !== nextState.thinkingLevel || modelStateKey(previousState.model) !== modelStateKey(nextState.model);
+}
+
 async function refreshState(tabContext = activeTabContext()) {
   if (!tabContext.tabId) return;
   const response = await api("/api/state", { tabId: tabContext.tabId });
   if (!isCurrentTabContext(tabContext)) return;
+  const previousState = currentState;
   currentState = response.data || null;
+  const shouldRefreshGitFooter = gitFooterRelevantStateChanged(previousState, currentState);
   syncActiveTabActivityFromState(currentState);
   syncRunIndicatorFromState(currentState);
   renderStatus();
-  requestGitFooterWebuiPayload(tabContext);
+  requestGitFooterWebuiPayload(tabContext, { force: shouldRefreshGitFooter });
 }
 
 async function refreshStats(tabContext = activeTabContext()) {
@@ -9181,6 +9194,7 @@ async function cycleThinkingFromShortcut() {
     if (response.data?.level && currentState) currentState = { ...currentState, thinkingLevel: response.data.level };
     if (isCurrentTabContext(tabContext)) {
       addTransientMessage({ role: "native", title: "thinking", content: response.data?.level ? `Thinking level: ${response.data.level}` : "Thinking level did not change.", level: "info" });
+      if (response.data?.level) requestGitFooterWebuiPayload(tabContext, { force: true });
       await Promise.allSettled([refreshState(tabContext), refreshStats(tabContext)]);
     }
   } catch (error) {
@@ -10031,7 +10045,14 @@ elements.setThinkingButton.addEventListener("click", async () => {
   try {
     const response = await api("/api/thinking", { method: "POST", body: { level: elements.thinkingSelect.value }, tabId: tabContext.tabId });
     if (isCurrentTabContext(tabContext)) {
-      if (response.data?.pending) addEvent(response.data.message || `Thinking level ${response.data.level} will apply to the next prompt.`, "info");
+      if (response.data?.pending) {
+        addEvent(response.data.message || `Thinking level ${response.data.level} will apply to the next prompt.`, "info");
+      } else if (response.data?.level) {
+        const requested = response.data.requestedLevel;
+        const effective = response.data.level;
+        addEvent(requested && requested !== effective ? `Thinking level set to ${effective} (requested ${requested}).` : `Thinking level set to ${effective}.`, "info");
+        requestGitFooterWebuiPayload(tabContext, { force: true });
+      }
       await refreshState(tabContext);
     }
   } catch (error) {

@@ -368,6 +368,10 @@ assert.doesNotMatch(app, /Git footer status disabled/, "disabled git footer shou
 assert.doesNotMatch(app, /footerMeta\("runtime"/, "minimal Web UI footer should not render runtime metadata");
 assert.match(app, /statusEntries\.has\(GIT_FOOTER_WEBUI_STATUS_KEY\)/, "optional feature detection should recognize the git-footer-status Web UI payload");
 assert.match(app, /\/git-footer-refresh --webui-silent/, "Web UI should quietly request the extension-owned footer payload when idle and missing");
+assert.match(app, /function requestGitFooterWebuiPayload\(tabContext = activeTabContext\(\), \{ force = false \} = \{\}\)[\s\S]*?!force && statusEntries\.has\(GIT_FOOTER_WEBUI_STATUS_KEY\)/, "git footer payload refresh should support forced refresh even when a live payload already exists");
+assert.match(app, /function gitFooterRelevantStateChanged\(previousState, nextState\)[\s\S]*?previousState\.thinkingLevel !== nextState\.thinkingLevel[\s\S]*?modelStateKey\(previousState\.model\) !== modelStateKey\(nextState\.model\)/, "state refresh should detect model and thinking changes that make the git footer payload stale");
+assert.match(app, /requestGitFooterWebuiPayload\(tabContext, \{ force: shouldRefreshGitFooter \}\)/, "state refresh should force-refresh the git footer when model or thinking state changes");
+assert.match(app, /if \(response\.data\?\.level\) requestGitFooterWebuiPayload\(tabContext, \{ force: true \}\)/, "thinking shortcut should immediately force-refresh the git footer payload");
 assert.match(app, /Loading git footer status…/, "missing git footer payload should show a loading state before declaring the extension unavailable");
 assert.match(app, /GIT_FOOTER_WEBUI_PAYLOAD_CACHE_KEY/, "git footer payloads should be cached across Web UI reloads");
 assert.match(app, /function setOptionalFeatureDisabled\(featureId, disabled\)[\s\S]*clearGitFooterWebuiPayloadCache\(\)/, "changing the git footer feature toggle should invalidate the cached footer payload");
