@@ -1592,34 +1592,11 @@ async function getPathSuggestionData(tab, rawQuery) {
 }
 
 async function getWorkspaceInfo(cwd, startedAt) {
-  const info = {
+  return {
     cwd,
     displayCwd: displayPath(cwd),
     uptimeMs: Math.max(0, Date.now() - Date.parse(startedAt)),
-    git: { isRepo: false },
   };
-
-  const inside = await runCommand("git", ["rev-parse", "--is-inside-work-tree"], { cwd, timeoutMs: 1200 });
-  if (inside.exitCode !== 0 || inside.stdout.trim() !== "true") return info;
-
-  const [branch, status] = await Promise.all([
-    runCommand("git", ["branch", "--show-current"], { cwd, timeoutMs: 1200 }),
-    runCommand("git", ["status", "--porcelain=v1", "--branch"], { cwd, timeoutMs: 1800 }),
-  ]);
-  const lines = status.stdout.split(/\r?\n/).filter(Boolean);
-  const branchLine = lines.find((line) => line.startsWith("## "));
-  const fileLines = lines.filter((line) => !line.startsWith("## "));
-  const untracked = fileLines.filter((line) => line.startsWith("??")).length;
-  const changed = fileLines.length - untracked;
-
-  info.git = {
-    isRepo: true,
-    branch: branch.stdout.trim() || branchLine?.replace(/^##\s+/, "").split("...")[0] || "detached",
-    changed,
-    untracked,
-    branchStatus: branchLine,
-  };
-  return info;
 }
 
 let activeGitWorkflowProcess = null;
@@ -2206,6 +2183,39 @@ function pendingExtensionUiMap(tab) {
   return tab.pendingExtensionUiRequests;
 }
 
+function extensionStatusMap(tab) {
+  if (!tab.extensionStatuses) tab.extensionStatuses = new Map();
+  return tab.extensionStatuses;
+}
+
+function rememberExtensionStatusEvent(tab, event) {
+  if (event?.type !== "extension_ui_request" || event.method !== "setStatus" || !event.statusKey) return;
+  const statuses = extensionStatusMap(tab);
+  if (event.statusText) statuses.set(String(event.statusKey), String(event.statusText));
+  else statuses.delete(String(event.statusKey));
+}
+
+function clearExtensionStatuses(tab) {
+  tab?.extensionStatuses?.clear();
+}
+
+function replayExtensionStatuses(tab, res) {
+  for (const [statusKey, statusText] of extensionStatusMap(tab)) {
+    sendSse(res, {
+      type: "extension_ui_request",
+      id: randomUUID(),
+      method: "setStatus",
+      statusKey,
+      statusText,
+      tabId: tab.id,
+      tabTitle: tab.title,
+      replayed: true,
+      tabActivity: tabActivitySnapshot(tab),
+      pendingExtensionUiRequestCount: pendingExtensionUiRequests(tab).length,
+    });
+  }
+}
+
 function bashQueueForTab(tab) {
   if (!tab.bashQueue) tab.bashQueue = [];
   return tab.bashQueue;
@@ -2499,8 +2509,13 @@ function attachRpcToTab(tab, rpc) {
     if (resolveWebuiHelperResponse(tab, event) || resolveWebuiHelperRpcResponse(tab, event)) return;
     updateTabActivityFromEvent(tab, event);
     let scopedEvent = { ...event, tabId: tab.id, tabTitle: tab.title, tabActivity: tabActivitySnapshot(tab) };
-    if (event?.type === "pi_process_exit" || event?.type === "pi_process_error") clearPendingExtensionUiRequests(tab);
-    else trackPendingExtensionUiRequest(tab, scopedEvent);
+    if (event?.type === "pi_process_exit" || event?.type === "pi_process_error") {
+      clearPendingExtensionUiRequests(tab);
+      clearExtensionStatuses(tab);
+    } else {
+      rememberExtensionStatusEvent(tab, scopedEvent);
+      trackPendingExtensionUiRequest(tab, scopedEvent);
+    }
     scopedEvent = { ...scopedEvent, tabActivity: tabActivitySnapshot(tab), pendingExtensionUiRequestCount: pendingExtensionUiRequests(tab).length };
     recordEvent(scopedEvent);
     for (const client of tab.sseClients) sendSse(client, scopedEvent);
@@ -2534,6 +2549,7 @@ async function createTab({ id: requestedId, index, title, titleSource, conversat
     pendingThinkingLevel: undefined,
     activity: createTabActivity(createdAt),
     pendingExtensionUiRequests: new Map(),
+    extensionStatuses: new Map(),
     webuiHelperRequests: new Map(),
     webuiHelperResponseIds: new Set(),
     bashQueue: [],
@@ -2732,6 +2748,7 @@ async function updateTabCwd(id, cwd) {
   forgetTabState(tab);
   resetTabActivity(tab);
   clearPendingExtensionUiRequests(tab);
+  clearExtensionStatuses(tab);
   const rpc = new PiRpcProcess({ ...piCommand, cwd: tab.cwd });
   attachRpcToTab(tab, rpc);
   rpc.start();
@@ -2766,6 +2783,7 @@ async function restartTabRpc(tab, reason = "reload") {
 
   resetTabActivity(tab);
   clearPendingExtensionUiRequests(tab);
+  clearExtensionStatuses(tab);
   const rpc = new PiRpcProcess({ ...piCommand, cwd: tab.cwd });
   attachRpcToTab(tab, rpc);
   rpc.start();
@@ -3945,6 +3963,7 @@ const server = createServer(async (req, res) => {
         tabActivity: tabActivitySnapshot(tab),
         pendingExtensionUiRequestCount: pendingExtensionUiRequests(tab).length,
       });
+      replayExtensionStatuses(tab, res);
       replayPendingExtensionUiRequests(tab, res);
       const keepAlive = setInterval(() => res.write(": keepalive\n\n"), 15000);
       req.on("close", () => {
@@ -4288,6 +4307,7 @@ const server = createServer(async (req, res) => {
           forgetTabState(tab);
           rememberTabState(tab, response.data);
           clearPendingExtensionUiRequests(tab);
+          clearExtensionStatuses(tab);
         }
         sendJson(res, response.success === false ? 400 : 200, responseWithTab(response, tab));
         return;

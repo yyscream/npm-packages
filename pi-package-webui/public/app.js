@@ -207,9 +207,6 @@ let mobileFooterExpanded = false;
 let footerModelPickerOpen = false;
 let publishMenuOpen = false;
 let maxVisualViewportHeight = 0;
-let currentRunStartedAt = null;
-let currentRunStreamChars = 0;
-let latestTokPerSecond = null;
 let abortRequestInFlight = false;
 let userBashByTab = new Map();
 let userBashQueuesByTab = new Map();
@@ -234,6 +231,10 @@ const SERVER_START_CWD_STORAGE_KEY = "pi-webui-last-server-cwd";
 const DEFAULT_WEBUI_PORT = "31415";
 const CUSTOM_BACKGROUND_MAX_FILE_BYTES = 24 * 1024 * 1024;
 const OPTIONAL_FEATURES_STORAGE_KEY = "pi-webui-optional-features-disabled";
+const GIT_FOOTER_WEBUI_STATUS_KEY = "git-footer-webui";
+const GIT_FOOTER_WEBUI_PAYLOAD_TYPE = "firstpick.git-footer-status.footer";
+const GIT_FOOTER_WEBUI_PAYLOAD_VERSION = 1;
+const GIT_FOOTER_WEBUI_PAYLOAD_CACHE_KEY = "pi-webui-git-footer-webui-payload-cache";
 const LAST_USER_PROMPT_STORAGE_KEY = "pi-webui-last-user-prompts";
 const PROMPT_HISTORY_STORAGE_KEY = "pi-webui-prompt-history";
 const PROMPT_HISTORY_LIMIT_PER_TAB = 50;
@@ -343,8 +344,8 @@ const OPTIONAL_FEATURES = [
     id: "gitFooterStatus",
     label: "Git footer status",
     packageName: "@firstpick/pi-extension-git-footer-status",
-    capabilityLabel: "/git-footer-refresh or git-footer status event",
-    description: "Enhanced Pi footer/status telemetry when loaded by Pi.",
+    capabilityLabel: "/git-footer-refresh or git-footer-webui status event",
+    description: "Extension-owned enhanced footer/status telemetry when loaded by Pi.",
   },
   {
     id: "statsCommand",
@@ -375,6 +376,7 @@ const OPTIONAL_COMMAND_FEATURES = new Map([
 const HIDDEN_COMMAND_NAMES = new Set(["webui-tree-navigate", "webui-helper"]);
 const NATIVE_SELECTOR_COMMANDS = new Set(["model", "settings", "theme", "fork", "clone", "resume", "tree", "login", "logout", "scoped-models", "tools", "skills"]);
 const optionalFeatureInstallInProgress = new Set();
+const gitFooterPayloadRefreshInFlightByTab = new Set();
 
 function createGitWorkflowState() {
   return {
@@ -972,6 +974,92 @@ async function copyText(text) {
   const copied = document.execCommand("copy");
   textarea.remove();
   if (!copied) throw new Error("Clipboard copy failed");
+}
+
+function messageCopyFallbackText(body) {
+  return String(body?.innerText || body?.textContent || "").replace(/\n{3,}/g, "\n\n").trimEnd();
+}
+
+function messageCopyText(message, body = null) {
+  if (!message) return messageCopyFallbackText(body);
+  if (message.role === "assistant") {
+    const content = message.content === undefined || message.content === null ? "" : textFromContent(message.content);
+    const text = stripTodoProgressLines(content).trimEnd();
+    return text || messageCopyFallbackText(body);
+  }
+  if (message.role === "bashExecution") return stripAnsi([`$ ${message.command || ""}`, message.output || ""].filter(Boolean).join("\n\n")).trimEnd();
+  if (message.role === "compactionSummary") return String(message.summary || "Context was compacted.").trimEnd();
+  if (message.role === "toolResult") {
+    const content = message.content === undefined || message.content === null ? "" : textFromContent(message.content);
+    return stripAnsi(content).trimEnd() || messageCopyFallbackText(body);
+  }
+  if (message.role === "toolExecution") {
+    const tool = normalizeToolExecution(message);
+    const hasArgs = tool.args && Object.keys(tool.args).length > 0;
+    const sections = [`tool: ${tool.name}`];
+    if (hasArgs) sections.push(`arguments:\n${JSON.stringify(tool.args, null, 2)}`);
+    if (tool.text) sections.push(`${tool.isPartial ? "live output" : "output"}:\n${tool.text}`);
+    if (tool.details?.fullOutputPath) sections.push(`full output: ${tool.details.fullOutputPath}`);
+    return sections.join("\n\n").trimEnd() || messageCopyFallbackText(body);
+  }
+  if (message.role === "thinking") return visibleThinkingText(message.thinking || textFromContent(message.content)).trimEnd() || messageCopyFallbackText(body);
+  if (message.role === "toolCall") return JSON.stringify(message.arguments ?? message.content ?? {}, null, 2);
+  if (message.role === "assistantEvent") {
+    return (typeof message.content === "string" ? message.content : JSON.stringify(message.content ?? {}, null, 2)).trimEnd();
+  }
+  const content = message.content === undefined || message.content === null ? "" : textFromContent(message.content);
+  return stripAnsi(content).trimEnd() || messageCopyFallbackText(body);
+}
+
+function setMessageCopyButtonState(button, copied) {
+  clearTimeout(button._messageCopyResetTimer);
+  button.classList.toggle("copied", copied);
+  const icon = button.querySelector(".message-copy-icon");
+  if (icon) icon.textContent = copied ? "✓" : "⧉";
+  button.title = copied ? "Copied" : "Copy message";
+  button.setAttribute("aria-label", button.title);
+  if (copied) {
+    button._messageCopyResetTimer = setTimeout(() => setMessageCopyButtonState(button, false), 1400);
+  }
+}
+
+async function copyMessageBubble(button) {
+  const bubble = button.closest(".message");
+  const body = bubble?._copyBody || bubble?.querySelector(":scope > .message-body, :scope > .message-collapse > .message-body");
+  const text = messageCopyText(bubble?._copyMessage, body);
+  if (!text.trim()) {
+    addEvent("message has no text to copy", "warn");
+    return;
+  }
+  button.disabled = true;
+  try {
+    await copyText(text);
+    setMessageCopyButtonState(button, true);
+  } catch (error) {
+    addEvent(`message copy failed: ${error.message || String(error)}`, "warn");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function attachMessageCopyButton(bubble, message, body) {
+  if (!bubble || !body) return null;
+  bubble._copyMessage = message;
+  bubble._copyBody = body;
+  const existing = bubble.querySelector(":scope > .message-copy-button");
+  if (existing) return existing;
+  const button = make("button", "message-copy-button");
+  button.type = "button";
+  button.append(make("span", "message-copy-icon", "⧉"));
+  setMessageCopyButtonState(button, false);
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    copyMessageBubble(button);
+  });
+  bubble.classList.add("has-copy-action");
+  bubble.append(button);
+  return button;
 }
 
 function triggerNativeDownload(download) {
@@ -1797,6 +1885,10 @@ function setOptionalFeatureDisabled(featureId, disabled) {
   if (!OPTIONAL_FEATURE_BY_ID.has(featureId)) return;
   if (disabled) disabledOptionalFeatures.add(featureId);
   else disabledOptionalFeatures.delete(featureId);
+  if (featureId === "gitFooterStatus") {
+    statusEntries.delete(GIT_FOOTER_WEBUI_STATUS_KEY);
+    clearGitFooterWebuiPayloadCache();
+  }
   storeDisabledOptionalFeatures();
   renderOptionalFeatureDependentDisplays();
   const tabContext = activeTabContext();
@@ -2412,9 +2504,6 @@ function resetActiveTabUi() {
   latestStats = null;
   latestWorkspace = null;
   latestMessages = [];
-  currentRunStartedAt = null;
-  currentRunStreamChars = 0;
-  latestTokPerSecond = null;
   clearRunIndicatorActivity({ render: false });
   statusEntries.clear();
   widgets.clear();
@@ -3239,7 +3328,8 @@ function formatStatusEntry(key, value) {
   const cleanKey = cleanStatusText(key);
   const cleanValue = cleanStatusText(value);
   if (!cleanValue) return "";
-  if (cleanKey === "git-footer" && !isOptionalFeatureEnabled("gitFooterStatus")) return "";
+  if ((cleanKey === "git-footer" || cleanKey === GIT_FOOTER_WEBUI_STATUS_KEY) && !isOptionalFeatureEnabled("gitFooterStatus")) return "";
+  if (cleanKey === GIT_FOOTER_WEBUI_STATUS_KEY) return "";
   if (cleanKey === "plan-mode") return `Plan: ${cleanValue}`;
   if (cleanKey === "extension") return cleanValue;
   return `${cleanKey}: ${cleanValue}`;
@@ -3250,23 +3340,50 @@ function shortModelLabel(model) {
   return `(${model.provider}) ${model.id}`;
 }
 
-function formatTokenCount(value) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return "?";
-  const abs = Math.abs(n);
-  const sign = n < 0 ? "-" : "";
-  if (abs >= 1_000_000_000) return `${sign}${(abs / 1_000_000_000).toFixed(abs >= 10_000_000_000 ? 0 : 1)}B`;
-  if (abs >= 1_000_000) return `${sign}${(abs / 1_000_000).toFixed(abs >= 10_000_000 ? 0 : 1)}M`;
-  if (abs >= 1_000) return `${sign}${(abs / 1_000).toFixed(abs >= 10_000 ? 0 : 1)}k`;
-  return `${Math.round(n)}`;
+function footerModelLine(model = currentState?.model, thinkingLevel = currentState?.thinkingLevel) {
+  const label = shortModelLabel(model);
+  if (!model?.reasoning) return label;
+  const thinking = thinkingLevel === "off" ? "thinking off" : thinkingLevel || "?";
+  return `${label} • ${thinking}`;
 }
 
-function formatCost(value) {
-  const n = Number(value);
-  if (!Number.isFinite(n) || n <= 0) return "$0.000";
-  if (n < 0.01) return `$${n.toFixed(4)}`;
-  if (n < 100) return `$${n.toFixed(3)}`;
-  return `$${n.toFixed(2)}`;
+function formatFooterTokenCount(value) {
+  const n = Math.max(0, Number(value) || 0);
+  if (n < 1000) return `${Math.round(n)}`;
+  if (n < 10000) return `${(n / 1000).toFixed(1)}k`;
+  if (n < 1000000) return `${Math.round(n / 1000)}k`;
+  if (n < 10000000) return `${(n / 1000000).toFixed(1)}M`;
+  return `${Math.round(n / 1000000)}M`;
+}
+
+function footerCostAuthLabel() {
+  const provider = currentState?.model?.provider || "";
+  return /codex|copilot|chatgpt/i.test(provider) ? "sub" : "api";
+}
+
+function footerStatsTokensDisplay(stats = latestStats) {
+  const tokens = stats?.tokens;
+  if (!tokens) return "";
+  return `↑${formatFooterTokenCount(tokens.input)} ↓${formatFooterTokenCount(tokens.output)}`;
+}
+
+function footerStatsCostDisplay(stats = latestStats) {
+  if (!stats) return "";
+  return `$${Number(stats.cost || 0).toFixed(3)} (${footerCostAuthLabel()})`;
+}
+
+function footerStatsContextDisplay(stats = latestStats) {
+  const usage = stats?.contextUsage || currentState?.contextUsage;
+  const contextWindow = usage?.contextWindow ?? currentState?.model?.contextWindow ?? 0;
+  if (!contextWindow) return "";
+  const rawPercent = Number(usage?.percent);
+  const percent = Number.isFinite(rawPercent) ? `${rawPercent.toFixed(1)}%` : "?";
+  const auto = currentState?.autoCompactionEnabled !== false ? " (auto)" : "";
+  return `${percent}/${formatFooterTokenCount(contextWindow)}${auto}`;
+}
+
+function fallbackFooterStats() {
+  return [footerStatsTokensDisplay(), footerStatsCostDisplay(), footerStatsContextDisplay()].filter(Boolean);
 }
 
 function formatDuration(ms) {
@@ -3297,32 +3414,10 @@ function textFromContent(content) {
     .join("\n");
 }
 
-function estimateMessageTokens(messages) {
-  let chars = 0;
-  for (const message of messages || []) {
-    chars += textFromContent(message.content).length;
-    if (message.role === "toolResult") chars += textFromContent(message.content).length;
-    if (message.role === "bashExecution") chars += String(message.command || "").length + String(message.output || "").length;
-    chars += 16;
-  }
-  return Math.round(chars / 4);
-}
-
-function estimatePiTokens() {
-  const contextTokens = latestStats?.contextUsage?.tokens;
-  if (!Number.isFinite(Number(contextTokens))) return null;
-  return Math.max(0, Number(contextTokens) - estimateMessageTokens(latestMessages));
-}
-
-function subscriptionSuffix() {
-  const provider = currentState?.model?.provider || "";
-  return /codex|copilot|chatgpt/i.test(provider) ? "sub" : "metered";
-}
-
-function footerMetric(icon, label, value, tone = "") {
+function footerMetric(icon, label, value, tone = "", options = {}) {
   const node = make("span", `footer-metric ${tone}`.trim());
   node.append(make("span", "footer-metric-icon", icon), make("span", "footer-metric-label", label), make("span", "footer-metric-value", value));
-  node.title = `${label}: ${value}`;
+  node.title = options.title || `${label}: ${value}`;
   return node;
 }
 
@@ -3349,7 +3444,7 @@ function contextUsageActiveColor(percent) {
 
 function applyFooterContextUsage(node, contextUsage) {
   node.classList.add("footer-context-card");
-  const percent = Number(contextUsage?.percent);
+  const percent = typeof contextUsage?.percent === "number" ? contextUsage.percent : Number.NaN;
   if (Number.isFinite(percent)) {
     const clampedPercent = Math.min(100, Math.max(0, percent));
     const activeColor = contextUsageActiveColor(clampedPercent);
@@ -3371,6 +3466,223 @@ function footerMeta(label, value, className = "", options = {}) {
   node.append(make("span", "footer-meta-label", label), make("span", "footer-meta-value", value));
   node.title = options.title || `${label}: ${value}`;
   return node;
+}
+
+const FOOTER_PAYLOAD_TONES = new Set(["pink", "blue", "mauve", "yellow", "green", "teal"]);
+const FOOTER_META_CLASS_BY_KEY = new Map([
+  ["cwd", "footer-workspace"],
+  ["git", "footer-branch"],
+  ["git-state", "footer-git-state"],
+  ["sync", "footer-sync"],
+  ["changes", "footer-changes"],
+  ["git-extra", "footer-git-extra"],
+  ["context", "footer-context"],
+  ["model", "footer-model"],
+]);
+
+function cleanFooterPayloadText(value, fallback = "") {
+  const text = cleanStatusText(value).slice(0, 240);
+  return text || fallback;
+}
+
+function normalizeFooterPayloadChip(value, index) {
+  if (!value || typeof value !== "object") return null;
+  const key = cleanFooterPayloadText(value.key, `item-${index}`).replace(/[^a-z0-9_.:-]/gi, "-").slice(0, 64) || `item-${index}`;
+  const label = cleanFooterPayloadText(value.label, key).slice(0, 32);
+  const chip = {
+    key,
+    label,
+    value: cleanFooterPayloadText(value.value, "—"),
+    icon: cleanFooterPayloadText(value.icon, "•").slice(0, 8),
+    tone: FOOTER_PAYLOAD_TONES.has(value.tone) ? value.tone : "",
+    title: cleanFooterPayloadText(value.title, ""),
+  };
+  if (value.contextUsage && typeof value.contextUsage === "object") {
+    const percent = typeof value.contextUsage.percent === "number" ? value.contextUsage.percent : Number.NaN;
+    const contextWindow = Number(value.contextUsage.contextWindow);
+    chip.contextUsage = {
+      percent: Number.isFinite(percent) ? percent : null,
+      contextWindow: Number.isFinite(contextWindow) ? contextWindow : 0,
+    };
+  }
+  return chip;
+}
+
+function currentGitFooterCacheCwd(tabId = activeTabId) {
+  const tab = tabs.find((item) => item.id === tabId) || activeTab();
+  return latestWorkspace?.cwd || tab?.cwd || "";
+}
+
+function parseGitFooterWebuiPayloadRaw(raw) {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || parsed.type !== GIT_FOOTER_WEBUI_PAYLOAD_TYPE || parsed.version !== GIT_FOOTER_WEBUI_PAYLOAD_VERSION) return null;
+    const main = Array.isArray(parsed.main) ? parsed.main.map(normalizeFooterPayloadChip).filter(Boolean).slice(0, 8) : [];
+    const meta = Array.isArray(parsed.meta) ? parsed.meta.map(normalizeFooterPayloadChip).filter(Boolean).slice(0, 10) : [];
+    if (!main.length && !meta.length) return null;
+    return { main, meta };
+  } catch {
+    return null;
+  }
+}
+
+function readCachedGitFooterWebuiPayloadRaw() {
+  try {
+    const cached = JSON.parse(localStorage.getItem(GIT_FOOTER_WEBUI_PAYLOAD_CACHE_KEY) || "null");
+    if (!cached || typeof cached.raw !== "string") return null;
+    const cachedCwd = typeof cached.cwd === "string" ? cached.cwd : "";
+    const currentCwd = currentGitFooterCacheCwd();
+    if (cachedCwd && currentCwd && cachedCwd !== currentCwd) return null;
+    return cached.raw;
+  } catch {
+    return null;
+  }
+}
+
+function cacheGitFooterWebuiPayload(raw, tabId = activeTabId) {
+  if (!parseGitFooterWebuiPayloadRaw(raw)) return;
+  try {
+    localStorage.setItem(GIT_FOOTER_WEBUI_PAYLOAD_CACHE_KEY, JSON.stringify({
+      raw,
+      cwd: currentGitFooterCacheCwd(tabId),
+      savedAt: Date.now(),
+    }));
+  } catch {
+    // Cached footer payloads are best-effort; live extension payloads still work.
+  }
+}
+
+function clearGitFooterWebuiPayloadCache() {
+  try {
+    localStorage.removeItem(GIT_FOOTER_WEBUI_PAYLOAD_CACHE_KEY);
+  } catch {
+    // Ignore storage failures; toggles should still work for this page load.
+  }
+}
+
+function parseGitFooterWebuiPayload() {
+  if (isOptionalFeatureDisabled("gitFooterStatus")) return null;
+
+  const livePayload = parseGitFooterWebuiPayloadRaw(statusEntries.get(GIT_FOOTER_WEBUI_STATUS_KEY));
+  if (livePayload) return livePayload;
+
+  const commandsStillLoading = availableCommands.length === 0 && rawAvailableCommands.length === 0;
+  const extensionDetected = hasAvailableCommand("git-footer-refresh") || optionalFeatureAvailability.gitFooterStatus;
+  if (!commandsStillLoading && !extensionDetected) return null;
+  return parseGitFooterWebuiPayloadRaw(readCachedGitFooterWebuiPayloadRaw());
+}
+
+function footerMetaClassForPayload(chip) {
+  const base = FOOTER_META_CLASS_BY_KEY.get(chip.key) || "footer-extension-meta";
+  const toneClass = chip.tone ? ` tone-${chip.tone}` : "";
+  return `${base}${toneClass}`.trim();
+}
+
+function footerTuiItem(value, className = "", options = {}) {
+  const text = cleanStatusText(value);
+  const isAction = typeof options.onClick === "function";
+  const node = make(isAction ? "button" : "span", `footer-tui-item ${className}${isAction ? " footer-tui-action" : ""}`.trim(), text);
+  if (isAction) {
+    node.type = "button";
+    node.addEventListener("click", options.onClick);
+  }
+  if (options.title) node.title = options.title;
+  return node;
+}
+
+function renderTuiFooterLine({ cwd, cwdTitle, message = "", stats = [], model = "" } = {}) {
+  const tab = activeTab();
+  const line = make("div", "footer-line footer-line-tui");
+  line.append(footerTuiItem(cwd || "loading…", "footer-tui-cwd", tab ? {
+    onClick: changeActiveTabCwd,
+    title: cwdTitle || `Change cwd for ${tab.title}: ${cwd}`,
+  } : { title: cwdTitle }));
+  if (message) line.append(footerTuiItem(message, "footer-tui-status"));
+  for (const stat of stats.filter(Boolean)) line.append(footerTuiItem(stat, "footer-tui-stat"));
+  if (model) {
+    line.append(make("span", "footer-tui-spacer"));
+    line.append(footerTuiItem(model, "footer-tui-model", {
+      onClick: () => setFooterModelPickerOpen(!footerModelPickerOpen),
+      title: `Change scoped model: ${model}`,
+    }));
+  }
+  return line;
+}
+
+function renderGitFooterPayloadMetric(chip) {
+  const node = footerMetric(chip.icon || "•", chip.label, chip.value, chip.tone ? `tone-${chip.tone}` : "", { title: chip.title || undefined });
+  return chip.contextUsage ? applyFooterContextUsage(node, chip.contextUsage) : node;
+}
+
+function renderGitFooterPayloadMeta(chip, tab) {
+  const options = { title: chip.title || undefined };
+  if (chip.key === "cwd" && tab) {
+    options.onClick = changeActiveTabCwd;
+    options.title = chip.title || `Change cwd for ${tab.title}: ${chip.value}`;
+  } else if (chip.key === "model") {
+    options.onClick = () => setFooterModelPickerOpen(!footerModelPickerOpen);
+    options.title = chip.title || `Change scoped model: ${chip.value}`;
+  }
+  const node = footerMeta(chip.label, chip.value, footerMetaClassForPayload(chip), options);
+  return chip.contextUsage ? applyFooterContextUsage(node, chip.contextUsage) : node;
+}
+
+function renderGitFooterPayload(payload) {
+  const tab = activeTab();
+  elements.statusBar.replaceChildren();
+  elements.statusBar.classList.remove("statusbar-tui-footer");
+  elements.statusBar.classList.add("statusbar-git-footer");
+  document.body.classList.toggle("footer-model-picker-open", footerModelPickerOpen);
+
+  const row1 = make("div", "footer-line footer-line-main");
+  row1.append(...payload.main.map(renderGitFooterPayloadMetric));
+
+  const footerToggle = make("button", "footer-details-toggle", mobileFooterExpanded ? "Less" : "Details");
+  footerToggle.type = "button";
+  footerToggle.setAttribute("aria-expanded", mobileFooterExpanded ? "true" : "false");
+  footerToggle.addEventListener("click", () => setMobileFooterExpanded(!mobileFooterExpanded));
+
+  const row2 = make("div", "footer-line footer-line-meta");
+  row2.append(...payload.meta.map((chip) => renderGitFooterPayloadMeta(chip, tab)), footerToggle);
+
+  elements.statusBar.append(row1, row2);
+  if (footerModelPickerOpen) elements.statusBar.append(renderFooterModelPicker());
+  setMobileFooterExpanded(mobileFooterExpanded);
+  updateFooterModelPickerPosition();
+}
+
+function gitFooterFallbackMessage() {
+  if (isOptionalFeatureDisabled("gitFooterStatus")) return "";
+  const tabContext = activeTabContext();
+  const commandsStillLoading = availableCommands.length === 0 && rawAvailableCommands.length === 0;
+  const footerRefreshPending = tabContext.tabId ? gitFooterPayloadRefreshInFlightByTab.has(tabContext.tabId) : false;
+  const extensionDetected = hasAvailableCommand("git-footer-refresh") || optionalFeatureAvailability.gitFooterStatus;
+  return commandsStillLoading || footerRefreshPending || extensionDetected
+    ? "Loading git footer status…"
+    : "Git footer status extension unavailable";
+}
+
+function renderMinimalFooter() {
+  const tab = activeTab();
+  const workspaceLabel = latestWorkspace?.displayCwd || (tab?.cwd ? normalizeDisplayPath(tab.cwd) : "loading…");
+  const modelLine = footerModelLine();
+  const footerMessage = gitFooterFallbackMessage();
+
+  elements.statusBar.replaceChildren();
+  elements.statusBar.classList.remove("statusbar-git-footer");
+  elements.statusBar.classList.add("statusbar-tui-footer");
+  document.body.classList.toggle("footer-model-picker-open", footerModelPickerOpen);
+  elements.statusBar.append(renderTuiFooterLine({
+    cwd: workspaceLabel,
+    cwdTitle: tab ? `Change cwd for ${tab.title}: ${workspaceLabel}` : undefined,
+    message: footerMessage,
+    stats: fallbackFooterStats(),
+    model: modelLine,
+  }));
+  if (footerModelPickerOpen) elements.statusBar.append(renderFooterModelPicker());
+  setMobileFooterExpanded(false);
+  updateFooterModelPickerPosition();
 }
 
 function setFooterModelPickerOpen(open) {
@@ -3703,62 +4015,12 @@ async function changeActiveTabCwd() {
 }
 
 function renderFooter() {
-  const stats = latestStats;
-  const tokens = stats?.tokens || {};
-  const contextUsage = stats?.contextUsage || currentState?.contextUsage;
-  const piTokens = estimatePiTokens();
-  const speed = currentRunStartedAt
-    ? (Math.max(1, Math.round(currentRunStreamChars / 4)) / Math.max(0.5, (performance.now() - currentRunStartedAt) / 1000))
-    : latestTokPerSecond;
-  const speedLabel = Number.isFinite(speed) ? `${speed.toFixed(1)} tok/s` : "-- tok/s";
-  const contextLabel = contextUsage?.contextWindow
-    ? `${contextUsage.percent !== null && contextUsage.percent !== undefined ? `${Number(contextUsage.percent).toFixed(1)}% / ` : ""}${formatTokenCount(contextUsage.contextWindow)}`
-    : "?";
-
-  const tab = activeTab();
-  const git = latestWorkspace?.git;
-  const branchLabel = git?.isRepo ? git.branch || "detached" : "no repo";
-  const changeLabel = git?.isRepo ? `✎ ${git.changed ?? 0}  ◌ ${git.untracked ?? 0}` : "no git";
-  const workspaceLabel = latestWorkspace?.displayCwd || (tab?.cwd ? normalizeDisplayPath(tab.cwd) : "loading…");
-  const runtime = latestWorkspace?.uptimeMs ? formatDuration(latestWorkspace.uptimeMs) : "--";
-  const modelLine = `${shortModelLabel(currentState?.model)} · ${currentState?.thinkingLevel || "?"}`;
-
-  elements.statusBar.replaceChildren();
-  document.body.classList.toggle("footer-model-picker-open", footerModelPickerOpen);
-  const row1 = make("div", "footer-line footer-line-main");
-  row1.append(
-    footerMetric("🪙", "tokens", `↑ ${formatTokenCount(tokens.input ?? 0)}  ↓ ${formatTokenCount(tokens.output ?? 0)}`, "tone-pink"),
-    footerMetric("💾", "cache", `R ${formatTokenCount(tokens.cacheRead ?? 0)}${tokens.cacheWrite ? `  W ${formatTokenCount(tokens.cacheWrite)}` : ""}`, "tone-blue"),
-    footerMetric("π", "pi", piTokens === null ? "-- tok" : `~${formatTokenCount(piTokens)} tok`, "tone-mauve"),
-    footerMetric("⚡", "speed", speedLabel, "tone-yellow"),
-    footerMetric("💸", subscriptionSuffix(), formatCost(stats?.cost ?? 0), "tone-green"),
-    applyFooterContextUsage(footerMetric("🧠", "context", contextLabel, "tone-teal"), contextUsage),
-  );
-  const footerToggle = make("button", "footer-details-toggle", mobileFooterExpanded ? "Less" : "Details");
-  footerToggle.type = "button";
-  footerToggle.setAttribute("aria-expanded", mobileFooterExpanded ? "true" : "false");
-  footerToggle.addEventListener("click", () => setMobileFooterExpanded(!mobileFooterExpanded));
-
-  const row2 = make("div", "footer-line footer-line-meta");
-  row2.append(
-    footerMeta("cwd", workspaceLabel, "footer-workspace", tab ? {
-      onClick: changeActiveTabCwd,
-      title: `Change cwd for ${tab.title}: ${workspaceLabel}`,
-    } : {}),
-    footerMeta("git", branchLabel, "footer-branch"),
-    footerMeta("changes", changeLabel, "footer-changes"),
-    footerMeta("runtime", `⏱ ${runtime} · Agent`, "footer-runtime"),
-    applyFooterContextUsage(footerMeta("context", contextLabel, "footer-context"), contextUsage),
-    footerMeta("model", modelLine, "footer-model", {
-      onClick: () => setFooterModelPickerOpen(!footerModelPickerOpen),
-      title: `Change scoped model: ${modelLine}`,
-    }),
-    footerToggle,
-  );
-  elements.statusBar.append(row1, row2);
-  if (footerModelPickerOpen) elements.statusBar.append(renderFooterModelPicker());
-  setMobileFooterExpanded(mobileFooterExpanded);
-  updateFooterModelPickerPosition();
+  const gitFooterPayload = parseGitFooterWebuiPayload();
+  if (gitFooterPayload) {
+    renderGitFooterPayload(gitFooterPayload);
+    return;
+  }
+  renderMinimalFooter();
 }
 
 function scheduleRefreshMessages(delay = 120, tabContext = activeTabContext()) {
@@ -6291,6 +6553,7 @@ function updateLiveToolCard(bubble, message) {
   const header = bubble.querySelector(":scope > .message-header");
   const body = bubble.querySelector(":scope > .message-body");
   if (!body) return false;
+  attachMessageCopyButton(bubble, message, body);
   applyToolExecutionBubbleState(bubble, message);
   const role = header?.querySelector(".message-role");
   if (role) role.textContent = messageTitle(message);
@@ -6476,6 +6739,7 @@ function appendMessage(message, { streaming = false, messageIndex = -1, transien
   } else {
     bubble.append(header, body);
   }
+  attachMessageCopyButton(bubble, message, body);
   if (!streaming && !transient) renderActionFeedbackControls(bubble, message, messageIndex);
   appendChatMessageBubble(bubble);
   return { bubble, body };
@@ -7024,16 +7288,37 @@ function resetOptionalFeatureAvailability() {
   renderOptionalFeatureControls();
 }
 
+function requestGitFooterWebuiPayload(tabContext = activeTabContext()) {
+  if (!tabContext.tabId || isOptionalFeatureDisabled("gitFooterStatus")) return;
+  if (currentState?.isStreaming || currentState?.isCompacting) return;
+  if (!hasAvailableCommand("git-footer-refresh") || statusEntries.has(GIT_FOOTER_WEBUI_STATUS_KEY)) return;
+  if (gitFooterPayloadRefreshInFlightByTab.has(tabContext.tabId)) return;
+
+  gitFooterPayloadRefreshInFlightByTab.add(tabContext.tabId);
+  if (isCurrentTabContext(tabContext)) renderFooter();
+  api("/api/prompt", {
+    method: "POST",
+    body: { message: "/git-footer-refresh --webui-silent", streamingBehavior: "steer" },
+    tabId: tabContext.tabId,
+  }).catch((error) => {
+    if (isCurrentTabContext(tabContext)) addEvent(`git footer payload refresh failed: ${error.message || String(error)}`, "warn");
+  }).finally(() => {
+    gitFooterPayloadRefreshInFlightByTab.delete(tabContext.tabId);
+    if (isCurrentTabContext(tabContext)) renderFooter();
+  });
+}
+
 function updateOptionalFeatureAvailability() {
   optionalFeatureAvailability.gitWorkflow = hasAvailableCommand("git-staged-msg");
   optionalFeatureAvailability.releaseNpm = hasAvailableCommand("release-npm");
   optionalFeatureAvailability.releaseAur = hasAvailableCommand("release-aur");
   optionalFeatureAvailability.statsCommand = hasAvailableCommand("stats");
-  optionalFeatureAvailability.gitFooterStatus = hasAvailableCommand("git-footer-refresh") || optionalFeatureAvailability.gitFooterStatus || statusEntries.has("git-footer");
+  optionalFeatureAvailability.gitFooterStatus = hasAvailableCommand("git-footer-refresh") || optionalFeatureAvailability.gitFooterStatus || statusEntries.has("git-footer") || statusEntries.has(GIT_FOOTER_WEBUI_STATUS_KEY);
   optionalFeatureAvailability.tuiSkillsCommand = hasLoadedRpcCommand("skills");
   optionalFeatureAvailability.todoProgressWidget = hasAvailableCommand("todo-progress-status") || optionalFeatureAvailability.todoProgressWidget || widgets.has("todo-progress");
   optionalFeatureAvailability.tuiToolsCommand = hasLoadedRpcCommand("tools");
   optionalFeatureAvailability.themeBundle = availableThemes.length > 0;
+  requestGitFooterWebuiPayload();
   renderOptionalFeatureControls();
 }
 
@@ -8011,7 +8296,6 @@ function handleMessageUpdate(event) {
     scrollChatToBottom();
   } else if (update.type === "thinking_delta") {
     const delta = thinkingDeltaText(update);
-    currentRunStreamChars += delta.length;
     setRunIndicatorActivity("Thinking…", { scroll: false });
     const synced = syncStreamingThinkingFromMessage(event);
     if (thinkingOutputVisible && delta && (!synced || !streamThinking?.textContent)) {
@@ -8028,7 +8312,6 @@ function handleMessageUpdate(event) {
     setRunIndicatorActivity("Finished thinking; waiting for the next output or action…", { scroll: false });
   } else if (update.type === "text_delta" || update.type === "text_end") {
     const delta = update.type === "text_delta" ? update.delta || "" : "";
-    currentRunStreamChars += delta.length;
     const partialText = assistantTextFromMessage(assistantStreamingMessage(event));
     if (typeof partialText === "string") streamRawText = partialText;
     else if (update.type === "text_end" && typeof update.content === "string") streamRawText = update.content;
@@ -8060,6 +8343,7 @@ async function refreshState(tabContext = activeTabContext()) {
   syncActiveTabActivityFromState(currentState);
   syncRunIndicatorFromState(currentState);
   renderStatus();
+  requestGitFooterWebuiPayload(tabContext);
 }
 
 async function refreshStats(tabContext = activeTabContext()) {
@@ -8086,7 +8370,6 @@ async function refreshWorkspace(tabContext = activeTabContext()) {
           cwd: health.cwd,
           displayCwd: normalizeDisplayPath(health.cwd),
           uptimeMs: latestWorkspace?.uptimeMs || 0,
-          git: { isRepo: false },
         }
       : null;
   }
@@ -9184,12 +9467,18 @@ function handleExtensionUiRequest(request) {
       addTransientMessage({ role: "extension", title: "extension output", content: message, level });
       return;
     }
-    case "setStatus":
-      if (request.statusText) statusEntries.set(request.statusKey || "extension", request.statusText);
-      else statusEntries.delete(request.statusKey || "extension");
+    case "setStatus": {
+      const statusKey = request.statusKey || "extension";
+      if (request.statusText) {
+        statusEntries.set(statusKey, request.statusText);
+        if (statusKey === GIT_FOOTER_WEBUI_STATUS_KEY) cacheGitFooterWebuiPayload(request.statusText, request.tabId);
+      } else {
+        statusEntries.delete(statusKey);
+      }
       updateOptionalFeatureAvailability();
       renderStatus();
       return;
+    }
     case "setWidget":
       if (Array.isArray(request.widgetLines)) widgets.set(request.widgetKey || request.id, request);
       else widgets.delete(request.widgetKey || request.id);
@@ -9392,13 +9681,11 @@ function handleEvent(event) {
     }
     case "pi_process_exit":
       addEvent(`pi rpc exited (${event.code ?? event.signal ?? "unknown"})`, "error");
-      currentRunStartedAt = null;
       clearRunIndicatorActivity();
       refreshTabs().catch((error) => addEvent(error.message, "error"));
       break;
     case "pi_process_error":
       addEvent(event.error || "pi rpc process error", "error");
-      currentRunStartedAt = null;
       clearRunIndicatorActivity();
       refreshTabs().catch((error) => addEvent(error.message, "error"));
       break;
@@ -9410,9 +9697,6 @@ function handleEvent(event) {
       scheduleRefreshState();
       break;
     case "agent_start":
-      currentRunStartedAt = performance.now();
-      currentRunStreamChars = 0;
-      latestTokPerSecond = null;
       if (currentState) currentState = { ...currentState, isStreaming: true };
       setRunIndicatorActivity("Agent run started; waiting for first output or action…");
       addEvent("agent started");
@@ -9423,7 +9707,6 @@ function handleEvent(event) {
     case "agent_end":
       addEvent("agent finished");
       notifyAgentDone(event.tabId || activeTabId, { activity: event.tabActivity, tabTitle: event.tabTitle });
-      currentRunStartedAt = null;
       if (currentState) currentState = { ...currentState, isStreaming: false };
       clearRunIndicatorActivity();
       markTabOutputSeen();
@@ -9450,11 +9733,6 @@ function handleEvent(event) {
       handleMessageUpdate(event);
       break;
     case "message_end":
-      if (event.message?.role === "assistant" && currentRunStartedAt) {
-        const elapsedSeconds = Math.max(0.5, (performance.now() - currentRunStartedAt) / 1000);
-        const outputTokens = Number(event.message?.usage?.output ?? 0) || Math.max(1, Math.round(currentRunStreamChars / 4));
-        latestTokPerSecond = outputTokens / elapsedSeconds;
-      }
       if (runIndicatorIsActive()) setRunIndicatorActivity("Assistant message finished; waiting for the next step…", { scroll: false });
       scheduleRefreshMessages();
       scheduleRefreshState();

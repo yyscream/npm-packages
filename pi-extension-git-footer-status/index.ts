@@ -38,6 +38,10 @@ type SigningDiagnostics = {
 };
 
 const LIVE_TOKEN_SPEED_ROLLING_WINDOW_MS = 2000;
+const WEBUI_FOOTER_STATUS_KEY = "git-footer-webui";
+const GIT_FOOTER_STATUS_KEY = "git-footer";
+const WEBUI_FOOTER_PAYLOAD_TYPE = "firstpick.git-footer-status.footer";
+const WEBUI_FOOTER_PAYLOAD_VERSION = 1;
 
 // Toggle footer items on/off here.
 const FOOTER_FLAGS = {
@@ -61,6 +65,58 @@ const FOOTER_FLAGS = {
   lastCommitAge: true,
   signingMismatch: true,
 } as const;
+
+type GitStatusTone = "accent" | "warning" | "muted" | "success" | "error" | "dim";
+
+type GitStatusItem = {
+  text: string;
+  tone: GitStatusTone;
+};
+
+type GitStatusSection = {
+  key: "branch" | "sync" | "changes" | "extra";
+  items: GitStatusItem[];
+};
+
+type FooterTelemetry = {
+  totalInput: number;
+  totalOutput: number;
+  totalCacheRead: number;
+  totalCacheWrite: number;
+  totalCost: number;
+  liveOutputTokens: number;
+  latestTokenSpeed: number | null;
+  promptInjectionTokens: number;
+  contextWindow: number;
+  contextPercent: number | null;
+  contextDisplay: string;
+  modelName: string;
+  modelProvider: string | null;
+  showModelProvider: boolean;
+  thinkingLevel: string;
+  usingSubscription: boolean;
+};
+
+type WebuiFooterChip = {
+  key: string;
+  label: string;
+  value: string;
+  icon?: string;
+  tone?: "pink" | "blue" | "mauve" | "yellow" | "green" | "teal";
+  title?: string;
+  contextUsage?: {
+    percent: number | null;
+    contextWindow: number;
+  };
+};
+
+type WebuiFooterPayload = {
+  type: typeof WEBUI_FOOTER_PAYLOAD_TYPE;
+  version: typeof WEBUI_FOOTER_PAYLOAD_VERSION;
+  generatedAt: number;
+  main: WebuiFooterChip[];
+  meta: WebuiFooterChip[];
+};
 
 function formatCwd(cwd: string): string {
   const home = homedir();
@@ -325,57 +381,221 @@ async function getSigningDiagnostics(pi: ExtensionAPI, cwd: string): Promise<Sig
   };
 }
 
-function buildStatusText(ctx: ExtensionContext, snapshot: GitSnapshot): string {
-  const t = ctx.ui.theme;
-  const f = FOOTER_FLAGS;
-
-  const sectionSep = t.fg("dim", "│");
-  const itemSep = t.fg("dim", "·");
-
-  const branchSection: string[] = [];
-  if (f.branch) {
-    branchSection.push(t.fg("accent", ""), t.fg("accent", snapshot.branch));
-  }
-  if (f.detachedIndicator && snapshot.isDetached) branchSection.push(t.fg("warning", "⎇"));
-  if (f.operationState && snapshot.operation) branchSection.push(t.fg("warning", snapshot.operation));
-
-  const syncSection: string[] = [];
-  if (f.ahead && snapshot.ahead > 0) syncSection.push(t.fg("muted", `⇡${snapshot.ahead}`));
-  if (f.behind && snapshot.behind > 0) syncSection.push(t.fg("muted", `⇣${snapshot.behind}`));
-
-  const changesSection: string[] = [];
-  if (f.staged && snapshot.staged > 0) changesSection.push(t.fg("success", `+${snapshot.staged}`));
-  if (f.unstaged && snapshot.unstaged > 0) changesSection.push(t.fg("warning", `✎${snapshot.unstaged}`));
-  if (f.untracked && snapshot.untracked > 0) changesSection.push(t.fg("muted", `◌${snapshot.untracked}`));
-  if (f.conflicted && snapshot.conflicted > 0) changesSection.push(t.fg("error", `!${snapshot.conflicted}`));
-
-  const extraSection: string[] = [];
-  if (f.stash && snapshot.stashCount > 0) extraSection.push(t.fg("muted", `⚑${snapshot.stashCount}`));
-  if (f.submodules && snapshot.submoduleDirty > 0) extraSection.push(t.fg("warning", `✖${snapshot.submoduleDirty}`));
-  if (f.worktrees && snapshot.worktreeCount > 1) extraSection.push(t.fg("muted", `📦${snapshot.worktreeCount}`));
-  if (f.tag && snapshot.headTag) extraSection.push(t.fg("accent", `🏷${snapshot.headTag}`));
-  if (f.lastCommitAge && snapshot.lastCommitAge) extraSection.push(t.fg("dim", `⏱${snapshot.lastCommitAge}`));
-  if (f.signingMismatch && snapshot.signingMismatch) extraSection.push(t.fg("warning", "⚠️!"));
-
-  const isWorkingTreeClean =
+function isWorkingTreeClean(snapshot: GitSnapshot): boolean {
+  return (
     snapshot.ahead === 0 &&
     snapshot.behind === 0 &&
     snapshot.staged === 0 &&
     snapshot.unstaged === 0 &&
     snapshot.untracked === 0 &&
-    snapshot.conflicted === 0;
-
-  if (f.clean && isWorkingTreeClean) {
-    changesSection.push(t.fg("dim", "clean"));
-  }
-
-  const sections = [branchSection, syncSection, changesSection, extraSection].filter(
-    (section) => section.length > 0,
+    snapshot.conflicted === 0
   );
+}
+
+function buildGitStatusSections(snapshot: GitSnapshot): GitStatusSection[] {
+  const f = FOOTER_FLAGS;
+  const branchSection: GitStatusItem[] = [];
+  if (f.branch) {
+    branchSection.push({ text: "", tone: "accent" }, { text: snapshot.branch, tone: "accent" });
+  }
+  if (f.detachedIndicator && snapshot.isDetached) branchSection.push({ text: "⎇", tone: "warning" });
+  if (f.operationState && snapshot.operation) branchSection.push({ text: snapshot.operation, tone: "warning" });
+
+  const syncSection: GitStatusItem[] = [];
+  if (f.ahead && snapshot.ahead > 0) syncSection.push({ text: `⇡${snapshot.ahead}`, tone: "muted" });
+  if (f.behind && snapshot.behind > 0) syncSection.push({ text: `⇣${snapshot.behind}`, tone: "muted" });
+
+  const changesSection: GitStatusItem[] = [];
+  if (f.staged && snapshot.staged > 0) changesSection.push({ text: `+${snapshot.staged}`, tone: "success" });
+  if (f.unstaged && snapshot.unstaged > 0) changesSection.push({ text: `✎${snapshot.unstaged}`, tone: "warning" });
+  if (f.untracked && snapshot.untracked > 0) changesSection.push({ text: `◌${snapshot.untracked}`, tone: "muted" });
+  if (f.conflicted && snapshot.conflicted > 0) changesSection.push({ text: `!${snapshot.conflicted}`, tone: "error" });
+  if (f.clean && isWorkingTreeClean(snapshot)) changesSection.push({ text: "clean", tone: "dim" });
+
+  const extraSection: GitStatusItem[] = [];
+  if (f.stash && snapshot.stashCount > 0) extraSection.push({ text: `⚑${snapshot.stashCount}`, tone: "muted" });
+  if (f.submodules && snapshot.submoduleDirty > 0) extraSection.push({ text: `✖${snapshot.submoduleDirty}`, tone: "warning" });
+  if (f.worktrees && snapshot.worktreeCount > 1) extraSection.push({ text: `📦${snapshot.worktreeCount}`, tone: "muted" });
+  if (f.tag && snapshot.headTag) extraSection.push({ text: `🏷${snapshot.headTag}`, tone: "accent" });
+  if (f.lastCommitAge && snapshot.lastCommitAge) extraSection.push({ text: `⏱${snapshot.lastCommitAge}`, tone: "dim" });
+  if (f.signingMismatch && snapshot.signingMismatch) extraSection.push({ text: "⚠️!", tone: "warning" });
+
+  return [
+    { key: "branch", items: branchSection },
+    { key: "sync", items: syncSection },
+    { key: "changes", items: changesSection },
+    { key: "extra", items: extraSection },
+  ].filter((section) => section.items.length > 0);
+}
+
+function buildStatusText(ctx: ExtensionContext, snapshot: GitSnapshot): string {
+  const t = ctx.ui.theme;
+  const sectionSep = t.fg("dim", "│");
+  const itemSep = t.fg("dim", "·");
+  const sections = buildGitStatusSections(snapshot);
 
   return sections.length > 0
-    ? sections.map((section) => section.join(` ${itemSep} `)).join(` ${sectionSep} `)
+    ? sections
+        .map((section) => section.items.map((item) => t.fg(item.tone, item.text)).join(` ${itemSep} `))
+        .join(` ${sectionSep} `)
     : t.fg("dim", "git");
+}
+
+function sectionValue(section: GitStatusSection | undefined): string | undefined {
+  if (!section || section.items.length === 0) return undefined;
+  return section.items.map((item) => item.text).join(" · ");
+}
+
+function footerTone(tone: GitStatusTone): WebuiFooterChip["tone"] {
+  switch (tone) {
+    case "success":
+      return "green";
+    case "warning":
+      return "yellow";
+    case "accent":
+      return "mauve";
+    case "error":
+      return "pink";
+    case "muted":
+    case "dim":
+      return "blue";
+  }
+}
+
+function buildWebuiGitMeta(snapshot: GitSnapshot | null): WebuiFooterChip[] {
+  if (!snapshot) return [{ key: "git", label: "git", value: "no repo", title: "git: no repo" }];
+
+  const sections = buildGitStatusSections(snapshot);
+  const state = sectionValue(sections.find((section) => section.key === "branch"));
+  const sync = sectionValue(sections.find((section) => section.key === "sync"));
+  const changes = sectionValue(sections.find((section) => section.key === "changes"));
+  const extraSection = sections.find((section) => section.key === "extra");
+  const extra = sectionValue(extraSection);
+
+  const chips: WebuiFooterChip[] = [
+    {
+      key: "git",
+      label: "git",
+      value: snapshot.branch || "detached",
+      title: `git branch: ${snapshot.branch || "detached"}`,
+    },
+  ];
+  if (state) chips.push({ key: "git-state", label: "state", value: state, title: `git state: ${state}`, tone: "yellow" });
+  if (sync) chips.push({ key: "sync", label: "sync", value: sync, title: `git sync: ${sync}`, tone: "blue" });
+  if (changes) chips.push({ key: "changes", label: "changes", value: changes, title: `git changes: ${changes}` });
+  if (extra) {
+    chips.push({
+      key: "git-extra",
+      label: "git+",
+      value: extra,
+      title: `git extras: ${extra}`,
+      tone: footerTone(extraSection?.items.find((item) => item.tone !== "dim")?.tone ?? "muted"),
+    });
+  }
+  return chips;
+}
+
+function footerMetricValue(tokens: number): string {
+  return formatTokens(tokens);
+}
+
+function buildWebuiFooterPayload(ctx: ExtensionContext, snapshot: GitSnapshot | null, telemetry: FooterTelemetry): WebuiFooterPayload {
+  const speed = telemetry.latestTokenSpeed;
+  const speedPrefix = telemetry.liveOutputTokens > 0 ? `${footerMetricValue(telemetry.liveOutputTokens)} tok @ ` : "";
+  const providerPrefix = telemetry.showModelProvider && telemetry.modelProvider ? `(${telemetry.modelProvider}) ` : "";
+  const thinkingSuffix = telemetry.thinkingLevel
+    ? telemetry.thinkingLevel === "off"
+      ? " • thinking off"
+      : ` • ${telemetry.thinkingLevel}`
+    : "";
+
+  const main: WebuiFooterChip[] = [];
+  if (telemetry.totalInput || telemetry.totalOutput) {
+    main.push({
+      key: "tokens",
+      icon: "🪙",
+      label: "tokens",
+      value: `↑${footerMetricValue(telemetry.totalInput)} · ↓${footerMetricValue(telemetry.totalOutput)}`,
+      tone: "pink",
+    });
+  }
+  if (telemetry.totalCacheRead || telemetry.totalCacheWrite) {
+    main.push({
+      key: "cache",
+      icon: "💾",
+      label: "cache",
+      value: `R${footerMetricValue(telemetry.totalCacheRead)}${telemetry.totalCacheWrite ? ` · W${footerMetricValue(telemetry.totalCacheWrite)}` : ""}`,
+      tone: "blue",
+    });
+  }
+  main.push({
+    key: "pi",
+    icon: "π",
+    label: "pi",
+    value: `${footerMetricValue(telemetry.promptInjectionTokens)} tok`,
+    tone: "mauve",
+  });
+  if (speed !== null) {
+    main.push({
+      key: "speed",
+      icon: "⚡",
+      label: "speed",
+      value: `${speedPrefix}${formatTokenSpeed(speed)} tok/s`,
+      tone: "yellow",
+    });
+  }
+  main.push({
+    key: "cost",
+    icon: "💸",
+    label: telemetry.usingSubscription ? "sub" : "api",
+    value: `$${telemetry.totalCost.toFixed(3)}`,
+    tone: "green",
+  });
+  main.push({
+    key: "context",
+    icon: "🧠",
+    label: "context",
+    value: telemetry.contextDisplay,
+    tone: "teal",
+    contextUsage: {
+      percent: telemetry.contextPercent,
+      contextWindow: telemetry.contextWindow,
+    },
+  });
+
+  const meta: WebuiFooterChip[] = [
+    {
+      key: "cwd",
+      label: "cwd",
+      value: formatCwd(ctx.cwd),
+      title: `cwd: ${ctx.cwd}`,
+    },
+    {
+      key: "context",
+      label: "context",
+      value: telemetry.contextDisplay,
+      title: `context: ${telemetry.contextDisplay}`,
+      contextUsage: {
+        percent: telemetry.contextPercent,
+        contextWindow: telemetry.contextWindow,
+      },
+    },
+    ...buildWebuiGitMeta(snapshot),
+    {
+      key: "model",
+      label: "model",
+      value: `${providerPrefix}${telemetry.modelName}${thinkingSuffix}`,
+      title: `model: ${providerPrefix}${telemetry.modelName}${thinkingSuffix}`,
+    },
+  ];
+
+  return {
+    type: WEBUI_FOOTER_PAYLOAD_TYPE,
+    version: WEBUI_FOOTER_PAYLOAD_VERSION,
+    generatedAt: Date.now(),
+    main,
+    meta,
+  };
 }
 
 export default function gitFooterStatus(pi: ExtensionAPI) {
@@ -389,7 +609,10 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
   let promptEstimateCache: PromptEstimateCache | null = null;
   let promptEstimateRequestId = 0;
   let footerUsageSnapshot: FooterUsageSnapshot = emptyFooterUsageSnapshot();
+  let latestGitSnapshot: GitSnapshot | null = null;
   let requestFooterRender: (() => void) | null = null;
+  let webuiFooterPublishTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastWebuiFooterPublishMs = 0;
 
   const getPromptCalibration = (ctx: ExtensionContext) => collectInitialPromptCalibration(ctx.sessionManager.getSessionDir());
 
@@ -426,11 +649,74 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
       const latestFallback = getFallbackPromptEstimate(ctx);
       promptEstimateCache = { key: latestFallback.key, tokens: latestFallback.estimate.total };
     } finally {
-      if (requestId === promptEstimateRequestId) requestFooterRender?.();
+      if (requestId === promptEstimateRequestId) {
+        requestFooterRender?.();
+        publishWebuiFooter(ctx);
+      }
     }
   };
 
   const getFooterPromptInjectionTokens = (): number => promptEstimateCache?.tokens ?? 0;
+
+  const buildFooterTelemetry = (ctx: ExtensionContext): FooterTelemetry => {
+    const {
+      totalInput,
+      totalOutput,
+      totalCacheRead,
+      totalCacheWrite,
+      totalCost,
+      historicalTokenSpeed,
+    } = footerUsageSnapshot;
+    const liveOutputTokens = currentAssistantStartMs !== null ? currentAssistantEstimatedOutputTokens : 0;
+    let latestTokenSpeed: number | null = currentAssistantStartMs !== null ? currentAssistantLiveTokenSpeed : latestMeasuredTokenSpeed;
+
+    if (latestTokenSpeed === null && historicalTokenSpeed !== null) {
+      latestTokenSpeed = historicalTokenSpeed;
+    }
+
+    const contextUsage = ctx.getContextUsage();
+    const contextWindow = contextUsage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
+    const rawContextPercent = typeof contextUsage?.percent === "number" ? contextUsage.percent : null;
+    const contextDisplay = rawContextPercent === null
+      ? `?/${formatTokens(contextWindow)}`
+      : `${rawContextPercent.toFixed(1)}%/${formatTokens(contextWindow)}`;
+
+    return {
+      totalInput,
+      totalOutput,
+      totalCacheRead,
+      totalCacheWrite,
+      totalCost,
+      liveOutputTokens,
+      latestTokenSpeed,
+      promptInjectionTokens: getFooterPromptInjectionTokens(),
+      contextWindow,
+      contextPercent: rawContextPercent,
+      contextDisplay,
+      modelName: ctx.model?.id || "no-model",
+      modelProvider: ctx.model?.provider || null,
+      showModelProvider: ctx.model ? true : false,
+      thinkingLevel: pi.getThinkingLevel(),
+      usingSubscription: ctx.model ? ctx.modelRegistry.isUsingOAuth(ctx.model) : false,
+    };
+  };
+
+  const publishWebuiFooter = (ctx: ExtensionContext, snapshot: GitSnapshot | null = latestGitSnapshot) => {
+    lastWebuiFooterPublishMs = Date.now();
+    const payload = buildWebuiFooterPayload(ctx, snapshot, buildFooterTelemetry(ctx));
+    ctx.ui.setStatus(WEBUI_FOOTER_STATUS_KEY, JSON.stringify(payload));
+  };
+
+  const scheduleWebuiFooterPublish = (ctx: ExtensionContext, snapshot: GitSnapshot | null = latestGitSnapshot, delayMs = 250) => {
+    if (webuiFooterPublishTimer) return;
+    const elapsedMs = Date.now() - lastWebuiFooterPublishMs;
+    const waitMs = Math.max(0, Math.min(delayMs, delayMs - elapsedMs));
+    webuiFooterPublishTimer = setTimeout(() => {
+      webuiFooterPublishTimer = null;
+      publishWebuiFooter(ctx, snapshot);
+    }, waitMs);
+    webuiFooterPublishTimer.unref?.();
+  };
 
   const recomputeFooterUsageSnapshot = (ctx: ExtensionContext): FooterUsageSnapshot => {
     const snapshot = emptyFooterUsageSnapshot();
@@ -533,12 +819,15 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
 
     try {
       const snapshot = await readGitSnapshot(pi, ctx.cwd);
+      latestGitSnapshot = snapshot;
       if (!snapshot) {
-        ctx.ui.setStatus("git-footer", undefined);
+        ctx.ui.setStatus(GIT_FOOTER_STATUS_KEY, undefined);
+        publishWebuiFooter(ctx, null);
         return;
       }
 
-      ctx.ui.setStatus("git-footer", buildStatusText(ctx, snapshot));
+      ctx.ui.setStatus(GIT_FOOTER_STATUS_KEY, buildStatusText(ctx, snapshot));
+      publishWebuiFooter(ctx, snapshot);
     } finally {
       refreshing = false;
     }
@@ -546,6 +835,7 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     promptEstimateCache = null;
+    latestGitSnapshot = null;
     footerUsageSnapshot = recomputeFooterUsageSnapshot(ctx);
     void refreshPromptInjectionEstimate(ctx);
 
@@ -561,68 +851,46 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
         },
         invalidate() {},
         render(width: number): string[] {
-          const {
-            totalInput,
-            totalOutput,
-            totalCacheRead,
-            totalCacheWrite,
-            totalCost,
-            historicalTokenSpeed,
-          } = footerUsageSnapshot;
-          const liveOutputTokens = currentAssistantStartMs !== null ? currentAssistantEstimatedOutputTokens : 0;
-          let latestTokenSpeed: number | null = currentAssistantStartMs !== null ? currentAssistantLiveTokenSpeed : latestMeasuredTokenSpeed;
-
-          if (latestTokenSpeed === null && historicalTokenSpeed !== null) {
-            latestTokenSpeed = historicalTokenSpeed;
-          }
-
-          const currentPromptInjectionTokens = getFooterPromptInjectionTokens();
-
-          const contextUsage = ctx.getContextUsage();
-          const contextWindow = contextUsage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
-          const contextPercentValue = contextUsage?.percent ?? 0;
-          const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
-          const contextPercentDisplay =
-            contextPercent === "?" ? `?/${formatTokens(contextWindow)}` : `${contextPercent}%/${formatTokens(contextWindow)}`;
+          const telemetry = buildFooterTelemetry(ctx);
+          const contextPercentValue = telemetry.contextPercent ?? 0;
 
           let contextPercentStr: string;
-          if (contextPercent === "?") {
-            contextPercentStr = theme.fg("dim", contextPercentDisplay);
+          if (telemetry.contextPercent === null) {
+            contextPercentStr = theme.fg("dim", telemetry.contextDisplay);
           } else if (contextPercentValue < 50) {
-            contextPercentStr = theme.fg("success", contextPercentDisplay);
+            contextPercentStr = theme.fg("success", telemetry.contextDisplay);
           } else if (contextPercentValue < 65) {
-            contextPercentStr = theme.fg("accent", contextPercentDisplay);
+            contextPercentStr = theme.fg("accent", telemetry.contextDisplay);
           } else if (contextPercentValue < 75) {
-            contextPercentStr = theme.fg("muted", contextPercentDisplay);
+            contextPercentStr = theme.fg("muted", telemetry.contextDisplay);
           } else if (contextPercentValue < 85) {
-            contextPercentStr = theme.fg("warning", contextPercentDisplay);
+            contextPercentStr = theme.fg("warning", telemetry.contextDisplay);
           } else {
-            contextPercentStr = theme.fg("error", contextPercentDisplay);
+            contextPercentStr = theme.fg("error", telemetry.contextDisplay);
           }
 
           const sectionSep = theme.fg("dim", "│");
           const itemSep = theme.fg("dim", "·");
 
           const ioItems: string[] = [];
-          if (totalInput) ioItems.push(`↑${formatTokens(totalInput)}`);
-          if (totalOutput) ioItems.push(`↓${formatTokens(totalOutput)}`);
+          if (telemetry.totalInput) ioItems.push(`↑${formatTokens(telemetry.totalInput)}`);
+          if (telemetry.totalOutput) ioItems.push(`↓${formatTokens(telemetry.totalOutput)}`);
 
           const cacheItems: string[] = [];
-          if (totalCacheRead) cacheItems.push(`R${formatTokens(totalCacheRead)}`);
-          if (totalCacheWrite) cacheItems.push(`W${formatTokens(totalCacheWrite)}`);
+          if (telemetry.totalCacheRead) cacheItems.push(`R${formatTokens(telemetry.totalCacheRead)}`);
+          if (telemetry.totalCacheWrite) cacheItems.push(`W${formatTokens(telemetry.totalCacheWrite)}`);
 
           const segments: string[] = [];
           if (ioItems.length > 0) segments.push(`${theme.fg("muted", "🪙")} ${ioItems.join(` ${itemSep} `)}`);
           if (cacheItems.length > 0) segments.push(`${theme.fg("muted", "💾")} ${cacheItems.join(` ${itemSep} `)}`);
-          segments.push(`PI: ${formatTokens(currentPromptInjectionTokens)} tok`);
-          if (latestTokenSpeed !== null) {
-            const livePrefix = liveOutputTokens > 0 ? `${formatTokens(liveOutputTokens)} tok @ ` : "";
-            segments.push(`⚡ ${livePrefix}${formatTokenSpeed(latestTokenSpeed)} tok/s`);
+          segments.push(`PI: ${formatTokens(telemetry.promptInjectionTokens)} tok`);
+          if (telemetry.latestTokenSpeed !== null) {
+            const livePrefix = telemetry.liveOutputTokens > 0 ? `${formatTokens(telemetry.liveOutputTokens)} tok @ ` : "";
+            segments.push(`⚡ ${livePrefix}${formatTokenSpeed(telemetry.latestTokenSpeed)} tok/s`);
           }
 
-          const usingSubscription = ctx.model ? ctx.modelRegistry.isUsingOAuth(ctx.model) : false;
-          if (totalCost || usingSubscription) {
-            segments.push(`${theme.fg("muted", "💸")} $${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`);
+          if (telemetry.totalCost || telemetry.usingSubscription) {
+            segments.push(`${theme.fg("muted", "💸")} $${telemetry.totalCost.toFixed(3)}${telemetry.usingSubscription ? " (sub)" : ""}`);
           }
 
           segments.push(`${theme.fg("muted", "🧠")} ${contextPercentStr}`);
@@ -634,18 +902,16 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
             statsLeftWidth = visibleWidth(statsLeft);
           }
 
-          const modelName = ctx.model?.id || "no-model";
-          const thinkingLevel = pi.getThinkingLevel();
           const rightSideWithoutProvider =
             ctx.model?.reasoning
-              ? thinkingLevel === "off"
-                ? `${modelName} • thinking off`
-                : `${modelName} • ${thinkingLevel}`
-              : modelName;
+              ? telemetry.thinkingLevel === "off"
+                ? `${telemetry.modelName} • thinking off`
+                : `${telemetry.modelName} • ${telemetry.thinkingLevel}`
+              : telemetry.modelName;
 
           let rightSide = rightSideWithoutProvider;
-          if (footerData.getAvailableProviderCount() > 1 && ctx.model) {
-            const withProvider = `(${ctx.model.provider}) ${rightSideWithoutProvider}`;
+          if (footerData.getAvailableProviderCount() > 1 && telemetry.modelProvider) {
+            const withProvider = `(${telemetry.modelProvider}) ${rightSideWithoutProvider}`;
             if (statsLeftWidth + 2 + visibleWidth(withProvider) <= width) {
               rightSide = withProvider;
             }
@@ -675,9 +941,9 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
           const cwdText = theme.fg("muted", cwdWithBranch);
 
           const statuses = footerData.getExtensionStatuses();
-          const gitStatus = statuses.get("git-footer");
+          const gitStatus = statuses.get(GIT_FOOTER_STATUS_KEY);
           const otherStatuses = Array.from(statuses.entries())
-            .filter(([key, value]) => key !== "git-footer" && Boolean(value))
+            .filter(([key, value]) => key !== GIT_FOOTER_STATUS_KEY && key !== WEBUI_FOOTER_STATUS_KEY && Boolean(value))
             .sort(([a], [b]) => a.localeCompare(b))
             .map(([, value]) => value as string);
 
@@ -703,17 +969,18 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
     void refreshPromptInjectionEstimate(ctx);
   });
 
-  pi.on("message_start", (event) => {
+  pi.on("message_start", (event, ctx) => {
     if (event.message.role === "assistant") {
       currentAssistantStartMs = Date.now();
       currentAssistantOutputChars = 0;
       currentAssistantEstimatedOutputTokens = 0;
       currentAssistantLiveTokenSpeed = null;
       currentAssistantTokenSamples = [];
+      publishWebuiFooter(ctx);
     }
   });
 
-  pi.on("message_update", (event) => {
+  pi.on("message_update", (event, ctx) => {
     if (event.message.role !== "assistant" || currentAssistantStartMs === null) return;
 
     const streamEvent = event.assistantMessageEvent;
@@ -737,13 +1004,15 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
     }
 
     currentAssistantLiveTokenSpeed = getRollingLiveTokenSpeed(nowMs);
+    scheduleWebuiFooterPublish(ctx);
   });
 
-  pi.on("message_end", (event) => {
+  pi.on("message_end", (event, ctx) => {
     if (event.message.role === "assistant") {
       if (recordAssistantSpeed(event.message as AssistantMessage)) {
         resetLiveAssistantState();
       }
+      publishWebuiFooter(ctx);
     }
   });
 
@@ -760,16 +1029,22 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
-    ctx.ui.setStatus("git-footer", undefined);
+    if (webuiFooterPublishTimer) {
+      clearTimeout(webuiFooterPublishTimer);
+      webuiFooterPublishTimer = null;
+    }
+    ctx.ui.setStatus(GIT_FOOTER_STATUS_KEY, undefined);
+    ctx.ui.setStatus(WEBUI_FOOTER_STATUS_KEY, undefined);
     ctx.ui.setFooter(undefined);
   });
 
   pi.registerCommand("git-footer-refresh", {
     description: "Refresh git footer information",
-    handler: async (_args, ctx) => {
+    handler: async (args, ctx) => {
+      const silent = /(?:^|\s)--webui-silent(?:\s|$)/.test(args || "");
       await refreshPromptInjectionEstimate(ctx);
       await refresh(ctx);
-      ctx.ui.notify("Git footer refreshed", "info");
+      if (!silent) ctx.ui.notify("Git footer refreshed", "info");
     },
   });
 

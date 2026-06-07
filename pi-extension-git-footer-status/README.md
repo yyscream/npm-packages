@@ -18,6 +18,7 @@ Enhanced Pi footer with git health and model/token telemetry.
   - staged/unstaged/untracked/conflicts
   - operation state (rebase/merge/cherry-pick/revert/bisect)
   - stash/submodule/worktree/tag/last-commit-age/signing mismatch indicators
+- Publishes the same footer data as a structured `git-footer-webui` status payload so Pi Web UI can render the extension-owned footer instead of duplicating this logic in the Web UI package.
 
 ## Install
 
