@@ -3748,7 +3748,7 @@ const GIT_FOOTER_TOOLTIP_COPY = {
   git: "Current Git branch. detached means HEAD is not on a branch; no repo means the cwd is outside a Git work tree.",
   "git-state": "Active Git operation or detached state. Finish or abort rebase/merge/cherry-pick/revert/bisect before normal commits.",
   sync: "Remote tracking divergence. ↑ means local commits ahead; ↓ means remote commits to pull.",
-  changes: "Working tree summary. ✅ staged, ✏️ modified unstaged, ➕ untracked, ⚠️ conflicted; clean means no changes.",
+  changes: "Working tree summary. 🟢 staged, ✏️ modified unstaged, ➕ untracked, ⚠️ conflicted; ✅ means no changes.",
   "git-extra": "Extra Git signals. 📦 stash, 🧩 dirty submodules, 🌳 worktrees, 🏷️ tag at HEAD, 🕒 last commit age, 🔓 signing mismatch.",
   model: "Scoped model for this tab.",
   thinking: "Reasoning/thinking effort for this tab.",

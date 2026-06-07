@@ -39,6 +39,7 @@ type SigningDiagnostics = {
 };
 
 const LIVE_TOKEN_SPEED_ROLLING_WINDOW_MS = 2000;
+const GIT_AUTO_REFRESH_INTERVAL_MS = 2000;
 const WEBUI_FOOTER_STATUS_KEY = "git-footer-webui";
 const GIT_FOOTER_STATUS_KEY = "git-footer";
 const WEBUI_FOOTER_PAYLOAD_TYPE = "firstpick.git-footer-status.footer";
@@ -117,6 +118,10 @@ type WebuiFooterPayload = {
   generatedAt: number;
   main: WebuiFooterChip[];
   meta: WebuiFooterChip[];
+};
+
+type GitRefreshOptions = {
+  publishIfUnchanged?: boolean;
 };
 
 function formatCwd(cwd: string): string {
@@ -388,6 +393,27 @@ function isWorkingTreeClean(snapshot: GitSnapshot): boolean {
   );
 }
 
+function gitSnapshotFingerprint(snapshot: GitSnapshot | null): string {
+  if (!snapshot) return "none";
+  return [
+    snapshot.branch,
+    snapshot.isDetached ? "1" : "0",
+    snapshot.ahead,
+    snapshot.behind,
+    snapshot.staged,
+    snapshot.unstaged,
+    snapshot.untracked,
+    snapshot.conflicted,
+    snapshot.operation ?? "",
+    snapshot.stashCount,
+    snapshot.submoduleDirty,
+    snapshot.lastCommitAge ?? "",
+    snapshot.worktreeCount,
+    snapshot.headTag ?? "",
+    snapshot.signingMismatch ? "1" : "0",
+  ].join("\u001f");
+}
+
 function buildGitStatusSections(snapshot: GitSnapshot): GitStatusSection[] {
   const f = FOOTER_FLAGS;
   const branchSection: GitStatusItem[] = [];
@@ -406,7 +432,7 @@ function buildGitStatusSections(snapshot: GitSnapshot): GitStatusSection[] {
   if (f.unstaged && snapshot.unstaged > 0) changesSection.push({ text: `✎${snapshot.unstaged}`, tone: "warning" });
   if (f.untracked && snapshot.untracked > 0) changesSection.push({ text: `◌${snapshot.untracked}`, tone: "muted" });
   if (f.conflicted && snapshot.conflicted > 0) changesSection.push({ text: `!${snapshot.conflicted}`, tone: "error" });
-  if (f.clean && isWorkingTreeClean(snapshot)) changesSection.push({ text: "clean", tone: "dim" });
+  if (f.clean && isWorkingTreeClean(snapshot)) changesSection.push({ text: "✅", tone: "dim" });
 
   const extraSection: GitStatusItem[] = [];
   if (f.stash && snapshot.stashCount > 0) extraSection.push({ text: `⚑${snapshot.stashCount}`, tone: "muted" });
@@ -444,11 +470,11 @@ function sectionValue(section: GitStatusSection | undefined): string | undefined
 
 function webuiChangesValue(snapshot: GitSnapshot): string | undefined {
   const parts: string[] = [];
-  if (snapshot.staged > 0) parts.push(`✅ ${snapshot.staged}`);
+  if (snapshot.staged > 0) parts.push(`🟢 ${snapshot.staged}`);
   if (snapshot.unstaged > 0) parts.push(`✏️ ${snapshot.unstaged}`);
   if (snapshot.untracked > 0) parts.push(`➕ ${snapshot.untracked}`);
   if (snapshot.conflicted > 0) parts.push(`⚠️ ${snapshot.conflicted}`);
-  if (parts.length === 0 && isWorkingTreeClean(snapshot)) parts.push("clean");
+  if (parts.length === 0 && isWorkingTreeClean(snapshot)) parts.push("✅");
   return parts.length > 0 ? parts.join(" · ") : undefined;
 }
 
@@ -666,9 +692,11 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
   let latestMeasuredTokenSpeed: number | null = null;
   let footerUsageSnapshot: FooterUsageSnapshot = emptyFooterUsageSnapshot();
   let latestGitSnapshot: GitSnapshot | null = null;
+  let latestGitSnapshotFingerprint: string | null = null;
   let latestPromptEstimateContext: ExtensionContext | null = null;
   let requestFooterRender: (() => void) | null = null;
   let webuiFooterPublishTimer: ReturnType<typeof setTimeout> | null = null;
+  let gitAutoRefreshTimer: ReturnType<typeof setInterval> | null = null;
   let lastWebuiFooterPublishMs = 0;
 
   const getPromptCalibration = (ctx: ExtensionContext) => collectInitialPromptCalibration(ctx.sessionManager.getSessionDir());
@@ -886,13 +914,18 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
     currentAssistantTokenSamples = [];
   };
 
-  const refresh = async (ctx: ExtensionContext) => {
+  const refresh = async (ctx: ExtensionContext, options: GitRefreshOptions = {}) => {
     if (refreshing) return;
     refreshing = true;
 
     try {
       const snapshot = await readGitSnapshot(pi, ctx.cwd);
+      const fingerprint = gitSnapshotFingerprint(snapshot);
+      const changed = fingerprint !== latestGitSnapshotFingerprint;
       latestGitSnapshot = snapshot;
+      latestGitSnapshotFingerprint = fingerprint;
+      if (!changed && options.publishIfUnchanged === false) return;
+
       if (!snapshot) {
         ctx.ui.setStatus(GIT_FOOTER_STATUS_KEY, undefined);
         publishWebuiFooter(ctx, null);
@@ -906,12 +939,28 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
     }
   };
 
+  const stopGitAutoRefresh = () => {
+    if (!gitAutoRefreshTimer) return;
+    clearInterval(gitAutoRefreshTimer);
+    gitAutoRefreshTimer = null;
+  };
+
+  const startGitAutoRefresh = (ctx: ExtensionContext) => {
+    stopGitAutoRefresh();
+    gitAutoRefreshTimer = setInterval(() => {
+      void refresh(ctx, { publishIfUnchanged: false });
+    }, GIT_AUTO_REFRESH_INTERVAL_MS);
+    gitAutoRefreshTimer.unref?.();
+  };
+
   pi.on("session_start", async (_event, ctx) => {
     promptEstimateService.clear();
     promptEstimateKeyCheck = null;
     latestPromptEstimateContext = null;
     latestGitSnapshot = null;
+    latestGitSnapshotFingerprint = null;
     footerUsageSnapshot = recomputeFooterUsageSnapshot(ctx);
+    stopGitAutoRefresh();
     void refreshPromptInjectionEstimate(ctx);
 
     ctx.ui.setFooter((tui, theme, footerData) => {
@@ -1039,6 +1088,7 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
     });
 
     await refresh(ctx);
+    startGitAutoRefresh(ctx);
   });
 
   pi.on("agent_start", async (_event, ctx) => {
@@ -1105,10 +1155,12 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    stopGitAutoRefresh();
     if (webuiFooterPublishTimer) {
       clearTimeout(webuiFooterPublishTimer);
       webuiFooterPublishTimer = null;
     }
+    latestGitSnapshotFingerprint = null;
     ctx.ui.setStatus(GIT_FOOTER_STATUS_KEY, undefined);
     ctx.ui.setStatus(WEBUI_FOOTER_STATUS_KEY, undefined);
     ctx.ui.setFooter(undefined);
