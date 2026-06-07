@@ -1173,12 +1173,18 @@ body.side-panel-collapsed .terminal-tabs-shell {
 }
 .terminal-tabs-shell:has(.terminal-tab-group:hover),
 .terminal-tabs-shell:has(.terminal-tab-group:focus-within),
-.terminal-tabs-shell:has(.terminal-tab-group.menu-open) {
+.terminal-tabs-shell:has(.terminal-tab-group.menu-open),
+.terminal-tabs-shell:has(.terminal-new-tab-menu:hover),
+.terminal-tabs-shell:has(.terminal-new-tab-menu:focus-within),
+.terminal-tabs-shell:has(.terminal-new-tab-menu.open) {
   z-index: 90;
 }
 .terminal-tabs:has(.terminal-tab-group:hover),
 .terminal-tabs:has(.terminal-tab-group:focus-within),
-.terminal-tabs:has(.terminal-tab-group.menu-open) {
+.terminal-tabs:has(.terminal-tab-group.menu-open),
+.terminal-tabs:has(.terminal-new-tab-menu:hover),
+.terminal-tabs:has(.terminal-new-tab-menu:focus-within),
+.terminal-tabs:has(.terminal-new-tab-menu.open) {
   overflow: visible;
 }
 .terminal-tab {
@@ -1445,6 +1451,10 @@ body.side-panel-collapsed .terminal-tabs-shell {
 .terminal-tab-group-close {
   border-left-color: rgba(243, 139, 168, 0.18);
 }
+.terminal-new-tab-menu.composer-publish-menu {
+  flex: 0 0 auto;
+  margin-right: 0;
+}
 .terminal-new-tab-button {
   flex: 0 0 auto;
   padding: 0.45rem 0.72rem;
@@ -1455,10 +1465,33 @@ body.side-panel-collapsed .terminal-tabs-shell {
     linear-gradient(120deg, rgba(245, 194, 231, 0.12), rgba(137, 180, 250, 0.08)),
     rgba(var(--ctp-crust-rgb), 0.58);
 }
-.terminal-new-tab-button:hover {
+.terminal-new-tab-button:hover,
+.terminal-new-tab-button.menu-open {
   color: #11111b;
   border-color: transparent;
   background: linear-gradient(120deg, var(--ctp-pink), var(--ctp-mauve), var(--ctp-blue));
+}
+.terminal-new-tab-menu.open .terminal-new-tab-button {
+  border-color: rgba(245, 194, 231, 0.58);
+}
+.terminal-new-tab-menu .composer-publish-menu-panel {
+  inset: 100% 0 auto auto;
+  padding-top: 0.38rem;
+  padding-bottom: 0;
+}
+.terminal-new-tab-menu .composer-publish-menu-item {
+  color: var(--ctp-pink);
+  border-color: rgba(245, 194, 231, 0.32);
+  background:
+    linear-gradient(120deg, rgba(245, 194, 231, 0.12), rgba(137, 180, 250, 0.08)),
+    var(--ctp-crust);
+}
+.terminal-new-tab-menu .composer-publish-menu-item:hover,
+.terminal-new-tab-menu .composer-publish-menu-item:focus-visible {
+  color: #11111b;
+  border-color: transparent;
+  background: linear-gradient(120deg, var(--ctp-pink), var(--ctp-mauve), var(--ctp-blue));
+  box-shadow: 0 0 1rem rgba(245, 194, 231, 0.20);
 }
 
 .widget-area {
@@ -4589,7 +4622,10 @@ summary { cursor: pointer; color: var(--warning); }
   }
   .terminal-tabs:has(.terminal-tab-group:hover),
   .terminal-tabs:has(.terminal-tab-group:focus-within),
-  .terminal-tabs:has(.terminal-tab-group.menu-open) {
+  .terminal-tabs:has(.terminal-tab-group.menu-open),
+  .terminal-tabs:has(.terminal-new-tab-menu:hover),
+  .terminal-tabs:has(.terminal-new-tab-menu:focus-within),
+  .terminal-tabs:has(.terminal-new-tab-menu.open) {
     overflow: auto;
   }
   .terminal-tab { min-width: min(11rem, 100%); max-width: 100%; flex: 1 1 9rem; }
@@ -4620,9 +4656,27 @@ summary { cursor: pointer; color: var(--warning); }
     max-width: 100%;
     flex: 0 0 auto;
   }
+  .terminal-new-tab-menu {
+    width: auto;
+    flex-wrap: wrap;
+  }
+  .terminal-new-tab-menu.open,
+  .terminal-new-tab-menu:focus-within {
+    flex-basis: 100%;
+  }
+  .terminal-new-tab-menu .composer-publish-menu-panel {
+    position: static;
+    width: 100%;
+    min-width: min(11rem, 100%);
+    max-width: 100%;
+    margin: 0.34rem 0 0;
+    padding-top: 0;
+    overflow: visible;
+  }
   .terminal-tab-button,
   .terminal-tab-close,
   .terminal-new-tab-button,
+  .terminal-new-tab-menu-item,
   .terminal-tab-group-add { min-height: 44px; }
   .terminal-tab-button { padding: 0.32rem 0.52rem; }
   .terminal-tab-title { font-size: 0.78rem; }
@@ -4636,6 +4690,11 @@ summary { cursor: pointer; color: var(--warning); }
     width: auto;
     padding: 0.36rem 0.58rem;
     white-space: nowrap;
+  }
+  .terminal-new-tab-menu-item {
+    width: 100%;
+    max-width: 100%;
+    padding: 0.42rem 0.58rem;
   }
   .widget-area {
     display: block;

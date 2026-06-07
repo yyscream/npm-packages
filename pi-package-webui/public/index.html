@@ -12,7 +12,7 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <link rel="stylesheet" href="/styles.css?v=24" />
+    <link rel="stylesheet" href="/styles.css?v=25" />
   </head>
   <body>
     <button id="sidePanelExpandButton" class="side-panel-expand-button" type="button" aria-controls="sidePanel" aria-expanded="false" aria-label="Expand side panel" title="Expand side panel">
@@ -50,7 +50,13 @@
         <header class="terminal-tabs-shell">
           <button id="terminalTabsToggleButton" class="terminal-tabs-toggle-button" type="button" aria-controls="tabBar" aria-expanded="false">Tabs</button>
           <div id="tabBar" class="terminal-tabs" role="tablist" aria-label="Pi terminal tabs">
-            <button id="newTabButton" class="terminal-new-tab-button" type="button" title="Start a separate isolated Pi terminal">+ Tab</button>
+            <div id="newTabMenu" class="terminal-new-tab-menu composer-publish-menu">
+              <button id="newTabButton" class="terminal-new-tab-button" type="button" title="Start a separate isolated Pi terminal" aria-haspopup="menu" aria-expanded="false" aria-controls="newTabMenuPanel">+ Tab ▾</button>
+              <div id="newTabMenuPanel" class="terminal-new-tab-menu-panel composer-publish-menu-panel" role="menu" aria-labelledby="newTabButton">
+                <button id="newTabCurrentDirectoryButton" class="terminal-new-tab-menu-item composer-publish-menu-item" type="button" role="menuitem"><span>Current Directory</span></button>
+                <button id="newTabChooseDirectoryButton" class="terminal-new-tab-menu-item composer-publish-menu-item" type="button" role="menuitem"><span>Choose Directory</span></button>
+              </div>
+            </div>
           </div>
           <button id="closeAllTabsButton" class="terminal-close-all-button" type="button" title="Close all terminal tabs">Close all Tabs</button>
         </header>
@@ -467,6 +473,6 @@
       </form>
     </dialog>
 
-    <script type="module" src="/app.js?v=24"></script>
+    <script type="module" src="/app.js?v=25"></script>
   </body>
 </html>

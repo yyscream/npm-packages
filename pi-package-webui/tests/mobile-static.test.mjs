@@ -41,6 +41,11 @@ assert.match(html, /<meta name="theme-color" content="#11111b" \/>/, "PWA should
 assert.match(html, /<link rel="manifest" href="\/manifest\.webmanifest" \/>/, "PWA should expose a web app manifest");
 assert.match(html, /<link rel="apple-touch-icon" href="\/apple-touch-icon\.png" \/>/, "PWA should expose the conventional iOS home-screen icon path");
 assert.match(html, /id="terminalTabsToggleButton"/, "mobile should expose a compact terminal-tabs toggle");
+assert.match(html, /id="newTabMenu" class="terminal-new-tab-menu composer-publish-menu"/, "new-tab control should reuse the shared composer dropdown container");
+assert.match(html, /id="newTabButton"[\s\S]*aria-haspopup="menu"[\s\S]*aria-controls="newTabMenuPanel"/, "new-tab control should open a dropdown menu");
+assert.match(html, /id="newTabMenuPanel" class="terminal-new-tab-menu-panel composer-publish-menu-panel"/, "new-tab menu should reuse the shared composer dropdown panel");
+assert.match(html, /id="newTabCurrentDirectoryButton" class="terminal-new-tab-menu-item composer-publish-menu-item"[\s\S]*<span>Current Directory<\/span>/, "new-tab menu should offer the active cwd");
+assert.match(html, /id="newTabChooseDirectoryButton" class="terminal-new-tab-menu-item composer-publish-menu-item"[\s\S]*<span>Choose Directory<\/span>/, "new-tab menu should offer the cwd picker");
 assert.match(html, /id="closeAllTabsButton"[\s\S]*?>Close all Tabs<\/button>/, "tab header should expose a top-right close-all tabs action");
 assert.match(html, /id="sidePanelBackdrop"/, "mobile side panel needs an overlay/backdrop close target");
 assert.match(html, /<strong class="side-panel-title">[\s\S]*Control Deck[\s\S]*id="webuiVersionBadge"[\s\S]*id="webuiDevBadge"/, "Control Deck title should expose Web UI version and dev badges");
@@ -216,6 +221,8 @@ assert.match(css, /\.composer-actions-panel > \.composer-publish-menu[\s\S]*?gri
 assert.match(css, /\.composer-actions-panel[\s\S]*?bottom:\s*calc\(100% \+ 0\.42rem\)/, "mobile composer actions should open as an above-composer sheet");
 assert.match(css, /body\.composer-actions-open \.composer-actions-panel \{ display: grid; \}/, "composer actions panel should only open when toggled");
 assert.match(css, /\.terminal-tabs-toggle-button \{ display: none; \}/, "terminal tab toggle should be hidden outside mobile CSS");
+assert.match(css, /\.terminal-new-tab-menu \.composer-publish-menu-panel \{[\s\S]*?inset:\s*100% 0 auto auto;[\s\S]*?padding-top:\s*0\.38rem/, "new-tab dropdown should reuse the shared composer panel and open below the tab bar");
+assert.match(css, /\.terminal-new-tab-menu \.composer-publish-menu-item \{[\s\S]*?color:\s*var\(--ctp-pink\)/, "new-tab dropdown items should reuse shared composer menu items with a tab-specific color");
 assert.match(css, /\.terminal-close-all-button \{[\s\S]*?color:\s*var\(--ctp-red\)/, "close-all tabs action should render as a top-right destructive tab action");
 assert.match(css, /\.terminal-tabs\.terminal-tabs-dense \{[\s\S]*?flex-wrap:\s*wrap/, "large terminal tab sets should wrap into a readable dense tab strip");
 assert.match(css, /\.terminal-tab-group-close \{[\s\S]*?border-left-color/, "terminal tab groups should style their close button distinctly");
@@ -737,7 +744,7 @@ assert.equal(manifest.start_url, "/", "PWA manifest should start at the web UI r
 assert.ok(manifest.icons?.some((icon) => icon.src === "/apple-touch-icon.png" && icon.sizes === "180x180"), "PWA manifest should include a conventional 180px apple touch icon");
 assert.ok(manifest.icons?.some((icon) => icon.src === "/icon-192.png" && icon.sizes === "192x192"), "PWA manifest should include a 192px icon");
 assert.ok(manifest.icons?.some((icon) => icon.src === "/icon-512.png" && icon.sizes === "512x512"), "PWA manifest should include a 512px icon");
-assert.match(serviceWorker, /const CACHE_NAME = "pi-webui-pwa-v23"/, "PWA service worker should define an app-shell cache");
+assert.match(serviceWorker, /const CACHE_NAME = "pi-webui-pwa-v24"/, "PWA service worker should define an app-shell cache");
 assert.match(serviceWorker, /self\.addEventListener\("notificationclick"/, "PWA service worker should focus Web UI when blocked-tab notifications are clicked");
 assert.match(serviceWorker, /event\.notification\.data\?\.url/, "blocked-tab notifications should carry a URL for service-worker click handling");
 assert.match(serviceWorker, /"\/apple-touch-icon\.png"/, "PWA service worker should cache the apple touch icon");

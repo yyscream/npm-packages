@@ -5,7 +5,11 @@ const elements = {
   webuiDevBadge: $("#webuiDevBadge"),
   tabBar: $("#tabBar"),
   terminalTabsToggleButton: $("#terminalTabsToggleButton"),
+  newTabMenu: $("#newTabMenu"),
   newTabButton: $("#newTabButton"),
+  newTabMenuPanel: $("#newTabMenuPanel"),
+  newTabCurrentDirectoryButton: $("#newTabCurrentDirectoryButton"),
+  newTabChooseDirectoryButton: $("#newTabChooseDirectoryButton"),
   closeAllTabsButton: $("#closeAllTabsButton"),
   statusBar: $("#statusBar"),
   serverOfflinePanel: $("#serverOfflinePanel"),
@@ -181,6 +185,7 @@ let pathFastPicksReady = false;
 let pathFastPicksLoadPromise = null;
 let mobileTabsExpanded = false;
 let openTerminalTabGroupKey = null;
+let newTabMenuOpen = false;
 let nativeCommandMenuOpen = false;
 let optionsMenuOpen = false;
 let availableCommands = [];
@@ -2873,6 +2878,34 @@ function clearOpenTerminalTabGroup(groupKey, { force = false } = {}) {
   syncTabPolling();
 }
 
+function setNewTabMenuOpen(open) {
+  newTabMenuOpen = !!open;
+  elements.newTabButton?.setAttribute("aria-expanded", newTabMenuOpen ? "true" : "false");
+  elements.newTabButton?.classList.toggle("menu-open", newTabMenuOpen);
+  elements.newTabMenu?.classList.toggle("open", newTabMenuOpen);
+}
+
+function openNewTabMenu() {
+  setPublishMenuOpen(false);
+  setNativeCommandMenuOpen(false);
+  setOptionsMenuOpen(false);
+  setNewTabMenuOpen(true);
+}
+
+function focusNewTabMenuItem(direction = "first") {
+  const items = [elements.newTabCurrentDirectoryButton, elements.newTabChooseDirectoryButton].filter(Boolean);
+  const item = direction === "last" ? items.at(-1) : items[0];
+  item?.focus({ preventScroll: true });
+}
+
+function moveNewTabMenuFocus(delta) {
+  const items = [elements.newTabCurrentDirectoryButton, elements.newTabChooseDirectoryButton].filter(Boolean);
+  if (!items.length) return;
+  const currentIndex = Math.max(0, items.indexOf(document.activeElement));
+  const nextIndex = (currentIndex + delta + items.length) % items.length;
+  items[nextIndex].focus({ preventScroll: true });
+}
+
 function renderTabs() {
   const active = activeTab();
   const activeIndicator = active ? tabIndicator(active) : null;
@@ -2891,7 +2924,7 @@ function renderTabs() {
       for (const tab of group.tabs) elements.tabBar.append(renderTerminalTab(tab));
     }
   }
-  elements.tabBar.append(elements.newTabButton);
+  elements.tabBar.append(elements.newTabMenu);
   elements.closeAllTabsButton.disabled = tabs.length === 0;
   updateTerminalTabGroupOpenState();
   setMobileTabsExpanded(mobileTabsExpanded);
@@ -2933,12 +2966,17 @@ async function switchTab(tabId) {
   if (isCurrentTabContext(tabContext)) markTabOutputSeen();
 }
 
-async function createTerminalTab(cwd = activeTab()?.cwd, { triggerButton = elements.newTabButton } = {}) {
+function currentDirectoryForNewTab() {
+  return latestWorkspace?.cwd || activeTab()?.cwd || "";
+}
+
+async function createTerminalTab(cwd = currentDirectoryForNewTab(), { triggerButton = elements.newTabButton } = {}) {
   setMobileTabsExpanded(false);
+  setNewTabMenuOpen(false);
   const disabledButtons = new Set([elements.newTabButton, triggerButton].filter(Boolean));
   for (const button of disabledButtons) button.disabled = true;
   try {
-    const response = await api("/api/tabs", { method: "POST", body: { cwd: cwd || activeTab()?.cwd }, scoped: false });
+    const response = await api("/api/tabs", { method: "POST", body: { cwd: cwd || currentDirectoryForNewTab() }, scoped: false });
     tabs = response.data?.tabs || tabs;
     syncTabMetadata(tabs);
     const tab = response.data?.tab;
@@ -2952,6 +2990,16 @@ async function createTerminalTab(cwd = activeTab()?.cwd, { triggerButton = eleme
   } finally {
     for (const button of disabledButtons) button.disabled = false;
   }
+}
+
+async function createTerminalTabFromChosenDirectory({ triggerButton = elements.newTabChooseDirectoryButton } = {}) {
+  const sourceTab = activeTab();
+  const initialCwd = currentDirectoryForNewTab();
+  setMobileTabsExpanded(false);
+  setNewTabMenuOpen(false);
+  const cwd = await pickCwd(sourceTab || { id: "new-tab", title: "new tab" }, initialCwd, { title: "Choose CWD for new tab" });
+  if (!cwd) return;
+  await createTerminalTab(cwd, { triggerButton });
 }
 
 function tabHasActiveAgent(tab) {
@@ -4469,12 +4517,13 @@ function closePathPicker(cwd) {
   state.resolve(cwd || null);
 }
 
-function pickCwd(tab, initialCwd) {
+function pickCwd(tab, initialCwd, { title } = {}) {
   if (pathPickerState) return Promise.resolve(null);
 
   return new Promise((resolve) => {
-    pathPickerState = { tabId: tab.id, cwd: initialCwd, requestId: 0, loading: false, creatingDirectory: false, directories: [], filteredDirectories: [], resolve };
-    elements.pathPickerTitle.textContent = `Choose CWD for ${tab.title}`;
+    const pickerTab = tab || { id: "path-picker", title: "tab" };
+    pathPickerState = { tabId: pickerTab.id, cwd: initialCwd, requestId: 0, loading: false, creatingDirectory: false, directories: [], filteredDirectories: [], resolve };
+    elements.pathPickerTitle.textContent = title || `Choose CWD for ${pickerTab.title}`;
     elements.pathPickerCurrent.textContent = "Loading…";
     elements.pathPickerCreateNameInput.value = "";
     elements.pathPickerSearchInput.value = "";
@@ -11051,7 +11100,47 @@ elements.followUpButton.addEventListener("click", () => sendPromptFromModeButton
 elements.terminalTabsToggleButton.addEventListener("click", () => {
   setMobileTabsExpanded(!document.body.classList.contains("mobile-tabs-expanded"));
 });
-elements.newTabButton.addEventListener("click", () => createTerminalTab());
+elements.newTabButton.addEventListener("click", (event) => {
+  event.stopPropagation();
+  openNewTabMenu();
+});
+elements.newTabButton.addEventListener("keydown", (event) => {
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Enter" && event.key !== " ") return;
+  event.preventDefault();
+  openNewTabMenu();
+  focusNewTabMenuItem(event.key === "ArrowUp" ? "last" : "first");
+});
+elements.newTabMenuPanel?.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    setNewTabMenuOpen(false);
+    elements.newTabButton.focus({ preventScroll: true });
+  } else if (event.key === "ArrowDown") {
+    event.preventDefault();
+    moveNewTabMenuFocus(1);
+  } else if (event.key === "ArrowUp") {
+    event.preventDefault();
+    moveNewTabMenuFocus(-1);
+  } else if (event.key === "Home") {
+    event.preventDefault();
+    focusNewTabMenuItem("first");
+  } else if (event.key === "End") {
+    event.preventDefault();
+    focusNewTabMenuItem("last");
+  }
+});
+elements.newTabMenu?.addEventListener("pointerenter", () => openNewTabMenu());
+elements.newTabMenu?.addEventListener("pointerleave", () => {
+  if (!elements.newTabMenu?.contains(document.activeElement)) setNewTabMenuOpen(false);
+});
+elements.newTabMenu?.addEventListener("focusin", () => openNewTabMenu());
+elements.newTabMenu?.addEventListener("focusout", () => {
+  setTimeout(() => {
+    if (!elements.newTabMenu?.contains(document.activeElement)) setNewTabMenuOpen(false);
+  }, 0);
+});
+elements.newTabCurrentDirectoryButton?.addEventListener("click", () => createTerminalTab(currentDirectoryForNewTab(), { triggerButton: elements.newTabCurrentDirectoryButton }));
+elements.newTabChooseDirectoryButton?.addEventListener("click", () => createTerminalTabFromChosenDirectory({ triggerButton: elements.newTabChooseDirectoryButton }));
 elements.closeAllTabsButton.addEventListener("click", () => closeAllTerminalTabs());
 elements.gitWorkflowButton.addEventListener("click", () => {
   setComposerActionsOpen(false);
@@ -11339,6 +11428,9 @@ document.addEventListener("pointerdown", (event) => {
   if (openTerminalTabGroupKey && !event.target?.closest?.(".terminal-tab-group")) {
     clearOpenTerminalTabGroup(openTerminalTabGroupKey);
   }
+  if (newTabMenuOpen && !event.target?.closest?.(".terminal-new-tab-menu")) {
+    setNewTabMenuOpen(false);
+  }
   if (document.body.classList.contains("composer-actions-open") && !elements.composer.contains(event.target)) {
     setComposerActionsOpen(false);
   }
@@ -11352,6 +11444,7 @@ document.addEventListener("pointerdown", (event) => {
     setOptionsMenuOpen(false);
   }
   if (document.body.classList.contains("mobile-tabs-expanded") && !elements.tabBar.contains(event.target) && !elements.terminalTabsToggleButton.contains(event.target)) {
+    setNewTabMenuOpen(false);
     setMobileTabsExpanded(false);
   }
   if (isFooterPickerOpen() && !elements.statusBar.contains(event.target)) {
@@ -11446,11 +11539,16 @@ window.addEventListener("keydown", (event) => {
     setOptionsMenuOpen(false);
     return;
   }
+  if (newTabMenuOpen) {
+    setNewTabMenuOpen(false);
+    return;
+  }
   if (document.body.classList.contains("composer-actions-open")) {
     setComposerActionsOpen(false);
     return;
   }
   if (document.body.classList.contains("mobile-tabs-expanded")) {
+    setNewTabMenuOpen(false);
     setMobileTabsExpanded(false);
     return;
   }
