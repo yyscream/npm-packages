@@ -43,6 +43,10 @@ const elements = {
   publishMenu: $("#publishMenu"),
   releaseNpmButton: $("#releaseNpmButton"),
   releaseAurButton: $("#releaseAurButton"),
+  nativeCommandMenuButton: $("#nativeCommandMenuButton"),
+  nativeCommandMenu: $("#nativeCommandMenu"),
+  nativeSkillsButton: $("#nativeSkillsButton"),
+  nativeToolsButton: $("#nativeToolsButton"),
   gitWorkflowPanel: $("#gitWorkflowPanel"),
   gitWorkflowTitle: $("#gitWorkflowTitle"),
   gitWorkflowHint: $("#gitWorkflowHint"),
@@ -143,6 +147,7 @@ let pathFastPicksReady = false;
 let pathFastPicksLoadPromise = null;
 let mobileTabsExpanded = false;
 let openTerminalTabGroupKey = null;
+let nativeCommandMenuOpen = false;
 let availableCommands = [];
 let rawAvailableCommands = [];
 let commandSuggestions = [];
@@ -361,6 +366,8 @@ const OPTIONAL_COMMAND_FEATURES = new Map([
   ["git-staged-msg", "gitWorkflow"],
   ["release-npm", "releaseNpm"],
   ["release-aur", "releaseAur"],
+  ["skills", "tuiSkillsCommand"],
+  ["tools", "tuiToolsCommand"],
   ["stats", "statsCommand"],
   ["git-footer-refresh", "gitFooterStatus"],
   ["todo-progress-status", "todoProgressWidget"],
@@ -6943,6 +6950,13 @@ function setPublishMenuOpen(open) {
   elements.publishButton.parentElement?.classList.toggle("open", publishMenuOpen);
 }
 
+function setNativeCommandMenuOpen(open) {
+  nativeCommandMenuOpen = !!open;
+  elements.nativeCommandMenuButton.setAttribute("aria-expanded", nativeCommandMenuOpen ? "true" : "false");
+  elements.nativeCommandMenuButton.classList.toggle("menu-open", nativeCommandMenuOpen);
+  elements.nativeCommandMenuButton.parentElement?.classList.toggle("open", nativeCommandMenuOpen);
+}
+
 function optionalFeatureIdForCommand(name) {
   if (OPTIONAL_COMMAND_FEATURES.has(name)) return OPTIONAL_COMMAND_FEATURES.get(name);
   if (name === "release-toggle" || name === "release-abort" || name === "release-npm-logs") return "releaseNpm";
@@ -7096,6 +7110,18 @@ function renderOptionalFeatureControls() {
   );
   if (!hasPublishWorkflow && publishMenuOpen) setPublishMenuOpen(false);
 
+  const hasNativeCommandMenu = isOptionalFeatureEnabled("tuiSkillsCommand") || isOptionalFeatureEnabled("tuiToolsCommand");
+  elements.nativeSkillsButton.hidden = !isOptionalFeatureEnabled("tuiSkillsCommand");
+  elements.nativeToolsButton.hidden = !isOptionalFeatureEnabled("tuiToolsCommand");
+  const nativeCommandMenuContainer = elements.nativeCommandMenuButton.parentElement;
+  if (nativeCommandMenuContainer) nativeCommandMenuContainer.hidden = !hasNativeCommandMenu;
+  setOptionalControlState(
+    elements.nativeCommandMenuButton,
+    hasNativeCommandMenu,
+    "Slash command menu unavailable: enable/install TUI Skills command and/or TUI Tools command in Optional features.",
+  );
+  if (!hasNativeCommandMenu && nativeCommandMenuOpen) setNativeCommandMenuOpen(false);
+
   renderOptionalFeaturePanel();
 }
 
@@ -7159,6 +7185,23 @@ function runPublishWorkflow(command) {
   sendPrompt("prompt", command);
 }
 
+async function runNativeCommandMenu(command) {
+  setComposerActionsOpen(false);
+  setPublishMenuOpen(false);
+  setNativeCommandMenuOpen(false);
+  const commandName = String(command || "").replace(/^\//, "").split(/\s+/)[0].toLowerCase();
+  const featureId = optionalFeatureIdForCommand(commandName);
+  if ((featureId && !isOptionalFeatureEnabled(featureId)) || !hasAvailableCommand(commandName)) {
+    const tabContext = activeTabContext();
+    addEvent(commandUnavailableMessage(commandName), "warn");
+    refreshCommands(tabContext).catch((error) => {
+      if (isCurrentTabContext(tabContext)) addEvent(error.message || String(error), "error");
+    });
+    return;
+  }
+  await handleNativeSlashSelectorCommand(command);
+}
+
 function slashCommandName(message) {
   const match = String(message || "").trim().match(/^\/([^\s]+)$/);
   return match ? match[1].toLowerCase() : "";
@@ -7212,7 +7255,8 @@ function renderNativeLoading(label = "Loading…") {
 function nativeSelectorMatches(item, query) {
   if (!query) return true;
   const needle = query.toLowerCase();
-  return [item.label, item.description, item.meta, item.badge]
+  const tags = Array.isArray(item.tags) ? item.tags.map((tag) => tag?.label) : [];
+  return [item.label, item.description, item.meta, item.badge, ...tags]
     .filter(Boolean)
     .some((value) => String(value).toLowerCase().includes(needle));
 }
@@ -7244,6 +7288,10 @@ function renderNativeSelectorItems(items, { emptyText = "No choices.", onSelect,
         badge.style.background = "rgba(255, 159, 67, 0.10)";
       }
       title.append(badge);
+    }
+    for (const tag of Array.isArray(item.tags) ? item.tags : []) {
+      if (!tag?.label) continue;
+      title.append(make("span", `native-selector-badge${tag.className ? ` ${tag.className}` : ""}`, tag.label));
     }
     const detail = make("span", "native-selector-detail", item.description || "");
     const meta = make("span", "native-selector-meta", item.meta || "");
@@ -7583,6 +7631,12 @@ function nativeResourceSourceLabel(resource) {
   return [info.source, info.scope, info.origin].filter(Boolean).join(" · ") || resource?.location || "loaded resource";
 }
 
+function nativeToolOriginTag(resource) {
+  return resource?.sourceInfo?.source === "builtin"
+    ? { label: "Pi Native", className: "native-selector-badge-pi-native" }
+    : { label: "External", className: "native-selector-badge-external" };
+}
+
 function nativeResourceCounts(resources) {
   const disabled = resources.filter((resource) => resource.enabled === false).length;
   return { total: resources.length, disabled, enabled: resources.length - disabled };
@@ -7594,19 +7648,23 @@ function nativeResourceFilterMatches(resource, filter) {
   return true;
 }
 
-function renderNativeResourceToggles(resources, { savingName, filter = "all", onToggle } = {}) {
+function renderNativeResourceToggles(resources, { savingName, filter = "all", onToggle, getResourceTag } = {}) {
   const filteredResources = resources.filter((resource) => nativeResourceFilterMatches(resource, filter));
   const counts = nativeResourceCounts(resources);
-  const items = filteredResources.map((resource) => ({
-    id: resource.name,
-    label: resource.name,
-    description: resource.description || "No description provided.",
-    meta: nativeResourceSourceLabel(resource),
-    badge: resource.enabled === false ? "disabled" : "enabled",
-    badgeClass: resource.enabled === false ? "disabled native-selector-badge-disabled" : "enabled native-selector-badge-enabled",
-    disabled: Boolean(savingName),
-    resource,
-  }));
+  const items = filteredResources.map((resource) => {
+    const resourceTag = getResourceTag?.(resource);
+    return {
+      id: resource.name,
+      label: resource.name,
+      description: resource.description || "No description provided.",
+      meta: nativeResourceSourceLabel(resource),
+      badge: resource.enabled === false ? "disabled" : "enabled",
+      badgeClass: resource.enabled === false ? "disabled native-selector-badge-disabled" : "enabled native-selector-badge-enabled",
+      tags: resourceTag ? [resourceTag] : [],
+      disabled: Boolean(savingName),
+      resource,
+    };
+  });
   const filterLabel = filter === "enabled" ? "enabled" : filter === "disabled" ? "disabled" : "all";
   renderNativeSelectorItems(items, {
     emptyText: `No ${filterLabel} entries match this filter.`,
@@ -7631,7 +7689,7 @@ function renderNativeResourceFilterActions(filter, setFilter, render) {
 }
 
 async function openNativeToolsSelector() {
-  openNativeCommandDialog({ title: "/tools", message: "Enable or disable tools for the active Pi tab. Changes apply to the next model turn and persist on this session branch.", searchPlaceholder: "Filter tools…" });
+  openNativeCommandDialog({ title: "Tools Setup", message: "Enable or disable tools for the active Pi tab. Changes apply to the next model turn and persist on this session branch.", searchPlaceholder: "Filter tools…" });
   renderNativeLoading("Loading tools…");
   let tools = [];
   let savingName = "";
@@ -7640,6 +7698,7 @@ async function openNativeToolsSelector() {
     renderNativeResourceToggles(tools, {
       savingName,
       filter,
+      getResourceTag: nativeToolOriginTag,
       onToggle: async (tool) => {
         if (!tool || savingName) return;
         const enabledTools = new Set(tools.filter((item) => item.enabled !== false).map((item) => item.name));
@@ -7674,7 +7733,7 @@ async function openNativeToolsSelector() {
 }
 
 async function openNativeSkillsSelector() {
-  openNativeCommandDialog({ title: "/skills", message: "Enable or disable skills for automatic model invocation in the active Pi tab. Disabled skills are removed from the system prompt and their /skill:name commands are blocked by Web UI.", searchPlaceholder: "Filter skills…" });
+  openNativeCommandDialog({ title: "Skills Setup", message: "Enable or disable skills for automatic model invocation in the active Pi tab. Disabled skills are removed from the system prompt and their /skill:name commands are blocked by Web UI.", searchPlaceholder: "Filter skills…" });
   renderNativeLoading("Loading skills…");
   let skills = [];
   let savingName = "";
@@ -7730,6 +7789,15 @@ function openNativeAuthInfo(mode) {
 async function handleNativeSlashSelectorCommand(message, { usesPromptInput = false } = {}) {
   const name = slashCommandName(message);
   if (!NATIVE_SELECTOR_COMMANDS.has(name)) return false;
+  const featureId = optionalFeatureIdForCommand(name);
+  if (featureId && !isOptionalFeatureEnabled(featureId)) {
+    const tabContext = activeTabContext();
+    addEvent(commandUnavailableMessage(name), "warn");
+    refreshCommands(tabContext).catch((error) => {
+      if (isCurrentTabContext(tabContext)) addEvent(error.message || String(error), "error");
+    });
+    return true;
+  }
   setComposerActionsOpen(false);
   hideCommandSuggestions();
   if (usesPromptInput) {
@@ -9213,7 +9281,7 @@ function showNextDialog() {
       if (isGuardrailDialog && /^Block$/i.test(optionLabel)) button.classList.add("guardrail-safe-action");
       if (isGuardrailDialog && /^Allow/i.test(optionLabel)) button.classList.add("guardrail-allow-action");
       if (isReleaseDialog && /^(?:Yes|All eligible packages\b|Publish selected packages \([1-9]\d*\))/.test(optionLabel)) button.classList.add("primary", "release-publish-action");
-      if (isReleaseDialog && /^Publish selected packages \(select at least one\)$/i.test(optionLabel)) button.classList.add("release-publish-disabled-action");
+      if (isReleaseDialog && /^Publish selected packages$/i.test(optionLabel)) button.classList.add("release-publish-disabled-action");
       if (isReleaseDialog && /^\[x\]/.test(optionLabel)) button.classList.add("release-target-option", "release-target-selected");
       if (isReleaseDialog && /^\[ \]/.test(optionLabel)) button.classList.add("release-target-option");
       if (isReleaseDialog && /^(?:No|Cancel)$/i.test(optionLabel)) button.classList.add("release-cancel-action");
@@ -9515,18 +9583,46 @@ elements.gitWorkflowButton.addEventListener("click", () => {
 });
 const publishMenuContainer = elements.publishButton.parentElement;
 elements.publishButton.addEventListener("click", () => {
+  setNativeCommandMenuOpen(false);
   setPublishMenuOpen(true);
 });
-publishMenuContainer?.addEventListener("pointerenter", () => setPublishMenuOpen(true));
+publishMenuContainer?.addEventListener("pointerenter", () => {
+  setNativeCommandMenuOpen(false);
+  setPublishMenuOpen(true);
+});
 publishMenuContainer?.addEventListener("pointerleave", () => setPublishMenuOpen(false));
-publishMenuContainer?.addEventListener("focusin", () => setPublishMenuOpen(true));
+publishMenuContainer?.addEventListener("focusin", () => {
+  setNativeCommandMenuOpen(false);
+  setPublishMenuOpen(true);
+});
 publishMenuContainer?.addEventListener("focusout", () => {
   setTimeout(() => {
     if (!publishMenuContainer?.contains(document.activeElement)) setPublishMenuOpen(false);
   }, 0);
 });
+const nativeCommandMenuContainer = elements.nativeCommandMenuButton.parentElement;
+elements.nativeCommandMenuButton.addEventListener("click", () => {
+  setPublishMenuOpen(false);
+  setNativeCommandMenuOpen(true);
+});
+nativeCommandMenuContainer?.addEventListener("pointerenter", () => {
+  setPublishMenuOpen(false);
+  setNativeCommandMenuOpen(true);
+});
+nativeCommandMenuContainer?.addEventListener("pointerleave", () => setNativeCommandMenuOpen(false));
+nativeCommandMenuContainer?.addEventListener("focusin", () => {
+  setPublishMenuOpen(false);
+  setNativeCommandMenuOpen(true);
+});
+nativeCommandMenuContainer?.addEventListener("focusout", () => {
+  setTimeout(() => {
+    if (!nativeCommandMenuContainer?.contains(document.activeElement)) setNativeCommandMenuOpen(false);
+  }, 0);
+});
 elements.releaseNpmButton.addEventListener("click", () => runPublishWorkflow("/release-npm"));
 elements.releaseAurButton.addEventListener("click", () => runPublishWorkflow("/release-aur"));
+elements.nativeSkillsButton.addEventListener("click", () => runNativeCommandMenu("/skills"));
+elements.nativeToolsButton.addEventListener("click", () => runNativeCommandMenu("/tools"));
 elements.gitWorkflowCancelButton.addEventListener("click", () => cancelGitWorkflow());
 elements.nativeCommandDialog.addEventListener("close", () => {
   elements.nativeCommandSearch.oninput = null;
@@ -9727,6 +9823,9 @@ document.addEventListener("pointerdown", (event) => {
   if (publishMenuOpen && !event.target?.closest?.(".composer-publish-menu")) {
     setPublishMenuOpen(false);
   }
+  if (nativeCommandMenuOpen && !event.target?.closest?.(".composer-native-command-menu")) {
+    setNativeCommandMenuOpen(false);
+  }
   if (document.body.classList.contains("mobile-tabs-expanded") && !elements.tabBar.contains(event.target) && !elements.terminalTabsToggleButton.contains(event.target)) {
     setMobileTabsExpanded(false);
   }
@@ -9811,6 +9910,10 @@ window.addEventListener("keydown", (event) => {
   if (elements.dialog?.open || elements.pathPickerDialog?.open) return;
   if (publishMenuOpen) {
     setPublishMenuOpen(false);
+    return;
+  }
+  if (nativeCommandMenuOpen) {
+    setNativeCommandMenuOpen(false);
     return;
   }
   if (document.body.classList.contains("composer-actions-open")) {

@@ -692,7 +692,7 @@ export default function releaseNpmExtension(pi: ExtensionAPI) {
       const cancelChoice = "Cancel";
       const publishSelectedChoice = (count: number) => count > 0
         ? `Publish selected packages (${count})`
-        : "Publish selected packages (select at least one)";
+        : "Publish selected packages";
       const formatSelectableTarget = (target: PlannedPublishTarget, selected: boolean) => `${selected ? "[x]" : "[ ]"} ${target.target}`;
       const selectedTargetsText = (selectedTargets: Set<string>) => {
         const selected = plannedTargetResolution.targets.filter((target) => selectedTargets.has(target.target));

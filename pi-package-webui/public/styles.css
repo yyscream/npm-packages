@@ -3092,6 +3092,22 @@ summary { cursor: pointer; color: var(--warning); }
 .composer-publish-button.menu-open {
   background: linear-gradient(120deg, var(--ctp-peach), var(--ctp-yellow), var(--ctp-mauve));
 }
+.composer-native-command-button {
+  color: var(--ctp-mauve);
+  border-color: rgba(203, 166, 247, 0.40);
+  background:
+    linear-gradient(120deg, rgba(203, 166, 247, 0.15), rgba(137, 180, 250, 0.10)),
+    linear-gradient(180deg, rgba(var(--ctp-surface-rgb), 0.88), rgba(var(--ctp-crust-rgb), 0.88));
+}
+.composer-native-command-button:hover,
+.composer-native-command-button.menu-open {
+  color: #11111b;
+  background: linear-gradient(120deg, var(--ctp-mauve), var(--ctp-blue), var(--ctp-teal));
+  border-color: transparent;
+}
+.composer-native-command-menu.open .composer-native-command-button {
+  border-color: rgba(203, 166, 247, 0.62);
+}
 .composer-publish-menu-panel {
   position: absolute;
   z-index: 100;
@@ -3140,6 +3156,20 @@ summary { cursor: pointer; color: var(--warning); }
   border-color: transparent;
   background: linear-gradient(120deg, var(--ctp-peach), var(--ctp-yellow));
   box-shadow: 0 0 1rem rgba(250, 179, 135, 0.20);
+}
+.composer-native-command-menu-item {
+  color: var(--ctp-mauve);
+  border-color: rgba(203, 166, 247, 0.32);
+  background:
+    linear-gradient(120deg, rgba(203, 166, 247, 0.12), rgba(137, 180, 250, 0.08)),
+    var(--ctp-crust);
+}
+.composer-native-command-menu-item:hover,
+.composer-native-command-menu-item:focus-visible {
+  color: #11111b;
+  border-color: transparent;
+  background: linear-gradient(120deg, var(--ctp-mauve), var(--ctp-blue));
+  box-shadow: 0 0 1rem rgba(203, 166, 247, 0.20);
 }
 .composer button[data-tooltip] {
   position: relative;
@@ -3212,6 +3242,15 @@ summary { cursor: pointer; color: var(--warning); }
 .composer-input-row button[data-tooltip]:focus-visible::before,
 .composer-input-row button[data-tooltip].tooltip-open::before {
   transform: translate(-1.2rem, 0) rotate(45deg);
+}
+.composer-publish-menu:hover > .composer-publish-button[data-tooltip]::before,
+.composer-publish-menu:hover > .composer-publish-button[data-tooltip]::after,
+.composer-publish-menu:focus-within > .composer-publish-button[data-tooltip]::before,
+.composer-publish-menu:focus-within > .composer-publish-button[data-tooltip]::after,
+.composer-publish-menu.open > .composer-publish-button[data-tooltip]::before,
+.composer-publish-menu.open > .composer-publish-button[data-tooltip]::after {
+  display: none !important;
+  opacity: 0 !important;
 }
 
 .details {
@@ -3488,6 +3527,18 @@ summary { cursor: pointer; color: var(--warning); }
   border-color: rgba(255, 159, 67, 0.62) !important;
   color: #ff9f43 !important;
   background: rgba(255, 159, 67, 0.10);
+}
+.native-selector-badge.native-selector-badge-pi-native,
+.native-command-body:has(.native-resource-summary) .native-selector-badge.native-selector-badge-pi-native {
+  border-color: rgba(137, 180, 250, 0.48);
+  color: var(--ctp-blue);
+  background: rgba(137, 180, 250, 0.10);
+}
+.native-selector-badge.native-selector-badge-external,
+.native-command-body:has(.native-resource-summary) .native-selector-badge.native-selector-badge-external {
+  border-color: rgba(203, 166, 247, 0.46);
+  color: var(--ctp-mauve);
+  background: rgba(203, 166, 247, 0.10);
 }
 .native-selector-detail,
 .native-selector-meta,

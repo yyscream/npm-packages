@@ -12,7 +12,7 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <link rel="stylesheet" href="/styles.css?v=20" />
+    <link rel="stylesheet" href="/styles.css?v=23" />
   </head>
   <body>
     <button id="sidePanelExpandButton" class="side-panel-expand-button" type="button" aria-controls="sidePanel" aria-expanded="false" aria-label="Expand side panel" title="Expand side panel">
@@ -130,6 +130,27 @@
                   </button>
                   <button id="releaseAurButton" class="composer-publish-menu-item" type="button" role="menuitem" data-command="/release-aur">
                     <span>AUR Release</span>
+                  </button>
+                </div>
+              </div>
+              <div class="composer-publish-menu composer-native-command-menu">
+                <button
+                  id="nativeCommandMenuButton"
+                  class="composer-icon-button composer-publish-button composer-native-command-button"
+                  type="button"
+                  title="Open skills and tools commands"
+                  aria-label="Open /skills and /tools commands"
+                  aria-haspopup="menu"
+                  aria-expanded="false"
+                  aria-controls="nativeCommandMenu"
+                  data-tooltip="Skills/tools setup: open skill or tool setup."
+                ><svg class="composer-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 5h16v14H4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="m7 10 2.5 2L7 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 15h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+                <div id="nativeCommandMenu" class="composer-publish-menu-panel composer-native-command-menu-panel" role="menu" aria-label="Skills and tools setup">
+                  <button id="nativeSkillsButton" class="composer-publish-menu-item composer-native-command-menu-item" type="button" role="menuitem" data-command="/skills">
+                    <span>Skills Setup</span>
+                  </button>
+                  <button id="nativeToolsButton" class="composer-publish-menu-item composer-native-command-menu-item" type="button" role="menuitem" data-command="/tools">
+                    <span>Tools Setup</span>
                   </button>
                 </div>
               </div>
@@ -364,6 +385,6 @@
       </form>
     </dialog>
 
-    <script type="module" src="/app.js?v=20"></script>
+    <script type="module" src="/app.js?v=23"></script>
   </body>
 </html>
