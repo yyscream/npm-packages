@@ -42,6 +42,27 @@ const INLINE_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
 const INLINE_IMAGE_TOTAL_MAX_BYTES = 16 * 1024 * 1024;
 const RPC_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"];
+const SETTINGS_TRANSPORT_CHOICES = ["sse", "websocket", "websocket-cached", "auto"];
+const SETTINGS_HTTP_IDLE_TIMEOUT_CHOICES = [
+  { label: "30 sec", timeoutMs: 30_000 },
+  { label: "1 min", timeoutMs: 60_000 },
+  { label: "2 min", timeoutMs: 120_000 },
+  { label: "5 min", timeoutMs: 300_000 },
+  { label: "disabled", timeoutMs: 0 },
+];
+const SETTINGS_DOUBLE_ESCAPE_ACTIONS = ["tree", "fork", "none"];
+const SETTINGS_TREE_FILTER_MODES = ["default", "no-tools", "user-only", "labeled-only", "all"];
+const SETTINGS_IMAGE_WIDTH_CELLS = [60, 80, 120];
+const SETTINGS_EDITOR_PADDING_X = [0, 1, 2, 3];
+const SETTINGS_AUTOCOMPLETE_MAX_VISIBLE = [3, 5, 7, 10, 15, 20];
+const SETTINGS_RELOAD_RECOMMENDED_KEYS = new Set(["transport", "httpIdleTimeoutMs", "autoResizeImages", "blockImages", "enableSkillCommands"]);
+const SETTINGS_RELOAD_LABELS = new Map([
+  ["transport", "Transport"],
+  ["httpIdleTimeoutMs", "HTTP idle timeout"],
+  ["autoResizeImages", "Auto-resize images"],
+  ["blockImages", "Block images"],
+  ["enableSkillCommands", "Skill commands"],
+]);
 const EVENT_HISTORY_LIMIT = 200;
 const EXTENSION_UI_BLOCKING_METHODS = new Set(["select", "confirm", "input", "editor"]);
 const STATUS_RPC_TIMEOUT_MS = 1_800;
@@ -3103,6 +3124,167 @@ async function setSkillConfigData(tab, body) {
   return getMergedSkillConfigData(activeTab);
 }
 
+function settingsManagerForTab(tab) {
+  return SettingsManager.create(tab?.cwd || options.cwd, agentDir);
+}
+
+function nativeSettingsPayload(settingsManager = settingsManagerForTab()) {
+  const settings = {
+    transport: settingsManager.getTransport(),
+    httpIdleTimeoutMs: settingsManager.getHttpIdleTimeoutMs(),
+    autoResizeImages: settingsManager.getImageAutoResize(),
+    blockImages: settingsManager.getBlockImages(),
+    enableSkillCommands: settingsManager.getEnableSkillCommands(),
+    hideThinkingBlock: settingsManager.getHideThinkingBlock(),
+    showImages: settingsManager.getShowImages(),
+    imageWidthCells: settingsManager.getImageWidthCells(),
+    collapseChangelog: settingsManager.getCollapseChangelog(),
+    quietStartup: settingsManager.getQuietStartup(),
+    enableInstallTelemetry: settingsManager.getEnableInstallTelemetry(),
+    doubleEscapeAction: settingsManager.getDoubleEscapeAction(),
+    treeFilterMode: settingsManager.getTreeFilterMode(),
+    showHardwareCursor: settingsManager.getShowHardwareCursor(),
+    editorPaddingX: settingsManager.getEditorPaddingX(),
+    autocompleteMaxVisible: settingsManager.getAutocompleteMaxVisible(),
+    clearOnShrink: settingsManager.getClearOnShrink(),
+    showTerminalProgress: settingsManager.getShowTerminalProgress(),
+    warnings: settingsManager.getWarnings(),
+  };
+  return {
+    settings,
+    options: {
+      thinkingLevels: THINKING_LEVELS,
+      transports: SETTINGS_TRANSPORT_CHOICES,
+      httpIdleTimeouts: SETTINGS_HTTP_IDLE_TIMEOUT_CHOICES,
+      doubleEscapeActions: SETTINGS_DOUBLE_ESCAPE_ACTIONS,
+      treeFilterModes: SETTINGS_TREE_FILTER_MODES,
+      imageWidthCells: SETTINGS_IMAGE_WIDTH_CELLS,
+      editorPaddingX: SETTINGS_EDITOR_PADDING_X,
+      autocompleteMaxVisible: SETTINGS_AUTOCOMPLETE_MAX_VISIBLE,
+    },
+    scope: "global",
+    paths: {
+      global: settingsManager.storage?.globalSettingsPath || path.join(agentDir, "settings.json"),
+      project: settingsManager.storage?.projectSettingsPath || path.join(options.cwd, ".pi", "settings.json"),
+    },
+  };
+}
+
+function hasOwnSetting(body, key) {
+  return Object.prototype.hasOwnProperty.call(body || {}, key);
+}
+
+function requireBooleanSetting(value, key) {
+  if (typeof value !== "boolean") throw makeHttpError(400, `${key} must be a boolean`);
+  return value;
+}
+
+function requireStringChoiceSetting(value, key, choices) {
+  const text = String(value ?? "").trim();
+  if (!choices.includes(text)) throw makeHttpError(400, `${key} must be one of: ${choices.join(", ")}`);
+  return text;
+}
+
+function requireNumberChoiceSetting(value, key, choices) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || !choices.includes(number)) throw makeHttpError(400, `${key} must be one of: ${choices.join(", ")}`);
+  return number;
+}
+
+function rememberSettingChange(changed, reloadRecommended, key, before, after) {
+  if (before === after) return;
+  changed.push(key);
+  if (SETTINGS_RELOAD_RECOMMENDED_KEYS.has(key)) reloadRecommended.push(SETTINGS_RELOAD_LABELS.get(key) || key);
+}
+
+function applyBooleanSetting(body, key, settingsManager, getter, setter, changed, reloadRecommended) {
+  if (!hasOwnSetting(body, key)) return;
+  const next = requireBooleanSetting(body[key], key);
+  const before = getter.call(settingsManager);
+  if (before !== next) setter.call(settingsManager, next);
+  rememberSettingChange(changed, reloadRecommended, key, before, next);
+}
+
+function applyStringChoiceSetting(body, key, choices, settingsManager, getter, setter, changed, reloadRecommended) {
+  if (!hasOwnSetting(body, key)) return;
+  const next = requireStringChoiceSetting(body[key], key, choices);
+  const before = getter.call(settingsManager);
+  if (before !== next) setter.call(settingsManager, next);
+  rememberSettingChange(changed, reloadRecommended, key, before, next);
+}
+
+function applyNumberChoiceSetting(body, key, choices, settingsManager, getter, setter, changed, reloadRecommended) {
+  if (!hasOwnSetting(body, key)) return;
+  const next = requireNumberChoiceSetting(body[key], key, choices);
+  const before = getter.call(settingsManager);
+  if (before !== next) setter.call(settingsManager, next);
+  rememberSettingChange(changed, reloadRecommended, key, before, next);
+}
+
+function applyHttpIdleTimeoutSetting(body, settingsManager, changed, reloadRecommended) {
+  const key = "httpIdleTimeoutMs";
+  if (!hasOwnSetting(body, key)) return;
+  const next = Number(body[key]);
+  if (!Number.isFinite(next) || next < 0) throw makeHttpError(400, `${key} must be a non-negative number`);
+  const normalized = Math.floor(next);
+  const before = settingsManager.getHttpIdleTimeoutMs();
+  if (before !== normalized) settingsManager.setHttpIdleTimeoutMs(normalized);
+  rememberSettingChange(changed, reloadRecommended, key, before, normalized);
+}
+
+async function setNativeSettingsData(tab, body) {
+  const submitted = body?.settings && typeof body.settings === "object" ? body.settings : {};
+  const settingsManager = settingsManagerForTab(tab);
+  const changed = [];
+  const reloadRecommended = [];
+
+  applyStringChoiceSetting(submitted, "transport", SETTINGS_TRANSPORT_CHOICES, settingsManager, settingsManager.getTransport, settingsManager.setTransport, changed, reloadRecommended);
+  applyHttpIdleTimeoutSetting(submitted, settingsManager, changed, reloadRecommended);
+  applyBooleanSetting(submitted, "autoResizeImages", settingsManager, settingsManager.getImageAutoResize, settingsManager.setImageAutoResize, changed, reloadRecommended);
+  applyBooleanSetting(submitted, "blockImages", settingsManager, settingsManager.getBlockImages, settingsManager.setBlockImages, changed, reloadRecommended);
+  applyBooleanSetting(submitted, "enableSkillCommands", settingsManager, settingsManager.getEnableSkillCommands, settingsManager.setEnableSkillCommands, changed, reloadRecommended);
+  applyBooleanSetting(submitted, "hideThinkingBlock", settingsManager, settingsManager.getHideThinkingBlock, settingsManager.setHideThinkingBlock, changed, reloadRecommended);
+  applyBooleanSetting(submitted, "showImages", settingsManager, settingsManager.getShowImages, settingsManager.setShowImages, changed, reloadRecommended);
+  applyNumberChoiceSetting(submitted, "imageWidthCells", SETTINGS_IMAGE_WIDTH_CELLS, settingsManager, settingsManager.getImageWidthCells, settingsManager.setImageWidthCells, changed, reloadRecommended);
+  applyBooleanSetting(submitted, "collapseChangelog", settingsManager, settingsManager.getCollapseChangelog, settingsManager.setCollapseChangelog, changed, reloadRecommended);
+  applyBooleanSetting(submitted, "quietStartup", settingsManager, settingsManager.getQuietStartup, settingsManager.setQuietStartup, changed, reloadRecommended);
+  applyBooleanSetting(submitted, "enableInstallTelemetry", settingsManager, settingsManager.getEnableInstallTelemetry, settingsManager.setEnableInstallTelemetry, changed, reloadRecommended);
+  applyStringChoiceSetting(submitted, "doubleEscapeAction", SETTINGS_DOUBLE_ESCAPE_ACTIONS, settingsManager, settingsManager.getDoubleEscapeAction, settingsManager.setDoubleEscapeAction, changed, reloadRecommended);
+  applyStringChoiceSetting(submitted, "treeFilterMode", SETTINGS_TREE_FILTER_MODES, settingsManager, settingsManager.getTreeFilterMode, settingsManager.setTreeFilterMode, changed, reloadRecommended);
+  applyBooleanSetting(submitted, "showHardwareCursor", settingsManager, settingsManager.getShowHardwareCursor, settingsManager.setShowHardwareCursor, changed, reloadRecommended);
+  applyNumberChoiceSetting(submitted, "editorPaddingX", SETTINGS_EDITOR_PADDING_X, settingsManager, settingsManager.getEditorPaddingX, settingsManager.setEditorPaddingX, changed, reloadRecommended);
+  applyNumberChoiceSetting(submitted, "autocompleteMaxVisible", SETTINGS_AUTOCOMPLETE_MAX_VISIBLE, settingsManager, settingsManager.getAutocompleteMaxVisible, settingsManager.setAutocompleteMaxVisible, changed, reloadRecommended);
+  applyBooleanSetting(submitted, "clearOnShrink", settingsManager, settingsManager.getClearOnShrink, settingsManager.setClearOnShrink, changed, reloadRecommended);
+  applyBooleanSetting(submitted, "showTerminalProgress", settingsManager, settingsManager.getShowTerminalProgress, settingsManager.setShowTerminalProgress, changed, reloadRecommended);
+
+  if (submitted.warnings && typeof submitted.warnings === "object" && hasOwnSetting(submitted.warnings, "anthropicExtraUsage")) {
+    const warnings = settingsManager.getWarnings();
+    const before = warnings.anthropicExtraUsage ?? true;
+    const next = requireBooleanSetting(submitted.warnings.anthropicExtraUsage, "warnings.anthropicExtraUsage");
+    if (before !== next) {
+      settingsManager.setWarnings({ ...warnings, anthropicExtraUsage: next });
+      rememberSettingChange(changed, reloadRecommended, "warnings.anthropicExtraUsage", before, next);
+    }
+  }
+
+  await settingsManager.flush();
+  let activeTab = tab;
+  let reloaded = false;
+  const shouldReload = body?.reload === true && reloadRecommended.length > 0;
+  if (shouldReload) {
+    activeTab = await restartTabRpc(tab, "settings");
+    reloaded = true;
+  }
+
+  return {
+    ...nativeSettingsPayload(settingsManagerForTab(activeTab)),
+    changed,
+    reloadRecommended: [...new Set(reloadRecommended)],
+    reloaded,
+    tab: tabMeta(activeTab),
+  };
+}
+
 async function annotateSkillCommandState(tab, commands) {
   let disabledSkills = new Set();
   try {
@@ -4225,6 +4407,19 @@ const server = createServer(async (req, res) => {
       const body = await readJsonBody(req);
       const tab = getRequestedTab(req, url, body);
       sendJson(res, 200, { ok: true, data: await setSkillConfigData(tab, body) });
+      return;
+    }
+
+    if (url.pathname === "/api/settings" && req.method === "GET") {
+      const tab = getRequestedTab(req, url);
+      sendJson(res, 200, { ok: true, data: nativeSettingsPayload(settingsManagerForTab(tab)) });
+      return;
+    }
+
+    if (url.pathname === "/api/settings" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const tab = getRequestedTab(req, url, body);
+      sendJson(res, 200, { ok: true, data: await setNativeSettingsData(tab, body) });
       return;
     }
 

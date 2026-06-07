@@ -6,12 +6,13 @@ import {
   appendInitialPromptCalibrationRecord,
   buildInitialPromptCalibrationRecord,
   collectInitialPromptCalibration,
-  estimateInitialPromptFromPiExport,
   estimateInitialPromptInput,
   estimatePromptInjectionTokens,
+  estimateStableInitialPromptFromPiContext,
   estimateTokensFromCharCount,
   formatTokens,
   type InitialPromptCalibration,
+  type InitialPromptEstimateSnapshot,
   type InitialPromptInputEstimate,
   type InitialPromptToolInfo,
 } from "@firstpick/pi-utils";
@@ -413,7 +414,7 @@ function pushDetailSection(lines: string[], title: string, body: string[]): void
 }
 
 function formatInitialPromptDetailedLines(
-  promptEstimate: Awaited<ReturnType<typeof estimateInitialPromptFromPiExport>>,
+  promptEstimate: InitialPromptEstimateSnapshot,
   options: BuildSystemPromptOptions | null,
 ): string[] {
   const systemPrompt = promptEstimate.systemPrompt;
@@ -1148,7 +1149,7 @@ export default function statsExtension(pi: ExtensionAPI) {
         return;
       }
 
-      const promptEstimate = await estimateInitialPromptFromPiExport(pi, ctx, getPromptCalibration(ctx));
+      const promptEstimate = await estimateStableInitialPromptFromPiContext(pi, ctx, getPromptCalibration);
       const lines = formatPromptInjectionLines(promptEstimate.systemPrompt, latestSystemPromptOptions, promptEstimate.estimate, {
         source: promptEstimate.source === "export-html" ? "temporary Pi /export HTML session data" : "live context fallback",
         warning: promptEstimate.warning,

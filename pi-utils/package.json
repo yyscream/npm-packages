@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-utils",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Shared utilities for Firstpick Pi extension packages.",
   "main": "index.ts",
   "exports": {
@@ -11,8 +11,17 @@
     "./tokens": "./src/tokens.ts",
     "./prompt-calibration": "./src/prompt-calibration.ts",
     "./prompt-export-estimate": "./src/prompt-export-estimate.ts",
+    "./initial-prompt-estimate-state": "./src/initial-prompt-estimate-state.ts",
+    "./initial-prompt-estimate-service": "./src/initial-prompt-estimate-service.ts",
     "./async": "./src/async.ts",
+    "./cli": "./src/cli.ts",
+    "./json": "./src/json.ts",
+    "./process": "./src/process.ts",
+    "./tool-result": "./src/tool-result.ts",
+    "./markdown": "./src/markdown.ts",
+    "./release-log": "./src/release-log.ts",
     "./ui": "./src/ui/working-indicator.ts",
+    "./ui/live-output": "./src/ui/live-output.ts",
     "./local-wiki": "./src/local-wiki.ts"
   },
   "license": "MIT",
@@ -26,6 +35,10 @@
     "extensions": [
       "./index.ts"
     ]
+  },
+  "scripts": {
+    "check": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types tests/initial-prompt-estimate-state.test.mjs",
+    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types tests/initial-prompt-estimate-state.test.mjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"

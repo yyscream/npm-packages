@@ -1,10 +1,11 @@
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { appendDisplayChunk, appendRunLog, createRunLog as createSharedRunLog, formatElapsed, isCtrlC, isCtrlO, listRunLogs, outputLinesFromDisplay, resolveUserPath, saveRunLog as saveSharedRunLog, shellQuote, stripAnsi, truncateLine, type RunLog, type RunLogEntry } from "@firstpick/pi-utils";
 
 const STATUS_KEY = "release-aur";
 const OUTPUT_WIDGET_KEY = "release-aur:output";
@@ -28,8 +29,8 @@ const MANAGED_AUR_CONFIG_END = "# <<< pi release-aur setup: aur.archlinux.org";
 
 type RunResult = { ok: boolean; output: string; aborted: boolean };
 type AbortableChild = ChildProcessByStdio<null, Readable, Readable> & { abortReleaseStep?: () => void };
-type ReleaseRunLog = { id: string; startedAt: string; cwd: string; chunks: string[]; saved: boolean };
-type LogEntry = { file: string; title: string; mtimeMs: number };
+type ReleaseRunLog = RunLog;
+type LogEntry = RunLogEntry;
 type ReleaseAurConfig = {
   aurReposDir?: string;
   releaseSource?: string;
@@ -43,57 +44,20 @@ let activeRun: ActiveRun | undefined;
 let activeLogViewerCleanup: (() => void) | undefined;
 let setupWidgetGeneration = 0;
 
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-function sanitizeLogId(value: string): string {
-  return value.replace(/[^0-9A-Za-z._-]/g, "-");
-}
-
 function createRunLog(cwd: string): ReleaseRunLog {
-  const startedAt = new Date().toISOString();
-  return { id: sanitizeLogId(startedAt), startedAt, cwd, chunks: [], saved: false };
+  return createSharedRunLog(cwd);
 }
 
 function appendLog(runLog: ReleaseRunLog, chunk: string): void {
-  runLog.chunks.push(chunk);
+  appendRunLog(runLog, chunk);
 }
 
 function saveRunLog(runLog: ReleaseRunLog, status: string, summary?: string): string | undefined {
-  if (runLog.saved) return undefined;
-  runLog.saved = true;
-  try {
-    mkdirSync(LOG_DIR, { recursive: true });
-    const path = join(LOG_DIR, `${runLog.id}-${sanitizeLogId(status)}.log`);
-    const content = [
-      "release-aur log",
-      `started_at=${runLog.startedAt}`,
-      `finished_at=${new Date().toISOString()}`,
-      `status=${status}`,
-      `cwd=${runLog.cwd}`,
-      summary ? `summary=${summary.replace(/\r?\n/g, " | ")}` : undefined,
-      "",
-      "--- output ---",
-      runLog.chunks.join(""),
-    ].filter((line): line is string => line !== undefined).join("\n");
-    writeFileSync(path, content, "utf8");
-    return path;
-  } catch {
-    return undefined;
-  }
+  return saveSharedRunLog(runLog, { logDir: LOG_DIR, title: "release-aur log", status, summary });
 }
 
 function listLogs(): LogEntry[] {
-  if (!existsSync(LOG_DIR)) return [];
-  return readdirSync(LOG_DIR)
-    .filter((file) => file.endsWith(".log"))
-    .map((file) => {
-      const path = join(LOG_DIR, file);
-      const stat = statSync(path);
-      return { file: path, title: file.replace(/\.log$/, ""), mtimeMs: stat.mtimeMs };
-    })
-    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return listRunLogs(LOG_DIR);
 }
 
 function isDirectory(path: string): boolean {
@@ -335,10 +299,6 @@ async function resolveTarget(ctx: ExtensionCommandContext, parsed: ParsedArgs, r
   return choice;
 }
 
-function stripAnsi(input: string): string {
-  return input.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
-}
-
 function extractSummary(output: string): string {
   const lines = stripAnsi(output).split(/\r?\n/);
   const starts = lines.map((line, index) => ({ line, index })).filter(({ line }) => line.trim() === "AUR release summary:");
@@ -383,63 +343,6 @@ function queueFailureReview(pi: ExtensionAPI, step: string, output: string): voi
     truncateForPrompt(output, 16000),
     "```",
   ].join("\n"), { deliverAs: "followUp" });
-}
-
-function isCtrlO(data: string): boolean {
-  const key = data.toLowerCase();
-  return data === "\x0f" || key === "ctrl+o" || data === "\x1b[111;5u" || data === "\x1b[27;5;111~";
-}
-
-function isCtrlC(data: string): boolean {
-  const key = data.toLowerCase();
-  return data === "\x03" || key === "ctrl+c" || data === "\x1b[99;5u" || data === "\x1b[27;5;99~";
-}
-
-function truncateLine(line: string, width: number): string {
-  return line.length > width ? `${line.slice(0, Math.max(0, width - 1))}…` : line;
-}
-
-function appendDisplayChunk(lines: string[], chunk: string): void {
-  if (lines.length === 0) lines.push("");
-
-  for (let i = 0; i < chunk.length; i++) {
-    const char = chunk[i];
-    if (char === "\r") {
-      if (chunk[i + 1] === "\n") {
-        lines.push("");
-        i++;
-      } else {
-        lines[lines.length - 1] = "";
-      }
-      continue;
-    }
-    if (char === "\n") {
-      lines.push("");
-      continue;
-    }
-    lines[lines.length - 1] += char;
-  }
-}
-
-function outputLinesFromDisplay(lines: string[]): string[] {
-  const visible = lines.slice();
-  while (visible.length > 0 && visible[visible.length - 1] === "") visible.pop();
-  return visible;
-}
-
-function formatElapsed(startMs: number): string {
-  const seconds = Math.max(0, Math.floor((Date.now() - startMs) / 1000));
-  const minutes = Math.floor(seconds / 60);
-  const remainder = seconds % 60;
-  return minutes > 0 ? `${minutes}m${String(remainder).padStart(2, "0")}s` : `${remainder}s`;
-}
-
-function resolveUserPath(input: string, cwd: string): string {
-  let value = input.trim();
-  if (value.startsWith("@")) value = value.slice(1);
-  if (value === "~") return homedir();
-  if (value.startsWith("~/")) return join(homedir(), value.slice(2));
-  return isAbsolute(value) ? value : resolve(cwd, value);
 }
 
 function pkgbuildQuote(value: string): string {

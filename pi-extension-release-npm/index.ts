@@ -1,37 +1,26 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { appendDisplayChunk, appendRunLog, createRunLog, formatElapsed, isCtrlC, isCtrlO, listRunLogs, outputLinesFromDisplay, saveRunLog, shellQuote, stripAnsi, type RunLog, type RunLogEntry } from "@firstpick/pi-utils";
 
 const RELEASE_STATUS_KEY = "release-npm";
 const RELEASE_LOG_WIDGET_KEY = "release-npm:logs";
 const COLLAPSED_LINES = 40;
 const OUTPUT_RENDER_INTERVAL_MS = 80;
-const ANSI_ESCAPE_RE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
 
 type RunResult = { ok: boolean; output: string; aborted: boolean };
 type CommandResult = { ok: boolean; output: string };
 type AbortableChild = ChildProcessWithoutNullStreams & { abortReleaseStep?: () => void };
 type PlannedPublish = { name: string; version: string; action: "publish-first" | "publish-update"; label: string };
 type PlannedPublishTarget = PlannedPublish & { target: string };
-type ReleaseLogEntry = { file: string; title: string; mtimeMs: number };
-
-type ReleaseRunLog = {
-  id: string;
-  startedAt: string;
-  cwd: string;
-  chunks: string[];
-  saved: boolean;
-};
+type ReleaseLogEntry = RunLogEntry;
+type ReleaseRunLog = RunLog;
 
 const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
 const RELEASE_LOG_DIR = join(homedir(), ".pi", "agent", "release-npm-logs");
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
 
 function releaseScriptCommand(cwd: string, scriptName: string, args: string[] = []): string {
   const localScripts = [join(cwd, "dev", "scripts", scriptName), join(cwd, scriptName)];
@@ -41,53 +30,20 @@ function releaseScriptCommand(cwd: string, scriptName: string, args: string[] = 
   return `PI_NPM_PACKAGES_ROOT=${shellQuote(cwd)} ${shellQuote(scriptPath)}${quotedArgs ? ` ${quotedArgs}` : ""}`;
 }
 
-function sanitizeLogId(value: string): string {
-  return value.replace(/[^0-9A-Za-z._-]/g, "-");
-}
-
 function createReleaseRunLog(cwd: string): ReleaseRunLog {
-  const startedAt = new Date().toISOString();
-  return { id: sanitizeLogId(startedAt), startedAt, cwd, chunks: [], saved: false };
+  return createRunLog(cwd);
 }
 
 function appendReleaseLog(runLog: ReleaseRunLog, chunk: string): void {
-  runLog.chunks.push(chunk);
+  appendRunLog(runLog, chunk);
 }
 
 function saveReleaseRunLog(runLog: ReleaseRunLog, status: string, summary?: string): string | undefined {
-  if (runLog.saved) return undefined;
-  runLog.saved = true;
-  try {
-    mkdirSync(RELEASE_LOG_DIR, { recursive: true });
-    const path = join(RELEASE_LOG_DIR, `${runLog.id}-${sanitizeLogId(status)}.log`);
-    const content = [
-      `release-npm log`,
-      `started_at=${runLog.startedAt}`,
-      `finished_at=${new Date().toISOString()}`,
-      `status=${status}`,
-      `cwd=${runLog.cwd}`,
-      summary ? `summary=${summary.replace(/\r?\n/g, " | ")}` : undefined,
-      "",
-      "--- output ---",
-      runLog.chunks.join(""),
-    ].filter((line): line is string => line !== undefined).join("\n");
-    writeFileSync(path, content, "utf8");
-    return path;
-  } catch {
-    return undefined;
-  }
+  return saveRunLog(runLog, { logDir: RELEASE_LOG_DIR, title: "release-npm log", status, summary });
 }
 
 function listReleaseLogs(): ReleaseLogEntry[] {
-  if (!existsSync(RELEASE_LOG_DIR)) return [];
-  return readdirSync(RELEASE_LOG_DIR)
-    .filter((file) => file.endsWith(".log"))
-    .map((file) => {
-      const path = join(RELEASE_LOG_DIR, file);
-      const stat = statSync(path);
-      return { file: path, title: file.replace(/\.log$/, ""), mtimeMs: stat.mtimeMs };
-    })
-    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return listRunLogs(RELEASE_LOG_DIR);
 }
 
 async function runCommand(cwd: string, command: string): Promise<CommandResult> {
@@ -197,20 +153,6 @@ function evaluateFailureWithLLM(pi: ExtensionAPI, step: string, output: string):
     `Release step failed: ${step}. Analyze the failure and provide: (1) root cause, (2) exact fix steps, (3) safe rerun command order.\n\nFailure output:\n${trimmed}`,
     { deliverAs: "followUp" },
   );
-}
-
-function isCtrlO(data: string): boolean {
-  const key = data.toLowerCase();
-  return data === "\x0f" || key === "ctrl+o" || data === "\x1b[111;5u" || data === "\x1b[27;5;111~";
-}
-
-function isCtrlC(data: string): boolean {
-  const key = data.toLowerCase();
-  return data === "\x03" || key === "ctrl+c" || data === "\x1b[99;5u" || data === "\x1b[27;5;99~";
-}
-
-function stripAnsi(input: string): string {
-  return input.replace(ANSI_ESCAPE_RE, "");
 }
 
 function extractSection(output: string, heading: string): string[] {
@@ -357,41 +299,6 @@ const EXPANDED_LINES = 160;
 
 let activeReleaseRun: { abort: () => void; toggleOutput: () => void } | undefined;
 let activeLogViewerCleanup: (() => void) | undefined;
-
-function appendDisplayChunk(lines: string[], chunk: string): void {
-  if (lines.length === 0) lines.push("");
-
-  for (let i = 0; i < chunk.length; i++) {
-    const char = chunk[i];
-    if (char === "\r") {
-      if (chunk[i + 1] === "\n") {
-        lines.push("");
-        i++;
-      } else {
-        lines[lines.length - 1] = "";
-      }
-      continue;
-    }
-    if (char === "\n") {
-      lines.push("");
-      continue;
-    }
-    lines[lines.length - 1] += char;
-  }
-}
-
-function outputLinesFromDisplay(lines: string[]): string[] {
-  const visible = lines.slice();
-  while (visible.length > 0 && visible[visible.length - 1] === "") visible.pop();
-  return visible;
-}
-
-function formatElapsed(startMs: number): string {
-  const seconds = Math.max(0, Math.floor((Date.now() - startMs) / 1000));
-  const minutes = Math.floor(seconds / 60);
-  const remainder = seconds % 60;
-  return minutes > 0 ? `${minutes}m${String(remainder).padStart(2, "0")}s` : `${remainder}s`;
-}
 
 export default function releaseNpmExtension(pi: ExtensionAPI) {
   pi.registerCommand("release-npm-setup", {

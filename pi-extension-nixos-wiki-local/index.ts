@@ -4,7 +4,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { createLocalWikiEngine } from "@firstpick/pi-utils";
+import { createLocalWikiEngine, jsonToolResult } from "@firstpick/pi-utils";
 
 interface RepoSpec { name: string; repoUrl: string; sparsePatterns: string[]; }
 type ProgressReporter = (line: string) => void | Promise<void>;
@@ -83,7 +83,6 @@ const wiki = createLocalWikiEngine({
   statusExtra: async () => ({ gitRevisions: await gitRevisions() }),
 });
 
-function jsonToolResult(payload: unknown) { return { content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }], details: payload }; }
 async function setupRepo(repo: RepoSpec, progress?: ProgressReporter): Promise<string> {
   const target = repoPath(repo);
   if (!await exists(target)) {

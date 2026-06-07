@@ -1,14 +1,13 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { extractChecklist, stripChecklistLines, type ChecklistItem, type ChecklistStatus } from "@firstpick/pi-utils";
 
-type TodoStatus = "todo" | "partial" | "done";
-type TodoItem = { text: string; status: TodoStatus };
+type TodoStatus = ChecklistStatus;
+type TodoItem = ChecklistItem;
 type TodoState = { visible: boolean; items: TodoItem[]; offset: number };
 
 const KEY = "todo-progress";
 const MAX_ROWS = 5;
 const MAX_ITEMS = 12;
-const TODO_LINE_REGEX = /^\s*(?:(?:[-*]|\d+[.)])\s*)?\[( |x|X|-)\]\s+(.+)$/;
-
 function statusLabel(status: TodoStatus): string {
   if (status === "done") return "[x]";
   if (status === "partial") return "[-]";
@@ -42,56 +41,6 @@ function render(ctx: ExtensionContext, s: TodoState) {
   for (const item of top) lines.push(`${statusLabel(item.status)} ${item.text}`);
   if (s.items.length > MAX_ROWS) lines.push(ctx.ui.theme.fg("dim", `Scroll ${s.offset + 1}-${Math.min(s.offset + MAX_ROWS, s.items.length)} of ${s.items.length}`));
   ctx.ui.setWidget(KEY, lines);
-}
-
-function parseTodoLine(line: string): TodoItem | undefined {
-  const match = TODO_LINE_REGEX.exec(line);
-  if (!match) return undefined;
-
-  const mark = (match[1] || " ").toLowerCase();
-  const label = (match[2] || "").trim().replace(/\s+/g, " ");
-  if (!label) return undefined;
-
-  return {
-    status: mark === "x" ? "done" : mark === "-" ? "partial" : "todo",
-    text: label,
-  };
-}
-
-function extractChecklist(text: string): TodoItem[] {
-  const checklist: TodoItem[] = [];
-  let inFence = false;
-
-  for (const line of text.split(/\r?\n/)) {
-    if (/^\s*```/.test(line)) {
-      inFence = !inFence;
-      continue;
-    }
-    if (inFence) continue;
-
-    const item = parseTodoLine(line);
-    if (item) checklist.push(item);
-  }
-
-  return checklist;
-}
-
-function stripChecklistLines(text: string): string {
-  let inFence = false;
-  const kept: string[] = [];
-
-  for (const line of text.split(/\r?\n/)) {
-    if (/^\s*```/.test(line)) {
-      inFence = !inFence;
-      kept.push(line);
-      continue;
-    }
-
-    if (!inFence && parseTodoLine(line)) continue;
-    kept.push(line);
-  }
-
-  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 export default function todoProgress(pi: ExtensionAPI) {

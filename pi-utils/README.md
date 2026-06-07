@@ -26,8 +26,17 @@ Shared helper utilities used by `@firstpick/pi-extension-*` packages.
 - `buildInitialPromptCalibrationRecord(args)`
 - `appendInitialPromptCalibrationRecord(appendEntry, record)`
 - `delay(ms)`
+- `tokenizeArgs(input)` / `takeValue(tokens, index, flag)`
+- `readJsonFile(path)` / `readJsonIfExists(path, fallback)` / `writeJsonFile(path, data)`
+- `runCommand(command, args, options?)` / `runShellCommand(cwd, command, options?)`
+- `shellQuote(value)` / `stripAnsi(input)` / `resolveExecutableFromPath(name)`
+- `jsonToolResult(payload)` / `textToolResult(text, details?)`
+- `createRunLog(cwd)` / `appendRunLog(log, chunk)` / `saveRunLog(log, options)` / `listRunLogs(dir)`
+- `parseChecklistLine(line)` / `extractChecklist(text)` / `stripChecklistLines(text)` / `countChecklistProgress(textOrItems)`
+- `expandTilde(input)` / `resolveUserPath(input, cwd?)` / `safeResolveInside(base, ref)` / `formatUserPath(path)`
 - `createExtensionWorkingIndicator(ctx, initialMessage, options?)`
 - `withExtensionWorkingIndicator(ctx, initialMessage, run, options?)`
+- `appendDisplayChunk(lines, chunk)` / `outputLinesFromDisplay(lines)` / `formatElapsed(startMs)`
 - `createLocalWikiEngine(config)`
 
 `createExtensionWorkingIndicator` renders a reusable extension-owned spinner using `ctx.ui.setWidget` plus footer `setStatus`, so it works inside slash-command handlers where Pi's built-in model-streaming working row is not shown.

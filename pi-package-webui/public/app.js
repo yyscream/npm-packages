@@ -47,6 +47,16 @@ const elements = {
   nativeCommandMenu: $("#nativeCommandMenu"),
   nativeSkillsButton: $("#nativeSkillsButton"),
   nativeToolsButton: $("#nativeToolsButton"),
+  optionsMenuButton: $("#optionsMenuButton"),
+  optionsMenu: $("#optionsMenu"),
+  optionsResumeButton: $("#optionsResumeButton"),
+  optionsReloadButton: $("#optionsReloadButton"),
+  optionsNameButton: $("#optionsNameButton"),
+  optionsCloneButton: $("#optionsCloneButton"),
+  optionsSettingsButton: $("#optionsSettingsButton"),
+  optionsExportButton: $("#optionsExportButton"),
+  optionsForkButton: $("#optionsForkButton"),
+  optionsTreeButton: $("#optionsTreeButton"),
   gitWorkflowPanel: $("#gitWorkflowPanel"),
   gitWorkflowTitle: $("#gitWorkflowTitle"),
   gitWorkflowHint: $("#gitWorkflowHint"),
@@ -81,6 +91,7 @@ const elements = {
   sidePanel: $("#sidePanel"),
   stateDetails: $("#stateDetails"),
   queueBox: $("#queueBox"),
+  commandSearchInput: $("#commandSearchInput"),
   commandsBox: $("#commandsBox"),
   eventLog: $("#eventLog"),
   dialog: $("#extensionDialog"),
@@ -148,6 +159,7 @@ let pathFastPicksLoadPromise = null;
 let mobileTabsExpanded = false;
 let openTerminalTabGroupKey = null;
 let nativeCommandMenuOpen = false;
+let optionsMenuOpen = false;
 let availableCommands = [];
 let rawAvailableCommands = [];
 let commandSuggestions = [];
@@ -185,6 +197,11 @@ let blockedTabNotificationPermissionRequested = false;
 let blockedTabNotificationFallbackNoted = false;
 let agentDoneNotificationsEnabled = false;
 let thinkingOutputVisible = true;
+let webuiSettings = {};
+let autocompleteMaxVisible = 12;
+let doubleEscapeAction = "none";
+let treeFilterMode = "default";
+let lastEmptyPromptEscapeTime = 0;
 let toolOutputGloballyExpanded = false;
 let agentDoneNotificationPermissionRequested = false;
 let agentDoneNotificationFallbackNoted = false;
@@ -205,6 +222,7 @@ let lastChatProgrammaticScrollAt = 0;
 let chatUserScrollIntentUntil = 0;
 let mobileFooterExpanded = false;
 let footerModelPickerOpen = false;
+let footerThinkingPickerOpen = false;
 let publishMenuOpen = false;
 let maxVisualViewportHeight = 0;
 let abortRequestInFlight = false;
@@ -374,7 +392,25 @@ const OPTIONAL_COMMAND_FEATURES = new Map([
   ["todo-progress-status", "todoProgressWidget"],
 ]);
 const HIDDEN_COMMAND_NAMES = new Set(["webui-tree-navigate", "webui-helper"]);
-const NATIVE_SELECTOR_COMMANDS = new Set(["model", "settings", "theme", "fork", "clone", "resume", "tree", "login", "logout", "scoped-models", "tools", "skills"]);
+const NATIVE_SELECTOR_COMMANDS = new Set(["model", "settings", "theme", "fork", "clone", "name", "resume", "tree", "login", "logout", "scoped-models", "tools", "skills"]);
+const SETTINGS_THINKING_OPTIONS = ["off", "minimal", "low", "medium", "high", "xhigh"];
+const SETTINGS_TRANSPORT_OPTIONS = ["sse", "websocket", "websocket-cached", "auto"];
+const SETTINGS_HTTP_IDLE_TIMEOUT_OPTIONS = [
+  { value: "30000", label: "30 sec" },
+  { value: "60000", label: "1 min" },
+  { value: "120000", label: "2 min" },
+  { value: "300000", label: "5 min" },
+  { value: "0", label: "disabled" },
+];
+const SETTINGS_DOUBLE_ESCAPE_OPTIONS = [
+  { value: "tree", label: "open /tree" },
+  { value: "fork", label: "open /fork" },
+  { value: "none", label: "do nothing" },
+];
+const SETTINGS_TREE_FILTER_OPTIONS = ["default", "no-tools", "user-only", "labeled-only", "all"];
+const SETTINGS_IMAGE_WIDTH_OPTIONS = ["60", "80", "120"];
+const SETTINGS_EDITOR_PADDING_OPTIONS = ["0", "1", "2", "3"];
+const SETTINGS_AUTOCOMPLETE_OPTIONS = ["3", "5", "7", "10", "15", "20"];
 const optionalFeatureInstallInProgress = new Set();
 const gitFooterPayloadRefreshInFlightByTab = new Set();
 
@@ -696,11 +732,37 @@ function restoreThinkingVisibilitySetting() {
   renderThinkingVisibilityToggle();
 }
 
+function clampAutocompleteMaxVisible(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 12;
+  return Math.max(3, Math.min(20, Math.floor(number)));
+}
+
+function applyNativeSettingsForBrowser(settings = {}, { syncThinkingVisibility = false } = {}) {
+  if (!settings || typeof settings !== "object") return;
+  webuiSettings = { ...webuiSettings, ...settings, warnings: { ...(webuiSettings.warnings || {}), ...(settings.warnings || {}) } };
+  if (settings.autocompleteMaxVisible !== undefined) autocompleteMaxVisible = clampAutocompleteMaxVisible(settings.autocompleteMaxVisible);
+  if (SETTINGS_DOUBLE_ESCAPE_OPTIONS.some((option) => option.value === settings.doubleEscapeAction)) doubleEscapeAction = settings.doubleEscapeAction;
+  if (SETTINGS_TREE_FILTER_OPTIONS.includes(settings.treeFilterMode)) treeFilterMode = settings.treeFilterMode;
+  if (syncThinkingVisibility && typeof settings.hideThinkingBlock === "boolean") setThinkingOutputVisible(!settings.hideThinkingBlock);
+}
+
+async function refreshNativeSettings(tabContext = activeTabContext()) {
+  if (!tabContext.tabId) return;
+  const response = await api("/api/settings", { tabId: tabContext.tabId });
+  if (!isCurrentTabContext(tabContext)) return;
+  applyNativeSettingsForBrowser(response.data?.settings || {});
+}
+
 function setComposerActionsOpen(open) {
   const shouldOpen = open && isMobileView();
   document.body.classList.toggle("composer-actions-open", shouldOpen);
   elements.composerActionsButton.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
-  if (!shouldOpen) setPublishMenuOpen(false);
+  if (!shouldOpen) {
+    setPublishMenuOpen(false);
+    setNativeCommandMenuOpen(false);
+    setOptionsMenuOpen(false);
+  }
 }
 
 function isUserBashActive(tabId = activeTabId) {
@@ -760,23 +822,63 @@ function updateComposerModeButtons() {
   document.body.classList.toggle("pi-run-active", runActive || abortAvailable);
 }
 
+function isFooterPickerOpen() {
+  return footerModelPickerOpen || footerThinkingPickerOpen;
+}
+
+function footerActivePickerTarget() {
+  if (footerThinkingPickerOpen) return elements.statusBar.querySelector(".footer-thinking.footer-meta-action");
+  if (footerModelPickerOpen) return elements.statusBar.querySelector(".footer-model.footer-meta-action, .footer-tui-model");
+  return null;
+}
+
+function clearFooterPickerPosition() {
+  document.documentElement.style.removeProperty("--footer-model-picker-bottom");
+  document.documentElement.style.removeProperty("--footer-model-picker-left");
+  document.documentElement.style.removeProperty("--footer-model-picker-right");
+}
+
 function updateFooterModelPickerPosition() {
-  if (!footerModelPickerOpen || !isMobileView()) {
-    document.documentElement.style.removeProperty("--footer-model-picker-bottom");
+  if (!isFooterPickerOpen()) {
+    clearFooterPickerPosition();
     return;
   }
-  const viewportHeight = window.innerHeight || window.visualViewport?.height || document.documentElement.clientHeight;
-  const statusTop = elements.statusBar.getBoundingClientRect().top;
-  const bottom = Math.max(8, Math.round(viewportHeight - statusTop + 6));
-  document.documentElement.style.setProperty("--footer-model-picker-bottom", `${bottom}px`);
+  if (isMobileView()) {
+    document.documentElement.style.removeProperty("--footer-model-picker-left");
+    document.documentElement.style.removeProperty("--footer-model-picker-right");
+    const viewportHeight = window.innerHeight || window.visualViewport?.height || document.documentElement.clientHeight;
+    const statusTop = elements.statusBar.getBoundingClientRect().top;
+    const bottom = Math.max(8, Math.round(viewportHeight - statusTop + 6));
+    document.documentElement.style.setProperty("--footer-model-picker-bottom", `${bottom}px`);
+    return;
+  }
+  document.documentElement.style.removeProperty("--footer-model-picker-bottom");
+  const picker = elements.statusBar.querySelector(".footer-model-picker");
+  const target = footerActivePickerTarget();
+  if (!picker || !target) {
+    document.documentElement.style.removeProperty("--footer-model-picker-left");
+    document.documentElement.style.removeProperty("--footer-model-picker-right");
+    return;
+  }
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+  const statusRect = elements.statusBar.getBoundingClientRect();
+  const targetRect = target.getBoundingClientRect();
+  const pickerWidth = picker.offsetWidth || Math.min(544, viewportWidth - 16);
+  const minLeft = 8 - statusRect.left;
+  const maxLeft = Math.max(minLeft, viewportWidth - pickerWidth - 8 - statusRect.left);
+  const targetCenterLeft = targetRect.left - statusRect.left + (targetRect.width / 2) - (pickerWidth / 2);
+  const left = Math.min(maxLeft, Math.max(minLeft, targetCenterLeft));
+  document.documentElement.style.setProperty("--footer-model-picker-left", `${Math.round(left)}px`);
+  document.documentElement.style.setProperty("--footer-model-picker-right", "auto");
 }
 
 function setMobileFooterExpanded(expanded) {
   mobileFooterExpanded = expanded && isMobileView();
-  if (mobileFooterExpanded && footerModelPickerOpen) {
+  if (mobileFooterExpanded && isFooterPickerOpen()) {
     footerModelPickerOpen = false;
+    footerThinkingPickerOpen = false;
     document.body.classList.remove("footer-model-picker-open");
-    elements.statusBar.querySelector(".footer-model-picker")?.remove();
+    elements.statusBar.querySelectorAll(".footer-model-picker").forEach((node) => node.remove());
   }
   document.body.classList.toggle("footer-details-expanded", mobileFooterExpanded);
   const button = elements.statusBar.querySelector(".footer-details-toggle");
@@ -2792,6 +2894,7 @@ async function switchTab(tabId) {
   clearOpenTerminalTabGroup(null, { force: true });
   setMobileTabsExpanded(false);
   footerModelPickerOpen = false;
+  footerThinkingPickerOpen = false;
   saveActiveDraft();
   const tabContext = setActiveTabId(tabId, { remember: true });
   resetActiveTabUi();
@@ -3340,11 +3443,54 @@ function shortModelLabel(model) {
   return `(${model.provider}) ${model.id}`;
 }
 
+function footerThinkingLevelLabel(level) {
+  return String(level || "unknown").trim() || "unknown";
+}
+
+function footerThinkingDisplay(state = currentState) {
+  const current = footerThinkingLevelLabel(state?.thinkingLevel);
+  const pending = state?.pendingThinkingLevel ? footerThinkingLevelLabel(state.pendingThinkingLevel) : "";
+  return pending && pending !== current ? `${current} → ${pending} next` : current;
+}
+
 function footerModelLine(model = currentState?.model, thinkingLevel = currentState?.thinkingLevel) {
   const label = shortModelLabel(model);
   if (!model?.reasoning) return label;
   const thinking = thinkingLevel === "off" ? "thinking off" : thinkingLevel || "?";
   return `${label} • ${thinking}`;
+}
+
+function normalizeSelectedModel(model) {
+  const provider = String(model?.provider || "").trim();
+  const id = String(model?.id || model?.modelId || "").trim();
+  if (!provider || !id) return null;
+  const known = [...availableModels, ...footerScopedModels].find((item) => item?.provider === provider && item?.id === id);
+  return { ...(known || {}), ...model, provider, id };
+}
+
+function applyOptimisticModelSelection(model, tabContext = activeTabContext()) {
+  const nextModel = normalizeSelectedModel(model);
+  if (!nextModel || !currentState || !isCurrentTabContext(tabContext)) return nextModel;
+  const changed = modelStateKey(currentState.model) !== modelStateKey(nextModel);
+  currentState = { ...currentState, model: nextModel };
+  renderStatus();
+  if (changed) requestGitFooterWebuiPayload(tabContext, { force: true });
+  return nextModel;
+}
+
+function applyOptimisticThinkingSelection(data, tabContext = activeTabContext()) {
+  const level = String(data?.level || data?.requestedLevel || "").trim();
+  if (!level || !currentState || !isCurrentTabContext(tabContext)) return level;
+  if (data?.pending) currentState = { ...currentState, pendingThinkingLevel: level };
+  else currentState = { ...currentState, thinkingLevel: level, pendingThinkingLevel: undefined };
+  renderStatus();
+  if (!data?.pending) requestGitFooterWebuiPayload(tabContext, { force: true });
+  return level;
+}
+
+function footerThinkingLevels() {
+  const levels = Array.from(elements.thinkingSelect?.options || []).map((option) => option.value).filter(Boolean);
+  return levels.length ? levels : ["off", "minimal", "low", "medium", "high", "xhigh"];
 }
 
 function formatFooterTokenCount(value) {
@@ -3478,6 +3624,7 @@ const FOOTER_META_CLASS_BY_KEY = new Map([
   ["git-extra", "footer-git-extra"],
   ["context", "footer-context"],
   ["model", "footer-model"],
+  ["thinking", "footer-thinking"],
 ]);
 
 function cleanFooterPayloadText(value, fallback = "") {
@@ -3573,6 +3720,24 @@ function parseGitFooterWebuiPayload() {
   return parseGitFooterWebuiPayloadRaw(readCachedGitFooterWebuiPayloadRaw());
 }
 
+function footerPayloadWithLiveModel(payload) {
+  if (!payload || !currentState?.model) return payload;
+  const model = shortModelLabel(currentState.model);
+  const effort = footerThinkingDisplay();
+  const hasThinkingChip = [...payload.main, ...payload.meta].some((chip) => chip?.key === "thinking");
+  const effortChip = (chip) => ({ ...chip, key: "thinking", label: "effort", value: effort, title: `effort: ${effort}`, tone: "mauve" });
+  const splitChip = (chip) => {
+    if (chip?.key === "thinking") return [effortChip(chip)];
+    if (chip?.key !== "model") return [chip];
+    const modelChip = { ...chip, value: model, title: `model: ${model}` };
+    return hasThinkingChip ? [modelChip] : [modelChip, effortChip(chip)];
+  };
+  return {
+    main: payload.main.flatMap(splitChip),
+    meta: payload.meta.flatMap(splitChip),
+  };
+}
+
 function footerMetaClassForPayload(chip) {
   const base = FOOTER_META_CLASS_BY_KEY.get(chip.key) || "footer-extension-meta";
   const toneClass = chip.tone ? ` tone-${chip.tone}` : "";
@@ -3623,6 +3788,9 @@ function renderGitFooterPayloadMeta(chip, tab) {
   } else if (chip.key === "model") {
     options.onClick = () => setFooterModelPickerOpen(!footerModelPickerOpen);
     options.title = chip.title || `Change scoped model: ${chip.value}`;
+  } else if (chip.key === "thinking") {
+    options.onClick = () => setFooterThinkingPickerOpen(!footerThinkingPickerOpen);
+    options.title = chip.title || `Change thinking effort: ${chip.value}`;
   }
   const node = footerMeta(chip.label, chip.value, footerMetaClassForPayload(chip), options);
   return chip.contextUsage ? applyFooterContextUsage(node, chip.contextUsage) : node;
@@ -3633,7 +3801,7 @@ function renderGitFooterPayload(payload) {
   elements.statusBar.replaceChildren();
   elements.statusBar.classList.remove("statusbar-tui-footer");
   elements.statusBar.classList.add("statusbar-git-footer");
-  document.body.classList.toggle("footer-model-picker-open", footerModelPickerOpen);
+  document.body.classList.toggle("footer-model-picker-open", isFooterPickerOpen());
 
   const row1 = make("div", "footer-line footer-line-main");
   row1.append(...payload.main.map(renderGitFooterPayloadMetric));
@@ -3648,6 +3816,7 @@ function renderGitFooterPayload(payload) {
 
   elements.statusBar.append(row1, row2);
   if (footerModelPickerOpen) elements.statusBar.append(renderFooterModelPicker());
+  if (footerThinkingPickerOpen) elements.statusBar.append(renderFooterThinkingPicker());
   setMobileFooterExpanded(mobileFooterExpanded);
   updateFooterModelPickerPosition();
 }
@@ -3672,7 +3841,7 @@ function renderMinimalFooter() {
   elements.statusBar.replaceChildren();
   elements.statusBar.classList.remove("statusbar-git-footer");
   elements.statusBar.classList.add("statusbar-tui-footer");
-  document.body.classList.toggle("footer-model-picker-open", footerModelPickerOpen);
+  document.body.classList.toggle("footer-model-picker-open", isFooterPickerOpen());
   elements.statusBar.append(renderTuiFooterLine({
     cwd: workspaceLabel,
     cwdTitle: tab ? `Change cwd for ${tab.title}: ${workspaceLabel}` : undefined,
@@ -3681,19 +3850,35 @@ function renderMinimalFooter() {
     model: modelLine,
   }));
   if (footerModelPickerOpen) elements.statusBar.append(renderFooterModelPicker());
+  if (footerThinkingPickerOpen) elements.statusBar.append(renderFooterThinkingPicker());
   setMobileFooterExpanded(false);
   updateFooterModelPickerPosition();
 }
 
 function setFooterModelPickerOpen(open) {
   footerModelPickerOpen = !!open;
+  if (footerModelPickerOpen) footerThinkingPickerOpen = false;
   if (footerModelPickerOpen && isMobileView()) {
     mobileFooterExpanded = false;
     document.body.classList.remove("footer-details-expanded");
     setComposerActionsOpen(false);
     setMobileTabsExpanded(false);
   }
-  document.body.classList.toggle("footer-model-picker-open", footerModelPickerOpen);
+  document.body.classList.toggle("footer-model-picker-open", isFooterPickerOpen());
+  renderFooter();
+  updateFooterModelPickerPosition();
+}
+
+function setFooterThinkingPickerOpen(open) {
+  footerThinkingPickerOpen = !!open;
+  if (footerThinkingPickerOpen) footerModelPickerOpen = false;
+  if (footerThinkingPickerOpen && isMobileView()) {
+    mobileFooterExpanded = false;
+    document.body.classList.remove("footer-details-expanded");
+    setComposerActionsOpen(false);
+    setMobileTabsExpanded(false);
+  }
+  document.body.classList.toggle("footer-model-picker-open", isFooterPickerOpen());
   renderFooter();
   updateFooterModelPickerPosition();
 }
@@ -3703,15 +3888,16 @@ async function applyFooterModel(model) {
   const tabContext = activeTabContext();
   try {
     footerModelPickerOpen = false;
-    await api("/api/model", { method: "POST", body: { provider: model.provider, modelId: model.id }, tabId: tabContext.tabId });
+    const response = await api("/api/model", { method: "POST", body: { provider: model.provider, modelId: model.id }, tabId: tabContext.tabId });
     if (!isCurrentTabContext(tabContext)) return;
+    applyOptimisticModelSelection(response.data || model, tabContext);
     await refreshState(tabContext);
     await refreshModels(tabContext);
   } catch (error) {
     if (isCurrentTabContext(tabContext)) addEvent(error.message, "error");
   } finally {
     if (isCurrentTabContext(tabContext)) {
-      document.body.classList.toggle("footer-model-picker-open", footerModelPickerOpen);
+      document.body.classList.toggle("footer-model-picker-open", isFooterPickerOpen());
       renderFooter();
     }
   }
@@ -3745,6 +3931,54 @@ function renderFooterModelPicker() {
       make("span", "footer-model-option-name", model.name || ""),
     );
     button.addEventListener("click", () => applyFooterModel(model));
+    picker.append(button);
+  }
+  return picker;
+}
+
+async function applyFooterThinking(level) {
+  const nextLevel = String(level || "").trim();
+  if (!nextLevel) return;
+  const tabContext = activeTabContext();
+  try {
+    footerThinkingPickerOpen = false;
+    const response = await api("/api/thinking", { method: "POST", body: { level: nextLevel }, tabId: tabContext.tabId });
+    if (!isCurrentTabContext(tabContext)) return;
+    applyOptimisticThinkingSelection(response.data || { level: nextLevel }, tabContext);
+    if (response.data?.pending) {
+      addEvent(response.data.message || `Thinking effort ${response.data.level || nextLevel} will apply to the next prompt.`, "info");
+    } else if (response.data?.level) {
+      const requested = response.data.requestedLevel;
+      const effective = response.data.level;
+      addEvent(requested && requested !== effective ? `Thinking effort set to ${effective} (requested ${requested}).` : `Thinking effort set to ${effective}.`, "info");
+    }
+    await refreshState(tabContext);
+  } catch (error) {
+    if (isCurrentTabContext(tabContext)) addEvent(error.message, "error");
+  } finally {
+    if (isCurrentTabContext(tabContext)) {
+      document.body.classList.toggle("footer-model-picker-open", isFooterPickerOpen());
+      renderFooter();
+    }
+  }
+}
+
+function renderFooterThinkingPicker() {
+  const picker = make("div", "footer-model-picker footer-thinking-picker");
+  picker.setAttribute("role", "listbox");
+  picker.setAttribute("aria-label", "Thinking effort");
+  picker.append(make("div", "footer-model-picker-title", "Thinking effort"));
+  picker.append(make("div", "footer-model-picker-source", "Applies to this Pi tab."));
+  const current = currentState?.pendingThinkingLevel || currentState?.thinkingLevel || "off";
+  for (const level of footerThinkingLevels()) {
+    const selected = current === level;
+    const button = make("button", `footer-model-option${selected ? " active" : ""}`);
+    button.type = "button";
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", selected ? "true" : "false");
+    button.title = `Set thinking effort to ${level}`;
+    button.append(make("span", "footer-model-option-main", footerThinkingLevelLabel(level)));
+    button.addEventListener("click", () => applyFooterThinking(level));
     picker.append(button);
   }
   return picker;
@@ -4017,7 +4251,7 @@ async function changeActiveTabCwd() {
 function renderFooter() {
   const gitFooterPayload = parseGitFooterWebuiPayload();
   if (gitFooterPayload) {
-    renderGitFooterPayload(gitFooterPayload);
+    renderGitFooterPayload(footerPayloadWithLiveModel(gitFooterPayload));
     return;
   }
   renderMinimalFooter();
@@ -7221,6 +7455,13 @@ function setNativeCommandMenuOpen(open) {
   elements.nativeCommandMenuButton.parentElement?.classList.toggle("open", nativeCommandMenuOpen);
 }
 
+function setOptionsMenuOpen(open) {
+  optionsMenuOpen = !!open;
+  elements.optionsMenuButton.setAttribute("aria-expanded", optionsMenuOpen ? "true" : "false");
+  elements.optionsMenuButton.classList.toggle("menu-open", optionsMenuOpen);
+  elements.optionsMenuButton.parentElement?.classList.toggle("open", optionsMenuOpen);
+}
+
 function optionalFeatureIdForCommand(name) {
   if (OPTIONAL_COMMAND_FEATURES.has(name)) return OPTIONAL_COMMAND_FEATURES.get(name);
   if (name === "release-toggle" || name === "release-abort" || name === "release-npm-logs") return "releaseNpm";
@@ -7377,9 +7618,11 @@ function renderOptionalFeaturePanel() {
 }
 
 function renderOptionalFeatureControls() {
+  const hasGitWorkflow = isOptionalFeatureEnabled("gitWorkflow");
+  elements.gitWorkflowButton.hidden = !hasGitWorkflow;
   setOptionalControlState(
     elements.gitWorkflowButton,
-    isOptionalFeatureEnabled("gitWorkflow"),
+    hasGitWorkflow,
     optionalFeatureUnavailableMessage("gitWorkflow"),
   );
 
@@ -7388,6 +7631,7 @@ function renderOptionalFeatureControls() {
   const hasPublishWorkflow = isOptionalFeatureEnabled("releaseNpm") || isOptionalFeatureEnabled("releaseAur");
   const publishContainer = elements.publishButton.parentElement;
   if (publishContainer) publishContainer.hidden = !hasPublishWorkflow;
+  elements.publishButton.hidden = !hasPublishWorkflow;
   setOptionalControlState(
     elements.publishButton,
     hasPublishWorkflow,
@@ -7400,6 +7644,7 @@ function renderOptionalFeatureControls() {
   elements.nativeToolsButton.hidden = !isOptionalFeatureEnabled("tuiToolsCommand");
   const nativeCommandMenuContainer = elements.nativeCommandMenuButton.parentElement;
   if (nativeCommandMenuContainer) nativeCommandMenuContainer.hidden = !hasNativeCommandMenu;
+  elements.nativeCommandMenuButton.hidden = !hasNativeCommandMenu;
   setOptionalControlState(
     elements.nativeCommandMenuButton,
     hasNativeCommandMenu,
@@ -7457,6 +7702,7 @@ async function installOptionalFeature(featureId) {
 function runPublishWorkflow(command) {
   setComposerActionsOpen(false);
   setPublishMenuOpen(false);
+  setOptionsMenuOpen(false);
   const commandName = String(command || "").replace(/^\//, "").split(/\s+/)[0];
   const featureId = OPTIONAL_COMMAND_FEATURES.get(commandName);
   if ((featureId && !isOptionalFeatureEnabled(featureId)) || !hasAvailableCommand(commandName)) {
@@ -7474,6 +7720,7 @@ async function runNativeCommandMenu(command) {
   setComposerActionsOpen(false);
   setPublishMenuOpen(false);
   setNativeCommandMenuOpen(false);
+  setOptionsMenuOpen(false);
   const commandName = String(command || "").replace(/^\//, "").split(/\s+/)[0].toLowerCase();
   const featureId = optionalFeatureIdForCommand(commandName);
   if ((featureId && !isOptionalFeatureEnabled(featureId)) || !hasAvailableCommand(commandName)) {
@@ -7484,7 +7731,8 @@ async function runNativeCommandMenu(command) {
     });
     return;
   }
-  await handleNativeSlashSelectorCommand(command);
+  if (await handleNativeSlashSelectorCommand(command)) return;
+  await sendPrompt("prompt", command);
 }
 
 function slashCommandName(message) {
@@ -7619,11 +7867,13 @@ async function openNativeModelSelector() {
       activeId,
       onSelect: async (item) => {
         setNativeCommandError("");
+        const tabContext = activeTabContext(nativeCommandTabId || activeTabId);
         try {
-          await nativeCommandApi("/api/model", { method: "POST", body: { provider: item.model.provider, modelId: item.model.id } });
+          const response = await nativeCommandApi("/api/model", { method: "POST", body: { provider: item.model.provider, modelId: item.model.id } });
+          applyOptimisticModelSelection(response.data || item.model, tabContext);
           addTransientMessage({ role: "native", title: "/model", content: `Model set to ${item.label}.`, level: "info" });
           closeNativeCommandDialog();
-          await refreshState();
+          await refreshState(tabContext);
         } catch (error) {
           setNativeCommandError(error.message || String(error));
         }
@@ -7672,83 +7922,224 @@ function openNativeThemeSelector() {
   });
 }
 
-function nativeSettingSelect(label, value, options) {
+function nativeSettingsBadge(label, tone = "") {
+  return make("span", `native-settings-badge${tone ? ` native-settings-badge-${tone}` : ""}`, label);
+}
+
+function normalizedSettingsBadge(badge) {
+  if (!badge) return null;
+  if (typeof badge === "string") return { label: badge, tone: "" };
+  return badge;
+}
+
+function nativeSettingsLabelRow(label, badge) {
+  const row = make("span", "native-settings-label-row");
+  row.append(make("span", "native-settings-label", label));
+  const normalized = normalizedSettingsBadge(badge);
+  if (normalized?.label) row.append(nativeSettingsBadge(normalized.label, normalized.tone));
+  return row;
+}
+
+function normalizedSettingOptions(options) {
+  return options.map((option) => {
+    if (typeof option === "string" || typeof option === "number") return { value: String(option), label: String(option) };
+    return { value: String(option.value), label: option.label || String(option.value) };
+  });
+}
+
+function nativeSettingSelect(label, value, options, hint, badge) {
   const field = make("label", "native-settings-field");
-  field.append(make("span", "native-settings-label", label));
+  field.append(nativeSettingsLabelRow(label, badge));
   const select = make("select");
-  for (const option of options) {
-    const element = make("option", undefined, option.label || option.value);
+  for (const option of normalizedSettingOptions(options)) {
+    const element = make("option", undefined, option.label);
     element.value = option.value;
     select.append(element);
   }
-  select.value = value;
+  select.value = String(value);
   field.append(select);
+  if (hint) field.append(make("span", "native-settings-hint", hint));
   return { field, select };
 }
 
-function nativeSettingToggle(label, checked, hint) {
+function nativeSettingToggle(label, checked, hint, badge) {
   const field = make("label", "native-settings-toggle");
   const input = make("input");
   input.type = "checkbox";
   input.checked = !!checked;
   const text = make("span");
-  text.append(make("strong", undefined, label));
+  text.append(nativeSettingsLabelRow(label, badge));
   if (hint) text.append(make("span", "native-settings-hint", hint));
   field.append(input, text);
   return { field, input };
 }
 
-function openNativeSettingsDialog() {
-  openNativeCommandDialog({ title: "/settings", message: "Quick Web UI settings for the active Pi tab." });
-  elements.nativeCommandBody.replaceChildren();
+function nativeSettingsSection(title, description, controls, { open = true, badge } = {}) {
+  const section = make("details", "native-settings-section");
+  section.open = !!open;
+  const summary = make("summary", "native-settings-section-summary");
+  const titleRow = make("span", "native-settings-section-title");
+  titleRow.append(make("strong", undefined, title));
+  const normalized = normalizedSettingsBadge(badge);
+  if (normalized?.label) titleRow.append(nativeSettingsBadge(normalized.label, normalized.tone));
+  summary.append(titleRow);
+  if (description) summary.append(make("span", "native-settings-section-description", description));
+  const grid = make("div", "native-settings-grid");
+  grid.append(...controls.map((control) => control.field || control));
+  section.append(summary, grid);
+  return section;
+}
+
+function nativeSettingsNote(title, text) {
+  const note = make("div", "native-settings-note");
+  note.append(make("strong", undefined, title));
+  note.append(make("span", undefined, text));
+  return note;
+}
+
+function currentHttpIdleTimeoutValue(settings) {
+  return String(settings.httpIdleTimeoutMs ?? "300000");
+}
+
+function httpIdleTimeoutOptions(settings) {
+  const current = currentHttpIdleTimeoutValue(settings);
+  if (SETTINGS_HTTP_IDLE_TIMEOUT_OPTIONS.some((option) => option.value === current)) return SETTINGS_HTTP_IDLE_TIMEOUT_OPTIONS;
+  const label = Number(current) === 0 ? "disabled (current)" : `${Number(current) / 1000} sec (current)`;
+  return [{ value: current, label }, ...SETTINGS_HTTP_IDLE_TIMEOUT_OPTIONS];
+}
+
+function collectNativeSettingsPayload(controls) {
+  return {
+    transport: controls.transport.select.value,
+    httpIdleTimeoutMs: Number(controls.httpIdleTimeout.select.value),
+    autoResizeImages: controls.autoResizeImages.input.checked,
+    blockImages: controls.blockImages.input.checked,
+    enableSkillCommands: controls.skillCommands.input.checked,
+    hideThinkingBlock: !controls.thinkingOutput.input.checked,
+    showImages: controls.showImages.input.checked,
+    imageWidthCells: Number(controls.imageWidth.select.value),
+    collapseChangelog: controls.collapseChangelog.input.checked,
+    quietStartup: controls.quietStartup.input.checked,
+    enableInstallTelemetry: controls.installTelemetry.input.checked,
+    doubleEscapeAction: controls.doubleEscape.select.value,
+    treeFilterMode: controls.treeFilter.select.value,
+    showHardwareCursor: controls.hardwareCursor.input.checked,
+    editorPaddingX: Number(controls.editorPadding.select.value),
+    autocompleteMaxVisible: Number(controls.autocompleteMax.select.value),
+    clearOnShrink: controls.clearOnShrink.input.checked,
+    showTerminalProgress: controls.terminalProgress.input.checked,
+    warnings: { anthropicExtraUsage: controls.anthropicWarning.input.checked },
+  };
+}
+
+function nativeSettingsChangedMessage(response, reloadRequested) {
+  const changed = response.data?.changed || [];
+  const reloadRecommended = response.data?.reloadRecommended || [];
+  if (response.data?.reloaded) return `Settings updated and tab reloaded (${changed.length || 0} changed).`;
+  if (reloadRecommended.length) return `Settings updated. Reload tab to apply: ${reloadRecommended.join(", ")}.`;
+  if (reloadRequested) return `Settings updated. No reload-needed changes were detected.`;
+  return `Settings updated${changed.length ? ` (${changed.length} changed)` : ""}.`;
+}
+
+async function openNativeSettingsDialog() {
+  openNativeCommandDialog({ title: "/settings", message: "Pi settings for this Web UI tab. Badges show whether changes apply now, in the browser, or after reloading the tab." });
+  renderNativeLoading("Loading settings…");
+  let settingsData;
+  try {
+    const response = await nativeCommandApi("/api/settings");
+    settingsData = response.data || {};
+  } catch (error) {
+    setNativeCommandError(error.message || String(error));
+    elements.nativeCommandBody.replaceChildren();
+    return;
+  }
+
   const state = currentState || {};
-  const body = make("div", "native-settings-grid");
-  const thinking = nativeSettingSelect("Thinking level", state.thinkingLevel || "off", ["off", "minimal", "low", "medium", "high", "xhigh"].map((value) => ({ value })));
-  const steering = nativeSettingSelect("Steering queue", state.steeringMode || "one-at-a-time", [
-    { value: "one-at-a-time", label: "one at a time" },
-    { value: "all", label: "all queued" },
-  ]);
-  const followUp = nativeSettingSelect("Follow-up queue", state.followUpMode || "one-at-a-time", [
-    { value: "one-at-a-time", label: "one at a time" },
-    { value: "all", label: "all queued" },
-  ]);
-  const autoCompact = nativeSettingToggle("Auto compaction", state.autoCompactionEnabled !== false, "Let Pi compact when context is nearly full.");
-  const thinkingOutput = nativeSettingToggle("Show thinking output", thinkingOutputVisible, "Local browser transcript visibility.");
-  const doneNotifications = nativeSettingToggle("Agent done notifications", agentDoneNotificationsEnabled, "Browser notification after background tab work completes.");
-  const busyBehavior = nativeSettingSelect("Busy prompt behavior", elements.busyBehavior.value || "followUp", [
-    { value: "followUp", label: "follow-up" },
-    { value: "steer", label: "steer" },
-  ]);
-  body.append(thinking.field, steering.field, followUp.field, busyBehavior.field, autoCompact.field, thinkingOutput.field, doneNotifications.field);
-  elements.nativeCommandBody.append(body);
+  const settings = settingsData.settings || {};
+  applyNativeSettingsForBrowser(settings);
+
+  const controls = {
+    thinking: nativeSettingSelect("Thinking level", state.thinkingLevel || "off", SETTINGS_THINKING_OPTIONS, "Reasoning depth for thinking-capable models.", { label: "now", tone: "now" }),
+    autoCompact: nativeSettingToggle("Auto-compact", state.autoCompactionEnabled !== false, "Let Pi compact when context is nearly full.", { label: "now", tone: "now" }),
+    steering: nativeSettingSelect("Steering mode", state.steeringMode || "one-at-a-time", [
+      { value: "one-at-a-time", label: "one at a time" },
+      { value: "all", label: "all queued" },
+    ], "How Enter messages are delivered while the agent is streaming.", { label: "now", tone: "now" }),
+    followUp: nativeSettingSelect("Follow-up mode", state.followUpMode || "one-at-a-time", [
+      { value: "one-at-a-time", label: "one at a time" },
+      { value: "all", label: "all queued" },
+    ], "How queued follow-ups are delivered after the current response.", { label: "now", tone: "now" }),
+    transport: nativeSettingSelect("Transport", settings.transport || "auto", SETTINGS_TRANSPORT_OPTIONS, "Preferred provider transport when multiple transports are supported.", { label: "reload", tone: "reload" }),
+    httpIdleTimeout: nativeSettingSelect("HTTP idle timeout", currentHttpIdleTimeoutValue(settings), httpIdleTimeoutOptions(settings), "Maximum idle gap while waiting for provider HTTP data.", { label: "reload", tone: "reload" }),
+    busyBehavior: nativeSettingSelect("Busy prompt behavior", elements.busyBehavior.value || "followUp", [
+      { value: "followUp", label: "follow-up" },
+      { value: "steer", label: "steer" },
+    ], "When you submit a normal prompt while a tab is already busy.", { label: "browser", tone: "browser" }),
+    thinkingOutput: nativeSettingToggle("Show thinking output", settings.hideThinkingBlock !== true, "Browser transcript visibility; also writes Pi's hide-thinking setting.", { label: "browser", tone: "browser" }),
+    doneNotifications: nativeSettingToggle("Agent done notifications", agentDoneNotificationsEnabled, "Browser notification after background tab work completes.", { label: "browser", tone: "browser" }),
+    autocompleteMax: nativeSettingSelect("Autocomplete max items", settings.autocompleteMaxVisible ?? autocompleteMaxVisible, SETTINGS_AUTOCOMPLETE_OPTIONS, "Maximum visible slash/path suggestions.", { label: "browser", tone: "browser" }),
+    doubleEscape: nativeSettingSelect("Double-escape action", settings.doubleEscapeAction || doubleEscapeAction, SETTINGS_DOUBLE_ESCAPE_OPTIONS, "Action when pressing Escape twice with an empty composer.", { label: "browser", tone: "browser" }),
+    treeFilter: nativeSettingSelect("Tree filter mode", settings.treeFilterMode || treeFilterMode, SETTINGS_TREE_FILTER_OPTIONS, "Default filter when opening /tree.", { label: "browser", tone: "browser" }),
+    autoResizeImages: nativeSettingToggle("Auto-resize images", settings.autoResizeImages !== false, "Resize large images to 2000x2000 max for better model compatibility.", { label: "reload", tone: "reload" }),
+    blockImages: nativeSettingToggle("Block images", settings.blockImages === true, "Prevent images from being sent to LLM providers.", { label: "reload", tone: "reload" }),
+    showImages: nativeSettingToggle("Show terminal images", settings.showImages !== false, "Native TUI inline image rendering preference.", { label: "TUI", tone: "tui" }),
+    imageWidth: nativeSettingSelect("Terminal image width", settings.imageWidthCells || 60, SETTINGS_IMAGE_WIDTH_OPTIONS, "Native TUI inline image width in terminal cells.", { label: "TUI", tone: "tui" }),
+    skillCommands: nativeSettingToggle("Skill commands", settings.enableSkillCommands !== false, "Register skills as /skill:name commands.", { label: "reload", tone: "reload" }),
+    anthropicWarning: nativeSettingToggle("Anthropic extra usage warning", settings.warnings?.anthropicExtraUsage !== false, "Warn when Anthropic subscription auth may use paid extra usage.", { label: "safety", tone: "safety" }),
+    collapseChangelog: nativeSettingToggle("Collapse changelog", settings.collapseChangelog === true, "Show condensed changelog after updates.", { label: "startup", tone: "startup" }),
+    quietStartup: nativeSettingToggle("Quiet startup", settings.quietStartup === true, "Disable verbose printing at startup.", { label: "startup", tone: "startup" }),
+    installTelemetry: nativeSettingToggle("Install telemetry", settings.enableInstallTelemetry !== false, "Send anonymous version/update ping after changelog-detected updates.", { label: "startup", tone: "startup" }),
+    hardwareCursor: nativeSettingToggle("Show hardware cursor", settings.showHardwareCursor === true, "Native TUI cursor display for IME support.", { label: "TUI", tone: "tui" }),
+    editorPadding: nativeSettingSelect("Editor padding", settings.editorPaddingX ?? 0, SETTINGS_EDITOR_PADDING_OPTIONS, "Native TUI horizontal input padding.", { label: "TUI", tone: "tui" }),
+    clearOnShrink: nativeSettingToggle("Clear on shrink", settings.clearOnShrink === true, "Native TUI row clearing when content shrinks; may flicker.", { label: "TUI", tone: "tui" }),
+    terminalProgress: nativeSettingToggle("Terminal progress", settings.showTerminalProgress === true, "Native TUI OSC 9;4 terminal progress indicators.", { label: "TUI", tone: "tui" }),
+  };
+
+  const body = make("div", "native-settings-panel");
+  body.append(
+    nativeSettingsNote("Scopes", "Runtime settings apply to the active tab. Reload-badged settings are saved globally and need a tab reload for the running Pi process."),
+    nativeSettingsSection("Runtime", "Model behavior and request transport.", [controls.thinking, controls.autoCompact, controls.steering, controls.followUp, controls.transport, controls.httpIdleTimeout], { open: true }),
+    nativeSettingsSection("Browser workflow", "Local Web UI behavior plus shared composer defaults.", [controls.busyBehavior, controls.thinkingOutput, controls.doneNotifications, controls.autocompleteMax, controls.doubleEscape, controls.treeFilter], { open: true }),
+    nativeSettingsSection("Images", "Provider image policy and native terminal image display.", [controls.autoResizeImages, controls.blockImages, controls.showImages, controls.imageWidth], { open: true }),
+    nativeSettingsSection("Startup & safety", "Command registration, warnings, update/startup behavior.", [controls.skillCommands, controls.anthropicWarning, controls.collapseChangelog, controls.quietStartup, controls.installTelemetry], { open: false }),
+    nativeSettingsSection("Native TUI advanced", "Saved for the terminal UI; mostly informational in the browser.", [controls.hardwareCursor, controls.editorPadding, controls.clearOnShrink, controls.terminalProgress], { open: false })
+  );
+  elements.nativeCommandBody.replaceChildren(body);
   elements.nativeCommandActions.replaceChildren();
   addNativeCommandAction("Model…", () => openNativeModelSelector());
   addNativeCommandAction("Theme…", () => openNativeThemeSelector());
   addNativeCommandAction("Cancel", closeNativeCommandDialog);
-  const save = addNativeCommandAction("Apply", async () => {
-    setNativeActionBusy(save, true, "Applying…");
+
+  const applySettings = async (reload, button) => {
+    setNativeActionBusy(button, true, reload ? "Applying & reloading…" : "Applying…");
     setNativeCommandError("");
     try {
       const requests = [];
-      const thinkingLevelChanged = thinking.select.value !== state.thinkingLevel;
-      if (thinkingLevelChanged) requests.push(nativeCommandApi("/api/thinking", { method: "POST", body: { level: thinking.select.value } }));
-      if (steering.select.value !== state.steeringMode) requests.push(nativeCommandApi("/api/steering-mode", { method: "POST", body: { mode: steering.select.value } }));
-      if (followUp.select.value !== state.followUpMode) requests.push(nativeCommandApi("/api/follow-up-mode", { method: "POST", body: { mode: followUp.select.value } }));
-      if (autoCompact.input.checked !== state.autoCompactionEnabled) requests.push(nativeCommandApi("/api/auto-compaction", { method: "POST", body: { enabled: autoCompact.input.checked } }));
-      elements.busyBehavior.value = busyBehavior.select.value;
-      if (thinkingOutput.input.checked !== thinkingOutputVisible) setThinkingOutputVisible(thinkingOutput.input.checked);
-      if (doneNotifications.input.checked !== agentDoneNotificationsEnabled) await setAgentDoneNotificationsEnabled(doneNotifications.input.checked);
+      const thinkingLevelChanged = controls.thinking.select.value !== (state.thinkingLevel || "off");
+      if (thinkingLevelChanged) requests.push(nativeCommandApi("/api/thinking", { method: "POST", body: { level: controls.thinking.select.value } }));
+      if (controls.steering.select.value !== (state.steeringMode || "one-at-a-time")) requests.push(nativeCommandApi("/api/steering-mode", { method: "POST", body: { mode: controls.steering.select.value } }));
+      if (controls.followUp.select.value !== (state.followUpMode || "one-at-a-time")) requests.push(nativeCommandApi("/api/follow-up-mode", { method: "POST", body: { mode: controls.followUp.select.value } }));
+      if (controls.autoCompact.input.checked !== (state.autoCompactionEnabled !== false)) requests.push(nativeCommandApi("/api/auto-compaction", { method: "POST", body: { enabled: controls.autoCompact.input.checked } }));
+      elements.busyBehavior.value = controls.busyBehavior.select.value;
+      if (controls.thinkingOutput.input.checked !== thinkingOutputVisible) setThinkingOutputVisible(controls.thinkingOutput.input.checked);
+      if (controls.doneNotifications.input.checked !== agentDoneNotificationsEnabled) await setAgentDoneNotificationsEnabled(controls.doneNotifications.input.checked);
       await Promise.all(requests);
+      const response = await nativeCommandApi("/api/settings", { method: "POST", body: { settings: collectNativeSettingsPayload(controls), reload } });
+      applyResponseTab(response);
+      applyNativeSettingsForBrowser(response.data?.settings || collectNativeSettingsPayload(controls));
       if (thinkingLevelChanged) requestGitFooterWebuiPayload(activeTabContext(), { force: true });
-      addTransientMessage({ role: "native", title: "/settings", content: "Settings updated.", level: "info" });
+      addTransientMessage({ role: "native", title: "/settings", content: nativeSettingsChangedMessage(response, reload), level: response.data?.reloadRecommended?.length && !response.data?.reloaded ? "warn" : "info" });
       closeNativeCommandDialog();
-      await refreshState();
+      await refreshAll();
     } catch (error) {
       setNativeCommandError(error.message || String(error));
     } finally {
-      setNativeActionBusy(save, false);
+      setNativeActionBusy(button, false);
     }
-  }, "primary");
+  };
+
+  const reloadButton = addNativeCommandAction("Apply & reload tab", () => applySettings(true, reloadButton));
+  const save = addNativeCommandAction("Apply", () => applySettings(false, save), "primary");
 }
 
 async function openNativeForkSelector() {
@@ -7813,6 +8204,41 @@ function openNativeCloneDialog() {
   }, "primary");
 }
 
+function openNativeNameDialog() {
+  openNativeCommandDialog({ title: "/name", message: "Set the session and browser tab name." });
+  const field = make("label", "native-settings-field");
+  field.append(make("span", "native-settings-label", "Session name"));
+  const input = make("input", "dialog-input");
+  input.type = "text";
+  input.autocomplete = "off";
+  input.placeholder = "New session name";
+  input.value = activeTab()?.title || "";
+  field.append(input);
+  elements.nativeCommandBody.append(field);
+  elements.nativeCommandActions.replaceChildren();
+  addNativeCommandAction("Cancel", closeNativeCommandDialog);
+  const save = addNativeCommandAction("Name session", async () => {
+    const name = input.value.trim();
+    if (!name) {
+      setNativeCommandError("Enter a session name.");
+      input.focus();
+      return;
+    }
+    setNativeActionBusy(save, true, "Saving…");
+    closeNativeCommandDialog();
+    await sendPrompt("prompt", `/name ${name}`);
+  }, "primary");
+  input.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    save.click();
+  });
+  queueMicrotask(() => {
+    input.focus();
+    input.select();
+  });
+}
+
 async function openNativeResumeSelector(scope = "current") {
   openNativeCommandDialog({ title: "/resume", message: "Resume another persisted Pi session.", searchPlaceholder: "Filter sessions…" });
   renderNativeLoading("Loading sessions…");
@@ -7854,21 +8280,39 @@ async function openNativeResumeSelector(scope = "current") {
   }
 }
 
+function nativeTreeFilterMatches(node, filter) {
+  const settingsTypes = new Set(["label", "custom", "custom_message", "model_change", "thinking_level_change", "session_info"]);
+  switch (filter) {
+    case "user-only":
+      return node.type === "message" && node.role === "user";
+    case "no-tools":
+      return !settingsTypes.has(node.type) && !(node.type === "message" && node.role === "toolResult");
+    case "labeled-only":
+      return node.label !== undefined;
+    case "all":
+      return true;
+    default:
+      return !settingsTypes.has(node.type);
+  }
+}
+
 async function openNativeTreeSelector() {
   openNativeCommandDialog({ title: "/tree", message: "Navigate the current session tree. Choosing a user message restores it into the editor.", searchPlaceholder: "Filter tree…" });
   renderNativeLoading("Loading session tree…");
   try {
     const response = await nativeCommandApi("/api/session-tree");
     const nodes = response.data?.nodes || [];
+    let selectedFilter = treeFilterMode || "default";
+    const filterField = nativeSettingSelect("Filter", selectedFilter, SETTINGS_TREE_FILTER_OPTIONS, "Temporary filter for this tree view.");
     const summarize = nativeSettingToggle("Summarize abandoned branch", false, "Optional; may call the active model before switching branches.");
     const labelField = make("label", "native-settings-field");
-    labelField.append(make("span", "native-settings-label", "Optional label"));
+    labelField.append(nativeSettingsLabelRow("Optional label"));
     const labelInput = make("input", "dialog-input");
     labelInput.placeholder = "checkpoint label";
     labelField.append(labelInput);
     const options = make("div", "native-tree-options");
-    options.append(summarize.field, labelField);
-    const items = nodes.map((node) => ({
+    options.append(filterField.field, summarize.field, labelField);
+    const toItems = () => nodes.filter((node) => nativeTreeFilterMatches(node, selectedFilter)).map((node) => ({
       id: node.id,
       label: `${node.title}${node.label ? ` · ${node.label}` : ""}`,
       description: node.text || "",
@@ -7897,9 +8341,13 @@ async function openNativeTreeSelector() {
       }
     };
     const render = () => {
-      renderNativeSelectorItems(items, { emptyText: "No session tree entries match this filter.", onSelect: navigate });
+      renderNativeSelectorItems(toItems(), { emptyText: "No session tree entries match this filter.", onSelect: navigate });
       elements.nativeCommandBody.prepend(options);
     };
+    filterField.select.addEventListener("change", () => {
+      selectedFilter = filterField.select.value;
+      render();
+    });
     elements.nativeCommandSearch.oninput = render;
     render();
   } catch (error) {
@@ -8096,7 +8544,7 @@ async function handleNativeSlashSelectorCommand(message, { usesPromptInput = fal
       await openNativeModelSelector();
       return true;
     case "settings":
-      openNativeSettingsDialog();
+      await openNativeSettingsDialog();
       return true;
     case "theme":
       openNativeThemeSelector();
@@ -8106,6 +8554,9 @@ async function handleNativeSlashSelectorCommand(message, { usesPromptInput = fal
       return true;
     case "clone":
       openNativeCloneDialog();
+      return true;
+    case "name":
+      openNativeNameDialog();
       return true;
     case "resume":
       await openNativeResumeSelector();
@@ -8615,8 +9066,21 @@ function getCommandMatches(query) {
     .map((command) => ({ command, score: scoreCommandSuggestion(command, query) }))
     .filter((item) => Number.isFinite(item.score))
     .sort((a, b) => a.score - b.score || a.command.name.localeCompare(b.command.name))
-    .slice(0, 12)
+    .slice(0, clampAutocompleteMaxVisible(autocompleteMaxVisible))
     .map((item) => item.command);
+}
+
+function commandSearchQuery() {
+  return String(elements.commandSearchInput?.value || "").trim().replace(/^\/+/, "").toLowerCase();
+}
+
+function commandMatchesSearch(command, query) {
+  if (!query) return true;
+  return [command.name, command.description, command.source, command.location]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase()
+    .includes(query);
 }
 
 function activeSuggestionCount() {
@@ -8890,8 +9354,16 @@ function renderCommands() {
     hideCommandSuggestions();
     return;
   }
+  const searchQuery = commandSearchQuery();
+  const filteredCommands = commandsToShow.filter((command) => commandMatchesSearch(command, searchQuery));
+  if (!filteredCommands.length) {
+    elements.commandsBox.textContent = `No commands match “${elements.commandSearchInput?.value.trim() || searchQuery}”.`;
+    elements.commandsBox.classList.add("muted");
+    renderCommandSuggestions();
+    return;
+  }
   elements.commandsBox.classList.remove("muted");
-  for (const command of commandsToShow.slice(0, 80)) {
+  for (const command of filteredCommands.slice(0, 80)) {
     const item = make("button", "command-item");
     item.type = "button";
     item.title = `Send /${command.name}`;
@@ -8925,6 +9397,7 @@ async function refreshAll(tabContext = activeTabContext()) {
     refreshCommands(tabContext),
     refreshStats(tabContext),
     refreshWorkspace(tabContext),
+    refreshNativeSettings(tabContext),
     refreshNetworkStatus(),
     refreshWebuiVersion(),
   ]);
@@ -9175,6 +9648,7 @@ async function cycleModelFromShortcut(direction = "forward") {
     const model = response.data?.model;
     const scope = response.data?.scoped ? `scoped (${response.data.scopeSource})` : "all models";
     if (isCurrentTabContext(tabContext)) {
+      applyOptimisticModelSelection(model, tabContext);
       addTransientMessage({ role: "native", title: "model cycle", content: `Model set to ${appShortcutModelLabel(model)} via ${direction} cycle over ${scope}.`, level: "info" });
       await Promise.allSettled([refreshState(tabContext), refreshModels(tabContext), refreshStats(tabContext)]);
     }
@@ -9191,8 +9665,8 @@ async function cycleThinkingFromShortcut() {
   if (!tabContext.tabId) return;
   try {
     const response = await api("/api/thinking-cycle", { method: "POST", body: {}, tabId: tabContext.tabId });
-    if (response.data?.level && currentState) currentState = { ...currentState, thinkingLevel: response.data.level };
     if (isCurrentTabContext(tabContext)) {
+      applyOptimisticThinkingSelection(response.data, tabContext);
       addTransientMessage({ role: "native", title: "thinking", content: response.data?.level ? `Thinking level: ${response.data.level}` : "Thinking level did not change.", level: "info" });
       if (response.data?.level) requestGitFooterWebuiPayload(tabContext, { force: true });
       await Promise.allSettled([refreshState(tabContext), refreshStats(tabContext)]);
@@ -9816,7 +10290,13 @@ function handleEvent(event) {
         syncRunIndicatorFromState(currentState);
         renderStatus();
       } else if (["set_model", "cycle_model", "set_thinking_level", "cycle_thinking_level", "new_session", "compact"].includes(event.command)) {
-        if (event.command === "new_session") {
+        if (event.command === "set_model") {
+          applyOptimisticModelSelection(event.data, tabContext);
+        } else if (event.command === "cycle_model") {
+          applyOptimisticModelSelection(event.data?.model, tabContext);
+        } else if (event.command === "set_thinking_level" || event.command === "cycle_thinking_level") {
+          applyOptimisticThinkingSelection(event.data, tabContext);
+        } else if (event.command === "new_session") {
           const tabId = event.tabId || activeTabId;
           forgetLastUserPrompt(tabId);
           resetGitWorkflowForTab(tabId);
@@ -9854,6 +10334,7 @@ function connectEvents(tabContext = activeTabContext()) {
 
 elements.copyServerCommandButton?.addEventListener("click", copyServerStartCommand);
 elements.retryServerConnectionButton?.addEventListener("click", retryServerConnection);
+elements.commandSearchInput?.addEventListener("input", renderCommands);
 elements.sendFeedbackButton.addEventListener("click", () => submitQueuedActionFeedback());
 elements.composer.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -9876,15 +10357,18 @@ elements.gitWorkflowButton.addEventListener("click", () => {
 const publishMenuContainer = elements.publishButton.parentElement;
 elements.publishButton.addEventListener("click", () => {
   setNativeCommandMenuOpen(false);
+  setOptionsMenuOpen(false);
   setPublishMenuOpen(true);
 });
 publishMenuContainer?.addEventListener("pointerenter", () => {
   setNativeCommandMenuOpen(false);
+  setOptionsMenuOpen(false);
   setPublishMenuOpen(true);
 });
 publishMenuContainer?.addEventListener("pointerleave", () => setPublishMenuOpen(false));
 publishMenuContainer?.addEventListener("focusin", () => {
   setNativeCommandMenuOpen(false);
+  setOptionsMenuOpen(false);
   setPublishMenuOpen(true);
 });
 publishMenuContainer?.addEventListener("focusout", () => {
@@ -9895,15 +10379,18 @@ publishMenuContainer?.addEventListener("focusout", () => {
 const nativeCommandMenuContainer = elements.nativeCommandMenuButton.parentElement;
 elements.nativeCommandMenuButton.addEventListener("click", () => {
   setPublishMenuOpen(false);
+  setOptionsMenuOpen(false);
   setNativeCommandMenuOpen(true);
 });
 nativeCommandMenuContainer?.addEventListener("pointerenter", () => {
   setPublishMenuOpen(false);
+  setOptionsMenuOpen(false);
   setNativeCommandMenuOpen(true);
 });
 nativeCommandMenuContainer?.addEventListener("pointerleave", () => setNativeCommandMenuOpen(false));
 nativeCommandMenuContainer?.addEventListener("focusin", () => {
   setPublishMenuOpen(false);
+  setOptionsMenuOpen(false);
   setNativeCommandMenuOpen(true);
 });
 nativeCommandMenuContainer?.addEventListener("focusout", () => {
@@ -9911,10 +10398,40 @@ nativeCommandMenuContainer?.addEventListener("focusout", () => {
     if (!nativeCommandMenuContainer?.contains(document.activeElement)) setNativeCommandMenuOpen(false);
   }, 0);
 });
+const optionsMenuContainer = elements.optionsMenuButton.parentElement;
+elements.optionsMenuButton.addEventListener("click", () => {
+  setPublishMenuOpen(false);
+  setNativeCommandMenuOpen(false);
+  setOptionsMenuOpen(true);
+});
+optionsMenuContainer?.addEventListener("pointerenter", () => {
+  setPublishMenuOpen(false);
+  setNativeCommandMenuOpen(false);
+  setOptionsMenuOpen(true);
+});
+optionsMenuContainer?.addEventListener("pointerleave", () => setOptionsMenuOpen(false));
+optionsMenuContainer?.addEventListener("focusin", () => {
+  setPublishMenuOpen(false);
+  setNativeCommandMenuOpen(false);
+  setOptionsMenuOpen(true);
+});
+optionsMenuContainer?.addEventListener("focusout", () => {
+  setTimeout(() => {
+    if (!optionsMenuContainer?.contains(document.activeElement)) setOptionsMenuOpen(false);
+  }, 0);
+});
 elements.releaseNpmButton.addEventListener("click", () => runPublishWorkflow("/release-npm"));
 elements.releaseAurButton.addEventListener("click", () => runPublishWorkflow("/release-aur"));
 elements.nativeSkillsButton.addEventListener("click", () => runNativeCommandMenu("/skills"));
 elements.nativeToolsButton.addEventListener("click", () => runNativeCommandMenu("/tools"));
+elements.optionsResumeButton.addEventListener("click", () => runNativeCommandMenu("/resume"));
+elements.optionsReloadButton.addEventListener("click", () => runNativeCommandMenu("/reload"));
+elements.optionsNameButton.addEventListener("click", () => runNativeCommandMenu("/name"));
+elements.optionsCloneButton.addEventListener("click", () => runNativeCommandMenu("/clone"));
+elements.optionsSettingsButton.addEventListener("click", () => runNativeCommandMenu("/settings"));
+elements.optionsExportButton.addEventListener("click", () => runNativeCommandMenu("/export"));
+elements.optionsForkButton.addEventListener("click", () => runNativeCommandMenu("/fork"));
+elements.optionsTreeButton.addEventListener("click", () => runNativeCommandMenu("/tree"));
 elements.gitWorkflowCancelButton.addEventListener("click", () => cancelGitWorkflow());
 elements.nativeCommandDialog.addEventListener("close", () => {
   elements.nativeCommandSearch.oninput = null;
@@ -10034,8 +10551,11 @@ elements.setModelButton.addEventListener("click", async () => {
   const tabContext = activeTabContext();
   try {
     const selected = JSON.parse(elements.modelSelect.value);
-    await api("/api/model", { method: "POST", body: selected, tabId: tabContext.tabId });
-    if (isCurrentTabContext(tabContext)) await refreshState(tabContext);
+    const response = await api("/api/model", { method: "POST", body: selected, tabId: tabContext.tabId });
+    if (isCurrentTabContext(tabContext)) {
+      applyOptimisticModelSelection(response.data || selected, tabContext);
+      await refreshState(tabContext);
+    }
   } catch (error) {
     if (isCurrentTabContext(tabContext)) addEvent(error.message, "error");
   }
@@ -10045,13 +10565,13 @@ elements.setThinkingButton.addEventListener("click", async () => {
   try {
     const response = await api("/api/thinking", { method: "POST", body: { level: elements.thinkingSelect.value }, tabId: tabContext.tabId });
     if (isCurrentTabContext(tabContext)) {
+      applyOptimisticThinkingSelection(response.data, tabContext);
       if (response.data?.pending) {
         addEvent(response.data.message || `Thinking level ${response.data.level} will apply to the next prompt.`, "info");
       } else if (response.data?.level) {
         const requested = response.data.requestedLevel;
         const effective = response.data.level;
         addEvent(requested && requested !== effective ? `Thinking level set to ${effective} (requested ${requested}).` : `Thinking level set to ${effective}.`, "info");
-        requestGitFooterWebuiPayload(tabContext, { force: true });
       }
       await refreshState(tabContext);
     }
@@ -10125,11 +10645,15 @@ document.addEventListener("pointerdown", (event) => {
   if (nativeCommandMenuOpen && !event.target?.closest?.(".composer-native-command-menu")) {
     setNativeCommandMenuOpen(false);
   }
+  if (optionsMenuOpen && !event.target?.closest?.(".composer-options-menu")) {
+    setOptionsMenuOpen(false);
+  }
   if (document.body.classList.contains("mobile-tabs-expanded") && !elements.tabBar.contains(event.target) && !elements.terminalTabsToggleButton.contains(event.target)) {
     setMobileTabsExpanded(false);
   }
-  if (footerModelPickerOpen && !elements.statusBar.contains(event.target)) {
+  if (isFooterPickerOpen() && !elements.statusBar.contains(event.target)) {
     setFooterModelPickerOpen(false);
+    setFooterThinkingPickerOpen(false);
   }
 }, { passive: true });
 document.addEventListener("pointermove", (event) => {
@@ -10215,6 +10739,10 @@ window.addEventListener("keydown", (event) => {
     setNativeCommandMenuOpen(false);
     return;
   }
+  if (optionsMenuOpen) {
+    setOptionsMenuOpen(false);
+    return;
+  }
   if (document.body.classList.contains("composer-actions-open")) {
     setComposerActionsOpen(false);
     return;
@@ -10223,13 +10751,24 @@ window.addEventListener("keydown", (event) => {
     setMobileTabsExpanded(false);
     return;
   }
-  if (footerModelPickerOpen) {
+  if (isFooterPickerOpen()) {
     setFooterModelPickerOpen(false);
+    setFooterThinkingPickerOpen(false);
     return;
   }
   if (!elements.commandSuggest.hidden) {
     hideCommandSuggestions();
     return;
+  }
+  if (document.activeElement === elements.promptInput && !elements.promptInput.value.trim() && doubleEscapeAction !== "none") {
+    const now = Date.now();
+    if (now - lastEmptyPromptEscapeTime < 500) {
+      event.preventDefault();
+      lastEmptyPromptEscapeTime = 0;
+      runNativeCommandMenu(`/${doubleEscapeAction}`).catch((error) => addEvent(error.message || String(error), "error"));
+      return;
+    }
+    lastEmptyPromptEscapeTime = now;
   }
   if (isMobileView() && !document.body.classList.contains("side-panel-collapsed")) {
     setSidePanelCollapsed(true);

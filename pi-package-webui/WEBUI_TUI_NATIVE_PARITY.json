@@ -10,12 +10,12 @@
       "category": "native-command",
       "title": "Settings selector/editor",
       "command": { "name": "settings", "description": "Open settings menu" },
-      "webStatus": "degraded",
+      "webStatus": "implemented",
       "priority": "P1",
       "sensitive": false,
       "guards": ["none"],
-      "currentBehavior": "Browser dialog covers high-frequency runtime settings only.",
-      "targetBehavior": "Expose all documented settings with runtime/global/project scopes, source visibility, validation, and reload/restart labels."
+      "currentBehavior": "Browser dialog exposes native TUI settings in concise sections with runtime/browser/reload/TUI badges; reload-needed settings can restart the active tab after saving.",
+      "targetBehavior": "Keep native TUI setting coverage current; project/global source editing can be added as an advanced enhancement."
     },
     {
       "id": "/model",

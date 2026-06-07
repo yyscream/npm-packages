@@ -1,7 +1,7 @@
 import path from "node:path";
 import fsp from "node:fs/promises";
 
-export type LocalWikiFormat = "markdown" | "html";
+export type LocalWikiFormat = "markdown" | "html" | "asciidoc";
 
 export interface LocalWikiSection {
   title: string;
@@ -68,6 +68,9 @@ export interface LocalWikiEngineConfig {
   statusExtra?: () => Promise<Record<string, unknown>>;
   transformText?: (text: string, title: string, filePath: string) => string;
   titleFromHtml?: (html: string, filePath: string, fallback: string) => string;
+  /** Expand AsciiDoc include:: directives before parsing text/sections. Defaults to true for asciidoc format. */
+  expandIncludes?: boolean;
+  maxIncludeDepth?: number;
 }
 
 export function createLocalWikiEngine(config: LocalWikiEngineConfig) {
@@ -128,6 +131,31 @@ export function createLocalWikiEngine(config: LocalWikiEngineConfig) {
       .replace(/[*_`~]/g, "")
       .replace(/\[([^\]]+)\]\([^\)]+\)/g, "$1")
       .trim();
+  }
+
+  function stripAsciidocDecorators(input: string): string {
+    return input
+      .replace(/^={1,6}\s+/, "")
+      .replace(/^\[\[[^\]]+\]\]\s*/, "")
+      .replace(/xref:([^\[]+)\[([^\]]*)\]/g, (_m, target: string, label: string) => label || titleFromPath(target))
+      .replace(/https?:[^\[]+\[([^\]]+)\]/g, "$1")
+      .replace(/(?:kbd|btn|menu):\[([^\]]+)\]/g, "$1")
+      .replace(/[*_`]/g, "")
+      .trim();
+  }
+
+  function asciidocToText(asciidoc: string): string {
+    return normalizeWhitespace(asciidoc
+      .replace(/^\s*:[^:\n]+:.*$/gm, "")
+      .replace(/^\s*\/\/.*$/gm, "")
+      .replace(/^\[\[[^\]]+\]\]\s*$/gm, "")
+      .replace(/^\[(?:source|console|bash|python|json|ini|subs|NOTE|TIP|IMPORTANT|WARNING|CAUTION)[^\]]*\]\s*$/gim, "")
+      .replace(/^(?:----|====|\+{4}|`{3})\s*$/gm, "")
+      .replace(/^image::[^\[]+\[[^\]]*\]\s*$/gm, "")
+      .replace(/include::([^\[]+)\[[^\]]*\]/g, "")
+      .replace(/xref:([^\[]+)\[([^\]]*)\]/g, (_m, target: string, label: string) => label || titleFromPath(target))
+      .replace(/https?:[^\[]+\[([^\]]+)\]/g, "$1")
+      .replace(/(?:kbd|btn|menu):\[([^\]]+)\]/g, "$1"));
   }
 
   function stripYamlFrontmatter(markdown: string): string {
@@ -195,6 +223,33 @@ export function createLocalWikiEngine(config: LocalWikiEngineConfig) {
     return sections;
   }
 
+  function asciidocTitle(asciidoc: string, filePath: string): string {
+    for (const line of asciidoc.split(/\n/)) {
+      const match = line.match(/^(={1,6})\s+(.+)$/);
+      if (match) return stripAsciidocDecorators(match[2]);
+    }
+    return titleFromPath(filePath);
+  }
+
+  function asciidocSections(asciidoc: string, fallbackTitle: string): LocalWikiSection[] {
+    const sections: LocalWikiSection[] = [];
+    let current: LocalWikiSection | undefined;
+    for (const line of asciidoc.split(/\n/)) {
+      const match = line.match(/^(={1,6})\s+(.+)$/);
+      if (match) {
+        if (current) current.text = asciidocToText(current.text);
+        const title = stripAsciidocDecorators(match[2]);
+        current = { title, level: match[1].length, anchor: anchorFromHeading(title), text: "" };
+        sections.push(current);
+        continue;
+      }
+      if (current) current.text += `${line}\n`;
+    }
+    if (!current) sections.push({ title: fallbackTitle, level: 1, anchor: anchorFromHeading(fallbackTitle), text: asciidocToText(asciidoc) });
+    else current.text = asciidocToText(current.text);
+    return sections;
+  }
+
   function htmlToText(html: string): string {
     let body = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i)?.[1] ?? html;
     body = body.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ");
@@ -215,15 +270,35 @@ export function createLocalWikiEngine(config: LocalWikiEngineConfig) {
     return (config.titleFromHtml?.(html, filePath, fallback) ?? stripTags(html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? "")) || fallback;
   }
 
+  function candidateLocalPaths(currentFile: string, href: string): string[] {
+    if (/^(https?:|mailto:|#)/i.test(href)) return [];
+    const cleanHref = decodeEntities(href).split("#")[0].split("?")[0].trim();
+    if (!cleanHref) return [];
+    const variants = [...new Set([cleanHref, cleanHref.replace(/^\.\/+/g, "")].filter(Boolean))];
+    const expand = (candidate: string): string[] => {
+      if (path.extname(candidate)) return [candidate];
+      if (config.format === "html") return [`${candidate}.html`, `${candidate}.htm`, path.join(candidate, "index.html")];
+      if (config.format === "asciidoc") return [`${candidate}.adoc`, `${candidate}.asciidoc`, `${candidate}.asc`, path.join(candidate, "index.adoc")];
+      return [`${candidate}.md`, `${candidate}.mdx`, `${candidate}.rst`, path.join(candidate, "index.md")];
+    };
+    const bases = [path.dirname(currentFile), path.dirname(path.dirname(currentFile)), config.docsPath];
+    const resolved: string[] = [];
+    for (const variant of variants) {
+      for (const expanded of expand(variant)) {
+        if (path.isAbsolute(expanded)) resolved.push(path.normalize(expanded));
+        for (const base of bases) resolved.push(path.normalize(path.resolve(base, expanded)));
+      }
+    }
+    return [...new Set(resolved)].filter((candidate) => candidate === config.docsPath || candidate.startsWith(`${config.docsPath}${path.sep}`));
+  }
+
   function resolveLocalPath(currentFile: string, href: string): string | undefined {
-    if (/^(https?:|mailto:|#)/i.test(href)) return undefined;
-    const cleanHref = decodeEntities(href).split("#")[0].split("?")[0];
-    if (!cleanHref) return undefined;
-    const ext = config.format === "html" ? ".html" : ".md";
-    const candidates = path.extname(cleanHref) ? [cleanHref] : [cleanHref + ext, `${cleanHref}.mdx`, `${cleanHref}.rst`, path.join(cleanHref, "index.md")];
-    for (const candidate of candidates) {
-      const resolved = path.normalize(path.resolve(path.dirname(currentFile), candidate));
-      if (resolved.startsWith(config.docsPath)) return resolved;
+    return candidateLocalPaths(currentFile, href)[0];
+  }
+
+  async function resolveExistingLocalPath(currentFile: string, href: string): Promise<string | undefined> {
+    for (const candidate of candidateLocalPaths(currentFile, href)) {
+      if (await localExists(candidate)) return candidate;
     }
     return undefined;
   }
@@ -238,6 +313,38 @@ export function createLocalWikiEngine(config: LocalWikiEngineConfig) {
     return [...links.values()];
   }
 
+  function asciidocLinks(asciidoc: string, currentFile: string): LocalWikiLink[] {
+    const links = new Map<string, LocalWikiLink>();
+    const add = (href: string, label: string) => {
+      const resolved = resolveLocalPath(currentFile, href.trim());
+      if (!resolved) return;
+      links.set(resolved, { title: stripAsciidocDecorators(label) || titleFromPath(resolved), path: resolved });
+    };
+    for (const match of asciidoc.matchAll(/xref:([^\[]+)\[([^\]]*)\]/g)) add(match[1], match[2]);
+    for (const match of asciidoc.matchAll(/^include::([^\[]+)\[([^\]]*)\]/gm)) add(match[1], match[2]);
+    return [...links.values()];
+  }
+
+  async function expandAsciidocIncludes(raw: string, currentFile: string, depth = 0, seen = new Set<string>()): Promise<string> {
+    const maxDepth = Math.max(0, config.maxIncludeDepth ?? 4);
+    if (depth >= maxDepth) return raw;
+    const includeRe = /^include::([^\[]+)\[[^\]]*\]\s*$/gm;
+    const replacements = await Promise.all([...raw.matchAll(includeRe)].map(async (match) => {
+      const resolved = await resolveExistingLocalPath(currentFile, match[1].trim());
+      if (!resolved || seen.has(resolved)) return { from: match[0], to: "" };
+      try {
+        seen.add(resolved);
+        const included = await fsp.readFile(resolved, "utf8");
+        return { from: match[0], to: await expandAsciidocIncludes(included, resolved, depth + 1, seen) };
+      } catch {
+        return { from: match[0], to: "" };
+      }
+    }));
+    let expanded = raw;
+    for (const { from, to } of replacements) expanded = expanded.replace(from, to);
+    return expanded;
+  }
+
   function htmlLinks(html: string, currentFile: string): LocalWikiLink[] {
     const links = new Map<string, LocalWikiLink>();
     for (const match of html.matchAll(/<a\s+[^>]*href=["']([^"'#?]+)(?:#[^"']*)?["'][^>]*>([\s\S]*?)<\/a>/gi)) {
@@ -248,13 +355,29 @@ export function createLocalWikiEngine(config: LocalWikiEngineConfig) {
     return [...links.values()];
   }
 
-  function parsePage(raw: string, filePath: string, mtimeMs: number): LocalWikiPage {
-    const title = config.format === "html" ? htmlTitle(raw, filePath) : markdownTitle(raw, filePath);
-    const markdownBody = config.format === "html" ? raw : stripYamlFrontmatter(raw);
-    const baseText = config.format === "html" ? htmlToText(raw) : normalizeWhitespace(markdownBody);
+  function parsePage(raw: string, filePath: string, mtimeMs: number, sourceRaw = raw): LocalWikiPage {
+    if (config.format === "html") {
+      const title = htmlTitle(sourceRaw, filePath);
+      const baseText = htmlToText(raw);
+      const text = config.transformText?.(baseText, title, filePath) ?? baseText;
+      const sections = markdownSections(text, title);
+      return { title, slug: path.relative(config.docsPath, filePath).replace(config.fileExtensions, ""), path: filePath, source: config.sourceName?.(filePath, config.docsPath), headings: sections.map((s) => s.title), sections, links: htmlLinks(sourceRaw, filePath), text, mtimeMs };
+    }
+
+    if (config.format === "asciidoc") {
+      const title = asciidocTitle(sourceRaw, filePath);
+      const baseText = asciidocToText(raw);
+      const text = config.transformText?.(baseText, title, filePath) ?? baseText;
+      const sections = asciidocSections(raw, title);
+      return { title, slug: path.relative(config.docsPath, filePath).replace(config.fileExtensions, ""), path: filePath, source: config.sourceName?.(filePath, config.docsPath), headings: sections.map((s) => s.title), sections, links: asciidocLinks(sourceRaw, filePath), text, mtimeMs };
+    }
+
+    const title = markdownTitle(sourceRaw, filePath);
+    const markdownBody = stripYamlFrontmatter(raw);
+    const baseText = normalizeWhitespace(markdownBody);
     const text = config.transformText?.(baseText, title, filePath) ?? baseText;
     const sections = markdownSections(text, title);
-    return { title, slug: path.relative(config.docsPath, filePath).replace(config.fileExtensions, ""), path: filePath, source: config.sourceName?.(filePath, config.docsPath), headings: sections.map((s) => s.title), sections, links: config.format === "html" ? htmlLinks(raw, filePath) : markdownLinks(markdownBody, filePath), text, mtimeMs };
+    return { title, slug: path.relative(config.docsPath, filePath).replace(config.fileExtensions, ""), path: filePath, source: config.sourceName?.(filePath, config.docsPath), headings: sections.map((s) => s.title), sections, links: markdownLinks(markdownBody, filePath), text, mtimeMs };
   }
 
   function limitText(text: string, maxChars = 12000): { text: string; truncated: boolean } {
@@ -270,7 +393,10 @@ export function createLocalWikiEngine(config: LocalWikiEngineConfig) {
     for (const file of files) {
       const stat = await fsp.stat(file);
       newestMtimeMs = Math.max(newestMtimeMs, stat.mtimeMs);
-      pages.push(parsePage(await fsp.readFile(file, "utf8"), file, stat.mtimeMs));
+      const raw = await fsp.readFile(file, "utf8");
+      const shouldExpandIncludes = config.format === "asciidoc" && config.expandIncludes !== false;
+      const expanded = shouldExpandIncludes ? await expandAsciidocIncludes(raw, file) : raw;
+      pages.push(parsePage(expanded, file, stat.mtimeMs, raw));
     }
     const metadata: LocalWikiCacheMetadata = { schemaVersion, docsPath: config.docsPath, generatedAt: new Date().toISOString(), pageCount: pages.length, newestMtimeMs, extra: await config.metadataExtra?.() };
     await fsp.writeFile(pagesCache, JSON.stringify(pages, null, 2));

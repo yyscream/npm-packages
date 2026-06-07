@@ -1,16 +1,13 @@
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { DefaultPackageManager, DynamicBorder, getAgentDir, getSettingsListTheme, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Container, getKeybindings, Key, matchesKey, type SettingItem, SettingsList, Text } from "@earendil-works/pi-tui";
+import { getAgentSettingsPath, readJsonIfExists, writeJsonFile } from "@firstpick/pi-utils";
 
 type PackageEntry = string | { source?: string; skills?: string[]; extensions?: string[]; prompts?: string[]; [key: string]: unknown };
 type SettingsShape = { packages?: PackageEntry[]; skills?: string[]; [key: string]: unknown };
-
-function getAgentSettingsPath(): string {
-  return join(getAgentDir(), "settings.json");
-}
 
 type SkillCandidate = {
   name: string;
@@ -21,15 +18,6 @@ type SkillCandidate = {
   packageSource?: string;
   packageSkillName?: string;
 };
-
-function readJson(path: string): SettingsShape {
-  if (!existsSync(path)) return {};
-  return JSON.parse(readFileSync(path, "utf8")) as SettingsShape;
-}
-
-function writeJson(path: string, data: SettingsShape): void {
-  writeFileSync(path, `${JSON.stringify(data, null, 2)}\n`);
-}
 
 function collectSkillFilesFromDir(root: string, includeRootMarkdown = true): string[] {
   if (!existsSync(root)) return [];
@@ -324,7 +312,7 @@ export default function setupSkillsExtension(pi: ExtensionAPI): void {
       const settingsPath = getAgentSettingsPath();
       let settings: SettingsShape;
       try {
-        settings = readJson(settingsPath);
+        settings = readJsonIfExists<SettingsShape>(settingsPath, {});
       } catch (error) {
         ctx.ui.notify(`Could not read ${settingsPath}: ${error instanceof Error ? error.message : String(error)}`, "error");
         return;
@@ -344,7 +332,7 @@ export default function setupSkillsExtension(pi: ExtensionAPI): void {
       }
 
       try {
-        writeJson(settingsPath, applySelection(settings, candidates, selected));
+        writeJsonFile(settingsPath, applySelection(settings, candidates, selected));
       } catch (error) {
         ctx.ui.notify(`Could not write ${settingsPath}: ${error instanceof Error ? error.message : String(error)}`, "error");
         return;

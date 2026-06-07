@@ -5,10 +5,11 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   collectInitialPromptCalibration,
-  estimateInitialPromptForPiContext,
-  estimateInitialPromptFromPiExport,
+  createInitialPromptEstimateService,
+  estimateStableInitialPromptFromPiContext,
   estimateTokensFromCharCount,
   formatTokens,
+  type InitialPromptEstimateSnapshot,
 } from "@firstpick/pi-utils";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
@@ -86,7 +87,7 @@ type FooterTelemetry = {
   totalCost: number;
   liveOutputTokens: number;
   latestTokenSpeed: number | null;
-  promptInjectionTokens: number;
+  promptInjectionTokens: number | null;
   contextWindow: number;
   contextPercent: number | null;
   contextDisplay: string;
@@ -149,11 +150,6 @@ function isReasonableTokenSpeed(tokensPerSecond: number): boolean {
 
 type LiveTokenSample = {
   timestampMs: number;
-  tokens: number;
-};
-
-type PromptEstimateCache = {
-  key: string;
   tokens: number;
 };
 
@@ -446,6 +442,27 @@ function sectionValue(section: GitStatusSection | undefined): string | undefined
   return section.items.map((item) => item.text).join(" · ");
 }
 
+function webuiChangesValue(snapshot: GitSnapshot): string | undefined {
+  const parts: string[] = [];
+  if (snapshot.staged > 0) parts.push(`✅ ${snapshot.staged}`);
+  if (snapshot.unstaged > 0) parts.push(`✏️ ${snapshot.unstaged}`);
+  if (snapshot.untracked > 0) parts.push(`➕ ${snapshot.untracked}`);
+  if (snapshot.conflicted > 0) parts.push(`⚠️ ${snapshot.conflicted}`);
+  if (parts.length === 0 && isWorkingTreeClean(snapshot)) parts.push("clean");
+  return parts.length > 0 ? parts.join(" · ") : undefined;
+}
+
+function webuiExtraValue(snapshot: GitSnapshot): string | undefined {
+  const parts: string[] = [];
+  if (snapshot.stashCount > 0) parts.push(`📦 ${snapshot.stashCount}`);
+  if (snapshot.submoduleDirty > 0) parts.push(`🧩 ${snapshot.submoduleDirty}`);
+  if (snapshot.worktreeCount > 1) parts.push(`🌳 ${snapshot.worktreeCount}`);
+  if (snapshot.headTag) parts.push(`🏷️ ${snapshot.headTag}`);
+  if (snapshot.lastCommitAge) parts.push(`🕒 ${snapshot.lastCommitAge}`);
+  if (snapshot.signingMismatch) parts.push("🔓");
+  return parts.length > 0 ? parts.join(" · ") : undefined;
+}
+
 function footerTone(tone: GitStatusTone): WebuiFooterChip["tone"] {
   switch (tone) {
     case "success":
@@ -468,9 +485,9 @@ function buildWebuiGitMeta(snapshot: GitSnapshot | null): WebuiFooterChip[] {
   const sections = buildGitStatusSections(snapshot);
   const state = sectionValue(sections.find((section) => section.key === "branch"));
   const sync = sectionValue(sections.find((section) => section.key === "sync"));
-  const changes = sectionValue(sections.find((section) => section.key === "changes"));
+  const changes = webuiChangesValue(snapshot);
   const extraSection = sections.find((section) => section.key === "extra");
-  const extra = sectionValue(extraSection);
+  const extra = webuiExtraValue(snapshot);
 
   const chips: WebuiFooterChip[] = [
     {
@@ -497,6 +514,46 @@ function buildWebuiGitMeta(snapshot: GitSnapshot | null): WebuiFooterChip[] {
 
 function footerMetricValue(tokens: number): string {
   return formatTokens(tokens);
+}
+
+function footerPromptInjectionValue(tokens: number | null): string {
+  return tokens === null ? "…" : `${footerMetricValue(tokens)} tok`;
+}
+
+function debugHashText(value: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function formatDebugToolNames(snapshot: InitialPromptEstimateSnapshot, limit = 16): string {
+  const names = snapshot.tools.map((tool) => tool.name).filter(Boolean);
+  if (names.length === 0) return "none";
+  const shown = names.slice(0, limit).join(", ");
+  const remaining = names.length - limit;
+  return remaining > 0 ? `${shown}, … +${remaining} more` : shown;
+}
+
+function formatPromptEstimateDebugSnapshot(label: string, snapshot: InitialPromptEstimateSnapshot | null): string[] {
+  if (!snapshot) return [`${label}: none`];
+
+  const estimate = snapshot.estimate;
+  const state = snapshot.settled ? "settled" : "pending";
+  const range = estimate.low !== estimate.high ? ` · range ${formatTokens(estimate.low)}–${formatTokens(estimate.high)}` : "";
+  const warning = snapshot.warning ? [`  warning: ${snapshot.warning}`] : [];
+
+  return [
+    `${label}: ~${formatTokens(estimate.total)} tok (${snapshot.source}, ${state}, attempts=${snapshot.attempts}${range})`,
+    `  key: ${snapshot.key}`,
+    `  components: prompt=${formatTokens(estimate.promptText)} · tools=${formatTokens(estimate.toolSchemas)} (${estimate.toolCount}) · framing=${formatTokens(estimate.framing)} · uncal=${formatTokens(estimate.uncalibratedTotal)}`,
+    `  calibration: ×${estimate.calibrationMultiplier.toFixed(4)} · samples=${estimate.calibrationSamples} · confidence=${estimate.confidence}`,
+    `  systemPrompt: ${snapshot.systemPrompt.length} chars · hash=${debugHashText(snapshot.systemPrompt)}`,
+    `  tools: ${formatDebugToolNames(snapshot)}`,
+    ...warning,
+  ];
 }
 
 function buildWebuiFooterPayload(ctx: ExtensionContext, snapshot: GitSnapshot | null, telemetry: FooterTelemetry): WebuiFooterPayload {
@@ -532,7 +589,8 @@ function buildWebuiFooterPayload(ctx: ExtensionContext, snapshot: GitSnapshot | 
     key: "pi",
     icon: "π",
     label: "pi",
-    value: `${footerMetricValue(telemetry.promptInjectionTokens)} tok`,
+    value: footerPromptInjectionValue(telemetry.promptInjectionTokens),
+    title: telemetry.promptInjectionTokens === null ? "PI initial prompt estimate pending" : undefined,
     tone: "mauve",
   });
   if (speed !== null) {
@@ -606,57 +664,72 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
   let currentAssistantLiveTokenSpeed: number | null = null;
   let currentAssistantTokenSamples: LiveTokenSample[] = [];
   let latestMeasuredTokenSpeed: number | null = null;
-  let promptEstimateCache: PromptEstimateCache | null = null;
-  let promptEstimateRequestId = 0;
   let footerUsageSnapshot: FooterUsageSnapshot = emptyFooterUsageSnapshot();
   let latestGitSnapshot: GitSnapshot | null = null;
+  let latestPromptEstimateContext: ExtensionContext | null = null;
   let requestFooterRender: (() => void) | null = null;
   let webuiFooterPublishTimer: ReturnType<typeof setTimeout> | null = null;
   let lastWebuiFooterPublishMs = 0;
 
   const getPromptCalibration = (ctx: ExtensionContext) => collectInitialPromptCalibration(ctx.sessionManager.getSessionDir());
+  const promptEstimateService = createInitialPromptEstimateService({
+    pi,
+    getCalibration: getPromptCalibration,
+    publishFallback: false,
+    onUpdate: (_snapshot, ctx) => {
+      promptEstimateKeyCheck = null;
+      requestFooterRender?.();
+      publishWebuiFooter(ctx);
+    },
+  });
+  let promptEstimateRefreshPromise: Promise<unknown> | null = null;
+  let promptEstimateKeyCheck: { checkedAt: number; key: string } | null = null;
 
-  const getFallbackPromptEstimate = (ctx: ExtensionContext) => {
-    const calibration = getPromptCalibration(ctx);
-    const estimate = estimateInitialPromptForPiContext(pi, ctx.getSystemPrompt(), calibration);
-    const key = [
-      estimate.uncalibratedTotal,
-      estimate.promptText,
-      estimate.toolSchemas,
-      estimate.framing,
-      estimate.toolCount,
-      estimate.calibrationMultiplier,
-      estimate.calibrationSamples,
-      estimate.low,
-      estimate.high,
-    ].join(":");
-    return { calibration, estimate, key };
+  const rememberPromptEstimateContext = (ctx: ExtensionContext) => {
+    if (latestPromptEstimateContext !== ctx) promptEstimateKeyCheck = null;
+    latestPromptEstimateContext = ctx;
+  };
+
+  const getEstimateContext = (fallback: ExtensionContext): ExtensionContext => latestPromptEstimateContext ?? fallback;
+
+  const getCurrentPromptEstimateKey = (ctx: ExtensionContext): string => {
+    const estimateCtx = getEstimateContext(ctx);
+    const now = Date.now();
+    if (promptEstimateKeyCheck && now - promptEstimateKeyCheck.checkedAt < 1000) return promptEstimateKeyCheck.key;
+    const key = promptEstimateService.getFallbackSnapshot(estimateCtx).key;
+    promptEstimateKeyCheck = { checkedAt: now, key };
+    return key;
+  };
+
+  const queuePromptInjectionEstimateRefresh = (ctx: ExtensionContext): Promise<unknown> => {
+    const estimateCtx = getEstimateContext(ctx);
+    promptEstimateRefreshPromise ??= promptEstimateService.refresh(estimateCtx).finally(() => {
+      promptEstimateRefreshPromise = null;
+      promptEstimateKeyCheck = null;
+    });
+    return promptEstimateRefreshPromise;
   };
 
   const refreshPromptInjectionEstimate = async (ctx: ExtensionContext) => {
-    const requestId = ++promptEstimateRequestId;
-    const fallback = getFallbackPromptEstimate(ctx);
-    promptEstimateCache = { key: fallback.key, tokens: fallback.estimate.total };
-    requestFooterRender?.();
-
-    try {
-      const result = await estimateInitialPromptFromPiExport(pi, ctx, fallback.calibration);
-      const latestFallback = getFallbackPromptEstimate(ctx);
-      if (requestId !== promptEstimateRequestId || latestFallback.key !== fallback.key) return;
-      promptEstimateCache = { key: fallback.key, tokens: result.estimate.total };
-    } catch {
-      if (requestId !== promptEstimateRequestId) return;
-      const latestFallback = getFallbackPromptEstimate(ctx);
-      promptEstimateCache = { key: latestFallback.key, tokens: latestFallback.estimate.total };
-    } finally {
-      if (requestId === promptEstimateRequestId) {
-        requestFooterRender?.();
-        publishWebuiFooter(ctx);
-      }
-    }
+    rememberPromptEstimateContext(ctx);
+    await queuePromptInjectionEstimateRefresh(ctx);
   };
 
-  const getFooterPromptInjectionTokens = (): number => promptEstimateCache?.tokens ?? 0;
+  const getFooterPromptInjectionTokens = (ctx: ExtensionContext): number | null => {
+    const snapshot = promptEstimateService.getSnapshot();
+    if (!snapshot) {
+      void queuePromptInjectionEstimateRefresh(ctx);
+      return null;
+    }
+
+    const currentKey = getCurrentPromptEstimateKey(ctx);
+    if (snapshot.key !== currentKey) {
+      void queuePromptInjectionEstimateRefresh(ctx);
+      return null;
+    }
+
+    return snapshot.estimate.total;
+  };
 
   const buildFooterTelemetry = (ctx: ExtensionContext): FooterTelemetry => {
     const {
@@ -689,7 +762,7 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
       totalCost,
       liveOutputTokens,
       latestTokenSpeed,
-      promptInjectionTokens: getFooterPromptInjectionTokens(),
+      promptInjectionTokens: getFooterPromptInjectionTokens(ctx),
       contextWindow,
       contextPercent: rawContextPercent,
       contextDisplay,
@@ -834,7 +907,9 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
   };
 
   pi.on("session_start", async (_event, ctx) => {
-    promptEstimateCache = null;
+    promptEstimateService.clear();
+    promptEstimateKeyCheck = null;
+    latestPromptEstimateContext = null;
     latestGitSnapshot = null;
     footerUsageSnapshot = recomputeFooterUsageSnapshot(ctx);
     void refreshPromptInjectionEstimate(ctx);
@@ -883,7 +958,7 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
           const segments: string[] = [];
           if (ioItems.length > 0) segments.push(`${theme.fg("muted", "🪙")} ${ioItems.join(` ${itemSep} `)}`);
           if (cacheItems.length > 0) segments.push(`${theme.fg("muted", "💾")} ${cacheItems.join(` ${itemSep} `)}`);
-          segments.push(`PI: ${formatTokens(telemetry.promptInjectionTokens)} tok`);
+          segments.push(telemetry.promptInjectionTokens === null ? "PI: …" : `PI: ${formatTokens(telemetry.promptInjectionTokens)} tok`);
           if (telemetry.latestTokenSpeed !== null) {
             const livePrefix = telemetry.liveOutputTokens > 0 ? `${formatTokens(telemetry.liveOutputTokens)} tok @ ` : "";
             segments.push(`⚡ ${livePrefix}${formatTokenSpeed(telemetry.latestTokenSpeed)} tok/s`);
@@ -1045,6 +1120,38 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
       await refreshPromptInjectionEstimate(ctx);
       await refresh(ctx);
       if (!silent) ctx.ui.notify("Git footer refreshed", "info");
+    },
+  });
+
+  pi.registerCommand("git-footer-pi-debug", {
+    description: "Show git footer PI initial prompt estimate diagnostics.",
+    handler: async (_args, ctx) => {
+      const cachedBefore = promptEstimateService.getSnapshot();
+      rememberPromptEstimateContext(ctx);
+      const fallbackNow = promptEstimateService.getFallbackSnapshot(ctx);
+      const freshSharedEstimate = await estimateStableInitialPromptFromPiContext(pi, ctx, getPromptCalibration);
+      const refreshResult = await promptEstimateService.refresh(ctx);
+      const cachedAfter = promptEstimateService.getSnapshot();
+      const modelLabel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "none";
+      const sessionId = ctx.sessionManager.getSessionId?.() ?? "unknown";
+
+      ctx.ui.notify(
+        [
+          "Git footer PI estimate debug",
+          `model: ${modelLabel}`,
+          `session: ${sessionId}`,
+          `service refresh: ${refreshResult.status}`,
+          "",
+          ...formatPromptEstimateDebugSnapshot("footer cached before", cachedBefore),
+          "",
+          ...formatPromptEstimateDebugSnapshot("live fallback now", fallbackNow),
+          "",
+          ...formatPromptEstimateDebugSnapshot("fresh shared estimate", freshSharedEstimate),
+          "",
+          ...formatPromptEstimateDebugSnapshot("footer cached after", cachedAfter),
+        ].join("\n"),
+        "info",
+      );
     },
   });
 

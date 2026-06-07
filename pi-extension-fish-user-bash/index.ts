@@ -1,32 +1,19 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { createLocalBashOperations, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-
-function resolveFromPath(binName: string): string | undefined {
-  const envPath = process.env.PATH ?? "";
-  const candidates = os.platform() === "win32" && !binName.toLowerCase().endsWith(".exe") ? [binName, `${binName}.exe`] : [binName];
-
-  for (const dir of envPath.split(path.delimiter).filter(Boolean)) {
-    for (const name of candidates) {
-      const candidate = path.join(dir, name);
-      if (fs.existsSync(candidate)) return candidate;
-    }
-  }
-  return undefined;
-}
+import { resolveExecutableFromPath } from "@firstpick/pi-utils";
 
 function resolveShellPath(): string {
   const configured = process.env.PI_USER_BASH_SHELL_PATH?.trim();
   if (configured) {
     if (path.isAbsolute(configured) && fs.existsSync(configured)) return configured;
 
-    const resolvedConfigured = resolveFromPath(configured);
+    const resolvedConfigured = resolveExecutableFromPath(configured);
     if (resolvedConfigured) return resolvedConfigured;
   }
 
   const fish =
-    resolveFromPath("fish") ??
+    resolveExecutableFromPath("fish") ??
     ["/usr/bin/fish", "/bin/fish", "/usr/local/bin/fish", "/opt/homebrew/bin/fish"].find((p) => fs.existsSync(p));
   if (fish) return fish;
 
@@ -34,12 +21,12 @@ function resolveShellPath(): string {
   if (shellFromEnv && path.isAbsolute(shellFromEnv) && fs.existsSync(shellFromEnv)) return shellFromEnv;
 
   const bash =
-    resolveFromPath("bash") ??
+    resolveExecutableFromPath("bash") ??
     ["/bin/bash", "/usr/bin/bash", "C:\\Program Files\\Git\\bin\\bash.exe"].find((p) => fs.existsSync(p));
   if (bash) return bash;
 
   if (os.platform() === "win32") {
-    const pwsh = resolveFromPath("pwsh") ?? resolveFromPath("powershell");
+    const pwsh = resolveExecutableFromPath("pwsh") ?? resolveExecutableFromPath("powershell");
     if (pwsh) return pwsh;
 
     const comspec = process.env.ComSpec?.trim();

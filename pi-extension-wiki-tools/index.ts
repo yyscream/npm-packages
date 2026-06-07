@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { jsonToolResult, slugify as slugifyText, tokenizeArgs } from "@firstpick/pi-utils";
 import { Type } from "typebox";
 
 const EXTENSION_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -41,12 +42,8 @@ type PlanEntry = {
   action: "create" | "overwrite" | "skip";
 };
 
-function jsonResult(payload: unknown) {
-  return { content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }], details: payload };
-}
-
 function slugify(input: string): string {
-  const slug = input.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  const slug = slugifyText(input);
   if (!slug) throw new Error(`Cannot derive slug from '${input}'.`);
   return slug;
 }
@@ -374,13 +371,6 @@ const FLAG_MAP: Record<string, keyof WikiSpec> = {
   template: "template",
 };
 
-function tokenizeArgs(args: string): string[] {
-  const tokens: string[] = [];
-  const re = /"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'|(\S+)/g;
-  for (const match of args.matchAll(re)) tokens.push((match[1] ?? match[2] ?? match[3]).replace(/\\(["'\\])/g, "$1"));
-  return tokens;
-}
-
 function parseWikiCommandArgs(args: string, defaults: Partial<WikiCommandSpec> = {}) {
   const trimmed = args.trim();
   if (!trimmed) return { ...defaults } as WikiCommandSpec;
@@ -529,7 +519,7 @@ export default function wikiToolsExtension(pi: ExtensionAPI) {
       const roots = await templateRoots(ctx.cwd);
       const templates = [] as Array<{ root: string; templates: string[] }>;
       for (const root of roots) templates.push({ root, templates: await listDirs(root) });
-      return jsonResult({ roots, templates });
+      return jsonToolResult({ roots, templates });
     },
   });
 
@@ -541,7 +531,7 @@ export default function wikiToolsExtension(pi: ExtensionAPI) {
     promptGuidelines: ["Use create_wiki when the user asks to create a local wiki package from templates."],
     parameters: Type.Object({ ...wikiSpecSchema, dryRun: Type.Optional(Type.Boolean()), overwrite: Type.Optional(Type.Boolean()) }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      return jsonResult(await scaffoldWiki(params, ctx.cwd, "create"));
+      return jsonToolResult(await scaffoldWiki(params, ctx.cwd, "create"));
     },
   });
 
@@ -553,7 +543,7 @@ export default function wikiToolsExtension(pi: ExtensionAPI) {
     promptGuidelines: ["Use update_wiki with dryRun=true before overwriting customized wiki package files."],
     parameters: Type.Object({ ...wikiSpecSchema, dryRun: Type.Optional(Type.Boolean({ default: true })), overwrite: Type.Optional(Type.Boolean()) }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      return jsonResult(await scaffoldWiki({ ...params, dryRun: params.dryRun ?? true }, ctx.cwd, "update"));
+      return jsonToolResult(await scaffoldWiki({ ...params, dryRun: params.dryRun ?? true }, ctx.cwd, "update"));
     },
   });
 
@@ -564,7 +554,7 @@ export default function wikiToolsExtension(pi: ExtensionAPI) {
     promptSnippet: "Validate generated local wiki packages",
     parameters: Type.Object({ targetDir: Type.String({ description: "Generated wiki package directory; relative paths resolve from cwd" }) }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      return jsonResult(await validatePackage(params.targetDir, ctx.cwd));
+      return jsonToolResult(await validatePackage(params.targetDir, ctx.cwd));
     },
   });
 }

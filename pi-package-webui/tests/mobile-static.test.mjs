@@ -190,6 +190,7 @@ assert.match(css, /\.composer-publish-menu:hover > \.composer-publish-button\[da
 assert.match(css, /\.composer-publish-menu-panel \{[\s\S]*?display:\s*none;[\s\S]*?flex-direction:\s*column/, "Publish workflow menu should hide when closed and expand like grouped tabs");
 assert.match(css, /\.composer-publish-menu:hover \.composer-publish-menu-panel,[\s\S]*?\.composer-publish-menu:focus-within \.composer-publish-menu-panel,[\s\S]*?\.composer-publish-menu\.open \.composer-publish-menu-panel \{\n\s+display:\s*flex;/, "Publish workflow menu should open on hover, focus, or explicit open state");
 assert.match(css, /\.composer-native-command-button \{[\s\S]*?color:\s*var\(--ctp-mauve\)/, "skills/tools command menu should have a distinct slash-command button style");
+assert.match(css, /\.composer-options-menu-panel \{[\s\S]*?max-height:\s*min\(88vh, 36rem\)/, "Options menu should be tall enough for common commands without scrolling on normal viewports");
 assert.match(css, /\.composer-native-command-menu-item \{[\s\S]*?color:\s*var\(--ctp-mauve\)/, "skills/tools command menu items should be styled separately from publish actions");
 assert.match(css, /\.composer-actions-panel > \.composer-publish-menu[\s\S]*?grid-column: span 1/, "Publish and command menu buttons should fit beside Git workflow in mobile actions");
 assert.match(css, /\.composer-actions-panel[\s\S]*?bottom:\s*calc\(100% \+ 0\.42rem\)/, "mobile composer actions should open as an above-composer sheet");
@@ -216,10 +217,21 @@ assert.match(css, /body:not\(\.pi-run-active\):not\(\.mobile-keyboard-open\) \.c
 assert.match(css, /button\[hidden\] \{ display: none !important; \}/, "hidden bottom-row controls should not occupy layout space");
 assert.match(css, /\.statusbar-tui-footer \{[\s\S]*?gap:\s*0/, "default TUI-like footer should reduce statusbar chrome around the compact line");
 assert.match(css, /\.statusbar-git-footer \{[\s\S]*?gap:\s*0\.58rem/, "enabled git-footer extension should keep the styled Web UI footer spacing");
+assert.match(css, /\.footer-line-meta \{[\s\S]*?display:\s*flex;[\s\S]*?flex-wrap:\s*nowrap/, "git-footer metadata should keep cwd, git chips, model, and effort on one row when space allows");
+assert.match(css, /\.footer-line-meta \.footer-meta \{[\s\S]*?flex:\s*0 1 max-content/, "git-footer non-cwd boxes should shrink to content-sized chips while preferring complete text");
+assert.match(css, /\.footer-workspace \{[\s\S]*?flex:\s*1 1 8rem/, "git-footer cwd chip should dynamically take remaining row space");
+assert.match(css, /\.footer-thinking \.footer-meta-value \{[\s\S]*?color:\s*var\(--ctp-mauve\)/, "git-footer effort chip should have its own styling");
+assert.match(css, /\.footer-changes \{[\s\S]*?border-color:\s*rgba\(249, 226, 175, 0\.36\)/, "git-footer changes chip should use a higher-contrast warning tint");
+assert.match(css, /\.footer-changes \.footer-meta-value \{[\s\S]*?color:\s*var\(--ctp-yellow\)[\s\S]*?font-weight:\s*950/, "git-footer changes value should be bright and bold");
+assert.match(css, /\.footer-git-extra \.footer-meta-value \{[\s\S]*?color:\s*var\(--ctp-sky\)[\s\S]*?font-weight:\s*900/, "git-footer extras value should be bright enough to read at footer size");
+assert.match(css, /\.footer-changes,[\s\S]*?\.footer-git-extra \{[\s\S]*?flex:\s*0 0 auto/, "git-footer changes and extras chips should resist truncating short status values");
+assert.match(css, /\.footer-meta-action \{[\s\S]*?position:\s*relative;[\s\S]*?border-color:\s*rgba\(148, 226, 213, 0\.26\)/, "clickable footer boxes should have a subtle always-visible highlight");
+assert.doesNotMatch(css, /\.footer-meta-action::after/, "clickable footer boxes should not show a corner indicator dot");
+assert.match(css, /@media \(max-width: 1050px\)[\s\S]*?\.footer-line-meta \{[\s\S]*?display:\s*grid;[\s\S]*?\.footer-model \{ grid-column: 1; \}[\s\S]*?\.footer-thinking \{ grid-column: 2; \}/, "narrow git-footer metadata should keep model and effort on the same row");
 assert.match(css, /\.footer-line-tui \{[\s\S]*?white-space:\s*nowrap/, "default Web UI footer should use a minimal TUI-like line");
 assert.match(css, /\.footer-tui-cwd[\s\S]*?max-width:\s*38%/, "TUI-like footer should keep cwd compact on desktop");
 assert.match(css, /\.footer-tui-model[\s\S]*?text-align:\s*right/, "TUI-like footer should right-align model information on desktop");
-assert.match(css, /\.footer-model-picker[\s\S]*?position:\s*absolute/, "footer model picker should render as a dropdown/popover");
+assert.match(css, /\.footer-model-picker[\s\S]*?position:\s*absolute[\s\S]*?left:\s*var\(--footer-model-picker-left, auto\)[\s\S]*?right:\s*var\(--footer-model-picker-right, 0\.95rem\)/, "footer model and effort pickers should render as anchored dropdown popovers");
 assert.match(css, /@media \(max-width: 720px\), \(max-device-width: 720px\), \(pointer: coarse\) and \(hover: none\)[\s\S]*?\.footer-model-picker \{[\s\S]*?position:\s*fixed/, "mobile footer model picker should escape footer-details stacking as a fixed overlay on narrow, device-width-narrow, or touch-only devices");
 assert.match(css, /bottom:\s*var\(--footer-model-picker-bottom/, "mobile footer model picker should be anchored by a JS-computed viewport offset");
 assert.match(css, /\.footer-model-option\.active/, "footer model picker should style the selected scoped model");
@@ -355,7 +367,8 @@ assert.match(app, /restoreSidePanelSectionState\(\);\nbindSidePanelSectionToggle
 assert.match(app, /OPTIONAL_FEATURES_STORAGE_KEY/, "optional feature disable toggles should persist in browser storage");
 assert.match(app, /GIT_FOOTER_WEBUI_STATUS_KEY = "git-footer-webui"/, "git footer Web UI data should be received as an extension-owned status payload");
 assert.match(app, /function parseGitFooterWebuiPayloadRaw\(raw\)[\s\S]*GIT_FOOTER_WEBUI_PAYLOAD_TYPE[\s\S]*GIT_FOOTER_WEBUI_PAYLOAD_VERSION/, "Web UI footer should parse the structured payload emitted by git-footer-status");
-assert.match(app, /function renderFooter\(\)[\s\S]*parseGitFooterWebuiPayload\(\)[\s\S]*renderGitFooterPayload\(gitFooterPayload\)/, "detailed footer rendering should prefer the git-footer-status extension payload");
+assert.match(app, /function renderFooter\(\)[\s\S]*parseGitFooterWebuiPayload\(\)[\s\S]*renderGitFooterPayload\(footerPayloadWithLiveModel\(gitFooterPayload\)\)/, "detailed footer rendering should prefer the git-footer-status extension payload");
+assert.match(app, /function footerPayloadWithLiveModel\(payload\)[\s\S]*?shortModelLabel\(currentState\.model\)[\s\S]*?footerThinkingDisplay\(\)[\s\S]*?key: "thinking", label: "effort"/, "git footer payload rendering should split model and effort chips from live Web UI state");
 assert.match(app, /function renderGitFooterPayload\(payload\)[\s\S]*classList\.remove\("statusbar-tui-footer"\)[\s\S]*classList\.add\("statusbar-git-footer"\)[\s\S]*payload\.main\.map\(renderGitFooterPayloadMetric\)[\s\S]*payload\.meta\.map/, "enabled git footer payload should use the styled extension chip renderer, not the default TUI line");
 assert.match(app, /function renderGitFooterPayloadMetric\(chip\)[\s\S]*footerMetric\(chip\.icon/, "git footer main payload chips should render as styled metrics");
 assert.match(app, /function renderGitFooterPayloadMeta\(chip, tab\)[\s\S]*footerMeta\(chip\.label, chip\.value, footerMetaClassForPayload\(chip\)/, "git footer meta payload chips should render as styled metadata");
@@ -369,6 +382,8 @@ assert.doesNotMatch(app, /footerMeta\("runtime"/, "minimal Web UI footer should 
 assert.match(app, /statusEntries\.has\(GIT_FOOTER_WEBUI_STATUS_KEY\)/, "optional feature detection should recognize the git-footer-status Web UI payload");
 assert.match(app, /\/git-footer-refresh --webui-silent/, "Web UI should quietly request the extension-owned footer payload when idle and missing");
 assert.match(app, /function requestGitFooterWebuiPayload\(tabContext = activeTabContext\(\), \{ force = false \} = \{\}\)[\s\S]*?!force && statusEntries\.has\(GIT_FOOTER_WEBUI_STATUS_KEY\)/, "git footer payload refresh should support forced refresh even when a live payload already exists");
+assert.doesNotMatch(app, /function requestGitFooterWebuiPayload\([\s\S]*?statusEntries\.delete\(GIT_FOOTER_WEBUI_STATUS_KEY\)/, "forced git footer refreshes should keep the existing payload visible while the refresh runs");
+assert.match(app, /function applyOptimisticModelSelection\(model, tabContext = activeTabContext\(\)\)[\s\S]*?currentState = \{ \.\.\.currentState, model: nextModel \}[\s\S]*?renderStatus\(\)[\s\S]*?requestGitFooterWebuiPayload\(tabContext, \{ force: true \}\)/, "model changes should update current state and footer immediately before async refreshes complete");
 assert.match(app, /function gitFooterRelevantStateChanged\(previousState, nextState\)[\s\S]*?previousState\.thinkingLevel !== nextState\.thinkingLevel[\s\S]*?modelStateKey\(previousState\.model\) !== modelStateKey\(nextState\.model\)/, "state refresh should detect model and thinking changes that make the git footer payload stale");
 assert.match(app, /requestGitFooterWebuiPayload\(tabContext, \{ force: shouldRefreshGitFooter \}\)/, "state refresh should force-refresh the git footer when model or thinking state changes");
 assert.match(app, /if \(response\.data\?\.level\) requestGitFooterWebuiPayload\(tabContext, \{ force: true \}\)/, "thinking shortcut should immediately force-refresh the git footer payload");
@@ -381,6 +396,8 @@ assert.doesNotMatch(workspaceInfoSource, /runCommand\("git"|branchStatus|isRepo/
 assert.match(app, /function renderOptionalFeatureDependentDisplays\(\)[\s\S]*renderOptionalFeatureControls\(\);[\s\S]*renderThemeSelect\(\);[\s\S]*renderWidgets\(\);[\s\S]*renderStatus\(\);[\s\S]*renderCommands\(\);[\s\S]*renderAllMessages\(\{ preserveScroll: true \}\);[\s\S]*if \(streamRawText\) renderStreamingAssistantText\(\);/, "optional feature toggles should immediately refresh visible controls, commands, transcript, and live stream displays");
 assert.match(app, /function setOptionalFeatureDisabled\(featureId, disabled\)[\s\S]*renderOptionalFeatureDependentDisplays\(\);[\s\S]*const tabContext = activeTabContext\(\);[\s\S]*refreshCommands\(tabContext\)/, "optional feature enable/disable should re-render the GUI and then refresh command capabilities");
 assert.match(app, /function setOptionalControlState\(button, available, unavailableTitle\)[\s\S]*setAttribute\("aria-label", nextAriaLabel\)[\s\S]*setAttribute\("data-tooltip", nextTooltip\)/, "optional feature button disabled state should update accessible labels and visible tooltips");
+assert.match(app, /const hasGitWorkflow = isOptionalFeatureEnabled\("gitWorkflow"\);\n\s+elements\.gitWorkflowButton\.hidden = !hasGitWorkflow/, "guided git workflow composer button should be hidden when unavailable or disabled");
+assert.match(app, /elements\.publishButton\.hidden = !hasPublishWorkflow[\s\S]*elements\.nativeCommandMenuButton\.hidden = !hasNativeCommandMenu/, "optional publish and skills/tools menu buttons should be hidden when no enabled menu items are available");
 assert.match(app, /\["skills", "tuiSkillsCommand"\][\s\S]*\["tools", "tuiToolsCommand"\]/, "optional feature toggles should gate /skills and /tools command surfaces");
 assert.match(app, /function setNativeCommandMenuOpen\(open\)/, "frontend should track the skills/tools command menu open state separately from Publish");
 assert.match(app, /nativeSkillsButton\.hidden = !isOptionalFeatureEnabled\("tuiSkillsCommand"\)[\s\S]*nativeToolsButton\.hidden = !isOptionalFeatureEnabled\("tuiToolsCommand"\)/, "skills/tools menu items should be hidden by their optional feature toggles");
@@ -532,6 +549,8 @@ assert.match(app, /sendPromptFromModeButton\("steer", elements\.steerButton\)/, 
 assert.match(app, /sendPromptFromModeButton\("follow-up", elements\.followUpButton\)/, "Follow-up should show tooltip instead of silently doing nothing when input is empty");
 assert.match(app, /function runPublishWorkflow\(command\)[\s\S]*?sendPrompt\("prompt", command\)/, "Publish workflows should send slash commands directly without replacing the draft");
 assert.match(app, /async function runNativeCommandMenu\(command\)[\s\S]*?await handleNativeSlashSelectorCommand\(command\)/, "skills/tools command menu should open native selector dialogs directly");
+assert.match(app, /async function runNativeCommandMenu\(command\)[\s\S]*?sendPrompt\("prompt", command\)/, "generic native command menu should fall back to slash-command prompt execution");
+assert.match(app, /function setOptionsMenuOpen\(open\)/, "Options menu should have explicit open state");
 assert.match(app, /function nativeToolOriginTag\(resource\)[\s\S]*?sourceInfo\?\.source === "builtin"[\s\S]*?label: "Pi Native"[\s\S]*?label: "External"/, "Tools Setup should classify built-in Pi tools separately from external tools");
 assert.match(app, /renderNativeResourceToggles\(tools, \{[\s\S]*?getResourceTag: nativeToolOriginTag/, "Tools Setup should render Pi Native\/External tags");
 assert.match(app, /const tags = Array\.isArray\(item\.tags\)[\s\S]*?item\.badge, \.\.\.tags/, "native selector filtering should include extra resource tags");
@@ -539,19 +558,26 @@ assert.match(app, /publishMenuContainer\?\.addEventListener\("pointerenter", \(\
 assert.match(app, /publishMenuContainer\?\.addEventListener\("pointerleave", \(\) => setPublishMenuOpen\(false\)\)/, "Publish menu should collapse after hover leaves");
 assert.match(app, /nativeCommandMenuContainer\?\.addEventListener\("pointerenter", \(\) => \{[\s\S]*?setNativeCommandMenuOpen\(true\);[\s\S]*?\}\)/, "skills/tools command menu should expand on hover");
 assert.match(app, /nativeCommandMenuContainer\?\.addEventListener\("pointerleave", \(\) => setNativeCommandMenuOpen\(false\)\)/, "skills/tools command menu should collapse after hover leaves");
+assert.match(app, /optionsMenuContainer\?\.addEventListener\("pointerenter", \(\) => \{[\s\S]*?setOptionsMenuOpen\(true\);[\s\S]*?\}\)/, "Options menu should expand on hover");
+assert.match(app, /optionsMenuContainer\?\.addEventListener\("pointerleave", \(\) => setOptionsMenuOpen\(false\)\)/, "Options menu should collapse after hover leaves");
 assert.match(app, /releaseNpmButton\.addEventListener\("click", \(\) => runPublishWorkflow\("\/release-npm"\)\)/, "Publish menu should launch /release-npm");
 assert.match(app, /releaseAurButton\.addEventListener\("click", \(\) => runPublishWorkflow\("\/release-aur"\)\)/, "Publish menu should launch /release-aur");
 assert.match(app, /nativeSkillsButton\.addEventListener\("click", \(\) => runNativeCommandMenu\("\/skills"\)\)/, "skills/tools command menu should launch /skills");
 assert.match(app, /nativeToolsButton\.addEventListener\("click", \(\) => runNativeCommandMenu\("\/tools"\)\)/, "skills/tools command menu should launch /tools");
+for (const command of ["resume", "reload", "name", "clone", "settings", "export", "fork", "tree"]) {
+  const id = command.replace(/^./, (letter) => letter.toUpperCase());
+  assert.match(app, new RegExp(`options${id}Button\\.addEventListener\\("click", \\(\\) => runNativeCommandMenu\\("\\/${command}"\\)\\)`), `Options menu should launch /${command}`);
+}
 assert.match(app, /async function sendPrompt\(kind = "prompt", explicitMessage\)/, "prompt sending should accept direct messages that bypass the input field");
 assert.match(app, /const rawMessage = usesPromptInput \? elements\.promptInput\.value : explicitMessage/, "direct prompt sends should not read the input textarea");
 assert.match(app, /if \(usesPromptInput\) \{[\s\S]*?if \(targetStillActive\) \{[\s\S]*?elements\.promptInput\.value = "";/, "direct prompt sends should preserve the input textarea draft");
 assert.match(app, /make\("button", "command-item"\)[\s\S]*?sendPrompt\("prompt", `\/\$\{command\.name\}`\)/, "side-panel command clicks should send the slash command directly");
-assert.match(app, /const NATIVE_SELECTOR_COMMANDS = new Set\(\["model", "settings", "theme", "fork", "clone", "resume", "tree", "login", "logout", "scoped-models", "tools", "skills"\]\)/, "frontend should route native slash commands into selector UIs");
+assert.match(app, /const NATIVE_SELECTOR_COMMANDS = new Set\(\["model", "settings", "theme", "fork", "clone", "name", "resume", "tree", "login", "logout", "scoped-models", "tools", "skills"\]\)/, "frontend should route native slash commands into selector UIs");
 assert.match(app, /async function handleNativeSlashSelectorCommand\(message/, "frontend should intercept exact native slash commands before prompt forwarding");
 assert.match(app, /kind === "prompt" && attachments\.length === 0 && await handleNativeSlashSelectorCommand/, "prompt sending should open native selector dialogs before marking a run active");
 assert.match(app, /function openNativeModelSelector\(\)[\s\S]*?nativeCommandApi\("\/api\/models"\)/, "native /model selector should load models through the active tab API");
 assert.match(app, /function openNativeSettingsDialog\(\)[\s\S]*?\/api\/steering-mode[\s\S]*?\/api\/follow-up-mode[\s\S]*?\/api\/auto-compaction/, "native /settings selector should expose queue and compaction controls");
+assert.match(app, /function openNativeNameDialog\(\)[\s\S]*?sendPrompt\("prompt", `\/name \$\{name\}`\)/, "native /name selector should prompt before running the slash command");
 assert.match(app, /function openNativeForkSelector\(\)[\s\S]*?\/api\/fork-messages[\s\S]*?\/api\/fork/, "native /fork selector should pair fork-point loading with the fork action");
 assert.match(app, /function openNativeResumeSelector\(scope = "current"\)[\s\S]*?\/api\/sessions\?scope=\$\{encodeURIComponent\(selectedScope\)\}/, "native /resume selector should list current-cwd or all sessions");
 assert.match(app, /function openNativeTreeSelector\(\)[\s\S]*?\/api\/session-tree[\s\S]*?\/api\/tree-navigate/, "native /tree selector should list tree entries and navigate through the backend helper");
@@ -629,7 +655,7 @@ assert.match(app, /case "webui_tab_renamed":/, "frontend should update tab label
 assert.match(app, /terminalTabsToggleButton\.addEventListener\("click"/, "terminal tabs trigger should be wired in JS");
 assert.match(app, /composerActionsButton\.addEventListener\("click"/, "composer actions trigger should be wired in JS");
 assert.match(app, /function setMobileFooterExpanded\(/, "mobile footer should preserve expansion state for compatibility");
-assert.match(app, /function updateFooterModelPickerPosition\(\)/, "mobile model picker should compute a fixed overlay position above the footer");
+assert.match(app, /function updateFooterModelPickerPosition\(\)[\s\S]*?footerActivePickerTarget\(\)[\s\S]*?--footer-model-picker-left/, "footer picker should align desktop dropdowns above the active model or effort chip");
 assert.match(app, /mobileFooterExpanded = false;[\s\S]*?document\.body\.classList\.remove\("footer-details-expanded"\)/, "opening mobile model picker should collapse legacy footer details so they cannot cover the dropdown");
 assert.match(app, /function renderTuiFooterLine\([\s\S]*footer-line footer-line-tui/, "footer should render a minimal TUI-like line instead of metadata chips");
 assert.match(app, /footerTuiItem\(model, "footer-tui-model", \{[\s\S]*setFooterModelPickerOpen\(!footerModelPickerOpen\)/, "footer model item should be clickable");
@@ -637,6 +663,10 @@ assert.match(app, /function renderFooterModelPicker\(\)/, "footer should render 
 assert.match(app, /api\("\/api\/scoped-models", \{ tabId: tabContext\.tabId \}\)/, "footer model picker should load scoped models instead of all available models");
 assert.match(app, /for \(const model of footerScopedModels\)/, "footer model picker should render only scoped models");
 assert.match(app, /api\("\/api\/model", \{ method: "POST"/, "footer model picker should apply selected model through the model API");
+assert.match(app, /chip\.key === "thinking"[\s\S]*?setFooterThinkingPickerOpen\(!footerThinkingPickerOpen\)/, "git footer effort chip should open its own picker");
+assert.match(app, /function renderFooterThinkingPicker\(\)[\s\S]*?Thinking effort[\s\S]*?for \(const level of footerThinkingLevels\(\)\)/, "footer should render a thinking effort picker dropdown");
+assert.match(app, /api\("\/api\/thinking", \{ method: "POST", body: \{ level: nextLevel \}/, "footer thinking picker should apply selected effort through the thinking API");
+assert.match(app, /function isFooterPickerOpen\(\)[\s\S]*?footerModelPickerOpen \|\| footerThinkingPickerOpen/, "footer picker overlay state should cover model and thinking pickers");
 assert.doesNotMatch(app.match(/function renderMinimalFooter\(\)[\s\S]*?\n\}/)?.[0] || "", /footer-details-toggle/, "minimal default footer should not render a details toggle chip");
 assert.match(app, /bindMobileViewChanges\(/, "side panel state should react to mobile breakpoint changes");
 assert.match(app, /function restoreSidePanelState\(\) \{\n\s+if \(isMobileView\(\)\)/, "mobile should start with side panel collapsed even if desktop state was expanded");

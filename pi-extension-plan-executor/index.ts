@@ -1,9 +1,8 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { homedir } from "node:os";
 import { readFile } from "node:fs/promises";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { getAgentDir, slugify } from "@firstpick/pi-utils";
+import { countChecklistProgress, expandTilde, getAgentDir, slugify } from "@firstpick/pi-utils";
 import { matchesKey } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
@@ -51,12 +50,6 @@ function displayArchivedPlanPath(topic: string): string {
   return `~/.pi/agent/docs/${topic}/PLAN.md`;
 }
 
-function expandUserPath(path: string): string {
-  if (path === "~") return homedir();
-  if (path.startsWith("~/")) return join(homedir(), path.slice(2));
-  return path;
-}
-
 function isReadableIncompletePlan(path: string): boolean {
   return existsSync(path) && statSync(path).isFile() && !isPlanMarkedComplete(path);
 }
@@ -100,7 +93,7 @@ function findLatestArchivedPlan(cwd: string): string | undefined {
 
 function resolvePlanPath(cwd: string, requestedPath: string): PlanResolution {
   const requested = (requestedPath || DEFAULT_PATH).trim() || DEFAULT_PATH;
-  const expandedRequested = expandUserPath(requested);
+  const expandedRequested = expandTilde(requested);
   const directPath = isAbsolute(expandedRequested) ? expandedRequested : resolve(cwd, expandedRequested);
   if (isReadableIncompletePlan(directPath)) {
     return { displayPath: requested, readPath: directPath };
@@ -235,10 +228,8 @@ function updateExecutorStatus(ctx: { hasUI: boolean; ui: { setStatus: (key: stri
 }
 
 function parsePlanProgress(markdown: string) {
-  const matches = markdown.match(/^\s*[-*]\s+\[( |x|X)\]\s+/gm) ?? [];
-  const done = (markdown.match(/^\s*[-*]\s+\[(x|X)\]\s+/gm) ?? []).length;
-  const total = matches.length;
-  return { total, done, remaining: Math.max(0, total - done) };
+  const { total, done, remaining } = countChecklistProgress(markdown);
+  return { total, done, remaining };
 }
 
 export default function planExecutorExtension(pi: ExtensionAPI) {

@@ -108,11 +108,12 @@
                 id="gitWorkflowButton"
                 class="composer-icon-button composer-git-button"
                 type="button"
+                hidden
                 title="Guided Git workflow"
                 aria-label="Start guided Git workflow: git add dot, run git-staged-msg, preview messages, commit short or long, then git push. Cancel is available at each step."
                 data-tooltip="GitHub workflow:&#10;1. Run git add .&#10;2. Run /git-staged-msg&#10;3. Preview short + long messages&#10;4. Commit with short or long message&#10;5. Run git push&#10;Cancel is available at each step."
               ><svg class="composer-icon composer-icon-github" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg></button>
-              <div class="composer-publish-menu">
+              <div class="composer-publish-menu" hidden>
                 <button
                   id="publishButton"
                   class="composer-icon-button composer-publish-button"
@@ -133,7 +134,7 @@
                   </button>
                 </div>
               </div>
-              <div class="composer-publish-menu composer-native-command-menu">
+              <div class="composer-publish-menu composer-native-command-menu" hidden>
                 <button
                   id="nativeCommandMenuButton"
                   class="composer-icon-button composer-publish-button composer-native-command-button"
@@ -151,6 +152,45 @@
                   </button>
                   <button id="nativeToolsButton" class="composer-publish-menu-item composer-native-command-menu-item" type="button" role="menuitem" data-command="/tools">
                     <span>Tools Setup</span>
+                  </button>
+                </div>
+              </div>
+              <div class="composer-publish-menu composer-options-menu">
+                <button
+                  id="optionsMenuButton"
+                  class="composer-icon-button composer-publish-button composer-options-button"
+                  type="button"
+                  title="Open common Pi options"
+                  aria-label="Open common Pi options"
+                  aria-haspopup="menu"
+                  aria-expanded="false"
+                  aria-controls="optionsMenu"
+                  data-tooltip="Options: resume, reload, name, clone, settings, export, fork, or tree."
+                ><svg class="composer-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 7h16M4 12h16M4 17h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="8" cy="7" r="1.6" fill="currentColor"/><circle cx="16" cy="12" r="1.6" fill="currentColor"/><circle cx="11" cy="17" r="1.6" fill="currentColor"/></svg></button>
+                <div id="optionsMenu" class="composer-publish-menu-panel composer-options-menu-panel" role="menu" aria-label="Common Pi options">
+                  <button id="optionsTreeButton" class="composer-publish-menu-item composer-options-menu-item" type="button" role="menuitem" data-command="/tree">
+                    <span>Tree</span>
+                  </button>
+                  <button id="optionsForkButton" class="composer-publish-menu-item composer-options-menu-item" type="button" role="menuitem" data-command="/fork">
+                    <span>Fork</span>
+                  </button>
+                  <button id="optionsExportButton" class="composer-publish-menu-item composer-options-menu-item" type="button" role="menuitem" data-command="/export">
+                    <span>Export</span>
+                  </button>
+                  <button id="optionsSettingsButton" class="composer-publish-menu-item composer-options-menu-item" type="button" role="menuitem" data-command="/settings">
+                    <span>Settings</span>
+                  </button>
+                  <button id="optionsCloneButton" class="composer-publish-menu-item composer-options-menu-item" type="button" role="menuitem" data-command="/clone">
+                    <span>Clone Session</span>
+                  </button>
+                  <button id="optionsNameButton" class="composer-publish-menu-item composer-options-menu-item" type="button" role="menuitem" data-command="/name">
+                    <span>Name Session</span>
+                  </button>
+                  <button id="optionsReloadButton" class="composer-publish-menu-item composer-options-menu-item" type="button" role="menuitem" data-command="/reload">
+                    <span>Reload Pi</span>
+                  </button>
+                  <button id="optionsResumeButton" class="composer-publish-menu-item composer-options-menu-item" type="button" role="menuitem" data-command="/resume">
+                    <span>Resume Session</span>
                   </button>
                 </div>
               </div>
@@ -329,6 +369,7 @@
               </button>
             </h2>
             <div id="sidePanelSectionCommands" class="side-panel-section-content" hidden>
+              <input id="commandSearchInput" class="commands-search" type="search" placeholder="Search commands…" autocomplete="off" spellcheck="false" aria-label="Search commands" />
               <div id="commandsBox" class="commands-box muted">Loading…</div>
             </div>
           </section>

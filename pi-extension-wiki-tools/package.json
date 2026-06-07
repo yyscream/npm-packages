@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-extension-wiki-tools",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Pi tools and skill for scaffolding local wiki extension packages from repository templates.",
   "license": "MIT",
   "keywords": [
@@ -19,6 +19,9 @@
     "skills": [
       "./skills"
     ]
+  },
+  "dependencies": {
+    "@firstpick/pi-utils": "^0.1.9"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

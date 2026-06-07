@@ -4,8 +4,17 @@ export * from "./src/text";
 export * from "./src/tokens";
 export * from "./src/prompt-calibration";
 export * from "./src/prompt-export-estimate";
+export * from "./src/initial-prompt-estimate-state";
+export * from "./src/initial-prompt-estimate-service";
 export * from "./src/async";
+export * from "./src/cli";
+export * from "./src/json";
+export * from "./src/process";
+export * from "./src/tool-result";
+export * from "./src/markdown";
+export * from "./src/release-log";
 export * from "./src/ui/working-indicator";
+export * from "./src/ui/live-output";
 export * from "./src/local-wiki";
 
 export { default } from "./src/extension";

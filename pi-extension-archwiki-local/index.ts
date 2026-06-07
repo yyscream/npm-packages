@@ -4,7 +4,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { createLocalWikiEngine } from "@firstpick/pi-utils";
+import { createLocalWikiEngine, jsonToolResult } from "@firstpick/pi-utils";
 
 const DOCS_PATH = "/usr/share/doc/arch-wiki/html/en";
 const CACHE_DIR = path.join(os.homedir(), ".cache", "pi", "archwiki-local");
@@ -64,7 +64,6 @@ const wiki = createLocalWikiEngine({
   statusExtra: async () => ({ docsPathExists: await exists(DOCS_PATH), docsInstalled: await wiki.available(), installCommand: INSTALL_COMMAND, cacheDir: CACHE_DIR, archWikiDocsPackage: await packageVersion() }),
 });
 
-function jsonToolResult(payload: unknown) { return { content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }], details: payload }; }
 async function executeSetup() {
   if (!await canRun("pacman", ["--version"])) return { ok: false, message: `pacman is not available. Please install local ArchWiki docs manually: ${INSTALL_COMMAND}` };
   if (await wiki.available()) {

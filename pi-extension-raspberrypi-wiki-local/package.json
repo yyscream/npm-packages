@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-extension-raspberrypi-wiki-local",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local Raspberry Pi Documentation search and retrieval tools for Pi backed by a local documentation corpus.",
   "license": "MIT",
   "keywords": [
@@ -21,6 +21,9 @@
     "skills": [
       "./skills"
     ]
+  },
+  "dependencies": {
+    "@firstpick/pi-utils": "^0.1.9"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

@@ -4,7 +4,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { createLocalWikiEngine } from "@firstpick/pi-utils";
+import { createLocalWikiEngine, jsonToolResult } from "@firstpick/pi-utils";
 
 const REPO_URL = "https://github.com/hyprwm/hyprland-wiki.git";
 const REPO_PATH = path.join(os.homedir(), ".hyprwiki");
@@ -46,7 +46,6 @@ const wiki = createLocalWikiEngine({
   statusExtra: async () => ({ gitRevision: await gitRevision(), gitRemote: await gitRemote() }),
 });
 
-function jsonToolResult(payload: unknown) { return { content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }], details: payload }; }
 async function executeSetup(): Promise<{ ok: boolean; message: string }> {
   if (!await exists(REPO_PATH)) {
     const parent = path.dirname(REPO_PATH);
