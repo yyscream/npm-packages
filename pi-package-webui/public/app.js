@@ -71,6 +71,12 @@ const elements = {
   gitWorkflowOutput: $("#gitWorkflowOutput"),
   gitWorkflowActions: $("#gitWorkflowActions"),
   gitWorkflowCancelButton: $("#gitWorkflowCancelButton"),
+  gitPrDialog: $("#gitPrDialog"),
+  gitPrTitleInput: $("#gitPrTitleInput"),
+  gitPrBodyEditor: $("#gitPrBodyEditor"),
+  gitPrStatus: $("#gitPrStatus"),
+  gitPrCancelButton: $("#gitPrCancelButton"),
+  gitPrCreateButton: $("#gitPrCreateButton"),
   modelSelect: $("#modelSelect"),
   setModelButton: $("#setModelButton"),
   thinkingSelect: $("#thinkingSelect"),
@@ -117,6 +123,13 @@ const elements = {
   promptListDialogLoadButton: $("#promptListDialogLoadButton"),
   promptListSaveButton: $("#promptListSaveButton"),
   promptListRunListButton: $("#promptListRunListButton"),
+  attachmentTextDialog: $("#attachmentTextDialog"),
+  attachmentTextTitle: $("#attachmentTextTitle"),
+  attachmentTextMeta: $("#attachmentTextMeta"),
+  attachmentTextEditor: $("#attachmentTextEditor"),
+  attachmentTextStatus: $("#attachmentTextStatus"),
+  attachmentTextCancelButton: $("#attachmentTextCancelButton"),
+  attachmentTextSaveButton: $("#attachmentTextSaveButton"),
   commandSearchInput: $("#commandSearchInput"),
   commandsBox: $("#commandsBox"),
   eventLog: $("#eventLog"),
@@ -158,6 +171,7 @@ let activeTabId = null;
 let activeTabGeneration = 0;
 let tabDrafts = new Map();
 let tabAttachments = new Map();
+let activeTextAttachmentEditor = null;
 let tabActivities = new Map();
 let tabSeenCompletionSerials = new Map();
 let streamBubble = null;
@@ -185,6 +199,7 @@ let refreshTabsTimer = null;
 let foregroundReconcileTimer = null;
 let eventSource = null;
 let activeDialog = null;
+let activeGitPrDialogResolve = null;
 let nativeCommandTabId = null;
 let pathPickerState = null;
 let firstTerminalCwdPromptShown = false;
@@ -305,6 +320,8 @@ const ATTACHMENT_MAX_FILE_BYTES = 64 * 1024 * 1024;
 const ATTACHMENT_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
 const ATTACHMENT_INLINE_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
 const ATTACHMENT_INLINE_IMAGE_TOTAL_MAX_BYTES = 16 * 1024 * 1024;
+const LONG_INPUT_ATTACHMENT_LINE_THRESHOLD = 20;
+const LONG_INPUT_ATTACHMENT_MIME_TYPE = "text/plain";
 const INLINE_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const BACKGROUND_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const DEFAULT_THEME_NAME = "catppuccin-mocha";
@@ -430,6 +447,8 @@ const OPTIONAL_FEATURES = [
 const OPTIONAL_FEATURE_BY_ID = new Map(OPTIONAL_FEATURES.map((feature) => [feature.id, feature]));
 const OPTIONAL_COMMAND_FEATURES = new Map([
   ["git-staged-msg", "gitWorkflow"],
+  ["git-branch-name", "gitWorkflow"],
+  ["pr", "gitWorkflow"],
   ["release-npm", "releaseNpm"],
   ["release-aur", "releaseAur"],
   ["skills", "tuiSkillsCommand"],
@@ -461,16 +480,42 @@ const SETTINGS_AUTOCOMPLETE_OPTIONS = ["3", "5", "7", "10", "15", "20"];
 const optionalFeatureInstallInProgress = new Set();
 const gitFooterPayloadRefreshInFlightByTab = new Set();
 
+function createGitWorkflowActionsDone(patch = {}) {
+  return {
+    stage: false,
+    message: false,
+    commit: false,
+    push: false,
+    ...patch,
+  };
+}
+
+function gitWorkflowActionDone(workflow, process) {
+  return !!createGitWorkflowActionsDone(workflow?.actionsDone)[process];
+}
+
+function gitWorkflowActionDonePatch(workflow, process) {
+  return { actionsDone: createGitWorkflowActionsDone({ ...workflow?.actionsDone, [process]: true }) };
+}
+
 function createGitWorkflowState() {
   return {
     active: false,
     step: "idle",
+    process: "stage",
     busy: false,
     runId: 0,
     output: "",
     error: "",
     message: null,
     messageRequestedAt: 0,
+    branchName: "",
+    branchNameRequestedAt: 0,
+    actionsDone: createGitWorkflowActionsDone(),
+    prMode: false,
+    prBranch: "",
+    pr: null,
+    prRequestedAt: 0,
   };
 }
 
@@ -514,7 +559,13 @@ function clearGitWorkflowForTab(tabId) {
   }
 }
 
-const GIT_WORKFLOW_STEPS = ["Stage", "Message", "Commit", "Push"];
+const GIT_WORKFLOW_PROCESSES = [
+  { value: "stage", label: "Stage" },
+  { value: "message", label: "Message" },
+  { value: "commit", label: "Commit" },
+  { value: "push", label: "Push" },
+];
+const GIT_WORKFLOW_PROCESS_VALUES = new Set(GIT_WORKFLOW_PROCESSES.map((process) => process.value));
 const ACTION_FEEDBACK_REACTIONS = {
   up: { icon: "👍", label: "Good job", title: "Good job!" },
   down: { icon: "👎", label: "Avoid this", title: "Avoid this" },
@@ -526,11 +577,32 @@ const GIT_WORKFLOW_ACTIVE_INDEX = {
   generate: 1,
   generating: 1,
   message: 2,
+  branchNaming: 2,
+  branching: 2,
   committing: 2,
   push: 3,
   pushing: 3,
+  prGenerating: 3,
+  prReview: 3,
+  prCreating: 3,
   done: 4,
 };
+const GIT_WORKFLOW_CREATE_PR_TOOLTIP = [
+  "Create PR:",
+  "1. Ask Pi to generate a type/feature-name branch from staged changes.",
+  "2. Read dev/COMMIT/staged-branch-name.txt.",
+  "3. Let you confirm or edit the generated branch name.",
+  "4. Run git switch -c <branch>.",
+  "5. Return here so you can choose Commit short or Commit long on that branch.",
+].join("\n");
+const GIT_WORKFLOW_MANUAL_BRANCH_TOOLTIP = [
+  "Manual branch:",
+  "1. Skip agent branch-name generation.",
+  "2. Prefill a branch from the commit message if possible.",
+  "3. Let you type or edit the type/feature-name branch name.",
+  "4. Run git switch -c <branch>.",
+  "5. Return here so you can choose Commit short or Commit long on that branch.",
+].join("\n");
 
 function make(tag, className, text) {
   const node = document.createElement(tag);
@@ -1409,6 +1481,46 @@ function attachmentIcon(kind) {
   return kind === "image" ? "🖼️" : kind === "video" ? "🎞️" : kind === "audio" ? "🎵" : kind === "doc" ? "📄" : "📎";
 }
 
+function normalizeTextAttachmentContent(text) {
+  return String(text || "").replace(/\r\n?/g, "\n");
+}
+
+function textLineCount(text) {
+  const normalized = normalizeTextAttachmentContent(text);
+  return normalized ? normalized.split("\n").length : 0;
+}
+
+function shouldAttachTextInsteadOfComposerInput(text) {
+  const normalized = normalizeTextAttachmentContent(text);
+  return normalized.trim().length > 0 && textLineCount(normalized) > LONG_INPUT_ATTACHMENT_LINE_THRESHOLD;
+}
+
+function longInputAttachmentFileName() {
+  const stamp = new Date().toISOString().replace(/\.\d{3}Z$/, "Z").replace(/:/g, "-");
+  return `webui-input-${stamp}.txt`;
+}
+
+function makeTextAttachmentFile(text, name = longInputAttachmentFileName(), mimeType = LONG_INPUT_ATTACHMENT_MIME_TYPE) {
+  const normalized = normalizeTextAttachmentContent(text);
+  const fileName = String(name || longInputAttachmentFileName());
+  const type = String(mimeType || LONG_INPUT_ATTACHMENT_MIME_TYPE);
+  if (typeof File === "function") return new File([normalized], fileName, { type });
+  const blob = new Blob([normalized], { type });
+  try {
+    blob.name = fileName;
+    blob.lastModified = Date.now();
+  } catch {
+    // Older browsers may expose non-extensible Blob instances; the attachment record still carries the name.
+  }
+  return blob;
+}
+
+function isEditableTextAttachment(attachment) {
+  const name = String(attachment?.name || "");
+  const mimeType = String(attachment?.mimeType || attachment?.file?.type || inferMimeTypeFromName(name)).split(";", 1)[0].trim().toLowerCase();
+  return mimeType.startsWith("text/") || /(?:json|xml|yaml|toml|markdown|csv)/i.test(mimeType) || /\.(?:txt|md|markdown|csv|json|xml|ya?ml|toml|ini|log)$/i.test(name);
+}
+
 function attachmentsForTab(tabId = activeTabId) {
   return tabId ? tabAttachments.get(tabId) || [] : [];
 }
@@ -1437,11 +1549,19 @@ function renderAttachmentTray() {
     const icon = make("span", "attachment-pill-icon", attachmentIcon(attachment.kind));
     const name = make("span", "attachment-pill-name", attachment.name);
     const meta = make("span", "attachment-pill-meta", `${attachment.kind} · ${formatBytes(attachment.size)}`);
+    const edit = isEditableTextAttachment(attachment) ? make("button", "attachment-edit-button", "Edit") : null;
+    if (edit) {
+      edit.type = "button";
+      edit.setAttribute("aria-label", `Open and edit ${attachment.name}`);
+      edit.addEventListener("click", () => openTextAttachmentEditor(attachment.id));
+    }
     const remove = make("button", "attachment-remove-button", "×");
     remove.type = "button";
     remove.setAttribute("aria-label", `Remove ${attachment.name}`);
     remove.addEventListener("click", () => removeAttachment(attachment.id));
-    pill.append(icon, name, meta, remove);
+    pill.append(icon, name, meta);
+    if (edit) pill.append(edit);
+    pill.append(remove);
     tray.append(pill);
   }
 }
@@ -1452,6 +1572,7 @@ function removeAttachment(id, tabId = activeTabId) {
   if (index === -1) return;
   const [removed] = attachments.splice(index, 1);
   if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+  if (activeTextAttachmentEditor?.tabId === tabId && activeTextAttachmentEditor?.attachmentId === id) closeTextAttachmentEditor();
   if (attachments.length === 0) tabAttachments.delete(tabId);
   if (tabId === activeTabId) renderAttachmentTray();
 }
@@ -1461,15 +1582,16 @@ function clearAttachments(tabId = activeTabId) {
   for (const attachment of attachments) {
     if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
   }
+  if (activeTextAttachmentEditor?.tabId === tabId) closeTextAttachmentEditor();
   if (tabId) tabAttachments.delete(tabId);
   if (tabId === activeTabId) renderAttachmentTray();
 }
 
 function addAttachmentFiles(fileList, source = "picker") {
   const files = Array.from(fileList || []).filter(Boolean);
-  if (!files.length) return;
+  if (!files.length) return { added: 0, skipped: [] };
   const attachments = ensureAttachmentsForTab();
-  if (!attachments.length && !activeTabId) return;
+  if (!attachments.length && !activeTabId) return { added: 0, skipped: ["no active tab"] };
   let totalBytes = attachments.reduce((sum, attachment) => sum + attachment.size, 0);
   let added = 0;
   const skipped = [];
@@ -1507,6 +1629,129 @@ function addAttachmentFiles(fileList, source = "picker") {
   renderAttachmentTray();
   if (added) addEvent(`attached ${added} ${added === 1 ? "file" : "files"} from ${source}`, "info");
   if (skipped.length) addEvent(`skipped attachments: ${skipped.join("; ")}`, "warn");
+  return { added, skipped };
+}
+
+function attachLongTextAsFile(text, source = "input text") {
+  if (!shouldAttachTextInsteadOfComposerInput(text)) return false;
+  const normalized = normalizeTextAttachmentContent(text);
+  const lineCount = textLineCount(normalized);
+  const result = addAttachmentFiles([makeTextAttachmentFile(normalized)], `${lineCount}-line ${source}`);
+  return result.added > 0;
+}
+
+function moveLongPromptInputToAttachment() {
+  const text = elements.promptInput.value || "";
+  if (!attachLongTextAsFile(text, "input text")) return false;
+  elements.promptInput.value = "";
+  resizePromptInput();
+  hideCommandSuggestions();
+  return true;
+}
+
+function attachmentById(tabId, id) {
+  return attachmentsForTab(tabId).find((attachment) => attachment.id === id) || null;
+}
+
+function closeTextAttachmentEditor() {
+  if (elements.attachmentTextDialog?.open) elements.attachmentTextDialog.close();
+  else activeTextAttachmentEditor = null;
+}
+
+function setAttachmentTextStatus(message = "", level = "muted") {
+  if (!elements.attachmentTextStatus) return;
+  elements.attachmentTextStatus.textContent = message;
+  elements.attachmentTextStatus.className = `attachment-text-status ${level || "muted"}`;
+}
+
+function renderTextAttachmentEditorMeta() {
+  if (!activeTextAttachmentEditor || !elements.attachmentTextMeta) return;
+  const attachment = attachmentById(activeTextAttachmentEditor.tabId, activeTextAttachmentEditor.attachmentId);
+  if (!attachment) {
+    elements.attachmentTextMeta.textContent = "Attachment no longer exists.";
+    return;
+  }
+  const text = elements.attachmentTextEditor?.value || "";
+  const lineCount = textLineCount(text);
+  elements.attachmentTextMeta.textContent = `${attachment.name} · ${attachment.mimeType} · ${formatBytes(attachment.size)} · ${lineCount} ${lineCount === 1 ? "line" : "lines"}`;
+}
+
+function readFileAsText(file) {
+  if (typeof file?.text === "function") return file.text();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error || new Error("Failed to read text attachment"));
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.readAsText(file);
+  });
+}
+
+async function openTextAttachmentEditor(attachmentId, tabId = activeTabId) {
+  const attachment = attachmentById(tabId, attachmentId);
+  if (!attachment) return;
+  if (!isEditableTextAttachment(attachment)) {
+    addEvent(`${attachment.name || "attachment"} is not editable text`, "warn");
+    return;
+  }
+
+  activeTextAttachmentEditor = { tabId, attachmentId };
+  if (elements.attachmentTextTitle) elements.attachmentTextTitle.textContent = `Edit ${attachment.name || "text attachment"}`;
+  if (elements.attachmentTextEditor) elements.attachmentTextEditor.value = "";
+  if (elements.attachmentTextSaveButton) elements.attachmentTextSaveButton.disabled = true;
+  renderTextAttachmentEditorMeta();
+  setAttachmentTextStatus("Loading text attachment…", "muted");
+  if (elements.attachmentTextDialog && !elements.attachmentTextDialog.open) elements.attachmentTextDialog.showModal();
+
+  try {
+    const text = await readFileAsText(attachment.file);
+    if (activeTextAttachmentEditor?.tabId !== tabId || activeTextAttachmentEditor?.attachmentId !== attachmentId) return;
+    if (elements.attachmentTextEditor) elements.attachmentTextEditor.value = normalizeTextAttachmentContent(text);
+    if (elements.attachmentTextSaveButton) elements.attachmentTextSaveButton.disabled = false;
+    renderTextAttachmentEditorMeta();
+    setAttachmentTextStatus("Edit the text, then save it back to the attachment.", "muted");
+    queueMicrotask(() => elements.attachmentTextEditor?.focus());
+  } catch (error) {
+    if (elements.attachmentTextSaveButton) elements.attachmentTextSaveButton.disabled = true;
+    setAttachmentTextStatus(`Failed to open text attachment: ${error.message || String(error)}`, "error");
+  }
+}
+
+function totalAttachmentBytesWithReplacement(tabId, attachmentId, nextSize) {
+  return attachmentsForTab(tabId).reduce((sum, attachment) => sum + (attachment.id === attachmentId ? nextSize : attachment.size || 0), 0);
+}
+
+function saveTextAttachmentEdit() {
+  if (!activeTextAttachmentEditor) return;
+  const { tabId, attachmentId } = activeTextAttachmentEditor;
+  const attachment = attachmentById(tabId, attachmentId);
+  if (!attachment) {
+    setAttachmentTextStatus("Attachment no longer exists.", "error");
+    return;
+  }
+
+  const text = elements.attachmentTextEditor?.value || "";
+  const name = attachment.name || longInputAttachmentFileName();
+  const mimeType = attachment.mimeType || inferMimeTypeFromName(name) || LONG_INPUT_ATTACHMENT_MIME_TYPE;
+  const nextFile = makeTextAttachmentFile(text, name, mimeType);
+  if (nextFile.size > ATTACHMENT_MAX_FILE_BYTES) {
+    setAttachmentTextStatus(`Edited file is larger than ${formatBytes(ATTACHMENT_MAX_FILE_BYTES)}.`, "error");
+    return;
+  }
+  if (totalAttachmentBytesWithReplacement(tabId, attachmentId, nextFile.size) > ATTACHMENT_MAX_TOTAL_BYTES) {
+    setAttachmentTextStatus(`Edited attachments exceed ${formatBytes(ATTACHMENT_MAX_TOTAL_BYTES)} total.`, "error");
+    return;
+  }
+
+  if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+  attachment.file = nextFile;
+  attachment.name = name;
+  attachment.mimeType = nextFile.type || mimeType;
+  attachment.size = nextFile.size || 0;
+  attachment.kind = attachmentKind(attachment.mimeType, attachment.name);
+  attachment.previewUrl = undefined;
+  if (tabId === activeTabId) renderAttachmentTray();
+  addEvent(`updated text attachment ${attachment.name} (${formatBytes(attachment.size)})`, "info");
+  closeTextAttachmentEditor();
 }
 
 function clipboardFiles(dataTransfer) {
@@ -1534,9 +1779,15 @@ function clipboardFiles(dataTransfer) {
 
 function handleAttachmentPaste(event) {
   const files = clipboardFiles(event.clipboardData);
-  if (!files.length) return;
+  if (files.length) {
+    event.preventDefault();
+    addAttachmentFiles(files, "clipboard");
+    return;
+  }
+
+  const text = event.clipboardData?.getData("text/plain") || "";
+  if (!attachLongTextAsFile(text, "clipboard text")) return;
   event.preventDefault();
-  addAttachmentFiles(files, "clipboard");
 }
 
 function isFileDrag(event) {
@@ -2625,7 +2876,7 @@ function restoreActiveDraft() {
 
 function focusPromptInput({ defer = false } = {}) {
   const focus = () => {
-    if (!elements.promptInput || elements.dialog.open || elements.pathPickerDialog.open || elements.nativeCommandDialog.open || elements.appRunnerInfoDialog?.open || elements.promptListDialog?.open || document.visibilityState === "hidden") return;
+    if (!elements.promptInput || elements.dialog.open || elements.pathPickerDialog.open || elements.nativeCommandDialog.open || elements.appRunnerInfoDialog?.open || elements.promptListDialog?.open || elements.attachmentTextDialog?.open || document.visibilityState === "hidden") return;
     try {
       elements.promptInput.focus({ preventScroll: true });
     } catch {
@@ -5917,6 +6168,8 @@ function setGitWorkflow(patch, { tabId = activeTabId } = {}) {
   const workflow = gitWorkflowForTab(tabId);
   if (!workflow) return null;
   Object.assign(workflow, patch);
+  workflow.actionsDone = createGitWorkflowActionsDone(workflow.actionsDone);
+  if (patch.step && !("process" in patch)) workflow.process = gitWorkflowProcessForStep(workflow.step, workflow.process);
   if (tabId === activeTabId) {
     gitWorkflow = workflow;
     renderGitWorkflow();
@@ -5952,13 +6205,125 @@ function formatCommitMessagePreview(message) {
   return [`=== SHORT ===`, message.short || "(empty)", "", "=== LONG ===", message.long || "(empty)"].join("\n");
 }
 
-function addGitWorkflowAction(label, handler, className = "", disabled = gitWorkflow.busy) {
+function gitWorkflowMessageTitle(message) {
+  return String(message?.short || message?.long || "").split("\n").find((line) => line.trim())?.trim() || "Pull request";
+}
+
+function slugifyGitBranchPart(value) {
+  return String(value || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+}
+
+function defaultGitPrBranchName(message = gitWorkflow.message) {
+  const title = gitWorkflowMessageTitle(message);
+  const match = title.match(/^([a-z][a-z0-9-]*)(?:\([^)]*\))?:\s*(.+)$/i);
+  const type = slugifyGitBranchPart(match?.[1] || "feat") || "feat";
+  const summary = slugifyGitBranchPart(match?.[2] || title) || "feature";
+  return `${type}/${summary}`;
+}
+
+function formatGitPrPreview(pr) {
+  if (!pr) return "No PR description loaded yet.";
+  const header = [`=== PR DESCRIPTION ===`, `Branch: ${pr.branch || gitWorkflow.prBranch || "current branch"}`];
+  if (pr.path) header.push(`File: ${pr.path}`);
+  return [...header, "", pr.body || "(empty)"].join("\n");
+}
+
+function addGitWorkflowAction(label, handler, className = "", disabled = gitWorkflow.busy, tooltip = "") {
   const button = make("button", className, label);
   button.type = "button";
   button.disabled = disabled;
+  if (tooltip) {
+    button.title = tooltip;
+    button.dataset.tooltip = tooltip;
+    button.setAttribute("aria-label", `${label}. ${tooltip.replace(/\s+/g, " ")}`);
+  }
   button.addEventListener("click", handler);
   elements.gitWorkflowActions.append(button);
   return button;
+}
+
+function setGitPrDialogStatus(message = "", level = "muted") {
+  if (!elements.gitPrStatus) return;
+  elements.gitPrStatus.textContent = message;
+  elements.gitPrStatus.className = `git-pr-status ${level || "muted"}`;
+}
+
+function resolveGitPrDialog(value) {
+  const resolve = activeGitPrDialogResolve;
+  activeGitPrDialogResolve = null;
+  if (elements.gitPrDialog?.open) elements.gitPrDialog.close();
+  if (resolve) resolve(value);
+}
+
+function openGitPrReviewDialog(pr, { title = "" } = {}) {
+  if (!elements.gitPrDialog || !elements.gitPrTitleInput || !elements.gitPrBodyEditor) return Promise.resolve(null);
+  if (activeGitPrDialogResolve) resolveGitPrDialog(null);
+  elements.gitPrTitleInput.value = title || gitWorkflowMessageTitle(gitWorkflow.message);
+  elements.gitPrBodyEditor.value = pr?.body || "";
+  setGitPrDialogStatus(`Review ${pr?.path || "the generated PR description"}. Edit if needed, then create the pull request.`);
+  return new Promise((resolve) => {
+    activeGitPrDialogResolve = resolve;
+    elements.gitPrDialog.showModal();
+    queueMicrotask(() => elements.gitPrBodyEditor.focus());
+  });
+}
+
+function gitWorkflowProcessForStep(step = gitWorkflow.step, fallback = gitWorkflow.process || "stage") {
+  switch (step) {
+    case "generate":
+    case "generating":
+      return "message";
+    case "message":
+    case "branchNaming":
+    case "branching":
+    case "committing":
+      return "commit";
+    case "push":
+    case "pushing":
+    case "prGenerating":
+    case "prReview":
+    case "prCreating":
+    case "done":
+      return "push";
+    case "add":
+    case "idle":
+      return "stage";
+    case "cancelled":
+    case "error":
+      return GIT_WORKFLOW_PROCESS_VALUES.has(fallback) ? fallback : "stage";
+    default:
+      return "stage";
+  }
+}
+
+function selectGitWorkflowProcess(processValue, tabId = gitWorkflowActionTabId()) {
+  const workflow = gitWorkflowForTab(tabId);
+  if (!workflow) return;
+  const process = GIT_WORKFLOW_PROCESS_VALUES.has(processValue) ? processValue : "stage";
+  workflow.runId += 1;
+  const runId = workflow.runId;
+  const base = { active: true, process, busy: false, error: "", messageRequestedAt: 0, branchName: "", branchNameRequestedAt: 0, prMode: false, prBranch: "", pr: null, prRequestedAt: 0 };
+
+  if (process === "stage") {
+    setGitWorkflow({ ...base, step: "add", message: null, output: "Ready to stage all changes with git add ." }, { tabId });
+    return;
+  }
+  if (process === "message") {
+    setGitWorkflow({ ...base, step: "generate", message: null, output: "Ready to generate a commit message from the currently staged changes." }, { tabId });
+    return;
+  }
+  if (process === "commit") {
+    setGitWorkflow({ ...base, step: "message", message: null, output: "Loading current generated commit message files…" }, { tabId });
+    loadGitWorkflowMessage({ requireFresh: false, runId, tabId });
+    return;
+  }
+  setGitWorkflow({ ...base, step: "push", output: "Ready to run git push for the current branch." }, { tabId });
 }
 
 function gitWorkflowTitle() {
@@ -5966,10 +6331,15 @@ function gitWorkflowTitle() {
     case "add": return "Stage all changes";
     case "generate": return "Generate staged commit message";
     case "generating": return "Waiting for /git-staged-msg";
-    case "message": return "Choose commit message";
+    case "message": return gitWorkflow.prMode ? "Choose PR branch commit message" : "Choose commit message";
+    case "branchNaming": return "Waiting for branch name";
+    case "branching": return "Creating PR branch";
     case "committing": return "Committing";
-    case "push": return "Push commit";
+    case "push": return gitWorkflow.prMode ? "Push branch and create PR" : "Push commit";
     case "pushing": return "Pushing";
+    case "prGenerating": return "Waiting for /pr";
+    case "prReview": return "Review PR description";
+    case "prCreating": return "Creating pull request";
     case "done": return "Git workflow complete";
     case "cancelled": return "Git workflow cancelled";
     case "error": return "Git workflow needs attention";
@@ -5982,11 +6352,16 @@ function gitWorkflowHint() {
     case "add": return "Step 1: run git add . in the current Pi working directory.";
     case "generate": return "Step 2: run /git-staged-msg, then preview the generated files.";
     case "generating": return "Pi is generating dev/COMMIT/staged-commit-short.txt and staged-commit-long.txt.";
-    case "message": return "Step 3/4: preview the native g-msg output and choose short or long commit.";
+    case "message": return gitWorkflow.prMode ? `Branch ${gitWorkflow.prBranch || "created"}: choose short or long commit before opening a PR.` : "Step 3/4: preview the native g-msg output, commit here, or create a PR branch first.";
+    case "branchNaming": return "Pi is generating dev/COMMIT/staged-branch-name.txt. Cancel will request Pi abort.";
+    case "branching": return "Creating a new branch with git switch -c before committing.";
     case "committing": return "Running native git commit from the generated message file.";
-    case "push": return "Step 5: push the new commit to the configured remote.";
+    case "push": return gitWorkflow.prMode ? "Push the PR branch, generate /pr, review the description, then create the pull request." : "Step 5: push the new commit to the configured remote.";
     case "pushing": return "Running git push. Cancel will request process termination.";
-    case "done": return "Push finished. Review the output below.";
+    case "prGenerating": return "Pi is generating dev/PR/<current-branch>.md with /pr.";
+    case "prReview": return "Review or edit the generated PR description before creating the pull request.";
+    case "prCreating": return "Running gh pr create with the confirmed description.";
+    case "done": return gitWorkflow.prMode ? "PR workflow finished. Review the output below." : "Push finished. Review the output below.";
     case "cancelled": return "No further workflow steps will run.";
     case "error": return gitWorkflow.error || "Fix the issue, then retry or restart.";
     default: return "Stage changes, generate a commit message, commit, and push.";
@@ -6004,9 +6379,14 @@ function renderGitWorkflow() {
   elements.gitWorkflowActions.replaceChildren();
 
   const activeIndex = GIT_WORKFLOW_ACTIVE_INDEX[gitWorkflow.step] ?? 0;
-  for (const [index, label] of GIT_WORKFLOW_STEPS.entries()) {
-    const item = make("span", "git-workflow-step", label);
-    if (gitWorkflow.step === "done" || index < activeIndex) item.classList.add("done");
+  const activeProcess = gitWorkflowProcessForStep(gitWorkflow.step, gitWorkflow.process);
+  for (const [index, process] of GIT_WORKFLOW_PROCESSES.entries()) {
+    const item = make("button", "git-workflow-step", process.label);
+    item.type = "button";
+    item.dataset.gitWorkflowProcess = process.value;
+    item.disabled = !!gitWorkflow.busy;
+    item.setAttribute("aria-pressed", String(process.value === activeProcess));
+    if (gitWorkflowActionDone(gitWorkflow, process.value)) item.classList.add("done");
     if (index === activeIndex && !["done", "cancelled", "error"].includes(gitWorkflow.step)) item.classList.add("active");
     elements.gitWorkflowSteps.append(item);
   }
@@ -6022,11 +6402,28 @@ function renderGitWorkflow() {
   } else if (gitWorkflow.step === "generating") {
     addGitWorkflowAction("Refresh message preview", () => loadGitWorkflowMessage({ requireFresh: true }), "", false);
   } else if (gitWorkflow.step === "message") {
-    addGitWorkflowAction("Commit short", () => commitGitWorkflow("short"), "primary", false);
-    addGitWorkflowAction("Commit long", () => commitGitWorkflow("long"), "primary", false);
+    if (!gitWorkflow.prMode) {
+      addGitWorkflowAction("Create PR", () => createGitPrBranch(), "primary", false, GIT_WORKFLOW_CREATE_PR_TOOLTIP);
+      addGitWorkflowAction("Manual branch", () => createGitPrBranchManually(), "", false, GIT_WORKFLOW_MANUAL_BRANCH_TOOLTIP);
+    }
+    addGitWorkflowAction("Commit short", () => commitGitWorkflow("short"), gitWorkflow.prMode ? "primary" : "", false);
+    addGitWorkflowAction("Commit long", () => commitGitWorkflow("long"), gitWorkflow.prMode ? "primary" : "", false);
     addGitWorkflowAction("Regenerate", () => runGitMessagePrompt(), "", false);
+  } else if (gitWorkflow.step === "branchNaming") {
+    addGitWorkflowAction("Refresh branch name", () => loadGitWorkflowBranchName({ requireFresh: true }), "", false);
+    addGitWorkflowAction("Manual branch", () => createGitPrBranchManually(), "", !!gitWorkflow.busy, GIT_WORKFLOW_MANUAL_BRANCH_TOOLTIP);
+  } else if (gitWorkflow.step === "branching") {
+    addGitWorkflowAction("Creating branch…", () => {}, "primary", true);
   } else if (gitWorkflow.step === "push") {
-    addGitWorkflowAction("Run git push", () => pushGitWorkflow(), "primary", false);
+    if (gitWorkflow.prMode) addGitWorkflowAction("Push and Create PR", () => pushAndCreatePrGitWorkflow(), "primary", false);
+    else addGitWorkflowAction("Run git push", () => pushGitWorkflow(), "primary", false);
+  } else if (gitWorkflow.step === "prGenerating") {
+    addGitWorkflowAction("Refresh PR description", () => loadGitWorkflowPr({ requireFresh: true }), "", false);
+  } else if (gitWorkflow.step === "prReview") {
+    addGitWorkflowAction("Create PR", () => createGitPrFromReview(), "primary", false);
+    addGitWorkflowAction("Regenerate /pr", () => runGitPrPrompt(), "", false);
+  } else if (gitWorkflow.step === "prCreating") {
+    addGitWorkflowAction("Creating PR…", () => {}, "primary", true);
   } else if (gitWorkflow.step === "done") {
     addGitWorkflowAction("Close", () => setGitWorkflow({ active: false }), "primary", false);
     addGitWorkflowAction("Start another", () => startGitWorkflow(), "", false);
@@ -6076,11 +6473,19 @@ function startGitWorkflow(tabId = activeTabId) {
   setGitWorkflow({
     active: true,
     step: "add",
+    process: "stage",
     busy: false,
-    output: "Ready to stage all changes with git add .\n\nNative mode is used for g-msg/g-short/g-long: dev/COMMIT message files are read directly and git commit is run without fish.",
+    output: "Ready to stage all changes with git add .\n\nNative mode is used for g-msg/g-short/g-long: dev/COMMIT message files are read directly and git commit is run without fish. After the message is generated, use Create PR to switch to a new branch before committing.",
     error: "",
     message: null,
     messageRequestedAt: 0,
+    branchName: "",
+    branchNameRequestedAt: 0,
+    actionsDone: createGitWorkflowActionsDone(),
+    prMode: false,
+    prBranch: "",
+    pr: null,
+    prRequestedAt: 0,
   }, { tabId });
 }
 
@@ -6088,7 +6493,8 @@ async function cancelGitWorkflow(tabId = gitWorkflowActionTabId()) {
   const tabContext = activeTabContext(tabId);
   const workflow = gitWorkflowForTab(tabId, { create: false });
   if (!workflow?.active) return;
-  const shouldAbortPi = workflow.step === "generating";
+  const shouldAbortPi = workflow.step === "generating" || workflow.step === "branchNaming" || workflow.step === "prGenerating";
+  if (activeGitPrDialogResolve) resolveGitPrDialog(null);
   workflow.runId += 1;
   setGitWorkflow({ step: "cancelled", busy: false, error: "", output: `${workflow.output || ""}${workflow.output ? "\n\n" : ""}Cancelled by user.` }, { tabId });
   if (shouldAbortPi && isCurrentTabContext(tabContext)) setRunIndicatorActivity("Abort requested; checking whether Pi stopped…");
@@ -6108,7 +6514,7 @@ async function runGitAdd(tabId = gitWorkflowActionTabId()) {
   try {
     const result = await gitWorkflowRequest("/api/git-workflow/add", { runId, tabId });
     if (!result) return;
-    setGitWorkflow({ step: "generate", busy: false, output: `${formatGitCommandResult(result)}\n\nStaged. Next: run /git-staged-msg.` }, { tabId });
+    setGitWorkflow({ step: "generate", busy: false, ...gitWorkflowActionDonePatch(workflow, "stage"), output: `${formatGitCommandResult(result)}\n\nStaged. Next: run /git-staged-msg.` }, { tabId });
     if (isCurrentTabContext(tabContext)) scheduleRefreshFooter();
   } catch (error) {
     if (isCurrentGitWorkflowRun(runId, tabId)) failGitWorkflow(error, "add", { tabId });
@@ -6172,6 +6578,7 @@ async function loadGitWorkflowMessage({ requireFresh = false, retries = 0, runId
       busy: false,
       error: "",
       message,
+      ...(requireFresh && currentWorkflow.messageRequestedAt ? gitWorkflowActionDonePatch(currentWorkflow, "message") : {}),
       output: formatCommitMessagePreview(message),
     }, { tabId });
   } catch (error) {
@@ -6185,6 +6592,130 @@ async function loadGitWorkflowMessage({ requireFresh = false, retries = 0, runId
   }
 }
 
+function gitBranchNamePromptMessage() {
+  if (hasAvailableCommand("git-branch-name")) return "/git-branch-name";
+  return [
+    "Generate one PR branch name for the current staged work.",
+    "Inspect only staged changes (`git diff --cached`) and the generated commit message files if present:",
+    "- dev/COMMIT/staged-commit-short.txt",
+    "- dev/COMMIT/staged-commit-long.txt",
+    "",
+    "Write exactly one line to dev/COMMIT/staged-branch-name.txt in this format:",
+    "<type>/<short-feature-name>",
+    "",
+    "Rules: use lowercase kebab-case, no spaces/underscores/uppercase/trailing punctuation, 2-5 words after the slash, and no extra lines or prose in the file.",
+  ].join("\n");
+}
+
+async function createGitPrBranch(tabId = gitWorkflowActionTabId()) {
+  await runGitBranchNamePrompt(tabId);
+}
+
+async function createGitPrBranchManually(tabId = gitWorkflowActionTabId()) {
+  const workflow = gitWorkflowForTab(tabId, { create: false });
+  if (!workflow) return;
+  await createGitPrBranchWithSuggestion(workflow.branchName || defaultGitPrBranchName(workflow.message), tabId);
+}
+
+async function runGitBranchNamePrompt(tabId = gitWorkflowActionTabId()) {
+  const tabContext = activeTabContext(tabId);
+  const targetTab = tabs.find((tab) => tab.id === tabId);
+  const targetBusy = tabId === activeTabId ? !!currentState?.isStreaming : activityForTab(targetTab).isWorking;
+  if (targetBusy) {
+    failGitWorkflow(new Error("Pi is currently running. Wait for it to finish or abort before generating a branch name."), "message", { tabId });
+    return;
+  }
+  const workflow = gitWorkflowForTab(tabId, { create: false });
+  if (!workflow) return;
+  const runId = workflow.runId;
+  const requestedAt = Date.now();
+  setGitWorkflow({
+    step: "branchNaming",
+    busy: true,
+    error: "",
+    branchNameRequestedAt: requestedAt,
+    output: "Sending branch-name request to Pi.\n\nCancel will request Pi abort.",
+  }, { tabId });
+  if (isCurrentTabContext(tabContext)) setRunIndicatorActivity("Sending branch-name request to Pi…");
+  try {
+    await api("/api/prompt", { method: "POST", body: { message: gitBranchNamePromptMessage() }, tabId });
+    if (!isCurrentGitWorkflowRun(runId, tabId)) return;
+    appendGitWorkflowOutput("Branch-name request accepted. Waiting for agent_end, then the branch name will be loaded.", { tabId });
+    if (isCurrentTabContext(tabContext)) scheduleRefreshState(120, tabContext);
+    setTimeout(() => {
+      const currentWorkflow = gitWorkflowForTab(tabId, { create: false });
+      const targetStillBusy = tabId === activeTabId && currentState?.isStreaming;
+      if (isCurrentGitWorkflowRun(runId, tabId) && currentWorkflow?.step === "branchNaming" && !targetStillBusy) {
+        loadGitWorkflowBranchName({ requireFresh: true, retries: 1, runId, tabId });
+      }
+    }, 2500);
+  } catch (error) {
+    if (isCurrentGitWorkflowRun(runId, tabId)) {
+      if (isCurrentTabContext(tabContext)) clearRunIndicatorActivity();
+      failGitWorkflow(error, "message", { tabId });
+    }
+  }
+}
+
+async function loadGitWorkflowBranchName({ requireFresh = false, retries = 0, runId, tabId = activeTabId } = {}) {
+  const workflow = gitWorkflowForTab(tabId, { create: false });
+  const expectedRunId = runId ?? workflow?.runId;
+  try {
+    const branchName = await gitWorkflowRequest("/api/git-workflow/branch-name", { method: "GET", runId: expectedRunId, tabId });
+    if (!branchName) return;
+    const currentWorkflow = gitWorkflowForTab(tabId, { create: false });
+    if (!currentWorkflow) return;
+    if (requireFresh && currentWorkflow.branchNameRequestedAt && (branchName.mtimeMs || 0) + 10000 < currentWorkflow.branchNameRequestedAt) {
+      throw new Error("Generated branch name has not refreshed yet.");
+    }
+    const branch = branchName.branch || defaultGitPrBranchName(currentWorkflow.message);
+    setGitWorkflow({
+      step: "message",
+      busy: false,
+      error: "",
+      branchName: branch,
+      output: `${formatCommitMessagePreview(currentWorkflow.message)}\n\nGenerated branch name: ${branch}`,
+    }, { tabId });
+    await createGitPrBranchWithSuggestion(branch, tabId, expectedRunId);
+  } catch (error) {
+    if (!isCurrentGitWorkflowRun(expectedRunId, tabId)) return;
+    if (retries > 0) {
+      setTimeout(() => loadGitWorkflowBranchName({ requireFresh, retries: retries - 1, runId: expectedRunId, tabId }), 1400);
+      return;
+    }
+    const currentWorkflow = gitWorkflowForTab(tabId, { create: false });
+    failGitWorkflow(error, currentWorkflow?.step === "branchNaming" ? "message" : currentWorkflow?.step, { tabId });
+  }
+}
+
+async function createGitPrBranchWithSuggestion(suggestion, tabId = gitWorkflowActionTabId(), expectedRunId) {
+  const workflow = gitWorkflowForTab(tabId, { create: false });
+  if (!workflow) return;
+  const proposedBranch = prompt("New PR branch name (example: type/feature-name)", suggestion || defaultGitPrBranchName(workflow.message));
+  if (expectedRunId !== undefined && !isCurrentGitWorkflowRun(expectedRunId, tabId)) return;
+  if (proposedBranch === null) {
+    setGitWorkflow({ step: "message", busy: false, output: `${formatCommitMessagePreview(workflow.message)}\n\nPR branch creation cancelled. Use Create PR to generate a branch name again or Manual branch to type one.` }, { tabId });
+    return;
+  }
+  const branch = proposedBranch.trim();
+  if (!branch) {
+    failGitWorkflow(new Error("Branch name is required to create a PR branch."), "message", { tabId });
+    return;
+  }
+  const runId = workflow.runId;
+  setGitWorkflow({ step: "branching", prMode: true, prBranch: branch, branchName: branch, busy: true, error: "", output: `${formatCommitMessagePreview(workflow.message)}\n\nRunning git switch -c ${branch}…` }, { tabId });
+  try {
+    const result = await gitWorkflowRequest("/api/git-workflow/branch", { body: { branch }, runId, tabId });
+    if (!result) return;
+    setGitWorkflow({ step: "message", prMode: true, prBranch: result.branch || branch, branchName: result.branch || branch, busy: false, output: `${formatGitCommandResult(result)}\n\nCreated PR branch ${result.branch || branch}. Choose Commit short or Commit long to commit on this branch.` }, { tabId });
+  } catch (error) {
+    if (isCurrentGitWorkflowRun(runId, tabId)) {
+      setGitWorkflow({ prMode: false, prBranch: "" }, { tabId });
+      failGitWorkflow(error, "message", { tabId });
+    }
+  }
+}
+
 async function commitGitWorkflow(variant, tabId = gitWorkflowActionTabId()) {
   const tabContext = activeTabContext(tabId);
   const workflow = gitWorkflowForTab(tabId, { create: false });
@@ -6194,7 +6725,8 @@ async function commitGitWorkflow(variant, tabId = gitWorkflowActionTabId()) {
   try {
     const result = await gitWorkflowRequest("/api/git-workflow/commit", { body: { variant }, runId, tabId });
     if (!result) return;
-    setGitWorkflow({ step: "push", busy: false, output: `${formatGitCommandResult(result)}\n\nCommit created. Next: git push.` }, { tabId });
+    const nextAction = workflow.prMode ? "Push and Create PR." : "git push.";
+    setGitWorkflow({ step: "push", busy: false, ...gitWorkflowActionDonePatch(workflow, "commit"), output: `${formatGitCommandResult(result)}\n\nCommit created. Next: ${nextAction}` }, { tabId });
     if (isCurrentTabContext(tabContext)) scheduleRefreshFooter();
   } catch (error) {
     if (isCurrentGitWorkflowRun(runId, tabId)) failGitWorkflow(error, "message", { tabId });
@@ -6210,10 +6742,126 @@ async function pushGitWorkflow(tabId = gitWorkflowActionTabId()) {
   try {
     const result = await gitWorkflowRequest("/api/git-workflow/push", { runId, tabId });
     if (!result) return;
-    setGitWorkflow({ step: "done", busy: false, output: formatGitCommandResult(result) || "git push finished." }, { tabId });
+    setGitWorkflow({ step: "done", busy: false, ...gitWorkflowActionDonePatch(workflow, "push"), output: formatGitCommandResult(result) || "git push finished." }, { tabId });
     if (isCurrentTabContext(tabContext)) scheduleRefreshFooter();
   } catch (error) {
     if (isCurrentGitWorkflowRun(runId, tabId)) failGitWorkflow(error, "push", { tabId });
+  }
+}
+
+async function runGitPrPrompt(tabId = gitWorkflowActionTabId(), { prefixOutput = "" } = {}) {
+  const tabContext = activeTabContext(tabId);
+  const targetTab = tabs.find((tab) => tab.id === tabId);
+  const targetBusy = tabId === activeTabId ? !!currentState?.isStreaming : activityForTab(targetTab).isWorking;
+  if (targetBusy) {
+    failGitWorkflow(new Error("Pi is currently running. Wait for it to finish or abort before generating a PR description."), "push", { tabId });
+    return;
+  }
+  if (!hasAvailableCommand("pr")) {
+    failGitWorkflow(new Error(commandUnavailableMessage("pr")), "push", { tabId });
+    return;
+  }
+  const workflow = gitWorkflowForTab(tabId, { create: false });
+  if (!workflow) return;
+  const runId = workflow.runId;
+  const requestedAt = Date.now();
+  setGitWorkflow({
+    step: "prGenerating",
+    busy: true,
+    error: "",
+    prRequestedAt: requestedAt,
+    output: `${prefixOutput ? `${prefixOutput}\n\n` : ""}Sending /pr to Pi.\n\nCancel will request Pi abort.`,
+  }, { tabId });
+  if (isCurrentTabContext(tabContext)) setRunIndicatorActivity("Sending /pr to Pi…");
+  try {
+    await api("/api/prompt", { method: "POST", body: { message: "/pr" }, tabId });
+    if (!isCurrentGitWorkflowRun(runId, tabId)) return;
+    appendGitWorkflowOutput("/pr accepted. Waiting for agent_end, then the PR description will be loaded.", { tabId });
+    if (isCurrentTabContext(tabContext)) scheduleRefreshState(120, tabContext);
+    setTimeout(() => {
+      const currentWorkflow = gitWorkflowForTab(tabId, { create: false });
+      const targetStillBusy = tabId === activeTabId && currentState?.isStreaming;
+      if (isCurrentGitWorkflowRun(runId, tabId) && currentWorkflow?.step === "prGenerating" && !targetStillBusy) {
+        loadGitWorkflowPr({ requireFresh: true, retries: 1, runId, tabId });
+      }
+    }, 2500);
+  } catch (error) {
+    if (isCurrentGitWorkflowRun(runId, tabId)) {
+      if (isCurrentTabContext(tabContext)) clearRunIndicatorActivity();
+      failGitWorkflow(error, "push", { tabId });
+    }
+  }
+}
+
+async function loadGitWorkflowPr({ requireFresh = false, retries = 0, runId, tabId = activeTabId } = {}) {
+  const workflow = gitWorkflowForTab(tabId, { create: false });
+  const expectedRunId = runId ?? workflow?.runId;
+  try {
+    const pr = await gitWorkflowRequest("/api/git-workflow/pr-description", { method: "GET", runId: expectedRunId, tabId });
+    if (!pr) return;
+    const currentWorkflow = gitWorkflowForTab(tabId, { create: false });
+    if (!currentWorkflow) return;
+    if (requireFresh && currentWorkflow.prRequestedAt && (pr.mtimeMs || 0) + 10000 < currentWorkflow.prRequestedAt) {
+      throw new Error("Generated PR description has not refreshed yet.");
+    }
+    setGitWorkflow({
+      step: "prReview",
+      busy: false,
+      error: "",
+      pr,
+      prBranch: pr.branch || currentWorkflow.prBranch,
+      output: formatGitPrPreview(pr),
+    }, { tabId });
+  } catch (error) {
+    if (!isCurrentGitWorkflowRun(expectedRunId, tabId)) return;
+    if (retries > 0) {
+      setTimeout(() => loadGitWorkflowPr({ requireFresh, retries: retries - 1, runId: expectedRunId, tabId }), 1400);
+      return;
+    }
+    const currentWorkflow = gitWorkflowForTab(tabId, { create: false });
+    failGitWorkflow(error, currentWorkflow?.step === "prGenerating" ? "push" : currentWorkflow?.step, { tabId });
+  }
+}
+
+async function pushAndCreatePrGitWorkflow(tabId = gitWorkflowActionTabId()) {
+  const tabContext = activeTabContext(tabId);
+  const workflow = gitWorkflowForTab(tabId, { create: false });
+  if (!workflow) return;
+  const runId = workflow.runId;
+  const branch = workflow.prBranch || "current branch";
+  setGitWorkflow({ step: "pushing", busy: true, error: "", output: `Pushing PR branch ${branch}…` }, { tabId });
+  try {
+    const result = await gitWorkflowRequest("/api/git-workflow/push", { body: { setUpstream: true, branch: workflow.prBranch }, runId, tabId });
+    if (!result) return;
+    setGitWorkflow({ ...gitWorkflowActionDonePatch(workflow, "push") }, { tabId });
+    if (isCurrentTabContext(tabContext)) scheduleRefreshFooter();
+    await runGitPrPrompt(tabId, { prefixOutput: `${formatGitCommandResult(result)}\n\nPushed PR branch ${result.branch || branch}.` });
+  } catch (error) {
+    if (isCurrentGitWorkflowRun(runId, tabId)) failGitWorkflow(error, "push", { tabId });
+  }
+}
+
+async function createGitPrFromReview(tabId = gitWorkflowActionTabId()) {
+  const tabContext = activeTabContext(tabId);
+  const workflow = gitWorkflowForTab(tabId, { create: false });
+  if (!workflow?.pr) return;
+  const runId = workflow.runId;
+  const review = await openGitPrReviewDialog(workflow.pr, { title: gitWorkflowMessageTitle(workflow.message) });
+  if (!isCurrentGitWorkflowRun(runId, tabId)) return;
+  if (!review) {
+    setGitWorkflow({ step: "prReview", busy: false, output: `${formatGitPrPreview(workflow.pr)}\n\nPR creation cancelled. Edit the description, regenerate /pr, or press Create PR again.` }, { tabId });
+    return;
+  }
+  const title = review.title.trim();
+  const body = review.body.trimEnd();
+  setGitWorkflow({ step: "prCreating", busy: true, error: "", output: `${formatGitPrPreview({ ...workflow.pr, body })}\n\nCreating pull request with gh pr create…` }, { tabId });
+  try {
+    const result = await gitWorkflowRequest("/api/git-workflow/create-pr", { body: { title, body }, runId, tabId });
+    if (!result) return;
+    setGitWorkflow({ step: "done", busy: false, ...gitWorkflowActionDonePatch(workflow, "push"), output: `${formatGitCommandResult(result)}\n\nPull request created.` }, { tabId });
+    if (isCurrentTabContext(tabContext)) scheduleRefreshFooter();
+  } catch (error) {
+    if (isCurrentGitWorkflowRun(runId, tabId)) failGitWorkflow(error, "prReview", { tabId });
   }
 }
 
@@ -6229,6 +6877,22 @@ function resumeGitWorkflowForActiveTab(tabContext = activeTabContext()) {
       return;
     }
     loadGitWorkflowMessage({ requireFresh: true, retries: 3, runId: gitWorkflow.runId, tabId: workflowTabId });
+  }
+  if (workflowTabId === tabContext.tabId && gitWorkflow.active && gitWorkflow.step === "branchNaming" && !currentState?.isStreaming) {
+    const retryDelayMs = Math.max(0, 2500 - (Date.now() - (gitWorkflow.branchNameRequestedAt || 0)));
+    if (retryDelayMs > 0) {
+      setTimeout(() => resumeGitWorkflowForActiveTab(tabContext), retryDelayMs);
+      return;
+    }
+    loadGitWorkflowBranchName({ requireFresh: true, retries: 3, runId: gitWorkflow.runId, tabId: workflowTabId });
+  }
+  if (workflowTabId === tabContext.tabId && gitWorkflow.active && gitWorkflow.step === "prGenerating" && !currentState?.isStreaming) {
+    const retryDelayMs = Math.max(0, 2500 - (Date.now() - (gitWorkflow.prRequestedAt || 0)));
+    if (retryDelayMs > 0) {
+      setTimeout(() => resumeGitWorkflowForActiveTab(tabContext), retryDelayMs);
+      return;
+    }
+    loadGitWorkflowPr({ requireFresh: true, retries: 3, runId: gitWorkflow.runId, tabId: workflowTabId });
   }
 }
 
@@ -11596,6 +12260,10 @@ function handleEvent(event) {
         const workflow = gitWorkflowForTab(workflowTabId, { create: false });
         if (workflow?.active && workflow.step === "generating") {
           loadGitWorkflowMessage({ requireFresh: true, retries: 3, runId: workflow.runId, tabId: workflowTabId });
+        } else if (workflow?.active && workflow.step === "branchNaming") {
+          loadGitWorkflowBranchName({ requireFresh: true, retries: 3, runId: workflow.runId, tabId: workflowTabId });
+        } else if (workflow?.active && workflow.step === "prGenerating") {
+          loadGitWorkflowPr({ requireFresh: true, retries: 3, runId: workflow.runId, tabId: workflowTabId });
         }
       }
       break;
@@ -11750,6 +12418,23 @@ elements.promptListSaveButton?.addEventListener("click", saveDisplayedPromptList
 elements.promptListRunListButton?.addEventListener("click", () => runDisplayedPromptList());
 elements.promptListCloseButton?.addEventListener("click", () => elements.promptListDialog?.close());
 elements.promptListDialog?.querySelector("form")?.addEventListener("submit", (event) => event.preventDefault());
+elements.attachmentTextCancelButton?.addEventListener("click", closeTextAttachmentEditor);
+elements.attachmentTextSaveButton?.addEventListener("click", saveTextAttachmentEdit);
+elements.attachmentTextEditor?.addEventListener("input", () => {
+  renderTextAttachmentEditorMeta();
+  setAttachmentTextStatus("Unsaved attachment edits.", "warn");
+});
+elements.attachmentTextDialog?.addEventListener("close", () => {
+  activeTextAttachmentEditor = null;
+  if (elements.attachmentTextEditor) elements.attachmentTextEditor.value = "";
+  setAttachmentTextStatus("");
+});
+elements.attachmentTextDialog?.addEventListener("keydown", (event) => {
+  if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.key.toLowerCase() !== "s") return;
+  event.preventDefault();
+  if (!elements.attachmentTextSaveButton?.disabled) saveTextAttachmentEdit();
+});
+elements.attachmentTextDialog?.querySelector("form")?.addEventListener("submit", (event) => event.preventDefault());
 elements.sendFeedbackButton.addEventListener("click", () => submitQueuedActionFeedback());
 elements.composer.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -11938,7 +12623,32 @@ elements.optionsSettingsButton.addEventListener("click", () => runNativeCommandM
 elements.optionsExportButton.addEventListener("click", () => runNativeCommandMenu("/export"));
 elements.optionsForkButton.addEventListener("click", () => runNativeCommandMenu("/fork"));
 elements.optionsTreeButton.addEventListener("click", () => runNativeCommandMenu("/tree"));
+elements.gitWorkflowSteps.addEventListener("click", (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  const button = target?.closest("[data-git-workflow-process]");
+  if (!button || !elements.gitWorkflowSteps.contains(button) || button.disabled) return;
+  selectGitWorkflowProcess(button.dataset.gitWorkflowProcess);
+});
 elements.gitWorkflowCancelButton.addEventListener("click", () => cancelGitWorkflow());
+elements.gitPrCancelButton?.addEventListener("click", () => resolveGitPrDialog(null));
+elements.gitPrCreateButton?.addEventListener("click", () => {
+  const title = elements.gitPrTitleInput?.value.trim() || "";
+  const body = elements.gitPrBodyEditor?.value.trimEnd() || "";
+  if (!title) {
+    setGitPrDialogStatus("PR title is required.", "error");
+    elements.gitPrTitleInput?.focus();
+    return;
+  }
+  if (!body.trim()) {
+    setGitPrDialogStatus("PR description is required.", "error");
+    elements.gitPrBodyEditor?.focus();
+    return;
+  }
+  resolveGitPrDialog({ title, body });
+});
+elements.gitPrDialog?.addEventListener("close", () => {
+  if (activeGitPrDialogResolve) resolveGitPrDialog(null);
+});
 elements.nativeCommandDialog.addEventListener("close", () => {
   elements.nativeCommandSearch.oninput = null;
   nativeCommandTabId = null;
@@ -12389,6 +13099,7 @@ elements.promptInput.addEventListener("keydown", (event) => {
 
 elements.promptInput.addEventListener("input", () => {
   resetPromptHistoryNavigation();
+  if (moveLongPromptInputToAttachment()) return;
   resizePromptInput();
   renderCommandSuggestions();
 });

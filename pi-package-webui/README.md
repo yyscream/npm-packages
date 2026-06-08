@@ -173,7 +173,11 @@ The Git workflow button runs local git commands in the active Pi working directo
 4. Commit with the selected message
 5. Run `git push`
 
-This requires `/git-staged-msg` from `@firstpick/pi-prompts-git-pr`. Review the generated commit message before committing or pushing.
+After the message is generated, **Create PR** asks Pi to generate `dev/COMMIT/staged-branch-name.txt`, lets you confirm or edit the `type/feature-name` branch, then switches with `git switch -c` before committing. In PR mode, choose **Commit short** or **Commit long**, then **Push and Create PR** pushes the branch, sends `/pr`, shows the generated `dev/PR/<branch>.md` description for editing/confirmation, and creates the pull request with `gh pr create`. Use **Manual branch** to skip agent branch-name generation and type the branch directly.
+
+Use the workflow process buttons to jump directly to **Stage**, **Message**, **Commit**, or **Push** when earlier work was already completed manually. Selecting **Commit** loads the current generated files from `dev/COMMIT/` before enabling the commit choices. A yellow dot means that process was selected or is available but its action has not completed in this workflow; green means the process action completed.
+
+This requires `/git-staged-msg` and `/pr` from `@firstpick/pi-prompts-git-pr`; branch-name generation uses `/git-branch-name` when available and otherwise sends an equivalent inline prompt. Creating the PR also requires an authenticated GitHub CLI (`gh`). Review the generated commit message, branch name, and PR description before committing, pushing, or creating a PR.
 
 ## Mobile and PWA notes
 

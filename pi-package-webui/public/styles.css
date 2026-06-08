@@ -1918,6 +1918,11 @@ button.footer-meta {
   align-items: flex-start;
   justify-content: space-between;
   gap: 1rem;
+  flex-wrap: wrap;
+}
+.git-workflow-header > div:first-child {
+  flex: 1 1 18rem;
+  min-width: min(100%, 18rem);
 }
 .git-workflow-header strong {
   display: block;
@@ -1956,6 +1961,15 @@ button.footer-meta {
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
+button.git-workflow-step {
+  min-width: auto;
+  min-height: 2.15rem;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+button.git-workflow-step:hover:not(:disabled) {
+  border-color: rgba(203, 166, 247, 0.48);
+  box-shadow: 0 0 0 1px rgba(203, 166, 247, 0.10), 0 0 1rem rgba(203, 166, 247, 0.14);
+}
 .git-workflow-step::before {
   content: "";
   position: absolute;
@@ -1964,7 +1978,8 @@ button.footer-meta {
   width: 0.52rem;
   height: 0.52rem;
   border-radius: 999px;
-  background: rgba(var(--ctp-overlay-rgb), 0.72);
+  background: var(--ctp-yellow);
+  box-shadow: 0 0 0.65rem rgba(249, 226, 175, 0.26);
   transform: translateY(-50%);
 }
 .git-workflow-step.active {
@@ -1974,8 +1989,8 @@ button.footer-meta {
   box-shadow: 0 0 1rem rgba(203, 166, 247, 0.16);
 }
 .git-workflow-step.active::before {
-  background: var(--ctp-pink);
-  box-shadow: 0 0 0.7rem var(--glow-pink);
+  background: var(--ctp-yellow);
+  box-shadow: 0 0 0.7rem rgba(249, 226, 175, 0.34);
 }
 .git-workflow-step.done {
   color: var(--ctp-green);
@@ -2005,6 +2020,39 @@ button.footer-meta {
 .git-workflow-actions button {
   min-height: 2.15rem;
   padding: 0.45rem 0.72rem;
+}
+.git-workflow-actions button[data-tooltip] {
+  position: relative;
+}
+.git-workflow-actions button[data-tooltip]::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 0.66rem);
+  z-index: 32;
+  width: min(28rem, calc(100vw - 3rem));
+  max-width: min(28rem, calc(100vw - 3rem));
+  padding: 0.62rem 0.72rem;
+  border: 1px solid rgba(203, 166, 247, 0.28);
+  border-radius: 0.75rem;
+  color: var(--ctp-text);
+  background: rgba(var(--ctp-crust-rgb), 0.96);
+  box-shadow: 0 1rem 2.2rem rgba(var(--ctp-crust-rgb), 0.38), 0 0 1rem rgba(203, 166, 247, 0.18);
+  font-size: 0.78rem;
+  font-weight: 650;
+  line-height: 1.35;
+  letter-spacing: normal;
+  text-align: left;
+  white-space: pre-line;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(0.22rem);
+  transition: opacity 140ms ease, transform 140ms ease;
+}
+.git-workflow-actions button[data-tooltip]:hover::after,
+.git-workflow-actions button[data-tooltip]:focus-visible::after {
+  opacity: 1;
+  transform: translateY(0);
 }
 .widget-area:empty { display: none; }
 .widget {
@@ -3249,14 +3297,29 @@ summary { cursor: pointer; color: var(--warning); }
   color: rgba(var(--ctp-subtext-rgb), 0.72);
   font-size: 0.78rem;
 }
+.attachment-edit-button,
 .attachment-remove-button {
   min-height: 0;
   padding: 0.12rem 0.34rem;
   border-radius: 999px;
+  box-shadow: none;
+}
+.attachment-edit-button {
+  color: var(--ctp-blue);
+  border-color: rgba(137, 180, 250, 0.32);
+  background: rgba(137, 180, 250, 0.08);
+  font-size: 0.75rem;
+  font-weight: 900;
+}
+.attachment-edit-button:hover {
+  color: #11111b;
+  background: var(--ctp-blue);
+  border-color: transparent;
+}
+.attachment-remove-button {
   color: var(--ctp-red);
   border-color: rgba(243, 139, 168, 0.32);
   background: rgba(243, 139, 168, 0.08);
-  box-shadow: none;
 }
 .attachment-remove-button:hover {
   color: #11111b;
@@ -4054,6 +4117,42 @@ summary { cursor: pointer; color: var(--warning); }
 .prompt-list-status.success { color: var(--ctp-green); }
 .prompt-list-status.warn { color: var(--ctp-yellow); }
 .prompt-list-status.error { color: var(--ctp-red); }
+.extension-dialog.attachment-text-dialog {
+  width: min(176rem, calc(100vw - 1rem), calc(var(--visual-viewport-height, 100dvh) - 1rem));
+  height: min(176rem, calc(100vw - 1rem), calc(var(--visual-viewport-height, 100dvh) - 1rem));
+  max-height: none;
+  overflow: hidden;
+  aspect-ratio: 1 / 1;
+}
+.attachment-text-dialog form {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+  height: 100%;
+  min-height: 0;
+  gap: 0.78rem;
+}
+.attachment-text-meta,
+.attachment-text-status {
+  min-height: 1.05rem;
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 800;
+  line-height: 1.36;
+}
+.attachment-text-editor {
+  min-height: 0;
+  height: 100%;
+  resize: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.9rem;
+  line-height: 1.46;
+  tab-size: 2;
+  white-space: pre-wrap;
+  overflow-x: hidden;
+  overflow-wrap: anywhere;
+}
+.attachment-text-status.warn { color: var(--ctp-yellow); }
+.attachment-text-status.error { color: var(--ctp-red); }
 .commands-search {
   width: 100%;
   min-width: 0;
@@ -4257,6 +4356,29 @@ summary { cursor: pointer; color: var(--warning); }
 .dialog-options button { text-align: left; }
 .dialog-input { width: 100%; padding: 0.7rem; }
 .dialog-editor { width: 100%; min-height: 12rem; padding: 0.7rem; }
+.git-pr-dialog {
+  width: min(64rem, calc(100vw - 1.5rem));
+}
+.git-pr-dialog form {
+  display: grid;
+  gap: 0.8rem;
+}
+.git-pr-field {
+  display: grid;
+  gap: 0.38rem;
+  color: rgba(var(--ctp-subtext-rgb), 0.78);
+  font-size: 0.78rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.git-pr-body-editor {
+  min-height: min(28rem, 52vh);
+  line-height: 1.45;
+  letter-spacing: normal;
+  text-transform: none;
+}
+.git-pr-status.error { color: var(--ctp-red); }
 
 .app-runner-info-dialog {
   width: min(52rem, calc(100vw - 2rem));
@@ -4901,10 +5023,14 @@ summary { cursor: pointer; color: var(--warning); }
   }
   .chat { flex-basis: 0; }
   body:not(.side-panel-collapsed) { overflow: hidden; }
+  body:not(.side-panel-collapsed) .chat-panel {
+    visibility: hidden;
+    pointer-events: none;
+  }
   .side-panel-backdrop {
     position: fixed;
     inset: 0;
-    z-index: 18;
+    z-index: 110;
     display: block;
     width: 100%;
     min-height: 100%;
@@ -4925,7 +5051,7 @@ summary { cursor: pointer; color: var(--warning); }
   }
   .side-panel {
     position: fixed;
-    z-index: 19;
+    z-index: 111;
     top: calc(0.5rem + env(safe-area-inset-top));
     right: 0.5rem;
     bottom: calc(0.5rem + env(safe-area-inset-bottom));
@@ -4934,10 +5060,13 @@ summary { cursor: pointer; color: var(--warning); }
     max-height: none;
     border-radius: 0.95rem;
   }
+  body.side-panel-collapsed .terminal-tabs-shell {
+    padding-right: 4.85rem;
+  }
   .side-panel-expand-button {
     top: calc(0.62rem + env(safe-area-inset-top));
     right: 0.7rem;
-    z-index: 22;
+    z-index: 120;
   }
   .side-panel-body { overscroll-behavior: contain; }
   .footer-line-meta {
@@ -4983,7 +5112,7 @@ summary { cursor: pointer; color: var(--warning); }
     padding: calc(0.12rem + env(safe-area-inset-top)) 0.42rem 0.12rem;
     overflow: visible;
   }
-  body.side-panel-collapsed .terminal-tabs-shell { padding-right: 2.75rem; }
+  body.side-panel-collapsed .terminal-tabs-shell { padding-right: calc(44px + 0.8rem); }
   .terminal-tabs-toggle-button {
     display: block;
     width: min(14rem, calc(100vw - 8.8rem));
@@ -5013,6 +5142,7 @@ summary { cursor: pointer; color: var(--warning); }
   .side-panel-expand-button {
     top: calc(0.12rem + env(safe-area-inset-top));
     right: 0.42rem;
+    z-index: 120;
   }
   .terminal-close-all-button {
     min-height: 28px;
@@ -5497,7 +5627,7 @@ summary { cursor: pointer; color: var(--warning); }
   .side-panel-backdrop {
     position: fixed;
     inset: 0;
-    z-index: 18;
+    z-index: 110;
     display: block;
     width: 100%;
     min-height: 100%;
@@ -5518,7 +5648,7 @@ summary { cursor: pointer; color: var(--warning); }
   }
   .side-panel {
     position: fixed;
-    z-index: 19;
+    z-index: 111;
     top: calc(0.5rem + env(safe-area-inset-top));
     right: 0.5rem;
     bottom: calc(0.5rem + env(safe-area-inset-bottom));

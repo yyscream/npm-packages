@@ -2706,7 +2706,21 @@ function commitMessagePaths(root) {
   return {
     shortPath: path.join(root, "dev", "COMMIT", "staged-commit-short.txt"),
     longPath: path.join(root, "dev", "COMMIT", "staged-commit-long.txt"),
+    branchPath: path.join(root, "dev", "COMMIT", "staged-branch-name.txt"),
   };
+}
+
+async function readGitWorkflowBranchName(cwd) {
+  const root = await getGitRoot(cwd);
+  const { branchPath } = commitMessagePaths(root);
+  try {
+    const [branchText, branchStat] = await Promise.all([readFile(branchPath, "utf8"), stat(branchPath)]);
+    const branch = branchText.split(/\r?\n/).find((line) => line.trim())?.trim() || "";
+    if (!branch) throw new Error(`${branchPath} is empty`);
+    return { root, branchPath, branch, mtimeMs: branchStat.mtimeMs };
+  } catch (error) {
+    throw new Error(`Missing generated branch name file ${branchPath}. Run /git-branch-name first. ${sanitizeError(error)}`);
+  }
 }
 
 async function readGitWorkflowMessages(cwd) {
@@ -2733,19 +2747,77 @@ async function readGitWorkflowMessages(cwd) {
   }
 }
 
-function formatGitCommand(args) {
-  return ["git", ...args.map((arg) => (/\s/.test(arg) ? JSON.stringify(arg) : arg))].join(" ");
+function cleanGitBranchName(value) {
+  const branch = String(value || "").trim();
+  if (!branch) throw new Error("branch is required");
+  if (branch.includes("\0") || branch.includes("@{") || branch.startsWith("-") || branch.startsWith("/")) throw new Error("invalid branch name");
+  return branch;
 }
 
-function runGitWorkflowCommand(args, { cwd, label = formatGitCommand(args), timeoutMs = 10 * 60 * 1000 } = {}) {
+async function validateGitBranchName(root, branch) {
+  const result = await runGitWorkflowCommand(["check-ref-format", "--branch", branch], { cwd: root, timeoutMs: 5000 });
+  if (result.exitCode !== 0 || result.timedOut || result.cancelled || result.error) {
+    throw new Error((result.stderr || result.stdout || result.error || `Invalid branch name: ${branch}`).trim());
+  }
+}
+
+async function currentGitBranch(root) {
+  const result = await runGitWorkflowCommand(["branch", "--show-current"], { cwd: root, timeoutMs: 5000 });
+  const branch = result.stdout.trim();
+  if (result.exitCode !== 0 || !branch) throw new Error((result.stderr || result.stdout || "Cannot determine current git branch").trim());
+  return branch;
+}
+
+async function defaultGitRemote(root) {
+  const result = await runGitWorkflowCommand(["remote"], { cwd: root, timeoutMs: 5000 });
+  if (result.exitCode !== 0) throw new Error((result.stderr || result.stdout || "Cannot list git remotes").trim());
+  const remotes = result.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
+  if (!remotes.length) throw new Error("No git remote is configured for this repository");
+  return remotes.includes("origin") ? "origin" : remotes[0];
+}
+
+function prDescriptionPath(root, branch) {
+  const base = path.resolve(root, "dev", "PR");
+  const target = path.resolve(base, `${branch}.md`);
+  if (target !== base && !target.startsWith(`${base}${path.sep}`)) throw new Error("Resolved PR description path escapes dev/PR");
+  return { base, prPath: target };
+}
+
+async function readGitWorkflowPrDescription(cwd) {
+  const root = await getGitRoot(cwd);
+  const branch = await currentGitBranch(root);
+  const { prPath } = prDescriptionPath(root, branch);
+  try {
+    const [body, info] = await Promise.all([readFile(prPath, "utf8"), stat(prPath)]);
+    return { root, branch, path: prPath, body: body.trimEnd(), mtimeMs: info.mtimeMs };
+  } catch (error) {
+    throw new Error(`Missing generated PR description ${prPath}. Run /pr first. ${sanitizeError(error)}`);
+  }
+}
+
+function cleanPrTitle(value) {
+  const title = String(value || "").replace(/\r?\n/g, " ").trim();
+  if (!title) throw new Error("PR title is required");
+  return title.slice(0, 300);
+}
+
+function formatWorkflowCommand(command, args) {
+  return [command, ...args.map((arg) => (/\s/.test(arg) ? JSON.stringify(arg) : arg))].join(" ");
+}
+
+function formatGitCommand(args) {
+  return formatWorkflowCommand("git", args);
+}
+
+function runWorkflowCommand(command, args, { cwd, label = formatWorkflowCommand(command, args), timeoutMs = 10 * 60 * 1000 } = {}) {
   if (activeGitWorkflowProcess) {
     return Promise.reject(new Error(`A git workflow command is already running: ${activeGitWorkflowProcess.label}`));
   }
 
   return new Promise((resolve) => {
-    const child = spawn("git", args, {
+    const child = spawn(command, args, {
       cwd,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: process.env.GIT_TERMINAL_PROMPT || "0" },
+      env: { ...process.env, GIT_TERMINAL_PROMPT: process.env.GIT_TERMINAL_PROMPT || "0", GH_PROMPT_DISABLED: process.env.GH_PROMPT_DISABLED || "1" },
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
     });
@@ -2790,6 +2862,14 @@ function runGitWorkflowCommand(args, { cwd, label = formatGitCommand(args), time
   });
 }
 
+function runGitWorkflowCommand(args, options = {}) {
+  return runWorkflowCommand("git", args, { ...options, label: options.label || formatGitCommand(args) });
+}
+
+function runGitHubWorkflowCommand(args, options = {}) {
+  return runWorkflowCommand("gh", args, { ...options, label: options.label || formatWorkflowCommand("gh", args) });
+}
+
 function gitWorkflowCommandPayload(result) {
   const ok = result.exitCode === 0 && !result.timedOut && !result.cancelled && !result.error;
   return {
@@ -2804,9 +2884,21 @@ async function handleGitWorkflowRequest(pathname, body = {}, cwd = options.cwd) 
     switch (pathname) {
       case "/api/git-workflow/message":
         return { ok: true, data: await readGitWorkflowMessages(cwd) };
+      case "/api/git-workflow/branch-name":
+        return { ok: true, data: await readGitWorkflowBranchName(cwd) };
+      case "/api/git-workflow/pr-description":
+        return { ok: true, data: await readGitWorkflowPrDescription(cwd) };
       case "/api/git-workflow/add":
         await getGitRoot(cwd);
         return gitWorkflowCommandPayload(await runGitWorkflowCommand(["add", "."], { cwd }));
+      case "/api/git-workflow/branch": {
+        const root = await getGitRoot(cwd);
+        const branch = cleanGitBranchName(body.branch);
+        await validateGitBranchName(root, branch);
+        const payload = gitWorkflowCommandPayload(await runGitWorkflowCommand(["switch", "-c", branch], { cwd: root }));
+        if (payload.ok) payload.data.branch = branch;
+        return payload;
+      }
       case "/api/git-workflow/commit": {
         const variant = String(body.variant || "").trim();
         if (!["short", "long"].includes(variant)) throw new Error("variant must be 'short' or 'long'");
@@ -2821,7 +2913,36 @@ async function handleGitWorkflowRequest(pathname, body = {}, cwd = options.cwd) 
       }
       case "/api/git-workflow/push": {
         const root = await getGitRoot(cwd);
+        if (body.setUpstream) {
+          const currentBranch = await currentGitBranch(root);
+          const requestedBranch = body.branch ? cleanGitBranchName(body.branch) : currentBranch;
+          if (requestedBranch !== currentBranch) throw new Error(`Current branch is ${currentBranch}, not ${requestedBranch}`);
+          const remote = await defaultGitRemote(root);
+          const payload = gitWorkflowCommandPayload(await runGitWorkflowCommand(["push", "-u", remote, currentBranch], { cwd: root, label: `git push -u ${remote} ${currentBranch}`, timeoutMs: 15 * 60 * 1000 }));
+          if (payload.ok) {
+            payload.data.branch = currentBranch;
+            payload.data.remote = remote;
+          }
+          return payload;
+        }
         return gitWorkflowCommandPayload(await runGitWorkflowCommand(["push"], { cwd: root, timeoutMs: 15 * 60 * 1000 }));
+      }
+      case "/api/git-workflow/create-pr": {
+        const root = await getGitRoot(cwd);
+        const branch = await currentGitBranch(root);
+        const title = cleanPrTitle(body.title);
+        const description = String(body.body || "").trimEnd();
+        if (!description.trim()) throw new Error("PR description is required");
+        const { base, prPath } = prDescriptionPath(root, branch);
+        await mkdir(path.dirname(prPath), { recursive: true });
+        await writeFile(prPath, `${description}\n`, "utf8");
+        const payload = gitWorkflowCommandPayload(await runGitHubWorkflowCommand(["pr", "create", "--title", title, "--body-file", prPath, "--head", branch], { cwd: root, label: "gh pr create --title <title> --body-file <dev/PR/current-branch.md> --head <current-branch>", timeoutMs: 15 * 60 * 1000 }));
+        if (payload.ok) {
+          payload.data.branch = branch;
+          payload.data.path = prPath;
+          payload.data.prDirectory = base;
+        }
+        return payload;
       }
       case "/api/git-workflow/cancel": {
         const cancelled = !!activeGitWorkflowProcess;

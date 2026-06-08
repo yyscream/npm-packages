@@ -6,6 +6,7 @@ Reusable prompt templates for commit messages, pull request descriptions, and br
 
 - `/check-pr` — audit PR commits by author/branch/URL and identify risks.
 - `/git-staged-msg` — generate short and long conventional commit messages from staged changes.
+- `/git-branch-name` — generate a `type/feature-name` PR branch name from staged changes.
 - `/pr` — generate a PR description from the current branch diff.
 - `/pr-review-branch` — run a non-editing PR-style review against the base branch.
 - `/pr-review-implement` — safely implement valid PR review suggestions.

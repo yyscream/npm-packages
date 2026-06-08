@@ -12,7 +12,7 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <link rel="stylesheet" href="/styles.css?v=32" />
+    <link rel="stylesheet" href="/styles.css?v=35" />
   </head>
   <body>
     <button id="sidePanelExpandButton" class="side-panel-expand-button" type="button" aria-controls="sidePanel" aria-expanded="false" aria-label="Expand side panel" title="Expand side panel">
@@ -431,6 +431,26 @@
       </form>
     </dialog>
 
+    <dialog id="gitPrDialog" class="extension-dialog git-pr-dialog">
+      <form method="dialog">
+        <h2>Review pull request</h2>
+        <p class="muted">Confirm or edit the generated /pr description before Web UI runs <code>gh pr create</code>.</p>
+        <label class="git-pr-field" for="gitPrTitleInput">
+          <span>Title</span>
+          <input id="gitPrTitleInput" class="dialog-input" type="text" autocomplete="off" placeholder="Pull request title" />
+        </label>
+        <label class="git-pr-field" for="gitPrBodyEditor">
+          <span>Description</span>
+          <textarea id="gitPrBodyEditor" class="dialog-editor git-pr-body-editor" spellcheck="true" aria-label="Pull request description"></textarea>
+        </label>
+        <p id="gitPrStatus" class="git-pr-status muted" role="status" aria-live="polite"></p>
+        <menu>
+          <button id="gitPrCancelButton" type="button">Cancel</button>
+          <button id="gitPrCreateButton" class="primary" type="button">Create PR</button>
+        </menu>
+      </form>
+    </dialog>
+
     <dialog id="pathPickerDialog" class="extension-dialog path-picker-dialog">
       <form method="dialog">
         <h2 id="pathPickerTitle">Choose working directory</h2>
@@ -508,6 +528,19 @@
       </form>
     </dialog>
 
-    <script type="module" src="/app.js?v=32"></script>
+    <dialog id="attachmentTextDialog" class="extension-dialog attachment-text-dialog">
+      <form method="dialog">
+        <h2 id="attachmentTextTitle">Edit text attachment</h2>
+        <p id="attachmentTextMeta" class="attachment-text-meta muted"></p>
+        <textarea id="attachmentTextEditor" class="dialog-editor attachment-text-editor" spellcheck="false" aria-label="Text attachment contents"></textarea>
+        <p id="attachmentTextStatus" class="attachment-text-status muted" role="status" aria-live="polite"></p>
+        <menu>
+          <button id="attachmentTextCancelButton" type="button">Cancel</button>
+          <button id="attachmentTextSaveButton" class="primary" type="button">Save changes</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <script type="module" src="/app.js?v=36"></script>
   </body>
 </html>
