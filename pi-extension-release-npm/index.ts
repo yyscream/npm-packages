@@ -12,7 +12,7 @@ const COLLAPSED_LINES = 40;
 const OUTPUT_RENDER_INTERVAL_MS = 80;
 
 type RunResult = { ok: boolean; output: string; aborted: boolean };
-type CommandResult = { ok: boolean; output: string };
+type CommandResult = { ok: boolean; output: string; errorCode?: string };
 type AbortableChild = ChildProcessWithoutNullStreams & { abortReleaseStep?: () => void };
 type PlannedPublish = { name: string; version: string; action: "publish-first" | "publish-update"; label: string };
 type PlannedPublishTarget = PlannedPublish & { target: string };
@@ -46,24 +46,83 @@ function listReleaseLogs(): ReleaseLogEntry[] {
   return listRunLogs(RELEASE_LOG_DIR);
 }
 
+function spawnErrorCode(error: unknown): string | undefined {
+  return (error as NodeJS.ErrnoException)?.code;
+}
+
+function spawnErrorOutput(command: string, error: unknown): string {
+  const err = error as NodeJS.ErrnoException;
+  const code = err?.code ? `${err.code}: ` : "";
+  const message = err?.message || String(error);
+  return `Failed to spawn ${command}: ${code}${message}`;
+}
+
+type NpmCommandCandidate = { command: string; args: string[]; options?: Record<string, unknown> };
+
+function npmCommandCandidates(args: string[]): NpmCommandCandidate[] {
+  const candidates: NpmCommandCandidate[] = [];
+  const seen = new Set<string>();
+  const add = (candidate: NpmCommandCandidate) => {
+    const key = `${candidate.command}\0${candidate.args.join("\0")}\0${JSON.stringify(candidate.options || {})}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    candidates.push(candidate);
+  };
+
+  const npmExecPath = process.env.npm_execpath;
+  if (npmExecPath && existsSync(npmExecPath)) add({ command: process.execPath, args: [npmExecPath, ...args] });
+
+  const bundledNpmCli = join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+  if (existsSync(bundledNpmCli)) add({ command: process.execPath, args: [bundledNpmCli, ...args] });
+
+  if (process.platform === "win32") add({ command: "npm.cmd", args, options: { shell: true, windowsHide: true } });
+  add({ command: "npm", args });
+  return candidates;
+}
+
 async function runCommand(cwd: string, command: string): Promise<CommandResult> {
   return await new Promise((resolve) => {
-    const child = spawn("bash", ["-lc", command], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawn("bash", ["-lc", command], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (error) {
+      resolve({ ok: false, output: spawnErrorOutput("bash", error), errorCode: spawnErrorCode(error) });
+      return;
+    }
+
     let output = "";
+    let settled = false;
+    const settle = (value: CommandResult) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+
     child.stdout.on("data", (d) => { output += String(d); });
     child.stderr.on("data", (d) => { output += String(d); });
-    child.on("close", (code) => resolve({ ok: code === 0, output }));
+    child.on("error", (error) => settle({ ok: false, output: `${output}${spawnErrorOutput("bash", error)}\n`, errorCode: spawnErrorCode(error) }));
+    child.on("close", (code) => settle({ ok: code === 0, output }));
   });
 }
 
 async function runNpmCommand(cwd: string, args: string[]): Promise<CommandResult> {
-  const candidates = process.platform === "win32"
-    ? ["npm.cmd", "npm"]
-    : ["npm"];
+  const failedSpawnAttempts: string[] = [];
 
-  for (const command of candidates) {
+  for (const candidate of npmCommandCandidates(args)) {
     const result = await new Promise<CommandResult>((resolve) => {
-      const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+      let child: ChildProcessWithoutNullStreams;
+      try {
+        child = spawn(candidate.command, candidate.args, {
+          cwd,
+          stdio: ["ignore", "pipe", "pipe"],
+          windowsHide: true,
+          ...(candidate.options || {}),
+        });
+      } catch (error) {
+        resolve({ ok: false, output: spawnErrorOutput(candidate.command, error), errorCode: spawnErrorCode(error) });
+        return;
+      }
+
       let output = "";
       let settled = false;
       const settle = (value: CommandResult) => {
@@ -75,19 +134,25 @@ async function runNpmCommand(cwd: string, args: string[]): Promise<CommandResult
       child.stdout.on("data", (d) => { output += String(d); });
       child.stderr.on("data", (d) => { output += String(d); });
       child.on("error", (error) => {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-          settle({ ok: false, output: "ENOENT" });
+        const code = spawnErrorCode(error);
+        if (code === "ENOENT") {
+          settle({ ok: false, output: "ENOENT", errorCode: code });
           return;
         }
-        settle({ ok: false, output: error.message });
+        settle({ ok: false, output: `${output}${spawnErrorOutput(candidate.command, error)}\n`, errorCode: code });
       });
       child.on("close", (code) => settle({ ok: code === 0, output }));
     });
 
-    if (result.ok || result.output !== "ENOENT") return result;
+    if (result.ok) return result;
+    if (result.errorCode === "ENOENT" || result.errorCode === "EINVAL") {
+      failedSpawnAttempts.push(result.output.trim());
+      continue;
+    }
+    return result;
   }
 
-  return { ok: false, output: "npm executable not found in PATH" };
+  return { ok: false, output: failedSpawnAttempts.length ? failedSpawnAttempts.join("\n") : "npm executable not found in PATH" };
 }
 
 async function runNpmConfigSetToken(cwd: string, token: string): Promise<CommandResult> {
@@ -109,41 +174,61 @@ async function runScriptLive(
   onChild?: (child: AbortableChild) => void,
 ): Promise<RunResult> {
   return await new Promise((resolve) => {
-    const child = spawn("bash", ["-lc", script], { cwd, stdio: ["ignore", "pipe", "pipe"], detached: true }) as AbortableChild;
+    let child: AbortableChild;
+    try {
+      child = spawn("bash", ["-lc", script], {
+        cwd,
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: process.platform !== "win32",
+      }) as AbortableChild;
+    } catch (error) {
+      const output = `${spawnErrorOutput("bash", error)}\n`;
+      onChunk(output);
+      resolve({ ok: false, output, aborted: false });
+      return;
+    }
+
     let output = "";
     let aborted = false;
+    let settled = false;
+    const settle = (value: RunResult) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const appendChunk = (chunk: string) => {
+      output += chunk;
+      onChunk(chunk);
+    };
+    const signalChild = (signal: NodeJS.Signals) => {
+      if (process.platform !== "win32" && child.pid) {
+        try {
+          process.kill(-child.pid, signal);
+          return;
+        } catch {
+          // Fall back to signalling the direct child process below.
+        }
+      }
+      child.kill(signal);
+    };
 
     child.abortReleaseStep = () => {
       aborted = true;
-      try {
-        if (child.pid) process.kill(-child.pid, "SIGINT");
-      } catch {
-        child.kill("SIGINT");
-      }
+      signalChild("SIGINT");
       setTimeout(() => {
-        if (child.exitCode === null && child.signalCode === null) {
-          try {
-            if (child.pid) process.kill(-child.pid, "SIGTERM");
-          } catch {
-            child.kill("SIGTERM");
-          }
-        }
+        if (child.exitCode === null && child.signalCode === null) signalChild("SIGTERM");
       }, 1500).unref();
     };
 
     onChild?.(child);
 
-    child.stdout.on("data", (d) => {
-      const chunk = String(d);
-      output += chunk;
-      onChunk(chunk);
+    child.stdout.on("data", (d) => appendChunk(String(d)));
+    child.stderr.on("data", (d) => appendChunk(String(d)));
+    child.on("error", (error) => {
+      appendChunk(`${spawnErrorOutput("bash", error)}\n`);
+      settle({ ok: false, output, aborted });
     });
-    child.stderr.on("data", (d) => {
-      const chunk = String(d);
-      output += chunk;
-      onChunk(chunk);
-    });
-    child.on("close", (code) => resolve({ ok: code === 0 && !aborted, output, aborted }));
+    child.on("close", (code) => settle({ ok: code === 0 && !aborted, output, aborted }));
   });
 }
 
