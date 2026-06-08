@@ -118,6 +118,30 @@ const AUTO_TAB_TITLE_STOP_WORDS = new Set([
   "your",
 ]);
 
+const APP_RUNNER_CONFIG_FILE = ".pi-webui-runners.json";
+const APP_RUNNER_CUSTOM_LIMIT = 48;
+const APP_RUNNER_CUSTOM_ARG_LIMIT = 32;
+const APP_RUNNER_FILE_PICKER_LIMIT = 500;
+const APP_RUNNER_DETECTION_TIMEOUT_MS = 1_200;
+const APP_RUNNER_COMMAND_CACHE_TTL_MS = 30_000;
+const APP_RUNNER_OUTPUT_LINE_LIMIT = 1_000;
+const APP_RUNNER_OUTPUT_MAX_CHARS = 240_000;
+const APP_RUNNER_STOP_GRACE_MS = 2_500;
+const APP_RUNNER_PYTHON_ENTRIES = ["Main.py", "main.py", "src/main.py", "src/Main.py", "app.py", "src/app.py"];
+const APP_RUNNER_JS_ENTRIES = ["main.js", "src/main.js", "index.js", "src/index.js", "server.js", "src/server.js", "app.js", "src/app.js"];
+const APP_RUNNER_ZIG_ENTRIES = ["src/main.zig", "main.zig"];
+const APP_RUNNER_C_ENTRIES = ["main.c", "src/main.c"];
+const APP_RUNNER_CPP_ENTRIES = ["main.cpp", "src/main.cpp", "main.cc", "src/main.cc", "main.cxx", "src/main.cxx"];
+const APP_RUNNER_DOCKER_COMPOSE_FILES = ["compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml"];
+const APP_RUNNER_SHELL_SCRIPT_DIRS = ["", "dev", "scripts", "dev/scripts"];
+const APP_RUNNER_SHELL_SCRIPT_LIMIT = 24;
+const APP_RUNNER_SHELL_EXTENSIONS = new Map([
+  [".sh", "bash"],
+  [".bash", "bash"],
+  [".zsh", "zsh"],
+  [".fish", "fish"],
+]);
+
 const MIME_TYPES = new Map([
   [".html", "text/html; charset=utf-8"],
   [".jsonl", "application/x-ndjson; charset=utf-8"],
@@ -1020,6 +1044,997 @@ async function readJsonFileIfExists(filePath) {
     console.warn(`failed to read ${filePath}: ${sanitizeError(error)}`);
     return undefined;
   }
+}
+
+const appRunnerCommandAvailability = new Map();
+
+async function fileStatsIfExists(filePath) {
+  try {
+    return await stat(filePath);
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return null;
+    throw error;
+  }
+}
+
+async function appRunnerFileExists(cwd, relativePath) {
+  const stats = await fileStatsIfExists(path.join(cwd, relativePath));
+  return !!stats?.isFile();
+}
+
+async function appRunnerDirectoryExists(cwd, relativePath) {
+  const stats = await fileStatsIfExists(path.join(cwd, relativePath));
+  return !!stats?.isDirectory();
+}
+
+async function appRunnerTextIfExists(cwd, relativePath, maxLength = 120_000) {
+  try {
+    const text = await readFile(path.join(cwd, relativePath), "utf8");
+    return text.slice(0, maxLength);
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return "";
+    return "";
+  }
+}
+
+async function firstExistingRunnerFile(cwd, candidates) {
+  for (const candidate of candidates) {
+    if (await appRunnerFileExists(cwd, candidate)) return candidate;
+  }
+  return "";
+}
+
+async function appRunnerCommandAvailable(command, cwd) {
+  const name = String(command || "").trim();
+  if (!name) return false;
+  const key = `${name}\0${cwd || ""}`;
+  const cached = appRunnerCommandAvailability.get(key);
+  const now = Date.now();
+  if (cached && cached.expiresAt > now) return cached.available;
+
+  const result = await runCommand(name, ["--version"], {
+    cwd,
+    timeoutMs: APP_RUNNER_DETECTION_TIMEOUT_MS,
+    maxOutputLength: 2_000,
+  });
+  const available = !result.error && !result.timedOut && (result.exitCode === 0 || Boolean(result.stdout || result.stderr));
+  appRunnerCommandAvailability.set(key, { available, expiresAt: now + APP_RUNNER_COMMAND_CACHE_TTL_MS });
+  return available;
+}
+
+function appRunnerPackageScripts(pkg) {
+  return pkg && typeof pkg.scripts === "object" && pkg.scripts ? pkg.scripts : {};
+}
+
+function preferredPackageScript(pkg) {
+  const scripts = appRunnerPackageScripts(pkg);
+  for (const script of ["dev", "start", "serve"]) {
+    if (typeof scripts[script] === "string" && scripts[script].trim()) return script;
+  }
+  return "";
+}
+
+function packageDependencyNames(pkg) {
+  return new Set([
+    ...Object.keys(pkg?.dependencies || {}),
+    ...Object.keys(pkg?.devDependencies || {}),
+    ...Object.keys(pkg?.optionalDependencies || {}),
+  ]);
+}
+
+function appRunnerId(...parts) {
+  return parts
+    .map((part) => String(part || "").trim())
+    .filter(Boolean)
+    .join(":")
+    .replace(/[^a-z0-9_.:-]+/gi, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 160);
+}
+
+function shellQuote(value) {
+  return `'${String(value ?? "").replace(/'/g, `'\\''`)}'`;
+}
+
+function appRunnerCandidate({ id, label, kind, command, args = [], projectFile = "", description = "", shortDisplayCommand = "", priority = 100, cwd = "", custom = false, configFile = "" }) {
+  return {
+    id,
+    label,
+    kind,
+    command,
+    args,
+    displayCommand: formatCommandForDisplay(command, args),
+    shortDisplayCommand,
+    projectFile,
+    description,
+    priority,
+    cwd,
+    custom,
+    configFile,
+  };
+}
+
+function addAppRunner(runners, runner) {
+  if (!runner?.id || !runner.command) return;
+  if (runners.some((item) => item.id === runner.id || item.displayCommand === runner.displayCommand)) return;
+  runners.push(runner);
+}
+
+function appRunnerPathInside(root, target) {
+  const relative = path.relative(root, target);
+  return !relative || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function normalizeProjectRelativePath(value, { allowEmpty = false } = {}) {
+  const raw = normalizeSuggestionPath(value).replace(/\0/g, "").trim();
+  const withoutDot = raw.replace(/^\.\/+/, "").replace(/\/+$/g, "");
+  if (!withoutDot) {
+    if (allowEmpty) return "";
+    throw makeHttpError(400, "Path to file is required");
+  }
+  if (path.isAbsolute(withoutDot) || /^[a-z]:\//i.test(withoutDot)) throw makeHttpError(400, "Path must be relative to the project root");
+  const parts = withoutDot.split("/").filter(Boolean);
+  if (parts.some((part) => part === "." || part === "..")) throw makeHttpError(400, "Path cannot contain . or .. segments");
+  return parts.join("/").slice(0, 4096);
+}
+
+function resolveProjectRelativePath(projectRoot, relativePath) {
+  const target = path.resolve(projectRoot, relativePath || ".");
+  if (!appRunnerPathInside(projectRoot, target)) throw makeHttpError(400, "Path must stay inside the project root");
+  return target;
+}
+
+async function findAppRunnerProjectRoot(cwd) {
+  const start = await resolveCwd(cwd || options.cwd, options.cwd);
+  let fallback = "";
+  for (let current = start; current; current = path.dirname(current)) {
+    if (await appRunnerFileExists(current, APP_RUNNER_CONFIG_FILE)) return current;
+    if (!fallback && (await appRunnerFileExists(current, "package.json") || await appRunnerDirectoryExists(current, ".git"))) fallback = current;
+    const parent = path.dirname(current);
+    if (parent === current) break;
+  }
+  return fallback || start;
+}
+
+function cleanCustomRunnerCommand(value) {
+  const command = String(value || "./").trim().replace(/\s+/g, " ") || "./";
+  if (command.includes("\0") || /[\r\n]/.test(command)) throw makeHttpError(400, "Command cannot contain newlines or null bytes");
+  if (command.length > 512) throw makeHttpError(400, "Command is too long");
+  return command === "." ? "./" : command;
+}
+
+function customRunnerCommandParts(command) {
+  const clean = cleanCustomRunnerCommand(command);
+  return clean === "./" ? ["./"] : clean.split(" ").filter(Boolean);
+}
+
+function parseCustomRunnerArgs(value) {
+  const rawItems = Array.isArray(value)
+    ? value
+    : String(value || "").trim()
+      ? String(value || "").trim().split(/\s+/)
+      : [];
+  const args = [];
+  for (const item of rawItems) {
+    const text = String(item || "").trim();
+    if (!text) continue;
+    if (text.includes("\0") || /[\r\n]/.test(text)) throw makeHttpError(400, "Args cannot contain newlines or null bytes");
+    if (text.length > 2048) throw makeHttpError(400, "One arg is too long");
+    args.push(text);
+    if (args.length > APP_RUNNER_CUSTOM_ARG_LIMIT) throw makeHttpError(400, `Too many args; limit is ${APP_RUNNER_CUSTOM_ARG_LIMIT}`);
+  }
+  return args;
+}
+
+function publicCustomRunnerDefinition(runner) {
+  const command = cleanCustomRunnerCommand(runner.command);
+  const args = parseCustomRunnerArgs(runner.args);
+  const filePath = normalizeProjectRelativePath(runner.path || runner.projectFile);
+  const commandParts = customRunnerCommandParts(command);
+  const effectiveCommand = command === "./" ? `./${filePath}` : commandParts[0];
+  const effectiveArgs = command === "./" ? args : [...commandParts.slice(1), filePath, ...args];
+  return {
+    id: runner.id,
+    label: runner.label,
+    command,
+    path: filePath,
+    args,
+    displayCommand: formatCommandForDisplay(effectiveCommand, effectiveArgs),
+  };
+}
+
+function normalizeCustomRunnerDefinition(raw, projectRoot, { strict = false } = {}) {
+  const filePath = normalizeProjectRelativePath(raw?.path || raw?.projectFile);
+  const absolutePath = resolveProjectRelativePath(projectRoot, filePath);
+  const command = cleanCustomRunnerCommand(raw?.command);
+  const args = parseCustomRunnerArgs(raw?.args);
+  const label = String(raw?.label || path.basename(filePath)).trim().slice(0, 120) || path.basename(filePath);
+  const rawId = String(raw?.id || "").trim();
+  const id = appRunnerId(rawId || label, command, filePath) || appRunnerId(command, filePath);
+  if (!id) throw makeHttpError(400, "Custom runner id could not be generated");
+  if (strict && !appRunnerPathInside(projectRoot, absolutePath)) throw makeHttpError(400, "Path must stay inside the project root");
+  return { id, label, command, path: filePath, args };
+}
+
+async function readAppRunnerConfig(projectRoot) {
+  const configPath = path.join(projectRoot, APP_RUNNER_CONFIG_FILE);
+  const parsed = await readJsonFileIfExists(configPath);
+  const source = parsed && typeof parsed === "object" ? parsed : {};
+  const rawRunners = Array.isArray(source.runners) ? source.runners : [];
+  const runners = [];
+  for (const raw of rawRunners) {
+    try {
+      const runner = normalizeCustomRunnerDefinition(raw, projectRoot);
+      if (!runners.some((item) => item.id === runner.id)) runners.push(runner);
+    } catch (error) {
+      console.warn(`skipping invalid custom app runner in ${configPath}: ${sanitizeError(error)}`);
+    }
+    if (runners.length >= APP_RUNNER_CUSTOM_LIMIT) break;
+  }
+  return { projectRoot, configPath, runners };
+}
+
+async function writeAppRunnerConfig(projectRoot, runners) {
+  const configPath = path.join(projectRoot, APP_RUNNER_CONFIG_FILE);
+  const normalized = [];
+  for (const runner of runners) {
+    normalized.push(normalizeCustomRunnerDefinition(runner, projectRoot, { strict: true }));
+    if (normalized.length >= APP_RUNNER_CUSTOM_LIMIT) break;
+  }
+  const tmpFile = `${configPath}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tmpFile, `${JSON.stringify({ version: 1, runners: normalized }, null, 2)}\n`, { mode: 0o600 });
+  await rename(tmpFile, configPath);
+  return { projectRoot, configPath, runners: normalized };
+}
+
+async function customAppRunnerCandidate(projectRoot, configPath, runner) {
+  const filePath = runner.path;
+  const absolutePath = resolveProjectRelativePath(projectRoot, filePath);
+  const stats = await fileStatsIfExists(absolutePath);
+  if (!stats?.isFile()) return null;
+  const command = cleanCustomRunnerCommand(runner.command);
+  const args = parseCustomRunnerArgs(runner.args);
+  const commandParts = customRunnerCommandParts(command);
+  const effectiveCommand = command === "./" ? `./${filePath}` : commandParts[0];
+  const effectiveArgs = command === "./" ? args : [...commandParts.slice(1), filePath, ...args];
+  if (command !== "./" && !await appRunnerCommandAvailable(commandParts[0], projectRoot)) return null;
+  return appRunnerCandidate({
+    id: appRunnerId("custom", runner.id),
+    label: runner.label || path.basename(filePath),
+    kind: "custom",
+    command: effectiveCommand,
+    args: effectiveArgs,
+    projectFile: filePath,
+    description: `Custom project runner from ${APP_RUNNER_CONFIG_FILE}`,
+    priority: 8,
+    cwd: projectRoot,
+    custom: true,
+    configFile: configPath,
+  });
+}
+
+async function addCustomAppRunners(runners, cwd) {
+  const projectRoot = await findAppRunnerProjectRoot(cwd);
+  const config = await readAppRunnerConfig(projectRoot);
+  for (const runner of config.runners) {
+    const candidate = await customAppRunnerCandidate(projectRoot, config.configPath, runner);
+    if (candidate) addAppRunner(runners, candidate);
+  }
+}
+
+async function getCustomAppRunnerConfigData(tab) {
+  const projectRoot = await findAppRunnerProjectRoot(tab?.cwd || options.cwd);
+  const config = await readAppRunnerConfig(projectRoot);
+  return {
+    projectRoot,
+    displayProjectRoot: displayPath(projectRoot),
+    configFile: config.configPath,
+    displayConfigFile: displayPath(config.configPath),
+    relativeConfigFile: APP_RUNNER_CONFIG_FILE,
+    runners: config.runners.map(publicCustomRunnerDefinition),
+  };
+}
+
+async function saveCustomAppRunner(tab, rawRunner) {
+  const projectRoot = await findAppRunnerProjectRoot(tab?.cwd || options.cwd);
+  const config = await readAppRunnerConfig(projectRoot);
+  const normalized = normalizeCustomRunnerDefinition(rawRunner, projectRoot, { strict: true });
+  const stats = await fileStatsIfExists(resolveProjectRelativePath(projectRoot, normalized.path));
+  if (!stats?.isFile()) throw makeHttpError(400, `Path to file does not exist: ${normalized.path}`);
+  const commandParts = customRunnerCommandParts(normalized.command);
+  if (normalized.command !== "./" && !await appRunnerCommandAvailable(commandParts[0], projectRoot)) throw makeHttpError(400, `Command is not available: ${commandParts[0]}`);
+  const runners = config.runners.filter((runner) => runner.id !== normalized.id);
+  if (runners.length >= APP_RUNNER_CUSTOM_LIMIT) throw makeHttpError(400, `Custom runner limit reached (${APP_RUNNER_CUSTOM_LIMIT})`);
+  runners.push(normalized);
+  await writeAppRunnerConfig(projectRoot, runners);
+  return getAppRunnerData(tab);
+}
+
+async function deleteCustomAppRunner(tab, runnerId) {
+  const id = appRunnerId(String(runnerId || "").replace(/^custom:/, ""));
+  if (!id) throw makeHttpError(400, "Custom runner id is required");
+  const projectRoot = await findAppRunnerProjectRoot(tab?.cwd || options.cwd);
+  const config = await readAppRunnerConfig(projectRoot);
+  const runners = config.runners.filter((runner) => runner.id !== id);
+  if (runners.length === config.runners.length) throw makeHttpError(404, "Custom runner not found");
+  await writeAppRunnerConfig(projectRoot, runners);
+  return getAppRunnerData(tab);
+}
+
+async function getAppRunnerFileBrowserData(tab, rawPath) {
+  const projectRoot = await findAppRunnerProjectRoot(tab?.cwd || options.cwd);
+  const relativeDir = normalizeProjectRelativePath(rawPath || "", { allowEmpty: true });
+  const absoluteDir = resolveProjectRelativePath(projectRoot, relativeDir || ".");
+  const stats = await fileStatsIfExists(absoluteDir);
+  if (!stats?.isDirectory()) throw makeHttpError(400, `Not a directory inside project root: ${relativeDir || "."}`);
+  let entries;
+  try {
+    entries = await readdir(absoluteDir, { withFileTypes: true });
+  } catch (error) {
+    throw makeHttpError(error?.code === "EACCES" ? 403 : 400, `Cannot read directory ${relativeDir || "."}: ${sanitizeError(error)}`);
+  }
+  const sorted = entries.sort((a, b) => {
+    if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
+    return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+  });
+  const directories = [];
+  const files = [];
+  for (const entry of sorted) {
+    if (entry.name === ".git") continue;
+    const entryRelativePath = normalizeSuggestionPath(relativeDir ? `${relativeDir}/${entry.name}` : entry.name);
+    if (entry.isDirectory()) directories.push({ name: entry.name, path: entryRelativePath, hidden: entry.name.startsWith(".") });
+    else if (entry.isFile()) files.push({ name: entry.name, path: entryRelativePath, hidden: entry.name.startsWith(".") });
+    if (directories.length + files.length >= APP_RUNNER_FILE_PICKER_LIMIT) break;
+  }
+  const parent = relativeDir ? normalizeSuggestionPath(path.posix.dirname(relativeDir)) : "";
+  return {
+    projectRoot,
+    displayProjectRoot: displayPath(projectRoot),
+    relativeDir,
+    displayRelativeDir: relativeDir || ".",
+    parent: relativeDir && parent !== "." ? parent : relativeDir ? "" : null,
+    directories,
+    files,
+    truncated: sorted.length > directories.length + files.length,
+  };
+}
+
+function packageManagerArgs(manager, script) {
+  if (manager === "bun") return ["run", script];
+  if (manager === "yarn") return script === "start" ? ["start"] : [script];
+  return script === "start" ? ["start"] : ["run", script];
+}
+
+async function addPackageManagerRunners(runners, cwd, pkg) {
+  const script = preferredPackageScript(pkg);
+  if (!script) return;
+  const packageManager = String(pkg?.packageManager || "").toLowerCase();
+  const [hasBunLock, hasPnpmLock, hasYarnLock, hasPackageLock] = await Promise.all([
+    appRunnerFileExists(cwd, "bun.lock").then((exists) => exists || appRunnerFileExists(cwd, "bun.lockb")),
+    appRunnerFileExists(cwd, "pnpm-lock.yaml"),
+    appRunnerFileExists(cwd, "yarn.lock"),
+    appRunnerFileExists(cwd, "package-lock.json"),
+  ]);
+  const managers = [
+    { id: "bun", command: "bun", label: "Bun", hint: hasBunLock || packageManager.startsWith("bun@"), priority: hasBunLock || packageManager.startsWith("bun@") ? 20 : 54 },
+    { id: "pnpm", command: "pnpm", label: "pnpm", hint: hasPnpmLock || packageManager.startsWith("pnpm@"), priority: hasPnpmLock || packageManager.startsWith("pnpm@") ? 24 : 58 },
+    { id: "npm", command: "npm", label: "npm", hint: hasPackageLock || packageManager.startsWith("npm@") || !packageManager, priority: hasPackageLock || packageManager.startsWith("npm@") || !packageManager ? 28 : 62 },
+    { id: "yarn", command: "yarn", label: "Yarn", hint: hasYarnLock || packageManager.startsWith("yarn@"), priority: hasYarnLock || packageManager.startsWith("yarn@") ? 34 : 72 },
+  ];
+
+  for (const manager of managers) {
+    if (!await appRunnerCommandAvailable(manager.command, cwd)) continue;
+    const args = packageManagerArgs(manager.id, script);
+    addAppRunner(runners, appRunnerCandidate({
+      id: appRunnerId("pkg", manager.id, script),
+      label: `${manager.label} ${script}`,
+      kind: manager.id === "bun" ? "bun" : "node",
+      command: manager.command,
+      args,
+      projectFile: "package.json",
+      description: `${manager.label} package script: ${script}`,
+      priority: manager.priority + (manager.hint ? 0 : 12),
+    }));
+  }
+}
+
+async function addNpxFrameworkRunners(runners, cwd, pkg) {
+  const dependencyNames = packageDependencyNames(pkg);
+  if (!dependencyNames.size || !await appRunnerCommandAvailable("npx", cwd)) return;
+  const frameworks = [
+    { dep: "vite", label: "npx vite", args: ["--no-install", "vite"], priority: 78 },
+    { dep: "next", label: "npx next dev", args: ["--no-install", "next", "dev"], priority: 80 },
+    { dep: "astro", label: "npx astro dev", args: ["--no-install", "astro", "dev"], priority: 82 },
+    { dep: "@storybook/react", label: "npx storybook dev", args: ["--no-install", "storybook", "dev"], priority: 86 },
+    { dep: "storybook", label: "npx storybook dev", args: ["--no-install", "storybook", "dev"], priority: 86 },
+  ];
+  for (const framework of frameworks) {
+    if (!dependencyNames.has(framework.dep)) continue;
+    addAppRunner(runners, appRunnerCandidate({
+      id: appRunnerId("npx", framework.dep),
+      label: framework.label,
+      kind: "node",
+      command: "npx",
+      args: framework.args,
+      projectFile: "package.json",
+      description: `Detected ${framework.dep} dependency`,
+      priority: framework.priority,
+    }));
+  }
+}
+
+async function addNodeEntrypointRunner(runners, cwd, hasPackageJson) {
+  if (hasPackageJson) return;
+  const entry = await firstExistingRunnerFile(cwd, APP_RUNNER_JS_ENTRIES);
+  if (!entry || !await appRunnerCommandAvailable("node", cwd)) return;
+  addAppRunner(runners, appRunnerCandidate({
+    id: appRunnerId("node", entry),
+    label: `node ${entry}`,
+    kind: "node",
+    command: "node",
+    args: [entry],
+    projectFile: entry,
+    description: "Detected JavaScript entry file",
+    priority: 88,
+  }));
+}
+
+async function addPythonRunners(runners, cwd) {
+  const entry = await firstExistingRunnerFile(cwd, APP_RUNNER_PYTHON_ENTRIES);
+  if (!entry) return;
+  if (await appRunnerCommandAvailable("uv", cwd)) {
+    addAppRunner(runners, appRunnerCandidate({
+      id: appRunnerId("python", "uv", entry),
+      label: `uv run ${entry}`,
+      kind: "python",
+      command: "uv",
+      args: ["run", entry],
+      projectFile: entry,
+      description: "Detected Python entry file",
+      priority: 36,
+    }));
+  }
+  const pythonCommand = await appRunnerCommandAvailable("python3", cwd) ? "python3" : await appRunnerCommandAvailable("python", cwd) ? "python" : "";
+  if (pythonCommand) {
+    addAppRunner(runners, appRunnerCandidate({
+      id: appRunnerId("python", pythonCommand, entry),
+      label: `${pythonCommand} ${entry}`,
+      kind: "python",
+      command: pythonCommand,
+      args: [entry],
+      projectFile: entry,
+      description: "Detected Python entry file",
+      priority: 68,
+    }));
+  }
+}
+
+async function addRustRunner(runners, cwd) {
+  if (!await appRunnerFileExists(cwd, "Cargo.toml") || !await appRunnerCommandAvailable("cargo", cwd)) return;
+  addAppRunner(runners, appRunnerCandidate({
+    id: "rust:cargo-run",
+    label: "cargo run",
+    kind: "rust",
+    command: "cargo",
+    args: ["run"],
+    projectFile: "Cargo.toml",
+    description: "Detected Rust Cargo project",
+    priority: 18,
+  }));
+}
+
+async function goRunTarget(cwd) {
+  if (await appRunnerFileExists(cwd, "main.go")) return ".";
+  if (await appRunnerDirectoryExists(cwd, "cmd")) {
+    const entries = await readdir(path.join(cwd, "cmd"), { withFileTypes: true }).catch(() => []);
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (!entry.isDirectory()) continue;
+      if (await appRunnerFileExists(cwd, path.join("cmd", entry.name, "main.go"))) return `./cmd/${entry.name}`;
+    }
+  }
+  return await appRunnerFileExists(cwd, "go.mod") ? "." : "";
+}
+
+async function addGoRunner(runners, cwd) {
+  const target = await goRunTarget(cwd);
+  if (!target || !await appRunnerCommandAvailable("go", cwd)) return;
+  addAppRunner(runners, appRunnerCandidate({
+    id: appRunnerId("go", target),
+    label: `go run ${target}`,
+    kind: "go",
+    command: "go",
+    args: ["run", target],
+    projectFile: await appRunnerFileExists(cwd, "go.mod") ? "go.mod" : target,
+    description: "Detected Go/Golang app entry",
+    priority: 46,
+  }));
+}
+
+function buildZigHasRunStep(text) {
+  return /\.step\(\s*["']run["']/.test(String(text || ""));
+}
+
+async function addZigRunner(runners, cwd) {
+  if (!await appRunnerCommandAvailable("zig", cwd)) return;
+  const buildZig = await appRunnerTextIfExists(cwd, "build.zig");
+  if (buildZig && buildZigHasRunStep(buildZig)) {
+    addAppRunner(runners, appRunnerCandidate({
+      id: "zig:build-run",
+      label: "zig build run",
+      kind: "zig",
+      command: "zig",
+      args: ["build", "run"],
+      projectFile: "build.zig",
+      description: "Detected Zig build.zig run step",
+      priority: 44,
+    }));
+  }
+  const entry = await firstExistingRunnerFile(cwd, APP_RUNNER_ZIG_ENTRIES);
+  if (entry) {
+    addAppRunner(runners, appRunnerCandidate({
+      id: appRunnerId("zig", entry),
+      label: `zig run ${entry}`,
+      kind: "zig",
+      command: "zig",
+      args: ["run", entry],
+      projectFile: entry,
+      description: "Detected Zig app entry file",
+      priority: 66,
+    }));
+  }
+}
+
+function firstCmakeExecutableTarget(text) {
+  const match = String(text || "").match(/add_executable\s*\(\s*([A-Za-z0-9_.+-]+)/i);
+  return match ? match[1] : "";
+}
+
+async function addCompiledLanguageRunner(runners, cwd, { language, kind, compiler, entry, outputName, priority }) {
+  if (!entry || !await appRunnerCommandAvailable("sh", cwd) || !await appRunnerCommandAvailable(compiler, cwd)) return;
+  const output = `.pi-webui-runner/${outputName}`;
+  const compileAndRun = `mkdir -p .pi-webui-runner && ${compiler} ${shellQuote(entry)} -o ${shellQuote(output)} && ${shellQuote(`./${output}`)}`;
+  addAppRunner(runners, appRunnerCandidate({
+    id: appRunnerId(kind, entry),
+    label: `${compiler} ${entry}`,
+    kind,
+    command: "sh",
+    args: ["-lc", compileAndRun],
+    projectFile: entry,
+    description: `Detected ${language} app entry file`,
+    priority,
+  }));
+}
+
+async function addCppRunners(runners, cwd) {
+  const cmakeText = await appRunnerTextIfExists(cwd, "CMakeLists.txt");
+  const cmakeTarget = firstCmakeExecutableTarget(cmakeText);
+  const hasShell = await appRunnerCommandAvailable("sh", cwd);
+  if (cmakeTarget && hasShell && await appRunnerCommandAvailable("cmake", cwd)) {
+    const configureBuildRun = `cmake -S . -B build && cmake --build build --target ${shellQuote(cmakeTarget)} && ${shellQuote(`./build/${cmakeTarget}`)}`;
+    addAppRunner(runners, appRunnerCandidate({
+      id: appRunnerId("cmake", cmakeTarget),
+      label: `cmake run ${cmakeTarget}`,
+      kind: "cpp",
+      command: "sh",
+      args: ["-lc", configureBuildRun],
+      projectFile: "CMakeLists.txt",
+      description: "Detected C/C++ CMake executable target",
+      priority: 42,
+    }));
+    return;
+  }
+
+  await Promise.all([
+    addCompiledLanguageRunner(runners, cwd, {
+      language: "C",
+      kind: "c",
+      compiler: "cc",
+      entry: await firstExistingRunnerFile(cwd, APP_RUNNER_C_ENTRIES),
+      outputName: "main-c",
+      priority: 64,
+    }),
+    addCompiledLanguageRunner(runners, cwd, {
+      language: "C++",
+      kind: "cpp",
+      compiler: "c++",
+      entry: await firstExistingRunnerFile(cwd, APP_RUNNER_CPP_ENTRIES),
+      outputName: "main-cpp",
+      priority: 65,
+    }),
+  ]);
+}
+
+async function dockerComposePluginAvailable(cwd) {
+  const result = await runCommand("docker", ["compose", "version"], {
+    cwd,
+    timeoutMs: APP_RUNNER_DETECTION_TIMEOUT_MS,
+    maxOutputLength: 2_000,
+  });
+  return !result.error && !result.timedOut && result.exitCode === 0;
+}
+
+async function addDockerComposeRunner(runners, cwd) {
+  const composeFile = await firstExistingRunnerFile(cwd, APP_RUNNER_DOCKER_COMPOSE_FILES);
+  if (!composeFile) return;
+  if (await appRunnerCommandAvailable("docker", cwd) && await dockerComposePluginAvailable(cwd)) {
+    addAppRunner(runners, appRunnerCandidate({
+      id: appRunnerId("docker-compose", composeFile),
+      label: "docker compose up",
+      kind: "docker",
+      command: "docker",
+      args: ["compose", "-f", composeFile, "up"],
+      projectFile: composeFile,
+      description: "Detected Docker Compose file",
+      priority: 82,
+    }));
+  }
+  if (await appRunnerCommandAvailable("docker-compose", cwd)) {
+    addAppRunner(runners, appRunnerCandidate({
+      id: appRunnerId("docker-compose-standalone", composeFile),
+      label: "docker-compose up",
+      kind: "docker",
+      command: "docker-compose",
+      args: ["-f", composeFile, "up"],
+      projectFile: composeFile,
+      description: "Detected Docker Compose file",
+      priority: 84,
+    }));
+  }
+}
+
+function shellFromShebang(text) {
+  const firstLine = String(text || "").split(/\r?\n/, 1)[0] || "";
+  if (!firstLine.startsWith("#!")) return "";
+  if (/\bfish\b/.test(firstLine)) return "fish";
+  if (/\bzsh\b/.test(firstLine)) return "zsh";
+  if (/\bbash\b/.test(firstLine)) return "bash";
+  if (/\bsh\b/.test(firstLine)) return "bash";
+  return "";
+}
+
+function shellScriptPriority(relativePath, shell) {
+  const base = path.basename(relativePath).replace(/\.(?:sh|bash|zsh|fish)$/i, "").toLowerCase();
+  const directory = path.dirname(relativePath).replace(/\\/g, "/");
+  const nameRank = ["dev", "start", "run", "serve", "server", "app", "main"].indexOf(base);
+  const dirRank = APP_RUNNER_SHELL_SCRIPT_DIRS.indexOf(directory === "." ? "" : directory);
+  const shellRank = shell === "bash" ? 0 : shell === "zsh" ? 1 : shell === "fish" ? 2 : 3;
+  return 70 + (nameRank === -1 ? 18 : nameRank) + (dirRank === -1 ? 8 : dirRank) + shellRank / 10;
+}
+
+async function shellScriptRunnerForFile(cwd, relativePath) {
+  const extensionShell = APP_RUNNER_SHELL_EXTENSIONS.get(path.extname(relativePath).toLowerCase()) || "";
+  let shell = extensionShell;
+  if (!shell) shell = shellFromShebang(await appRunnerTextIfExists(cwd, relativePath, 256));
+  if (!shell || !await appRunnerCommandAvailable(shell, cwd)) return null;
+  const fileName = path.basename(relativePath);
+  const directory = path.dirname(relativePath);
+  return appRunnerCandidate({
+    id: appRunnerId("shell", shell, relativePath),
+    label: fileName,
+    kind: "shell",
+    command: shell,
+    args: [relativePath],
+    projectFile: relativePath,
+    description: `Detected ${shell} shell script${directory && directory !== "." ? ` in ${directory}` : ""}`,
+    priority: shellScriptPriority(relativePath, shell),
+  });
+}
+
+async function addShellScriptRunners(runners, cwd) {
+  const candidates = [];
+  for (const directory of APP_RUNNER_SHELL_SCRIPT_DIRS) {
+    const absoluteDirectory = path.join(cwd, directory || ".");
+    const stats = await fileStatsIfExists(absoluteDirectory);
+    if (!stats?.isDirectory()) continue;
+    const entries = await readdir(absoluteDirectory, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      const relativePath = directory ? `${directory}/${entry.name}` : entry.name;
+      const extension = path.extname(entry.name).toLowerCase();
+      const explicitShellExtension = APP_RUNNER_SHELL_EXTENSIONS.has(extension);
+      if (!explicitShellExtension && entry.name.includes(".")) continue;
+      candidates.push(relativePath);
+    }
+  }
+
+  for (const relativePath of candidates.slice(0, APP_RUNNER_SHELL_SCRIPT_LIMIT * 2)) {
+    const runner = await shellScriptRunnerForFile(cwd, relativePath);
+    if (runner) addAppRunner(runners, runner);
+    if (runners.filter((item) => item.kind === "shell").length >= APP_RUNNER_SHELL_SCRIPT_LIMIT) break;
+  }
+}
+
+function firstTaskFromText(text, names) {
+  for (const name of names) {
+    const pattern = new RegExp(`^[\\s\"']*${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s\"']*[:=]`, "m");
+    if (pattern.test(text)) return name;
+  }
+  return "";
+}
+
+async function addDenoRunner(runners, cwd) {
+  const hasDenoConfig = await appRunnerFileExists(cwd, "deno.json") || await appRunnerFileExists(cwd, "deno.jsonc");
+  if (!hasDenoConfig || !await appRunnerCommandAvailable("deno", cwd)) return;
+  const configText = (await appRunnerTextIfExists(cwd, "deno.json")) || (await appRunnerTextIfExists(cwd, "deno.jsonc"));
+  const task = firstTaskFromText(configText, ["dev", "start", "serve"]);
+  if (task) {
+    addAppRunner(runners, appRunnerCandidate({
+      id: appRunnerId("deno", task),
+      label: `deno task ${task}`,
+      kind: "deno",
+      command: "deno",
+      args: ["task", task],
+      projectFile: "deno.json",
+      description: "Detected Deno task",
+      priority: 52,
+    }));
+  }
+}
+
+async function addTaskFileRunners(runners, cwd) {
+  const [justText, makeText] = await Promise.all([
+    appRunnerTextIfExists(cwd, "justfile").then((text) => text || appRunnerTextIfExists(cwd, "Justfile")),
+    appRunnerTextIfExists(cwd, "Makefile").then((text) => text || appRunnerTextIfExists(cwd, "makefile")),
+  ]);
+  const justTarget = firstTaskFromText(justText, ["dev", "run", "start"]);
+  if (justTarget && await appRunnerCommandAvailable("just", cwd)) {
+    addAppRunner(runners, appRunnerCandidate({
+      id: appRunnerId("just", justTarget),
+      label: `just ${justTarget}`,
+      kind: "task",
+      command: "just",
+      args: [justTarget],
+      projectFile: "Justfile",
+      description: "Detected just recipe",
+      priority: 74,
+    }));
+  }
+  const makeTarget = firstTaskFromText(makeText, ["dev", "run", "start"]);
+  if (makeTarget && await appRunnerCommandAvailable("make", cwd)) {
+    addAppRunner(runners, appRunnerCandidate({
+      id: appRunnerId("make", makeTarget),
+      label: `make ${makeTarget}`,
+      kind: "task",
+      command: "make",
+      args: [makeTarget],
+      projectFile: "Makefile",
+      description: "Detected Make target",
+      priority: 76,
+    }));
+  }
+}
+
+function publicAppRunner(runner) {
+  if (!runner) return null;
+  const { priority: _priority, ...publicRunner } = runner;
+  return publicRunner;
+}
+
+async function detectAppRunners(tab) {
+  const cwd = tab?.cwd || options.cwd;
+  const runners = [];
+  const pkg = await readJsonFileIfExists(path.join(cwd, "package.json"));
+  await Promise.all([
+    addCustomAppRunners(runners, cwd),
+    addRustRunner(runners, cwd),
+    pkg ? addPackageManagerRunners(runners, cwd, pkg) : Promise.resolve(),
+    pkg ? addNpxFrameworkRunners(runners, cwd, pkg) : Promise.resolve(),
+    addPythonRunners(runners, cwd),
+    addGoRunner(runners, cwd),
+    addZigRunner(runners, cwd),
+    addCppRunners(runners, cwd),
+    addDockerComposeRunner(runners, cwd),
+    addShellScriptRunners(runners, cwd),
+    addDenoRunner(runners, cwd),
+    addTaskFileRunners(runners, cwd),
+    addNodeEntrypointRunner(runners, cwd, !!pkg),
+  ]);
+  return runners
+    .sort((a, b) => a.priority - b.priority || a.label.localeCompare(b.label))
+    .map(publicAppRunner);
+}
+
+function publicAppRunnerState(run) {
+  if (!run) return null;
+  return {
+    id: run.id,
+    runnerId: run.runnerId,
+    kind: run.kind,
+    label: run.label,
+    command: run.command,
+    args: run.args,
+    displayCommand: run.displayCommand,
+    cwd: run.cwd,
+    pid: run.pid,
+    status: run.status,
+    startedAt: run.startedAt,
+    endedAt: run.endedAt,
+    exitCode: run.exitCode,
+    signal: run.signal,
+    stopping: run.stopping === true,
+    truncated: run.truncated === true,
+    lineCount: run.lineCount || run.lines?.length || 0,
+    lines: Array.isArray(run.lines) ? [...run.lines] : [],
+  };
+}
+
+async function getAppRunnerData(tab) {
+  const [runners, customRunnerConfig] = await Promise.all([
+    detectAppRunners(tab),
+    getCustomAppRunnerConfigData(tab),
+  ]);
+  return {
+    cwd: tab.cwd,
+    runners,
+    customRunnerConfig,
+    activeRun: publicAppRunnerState(tab.appRunner),
+  };
+}
+
+function appendAppRunnerLine(run, line) {
+  if (!run) return;
+  const text = String(line ?? "");
+  run.lines.push(text);
+  run.lineCount = (run.lineCount || 0) + 1;
+  run.outputChars = (run.outputChars || 0) + text.length + 1;
+  while (run.lines.length > APP_RUNNER_OUTPUT_LINE_LIMIT || run.outputChars > APP_RUNNER_OUTPUT_MAX_CHARS) {
+    const removed = run.lines.shift();
+    run.outputChars -= String(removed || "").length + 1;
+    run.truncated = true;
+  }
+}
+
+function appendAppRunnerChunk(tab, run, chunk, streamName) {
+  if (!run || run.status !== "running") return;
+  const key = streamName === "stderr" ? "stderrRemainder" : "stdoutRemainder";
+  const normalized = `${run[key] || ""}${String(chunk).replace(/\r\n?/g, "\n")}`;
+  const lines = normalized.split("\n");
+  run[key] = lines.pop() || "";
+  for (const line of lines) appendAppRunnerLine(run, line);
+  scheduleAppRunnerBroadcast(tab);
+}
+
+function flushAppRunnerRemainders(run) {
+  for (const key of ["stdoutRemainder", "stderrRemainder"]) {
+    if (run?.[key]) {
+      appendAppRunnerLine(run, run[key]);
+      run[key] = "";
+    }
+  }
+}
+
+function appRunnerStatusLabel(run) {
+  if (run?.stopping && run.status === "running") return "stopping";
+  if (run?.status === "done") return "exit 0";
+  if (run?.status === "failed") return run.signal ? `signal ${run.signal}` : `exit ${run.exitCode ?? "?"}`;
+  if (run?.status === "error") return "error";
+  return run?.status || "running";
+}
+
+function broadcastAppRunnerState(tab) {
+  broadcastTabEvent(tab, {
+    type: "webui_app_runner_update",
+    tabId: tab.id,
+    tabTitle: tab.title,
+    cwd: tab.cwd,
+    command: tab.appRunner?.displayCommand,
+    activeRun: publicAppRunnerState(tab.appRunner),
+    tabActivity: tabActivitySnapshot(tab),
+  });
+}
+
+function scheduleAppRunnerBroadcast(tab) {
+  if (!tab || tab.appRunnerBroadcastTimer) return;
+  tab.appRunnerBroadcastTimer = setTimeout(() => {
+    tab.appRunnerBroadcastTimer = null;
+    if (tabs.has(tab.id)) broadcastAppRunnerState(tab);
+  }, 120);
+}
+
+function terminateAppRunnerChild(run, signal = "SIGTERM") {
+  if (!run?.child || run.child.killed) return false;
+  try {
+    if (process.platform !== "win32" && run.pid) process.kill(-run.pid, signal);
+    else run.child.kill(signal);
+    return true;
+  } catch {
+    try {
+      run.child.kill(signal);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+function finishAppRunner(tab, run, patch = {}) {
+  if (!run || run.settled) return;
+  run.settled = true;
+  clearTimeout(run.stopTimer);
+  flushAppRunnerRemainders(run);
+  run.endedAt = new Date().toISOString();
+  run.exitCode = patch.exitCode;
+  run.signal = patch.signal;
+  run.error = patch.error;
+  run.status = patch.error ? "error" : patch.exitCode === 0 ? "done" : "failed";
+  run.child = null;
+  run.stopping = false;
+  appendAppRunnerLine(run, `# ${appRunnerStatusLabel(run)} after ${Math.max(0, Math.round((Date.parse(run.endedAt) - Date.parse(run.startedAt)) / 1000))}s`);
+  if (patch.error) appendAppRunnerLine(run, `# ${patch.error}`);
+  recordEvent({ type: "webui_app_runner_exit", tabId: tab.id, tabTitle: tab.title, command: run.displayCommand, code: run.exitCode, signal: run.signal, error: run.error });
+  clearTimeout(tab.appRunnerBroadcastTimer);
+  tab.appRunnerBroadcastTimer = null;
+  broadcastAppRunnerState(tab);
+}
+
+async function startAppRunner(tab, runnerId) {
+  if (tab.appRunner?.status === "running") throw makeHttpError(409, `App runner already running: ${tab.appRunner.displayCommand}`);
+  const runners = await detectAppRunners(tab);
+  const runner = runners.find((item) => item.id === runnerId) || (runners.length === 1 && !runnerId ? runners[0] : null);
+  if (!runner) throw makeHttpError(400, "Selected app runner is unavailable in this tab cwd");
+
+  const run = {
+    id: randomUUID(),
+    runnerId: runner.id,
+    kind: runner.kind,
+    label: runner.label,
+    command: runner.command,
+    args: runner.args || [],
+    displayCommand: runner.displayCommand,
+    cwd: runner.cwd || tab.cwd,
+    status: "running",
+    startedAt: new Date().toISOString(),
+    lines: [],
+    lineCount: 0,
+    outputChars: 0,
+  };
+  appendAppRunnerLine(run, `$ ${run.displayCommand}`);
+  const child = spawn(run.command, run.args, {
+    cwd: run.cwd,
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+    detached: process.platform !== "win32",
+  });
+  run.child = child;
+  run.pid = child.pid;
+  tab.appRunner = run;
+
+  child.stdout.on("data", (chunk) => appendAppRunnerChunk(tab, run, chunk, "stdout"));
+  child.stderr.on("data", (chunk) => appendAppRunnerChunk(tab, run, chunk, "stderr"));
+  child.on("error", (error) => finishAppRunner(tab, run, { error: sanitizeError(error) }));
+  child.on("exit", (exitCode, signal) => finishAppRunner(tab, run, { exitCode, signal }));
+
+  recordEvent({ type: "webui_app_runner_start", tabId: tab.id, tabTitle: tab.title, command: run.displayCommand, cwd: run.cwd, pid: run.pid });
+  broadcastAppRunnerState(tab);
+  return { runners, customRunnerConfig: await getCustomAppRunnerConfigData(tab), activeRun: publicAppRunnerState(run), cwd: tab.cwd };
+}
+
+function stopAppRunnerForTab(tab, reason = "stop requested", { force = false } = {}) {
+  const run = tab?.appRunner;
+  if (!run || run.status !== "running") return false;
+  run.stopping = true;
+  appendAppRunnerLine(run, `# ${reason}; sending ${force ? "SIGKILL" : "SIGTERM"}`);
+  terminateAppRunnerChild(run, force ? "SIGKILL" : "SIGTERM");
+  if (!force) {
+    clearTimeout(run.stopTimer);
+    run.stopTimer = setTimeout(() => {
+      if (run.status === "running") {
+        appendAppRunnerLine(run, "# app runner did not stop; sending SIGKILL");
+        terminateAppRunnerChild(run, "SIGKILL");
+        scheduleAppRunnerBroadcast(tab);
+      }
+    }, APP_RUNNER_STOP_GRACE_MS);
+  }
+  broadcastAppRunnerState(tab);
+  return true;
+}
+
+function clearAppRunnerForTab(tab) {
+  if (!tab?.appRunner || tab.appRunner.status === "running") return false;
+  tab.appRunner = null;
+  broadcastAppRunnerState(tab);
+  return true;
 }
 
 function firstDefined(...values) {
@@ -2844,6 +3859,7 @@ async function updateTabCwd(id, cwd) {
   tab.rpcUnsubscribe?.();
   tab.rpcUnsubscribe = undefined;
   rejectTabBashQueue(tab, new Error("Pi tab is restarting; queued bash commands were cancelled"));
+  stopAppRunnerForTab(tab, "cwd changed", { force: true });
   oldRpc.stop();
 
   tab.cwd = nextCwd;
@@ -3849,6 +4865,7 @@ async function closeTab(id) {
   tab.sseClients.clear();
   tab.rpcUnsubscribe?.();
   rejectTabBashQueue(tab, new Error("Pi tab closed; queued bash commands were cancelled"));
+  stopAppRunnerForTab(tab, "tab closed", { force: true });
   tab.rpc.stop();
   tabs.delete(id);
   return tab;
@@ -4237,6 +5254,7 @@ const server = createServer(async (req, res) => {
         startedAt: tab.rpc.startedAt,
         tabActivity: tabActivitySnapshot(tab),
         pendingExtensionUiRequestCount: pendingExtensionUiRequests(tab).length,
+        activeRun: publicAppRunnerState(tab.appRunner),
       });
       replayExtensionStatuses(tab, res);
       replayPendingExtensionUiRequests(tab, res);
@@ -4347,6 +5365,61 @@ const server = createServer(async (req, res) => {
         ok: true,
         data: await getWorkspaceInfo(tab.cwd, tab.rpc.startedAt),
       });
+      return;
+    }
+
+    if (url.pathname === "/api/app-runners" && req.method === "GET") {
+      const tab = getRequestedTab(req, url);
+      sendJson(res, 200, { ok: true, data: await getAppRunnerData(tab) });
+      return;
+    }
+
+    if (url.pathname === "/api/app-runner" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const tab = getRequestedTab(req, url, body);
+      sendJson(res, 200, { ok: true, data: await startAppRunner(tab, String(body.runnerId || body.id || "")) });
+      return;
+    }
+
+    if (url.pathname === "/api/app-runner/stop" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const tab = getRequestedTab(req, url, body);
+      stopAppRunnerForTab(tab, "stop requested from Web UI");
+      sendJson(res, 200, { ok: true, data: await getAppRunnerData(tab) });
+      return;
+    }
+
+    if (url.pathname === "/api/app-runner/clear" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const tab = getRequestedTab(req, url, body);
+      clearAppRunnerForTab(tab);
+      sendJson(res, 200, { ok: true, data: await getAppRunnerData(tab) });
+      return;
+    }
+
+    if (url.pathname === "/api/app-runner-config" && req.method === "GET") {
+      const tab = getRequestedTab(req, url);
+      sendJson(res, 200, { ok: true, data: await getCustomAppRunnerConfigData(tab) });
+      return;
+    }
+
+    if (url.pathname === "/api/app-runner-config" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const tab = getRequestedTab(req, url, body);
+      sendJson(res, 200, { ok: true, data: await saveCustomAppRunner(tab, body.runner || body) });
+      return;
+    }
+
+    if (url.pathname === "/api/app-runner-config" && req.method === "DELETE") {
+      const body = await readJsonBody(req);
+      const tab = getRequestedTab(req, url, body);
+      sendJson(res, 200, { ok: true, data: await deleteCustomAppRunner(tab, body.id || body.runnerId) });
+      return;
+    }
+
+    if (url.pathname === "/api/app-runner-files" && req.method === "GET") {
+      const tab = getRequestedTab(req, url);
+      sendJson(res, 200, { ok: true, data: await getAppRunnerFileBrowserData(tab, url.searchParams.get("path")) });
       return;
     }
 
@@ -4626,7 +5699,10 @@ server.on("error", (error) => {
     return;
   }
   console.error("Web UI server failed:", sanitizeError(error));
-  for (const tab of tabs.values()) tab.rpc.stop();
+  for (const tab of tabs.values()) {
+    stopAppRunnerForTab(tab, "server error", { force: true });
+    tab.rpc.stop();
+  }
   process.exit(1);
 });
 
@@ -4653,7 +5729,10 @@ function shutdown(signal) {
     process.exit(0);
   });
   server.closeIdleConnections?.();
-  for (const tab of tabs.values()) tab.rpc.stop();
+  for (const tab of tabs.values()) {
+    stopAppRunnerForTab(tab, "server shutdown", { force: true });
+    tab.rpc.stop();
+  }
   setTimeout(() => process.exit(0), 4000).unref();
 }
 

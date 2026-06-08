@@ -50,6 +50,10 @@ const elements = {
   nativeCommandMenu: $("#nativeCommandMenu"),
   nativeSkillsButton: $("#nativeSkillsButton"),
   nativeToolsButton: $("#nativeToolsButton"),
+  appRunnerMenu: $("#appRunnerMenu"),
+  appRunnerInfoButton: $("#appRunnerInfoButton"),
+  appRunnerMenuButton: $("#appRunnerMenuButton"),
+  appRunnerMenuPanel: $("#appRunnerMenuPanel"),
   optionsMenuButton: $("#optionsMenuButton"),
   optionsMenu: $("#optionsMenu"),
   optionsResumeButton: $("#optionsResumeButton"),
@@ -143,6 +147,9 @@ const elements = {
   nativeCommandBody: $("#nativeCommandBody"),
   nativeCommandError: $("#nativeCommandError"),
   nativeCommandActions: $("#nativeCommandActions"),
+  appRunnerInfoDialog: $("#appRunnerInfoDialog"),
+  appRunnerInfoBody: $("#appRunnerInfoBody"),
+  appRunnerInfoCloseButton: $("#appRunnerInfoCloseButton"),
 };
 
 let currentState = null;
@@ -188,6 +195,9 @@ let mobileTabsExpanded = false;
 let openTerminalTabGroupKey = null;
 let newTabMenuOpen = false;
 let nativeCommandMenuOpen = false;
+let appRunnerMenuOpen = false;
+let appRunnerCustomDraft = { id: "", label: "", command: "./", path: "", args: "" };
+let appRunnerFileBrowserState = { open: false, loading: false, path: "", data: null, error: "" };
 let optionsMenuOpen = false;
 let availableCommands = [];
 let rawAvailableCommands = [];
@@ -245,6 +255,7 @@ let customBackgroundLoading = false;
 let footerScopedModels = [];
 let footerScopedModelPatterns = [];
 let footerScopedModelSource = "none";
+const contextUsageUnknownAfterCompactionByTab = new Map();
 let autoFollowChat = true;
 let chatFollowFrame = null;
 let chatFollowSettleTimer = null;
@@ -298,6 +309,7 @@ const INLINE_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"
 const BACKGROUND_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const DEFAULT_THEME_NAME = "catppuccin-mocha";
 const MOBILE_VIEW_QUERY = "(max-width: 720px), (max-device-width: 720px), (pointer: coarse) and (hover: none)";
+const SIDE_PANEL_OVERLAY_QUERY = "(max-width: 1050px), (max-device-width: 720px), (pointer: coarse) and (hover: none)";
 const CHAT_BOTTOM_THRESHOLD_PX = 96;
 const STICKY_USER_PROMPT_PREVIEW_LIMIT = 220;
 const STICKY_USER_PROMPT_TOP_GAP_PX = 12;
@@ -326,10 +338,12 @@ const BLOCKED_TAB_NOTIFICATION_TAG_PREFIX = "pi-webui-blocked-tab";
 const AGENT_DONE_NOTIFICATION_TAG_PREFIX = "pi-webui-agent-done";
 const BLOCKED_TAB_NOTIFICATION_ICON = "/icon-192.png";
 const mobileViewMedia = window.matchMedia?.(MOBILE_VIEW_QUERY) || null;
+const sidePanelOverlayMedia = window.matchMedia?.(SIDE_PANEL_OVERLAY_QUERY) || mobileViewMedia;
 const statusEntries = new Map();
 const widgets = new Map();
 const todoProgressWidgetExpandedByTab = new Map();
 const releaseNpmOutputExpandedByTab = new Map();
+const appRunnerDataByTab = new Map();
 const liveToolRuns = new Map();
 const liveToolCards = new Map();
 const liveToolRenderQueue = new Map();
@@ -531,6 +545,10 @@ function delay(ms) {
 
 function isMobileView() {
   return mobileViewMedia?.matches || false;
+}
+
+function isSidePanelOverlayView() {
+  return sidePanelOverlayMedia?.matches || false;
 }
 
 function readStoredSidePanelCollapsed() {
@@ -794,6 +812,7 @@ function setComposerActionsOpen(open) {
   if (!shouldOpen) {
     setPublishMenuOpen(false);
     setNativeCommandMenuOpen(false);
+    setAppRunnerMenuOpen(false);
     setOptionsMenuOpen(false);
   }
 }
@@ -929,7 +948,7 @@ function setMobileTabsExpanded(expanded) {
 }
 
 function syncMobileSidePanelState(collapsed) {
-  const showBackdrop = !collapsed && isMobileView();
+  const showBackdrop = !collapsed && isSidePanelOverlayView();
   elements.sidePanelBackdrop.hidden = !showBackdrop;
   if (showBackdrop) elements.sidePanel.setAttribute("aria-modal", "true");
   else elements.sidePanel.removeAttribute("aria-modal");
@@ -943,11 +962,11 @@ function setSidePanelCollapsed(collapsed, { persist = true, focusPanel = false }
   elements.sidePanelExpandButton.setAttribute("aria-expanded", collapsed ? "false" : "true");
   syncMobileSidePanelState(collapsed);
 
-  if (!collapsed && focusPanel && isMobileView()) {
+  if (!collapsed && focusPanel && isSidePanelOverlayView()) {
     requestAnimationFrame(() => elements.toggleSidePanelButton.focus());
   }
 
-  if (!persist || isMobileView()) return;
+  if (!persist || isSidePanelOverlayView()) return;
   try {
     localStorage.setItem(SIDE_PANEL_STORAGE_KEY, collapsed ? "1" : "0");
   } catch {
@@ -956,7 +975,7 @@ function setSidePanelCollapsed(collapsed, { persist = true, focusPanel = false }
 }
 
 function restoreSidePanelState() {
-  if (isMobileView()) {
+  if (isSidePanelOverlayView()) {
     setSidePanelCollapsed(true, { persist: false });
     return;
   }
@@ -970,7 +989,7 @@ function bindMobileViewChanges() {
     setComposerActionsOpen(false);
     setMobileFooterExpanded(false);
     setMobileTabsExpanded(false);
-    if (event.matches) {
+    if (event.matches || isSidePanelOverlayView()) {
       setSidePanelCollapsed(true, { persist: false });
       return;
     }
@@ -979,6 +998,20 @@ function bindMobileViewChanges() {
   };
   if (typeof mobileViewMedia.addEventListener === "function") mobileViewMedia.addEventListener("change", syncForViewport);
   else mobileViewMedia.addListener?.(syncForViewport);
+}
+
+function bindSidePanelOverlayViewChanges() {
+  if (!sidePanelOverlayMedia || sidePanelOverlayMedia === mobileViewMedia) return;
+  const syncForViewport = (event) => {
+    if (event.matches) {
+      setSidePanelCollapsed(true, { persist: false });
+      return;
+    }
+    const stored = readStoredSidePanelCollapsed();
+    setSidePanelCollapsed(stored ?? false, { persist: false });
+  };
+  if (typeof sidePanelOverlayMedia.addEventListener === "function") sidePanelOverlayMedia.addEventListener("change", syncForViewport);
+  else sidePanelOverlayMedia.addListener?.(syncForViewport);
 }
 
 function updateVisualViewportVars() {
@@ -2592,7 +2625,7 @@ function restoreActiveDraft() {
 
 function focusPromptInput({ defer = false } = {}) {
   const focus = () => {
-    if (!elements.promptInput || elements.dialog.open || elements.pathPickerDialog.open || elements.nativeCommandDialog.open || elements.promptListDialog?.open || document.visibilityState === "hidden") return;
+    if (!elements.promptInput || elements.dialog.open || elements.pathPickerDialog.open || elements.nativeCommandDialog.open || elements.appRunnerInfoDialog?.open || elements.promptListDialog?.open || document.visibilityState === "hidden") return;
     try {
       elements.promptInput.focus({ preventScroll: true });
     } catch {
@@ -2666,6 +2699,7 @@ function resetActiveTabUi() {
   else renderQueue({ tabId: activeTabId, steering: [], followUp: [] });
   elements.commandsBox.textContent = "Loading…";
   elements.commandsBox.classList.add("muted");
+  renderAppRunnerControls();
   renderWidgets();
   renderGitWorkflow();
   renderFooter();
@@ -2888,6 +2922,7 @@ function setNewTabMenuOpen(open) {
 function openNewTabMenu() {
   setPublishMenuOpen(false);
   setNativeCommandMenuOpen(false);
+  setAppRunnerMenuOpen(false);
   setOptionsMenuOpen(false);
   setNewTabMenuOpen(true);
 }
@@ -3067,6 +3102,7 @@ async function closeTerminalTabs(tabIds, { label = "selected terminal tabs" } = 
       tabDrafts.delete(id);
       clearAttachments(id);
       clearGitWorkflowForTab(id);
+      appRunnerDataByTab.delete(id);
     }
     clearOpenTerminalTabGroup(null, { force: true });
 
@@ -3602,6 +3638,50 @@ function footerCostAuthLabel() {
   return /codex|copilot|chatgpt/i.test(provider) ? "sub" : "api";
 }
 
+function contextWindowFromSources(...sources) {
+  for (const source of sources) {
+    const value = typeof source === "object" && source !== null ? source.contextWindow : source;
+    const contextWindow = Number(value);
+    if (Number.isFinite(contextWindow) && contextWindow > 0) return contextWindow;
+  }
+  return 0;
+}
+
+function contextUsageUnknownAfterCompaction(tabId = activeTabId) {
+  return !!tabId && contextUsageUnknownAfterCompactionByTab.has(tabId);
+}
+
+function unknownFooterContextText(contextUsage = null) {
+  const contextWindow = contextWindowFromSources(
+    contextUsage,
+    latestStats?.contextUsage,
+    currentState?.contextUsage,
+    currentState?.model?.contextWindow,
+  );
+  return contextWindow ? `?/${formatFooterTokenCount(contextWindow)}` : "?";
+}
+
+function contextUsageWithUnknownPercent(contextUsage = null) {
+  return {
+    ...(contextUsage || {}),
+    percent: null,
+    contextWindow: contextWindowFromSources(contextUsage, latestStats?.contextUsage, currentState?.contextUsage, currentState?.model?.contextWindow),
+  };
+}
+
+function markContextUsageUnknownAfterCompaction(tabId = activeTabId) {
+  if (!tabId) return;
+  contextUsageUnknownAfterCompactionByTab.set(tabId, Date.now());
+  if (tabId !== activeTabId) return;
+  if (currentState) currentState = { ...currentState, contextUsage: contextUsageWithUnknownPercent(currentState.contextUsage) };
+  if (latestStats) latestStats = { ...latestStats, contextUsage: contextUsageWithUnknownPercent(latestStats.contextUsage) };
+}
+
+function clearContextUsageUnknownAfterCompaction(tabId = activeTabId) {
+  if (!tabId) return;
+  contextUsageUnknownAfterCompactionByTab.delete(tabId);
+}
+
 function footerStatsTokensDisplay(stats = latestStats) {
   const tokens = stats?.tokens;
   if (!tokens) return "";
@@ -3622,7 +3702,8 @@ function footerContextDisplayWithAuto(value, state = currentState) {
 
 function footerStatsContextDisplay(stats = latestStats) {
   const usage = stats?.contextUsage || currentState?.contextUsage;
-  const contextWindow = usage?.contextWindow ?? currentState?.model?.contextWindow ?? 0;
+  const contextWindow = contextWindowFromSources(usage, currentState?.model?.contextWindow);
+  if (contextUsageUnknownAfterCompaction()) return footerContextDisplayWithAuto(unknownFooterContextText(usage));
   if (!contextWindow) return "";
   const rawPercent = Number(usage?.percent);
   const percent = Number.isFinite(rawPercent) ? `${rawPercent.toFixed(1)}%` : "?";
@@ -3921,8 +4002,10 @@ function footerPayloadWithLiveModel(payload) {
   const effort = footerThinkingDisplay();
   const hasThinkingChip = [...payload.main, ...payload.meta].some((chip) => chip?.key === "thinking");
   const contextChip = (chip) => {
-    const value = footerContextDisplayWithAuto(chip?.value);
-    return { ...chip, value, title: `context: ${value}` };
+    const usageUnknown = contextUsageUnknownAfterCompaction();
+    const value = usageUnknown ? footerContextDisplayWithAuto(unknownFooterContextText(chip?.contextUsage)) : footerContextDisplayWithAuto(chip?.value);
+    const contextUsage = usageUnknown ? contextUsageWithUnknownPercent(chip?.contextUsage) : chip?.contextUsage;
+    return { ...chip, value, title: `context: ${value}`, ...(contextUsage ? { contextUsage } : {}) };
   };
   const effortChip = (chip) => ({ ...chip, key: "thinking", label: "effort", value: effort, title: `effort: ${effort}`, tone: "mauve" });
   const splitChip = (chip) => {
@@ -5275,6 +5358,530 @@ function renderReleaseAurLogWidget() {
   return node;
 }
 
+function activeAppRunnerData() {
+  return activeTabId ? appRunnerDataByTab.get(activeTabId) || { runners: [], activeRun: null } : { runners: [], activeRun: null };
+}
+
+function setAppRunnerData(tabId, data = {}) {
+  if (!tabId) return;
+  const previous = appRunnerDataByTab.get(tabId) || { runners: [], activeRun: null, customRunnerConfig: null };
+  appRunnerDataByTab.set(tabId, {
+    cwd: data.cwd || previous.cwd || "",
+    runners: Array.isArray(data.runners) ? data.runners : previous.runners || [],
+    customRunnerConfig: data.customRunnerConfig || previous.customRunnerConfig || null,
+    activeRun: Object.prototype.hasOwnProperty.call(data, "activeRun") ? data.activeRun : previous.activeRun || null,
+  });
+}
+
+function appRunnerIsRunning(run) {
+  return run?.status === "running" || run?.stopping === true;
+}
+
+function appRunnerStatusLabel(run) {
+  if (run?.stopping && run.status === "running") return "stopping";
+  if (run?.status === "done") return "exit 0";
+  if (run?.status === "failed") return run.signal ? `signal ${run.signal}` : `exit ${run.exitCode ?? "?"}`;
+  if (run?.status === "error") return "error";
+  return run?.status || "running";
+}
+
+function appRunnerElapsedLabel(run) {
+  const startedAt = Date.parse(run?.startedAt || "");
+  if (!Number.isFinite(startedAt)) return "";
+  const endedAt = Date.parse(run?.endedAt || "");
+  const end = Number.isFinite(endedAt) ? endedAt : Date.now();
+  return formatDuration(end - startedAt);
+}
+
+function appRunnerActionButton(label, handler, className = "") {
+  const button = make("button", `release-npm-action ${className}`.trim(), label);
+  button.type = "button";
+  button.addEventListener("click", handler);
+  return button;
+}
+
+async function refreshAppRunners(tabContext = activeTabContext()) {
+  if (!tabContext.tabId) return;
+  const response = await api("/api/app-runners", { tabId: tabContext.tabId });
+  if (!isCurrentTabContext(tabContext)) return;
+  setAppRunnerData(tabContext.tabId, response.data || {});
+  renderAppRunnerControls();
+  renderWidgets();
+}
+
+async function runAppRunner(runnerId) {
+  const tabContext = activeTabContext();
+  if (!tabContext.tabId || !runnerId) return;
+  setComposerActionsOpen(false);
+  setAppRunnerMenuOpen(false);
+  try {
+    const response = await api("/api/app-runner", { method: "POST", body: { runnerId }, tabId: tabContext.tabId });
+    if (!isCurrentTabContext(tabContext)) return;
+    setAppRunnerData(tabContext.tabId, response.data || {});
+    renderAppRunnerControls();
+    renderWidgets();
+    const command = response.data?.activeRun?.displayCommand || "app runner";
+    addEvent(`started ${command}`, "info");
+  } catch (error) {
+    if (isCurrentTabContext(tabContext)) addEvent(error.message || String(error), "error");
+  }
+}
+
+async function stopAppRunner() {
+  const tabContext = activeTabContext();
+  if (!tabContext.tabId) return;
+  try {
+    const response = await api("/api/app-runner/stop", { method: "POST", body: {}, tabId: tabContext.tabId });
+    if (!isCurrentTabContext(tabContext)) return;
+    setAppRunnerData(tabContext.tabId, response.data || {});
+    renderAppRunnerControls();
+    renderWidgets();
+    addEvent("app runner stop requested", "warn");
+  } catch (error) {
+    if (isCurrentTabContext(tabContext)) addEvent(error.message || String(error), "error");
+  }
+}
+
+async function clearAppRunner() {
+  const tabContext = activeTabContext();
+  if (!tabContext.tabId) return;
+  try {
+    const response = await api("/api/app-runner/clear", { method: "POST", body: {}, tabId: tabContext.tabId });
+    if (!isCurrentTabContext(tabContext)) return;
+    setAppRunnerData(tabContext.tabId, response.data || {});
+    renderAppRunnerControls();
+    renderWidgets();
+  } catch (error) {
+    if (isCurrentTabContext(tabContext)) addEvent(error.message || String(error), "error");
+  }
+}
+
+function appRunnerOutputText(run) {
+  const lines = Array.isArray(run?.lines) ? run.lines : [];
+  return lines.join("\n").trimEnd();
+}
+
+async function copyAppRunnerOutput(run) {
+  const text = appRunnerOutputText(run);
+  if (!text.trim()) {
+    addEvent("app runner output is empty", "warn");
+    return;
+  }
+  try {
+    await copyText(text);
+    addEvent("copied app runner output", "info");
+  } catch (error) {
+    addEvent(`app runner output copy failed: ${error.message || String(error)}`, "warn");
+  }
+}
+
+const APP_RUNNER_SUPPORTED_ITEMS = [
+  "Project-local custom runners from .pi-webui-runners.json",
+  "package.json scripts: bun/npm/pnpm/yarn dev, start, serve",
+  "npx frameworks: Vite, Next, Astro, Storybook",
+  "Rust: cargo run",
+  "Python: uv run or python entry files such as Main.py, main.py, src/main.py",
+  "Go/Golang: go run",
+  "Zig: zig build run or zig run",
+  "C/C++: CMake, cc/c++ main files",
+  "Docker Compose: docker compose up",
+  "Shell scripts: bash/zsh/fish in root, dev/, scripts/, dev/scripts/",
+  "Deno, make, just, and plain Node entry files",
+];
+const APP_RUNNER_SUPPORTED_TOOLTIP = [
+  "No app runner detected for this tab cwd.",
+  "",
+  "Currently supported:",
+  ...APP_RUNNER_SUPPORTED_ITEMS.map((item) => `• ${item}`),
+].join("\n");
+
+function appRunnerMenuCanOpen() {
+  const data = activeAppRunnerData();
+  return Array.isArray(data.runners) && data.runners.length > 0 && !appRunnerIsRunning(data.activeRun);
+}
+
+function activeAppRunnerCustomConfig() {
+  return activeAppRunnerData().customRunnerConfig || { runners: [], projectRoot: "", displayProjectRoot: "", displayConfigFile: "" };
+}
+
+function resetAppRunnerCustomDraft() {
+  appRunnerCustomDraft = { id: "", label: "", command: "./", path: "", args: "" };
+  appRunnerFileBrowserState = { open: false, loading: false, path: "", data: null, error: "" };
+}
+
+function appRunnerRelativeDir(filePath) {
+  const normalized = String(filePath || "").replace(/\\/g, "/").replace(/^\.\/+/, "");
+  const index = normalized.lastIndexOf("/");
+  return index === -1 ? "" : normalized.slice(0, index);
+}
+
+function appRunnerCustomArgsText(args) {
+  return Array.isArray(args) ? args.join(" ") : String(args || "");
+}
+
+function appRunnerCustomDraftPayload() {
+  return {
+    id: appRunnerCustomDraft.id || undefined,
+    label: appRunnerCustomDraft.label.trim(),
+    command: appRunnerCustomDraft.command.trim() || "./",
+    path: appRunnerCustomDraft.path.trim(),
+    args: appRunnerCustomDraft.args.trim(),
+  };
+}
+
+function updateAppRunnerCustomDraftFrom(container) {
+  if (!container) return;
+  appRunnerCustomDraft = {
+    id: appRunnerCustomDraft.id || "",
+    label: container.querySelector("#appRunnerCustomLabelInput")?.value || "",
+    command: container.querySelector("#appRunnerCustomCommandInput")?.value || "./",
+    path: container.querySelector("#appRunnerCustomPathInput")?.value || "",
+    args: container.querySelector("#appRunnerCustomArgsInput")?.value || "",
+  };
+}
+
+function appRunnerInputField({ id, label, value, placeholder = "", hint = "" }) {
+  const field = make("label", "app-runner-custom-field");
+  field.setAttribute("for", id);
+  field.append(make("span", "", label));
+  const input = make("input", "dialog-input");
+  input.id = id;
+  input.type = "text";
+  input.value = value || "";
+  input.placeholder = placeholder;
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  field.append(input);
+  if (hint) field.append(make("small", "muted", hint));
+  input.addEventListener("input", () => updateAppRunnerCustomDraftFrom(field.closest(".app-runner-custom-form")));
+  input.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    saveAppRunnerCustomRunner(field.closest(".app-runner-custom-form"));
+  });
+  return { field, input };
+}
+
+async function saveAppRunnerCustomRunner(form) {
+  updateAppRunnerCustomDraftFrom(form);
+  const payload = appRunnerCustomDraftPayload();
+  if (!payload.path) {
+    addEvent("custom app runner path is required", "warn");
+    form?.querySelector("#appRunnerCustomPathInput")?.focus();
+    return;
+  }
+  const tabContext = activeTabContext();
+  try {
+    const response = await api("/api/app-runner-config", { method: "POST", body: { runner: payload }, tabId: tabContext.tabId });
+    if (!isCurrentTabContext(tabContext)) return;
+    setAppRunnerData(tabContext.tabId, response.data || {});
+    resetAppRunnerCustomDraft();
+    renderAppRunnerControls();
+    renderWidgets();
+    renderAppRunnerInfoDialog();
+    addEvent("saved custom app runner", "info");
+  } catch (error) {
+    if (isCurrentTabContext(tabContext)) addEvent(error.message || String(error), "error");
+  }
+}
+
+async function deleteAppRunnerCustomRunner(id) {
+  const tabContext = activeTabContext();
+  try {
+    const response = await api("/api/app-runner-config", { method: "DELETE", body: { id }, tabId: tabContext.tabId });
+    if (!isCurrentTabContext(tabContext)) return;
+    setAppRunnerData(tabContext.tabId, response.data || {});
+    if (appRunnerCustomDraft.id === id) resetAppRunnerCustomDraft();
+    renderAppRunnerControls();
+    renderWidgets();
+    renderAppRunnerInfoDialog();
+    addEvent("deleted custom app runner", "warn");
+  } catch (error) {
+    if (isCurrentTabContext(tabContext)) addEvent(error.message || String(error), "error");
+  }
+}
+
+async function loadAppRunnerFileBrowser(relativePath = "") {
+  const tabContext = activeTabContext();
+  const path = String(relativePath || "").replace(/^\.\/+/, "").replace(/\/+$/g, "");
+  appRunnerFileBrowserState = { open: true, loading: true, path, data: null, error: "" };
+  renderAppRunnerInfoDialog();
+  try {
+    const response = await api(`/api/app-runner-files?path=${encodeURIComponent(path)}`, { tabId: tabContext.tabId });
+    if (!isCurrentTabContext(tabContext)) return;
+    appRunnerFileBrowserState = { open: true, loading: false, path, data: response.data || {}, error: "" };
+    renderAppRunnerInfoDialog();
+  } catch (error) {
+    if (!isCurrentTabContext(tabContext)) return;
+    appRunnerFileBrowserState = { open: true, loading: false, path, data: null, error: error.message || String(error) };
+    renderAppRunnerInfoDialog();
+  }
+}
+
+function renderAppRunnerFileBrowser() {
+  if (!appRunnerFileBrowserState.open) return null;
+  const browser = make("div", "app-runner-file-browser");
+  if (appRunnerFileBrowserState.loading) {
+    browser.append(make("div", "muted", "Loading project files…"));
+    return browser;
+  }
+  if (appRunnerFileBrowserState.error) {
+    browser.append(make("div", "path-picker-error", appRunnerFileBrowserState.error));
+    return browser;
+  }
+  const data = appRunnerFileBrowserState.data || {};
+  const header = make("div", "app-runner-file-browser-header");
+  header.append(make("strong", "", data.displayRelativeDir || "."));
+  const close = make("button", "app-runner-file-browser-close", "Hide browser");
+  close.type = "button";
+  close.addEventListener("click", () => {
+    appRunnerFileBrowserState = { open: false, loading: false, path: "", data: null, error: "" };
+    renderAppRunnerInfoDialog();
+  });
+  header.append(close);
+  browser.append(header);
+
+  const roots = make("div", "path-picker-roots app-runner-file-browser-roots");
+  if (data.parent !== null && data.parent !== undefined) roots.append(pathPickerButton("↑ Parent", data.parent || ".", () => loadAppRunnerFileBrowser(data.parent || ""), "path-picker-root-button"));
+  roots.append(pathPickerButton("Project root", data.displayProjectRoot || "Project root", () => loadAppRunnerFileBrowser(""), "path-picker-root-button"));
+  browser.append(roots);
+
+  const list = make("div", "path-picker-list app-runner-file-browser-list");
+  const directories = Array.isArray(data.directories) ? data.directories : [];
+  const files = Array.isArray(data.files) ? data.files : [];
+  for (const directory of directories) {
+    const button = pathPickerButton(`${directory.name}/`, directory.path, () => loadAppRunnerFileBrowser(directory.path), `path-picker-directory${directory.hidden ? " hidden-directory" : ""}`);
+    list.append(button);
+  }
+  for (const file of files) {
+    const button = pathPickerButton(file.name, file.path, () => {
+      appRunnerCustomDraft.path = file.path;
+      appRunnerFileBrowserState = { open: false, loading: false, path: "", data: null, error: "" };
+      renderAppRunnerInfoDialog();
+    }, `path-picker-directory app-runner-file-choice${file.hidden ? " hidden-directory" : ""}`);
+    list.append(button);
+  }
+  if (!directories.length && !files.length) list.append(make("div", "path-picker-empty muted", "No files in this directory."));
+  browser.append(list);
+  if (data.truncated) browser.append(make("div", "path-picker-error", "Showing the first project entries only."));
+  return browser;
+}
+
+function renderAppRunnerCustomSection() {
+  const config = activeAppRunnerCustomConfig();
+  const section = make("section", "app-runner-info-section app-runner-custom-section");
+  const titleRow = make("div", "app-runner-section-title-row");
+  titleRow.append(make("h3", "", "Custom project runners"));
+  if (config.displayConfigFile) titleRow.append(make("code", "", config.displayConfigFile));
+  section.append(titleRow);
+  section.append(make("p", "muted", "Add project-local runners saved in .pi-webui-runners.json. Command defaults to ./, so a selected file runs as ./path/to/file."));
+
+  const existing = make("div", "app-runner-custom-list");
+  const customRunners = Array.isArray(config.runners) ? config.runners : [];
+  if (!customRunners.length) {
+    existing.append(make("div", "app-runner-custom-empty muted", "No custom runners saved for this project yet."));
+  } else {
+    for (const runner of customRunners) {
+      const row = make("div", "app-runner-custom-item");
+      const details = make("div", "app-runner-custom-item-details");
+      details.append(make("strong", "", runner.label || runner.path || "custom runner"), make("code", "", runner.displayCommand || runner.path || ""));
+      const actions = make("div", "app-runner-custom-item-actions");
+      const edit = make("button", "", "Edit");
+      edit.type = "button";
+      edit.addEventListener("click", () => {
+        appRunnerCustomDraft = { id: runner.id || "", label: runner.label || "", command: runner.command || "./", path: runner.path || "", args: appRunnerCustomArgsText(runner.args) };
+        appRunnerFileBrowserState = { open: false, loading: false, path: "", data: null, error: "" };
+        renderAppRunnerInfoDialog();
+      });
+      const remove = make("button", "danger", "Delete");
+      remove.type = "button";
+      remove.addEventListener("click", () => {
+        if (!confirm(`Delete custom app runner “${runner.label || runner.path || runner.id}”?`)) return;
+        deleteAppRunnerCustomRunner(runner.id);
+      });
+      actions.append(edit, remove);
+      row.append(details, actions);
+      existing.append(row);
+    }
+  }
+  section.append(existing);
+
+  const form = make("div", "app-runner-custom-form");
+  const labelField = appRunnerInputField({ id: "appRunnerCustomLabelInput", label: "Label", value: appRunnerCustomDraft.label, placeholder: "My app" });
+  const commandField = appRunnerInputField({ id: "appRunnerCustomCommandInput", label: "Command", value: appRunnerCustomDraft.command || "./", placeholder: "./", hint: "Use ./ to execute the selected file directly, or use bash, python3, node, bun, uv run, etc." });
+  const pathField = appRunnerInputField({ id: "appRunnerCustomPathInput", label: "Path to file", value: appRunnerCustomDraft.path, placeholder: "dev/scripts/start.sh" });
+  const pathRow = make("div", "app-runner-custom-path-row");
+  pathRow.append(pathField.field);
+  const browse = make("button", "app-runner-custom-browse", "Browse…");
+  browse.type = "button";
+  browse.addEventListener("click", () => {
+    updateAppRunnerCustomDraftFrom(form);
+    loadAppRunnerFileBrowser(appRunnerRelativeDir(appRunnerCustomDraft.path));
+  });
+  pathRow.append(browse);
+  const argsField = appRunnerInputField({ id: "appRunnerCustomArgsInput", label: "Args", value: appRunnerCustomDraft.args, placeholder: "--port 3000", hint: "Optional extra args, space-separated." });
+  form.append(labelField.field, commandField.field, pathRow, argsField.field);
+  const formActions = make("div", "app-runner-custom-form-actions");
+  const save = make("button", "primary", appRunnerCustomDraft.id ? "Save changes" : "Add runner");
+  save.type = "button";
+  save.addEventListener("click", () => saveAppRunnerCustomRunner(form));
+  const reset = make("button", "", "Reset");
+  reset.type = "button";
+  reset.addEventListener("click", () => { resetAppRunnerCustomDraft(); renderAppRunnerInfoDialog(); });
+  formActions.append(save, reset);
+  form.append(formActions);
+  const browser = renderAppRunnerFileBrowser();
+  if (browser) form.append(browser);
+  section.append(form);
+  return section;
+}
+
+function renderAppRunnerControls() {
+  const menu = elements.appRunnerMenu;
+  const button = elements.appRunnerMenuButton;
+  const panel = elements.appRunnerMenuPanel;
+  if (!menu || !button || !panel) return;
+  const data = activeAppRunnerData();
+  const runners = Array.isArray(data.runners) ? data.runners : [];
+  const activeRun = data.activeRun;
+  const running = appRunnerIsRunning(activeRun);
+  menu.hidden = false;
+  menu.classList.toggle("has-runners", runners.length > 0);
+  if (elements.appRunnerInfoButton) {
+    elements.appRunnerInfoButton.hidden = runners.length === 0;
+    elements.appRunnerInfoButton.disabled = runners.length === 0;
+  }
+  button.disabled = running;
+  button.title = running
+    ? `App runner already running: ${activeRun.displayCommand || activeRun.label || "runner"}`
+    : runners.length
+      ? "Run a detected app runner"
+      : "No app runners detected in this tab working directory";
+  button.dataset.tooltip = runners.length ? "App runners: run detected project commands in this tab's working directory." : APP_RUNNER_SUPPORTED_TOOLTIP;
+  button.setAttribute("aria-label", button.title);
+  if (!runners.length || running) setAppRunnerMenuOpen(false);
+
+  panel.replaceChildren();
+  for (const runner of runners) {
+    const item = make("button", "composer-publish-menu-item composer-app-runner-menu-item");
+    item.type = "button";
+    item.setAttribute("role", "menuitem");
+    const runnerDisplayCommand = runner.shortDisplayCommand || runner.displayCommand;
+    item.title = runner.description ? `${runnerDisplayCommand}\n${runner.description}` : runnerDisplayCommand;
+    item.addEventListener("click", () => runAppRunner(runner.id));
+    const label = make("span", "app-runner-menu-item-label", runner.label || runnerDisplayCommand);
+    const command = make("span", "app-runner-menu-item-command", runnerDisplayCommand);
+    item.append(label, command);
+    panel.append(item);
+  }
+}
+
+function renderAppRunnerInfoDialog() {
+  const body = elements.appRunnerInfoBody;
+  if (!body) return;
+  const data = activeAppRunnerData();
+  const runners = Array.isArray(data.runners) ? data.runners : [];
+  body.replaceChildren();
+
+  const current = make("section", "app-runner-info-section");
+  current.append(make("h3", "", "Detected in this tab"));
+  if (runners.length) {
+    const list = make("ul", "app-runner-info-list app-runner-info-detected-list");
+    for (const runner of runners) {
+      const command = runner.shortDisplayCommand || runner.displayCommand || runner.command || runner.id;
+      const item = make("li");
+      item.append(
+        make("strong", "", runner.label || command || "runner"),
+        make("code", "", command || "detected command"),
+      );
+      if (runner.description) item.append(make("span", "", runner.description));
+      list.append(item);
+    }
+    current.append(list);
+  } else {
+    current.append(make("p", "muted", "No runners are currently detected for this tab working directory."));
+  }
+
+  const how = make("section", "app-runner-info-section");
+  how.append(make("h3", "", "How it works"));
+  const howList = make("ul", "app-runner-info-list");
+  for (const line of [
+    "Detection is scoped to the active terminal tab's current working directory.",
+    "Only commands/files that exist and runner binaries available on this system are shown.",
+    "Starting a runner keeps live output pinned above the chat/terminal area.",
+    "Only one app runner can be active per tab; Close/Stop terminates the process/server.",
+  ]) howList.append(make("li", "", line));
+  how.append(howList);
+
+  const supported = make("section", "app-runner-info-section");
+  supported.append(make("h3", "", "Supported runner types"));
+  const supportedList = make("ul", "app-runner-info-list app-runner-info-supported-list");
+  for (const itemText of APP_RUNNER_SUPPORTED_ITEMS) supportedList.append(make("li", "", itemText));
+  supported.append(supportedList);
+
+  body.append(current, renderAppRunnerCustomSection(), how, supported);
+}
+
+function openAppRunnerInfoDialog() {
+  if (!elements.appRunnerInfoDialog) return;
+  renderAppRunnerInfoDialog();
+  setAppRunnerMenuOpen(false);
+  if (!elements.appRunnerInfoDialog.open) elements.appRunnerInfoDialog.showModal();
+}
+
+function closeAppRunnerInfoDialog() {
+  if (elements.appRunnerInfoDialog?.open) elements.appRunnerInfoDialog.close();
+}
+
+function renderAppRunnerWidget() {
+  const data = activeAppRunnerData();
+  const run = data.activeRun;
+  if (!run) return null;
+  const running = appRunnerIsRunning(run);
+  const status = appRunnerStatusLabel(run);
+  const node = make("section", `widget release-npm-widget app-runner-widget${running ? " app-runner-live-widget" : " app-runner-log-widget"}`);
+  node.setAttribute("aria-label", "app runner output");
+
+  const header = make("div", "release-npm-header");
+  const titleWrap = make("div", "release-npm-title-wrap");
+  titleWrap.append(make("span", "release-npm-kicker", "app runner"), make("strong", "release-npm-title", run.label || run.displayCommand || "app runner"));
+
+  const elapsed = appRunnerElapsedLabel(run);
+  header.append(titleWrap);
+
+  const lines = Array.isArray(run.lines) && run.lines.length ? run.lines : [run.displayCommand ? `$ ${run.displayCommand}` : "Waiting for app runner output..."];
+  const streamHeader = releaseNpmStreamHeader(running ? "Live app output" : "App output", run.lineCount || lines.length, { live: running });
+  const terminal = make("div", "release-npm-terminal");
+  terminal.setAttribute("role", "log");
+  terminal.setAttribute("aria-live", running ? "polite" : "off");
+  for (const line of lines) appendReleaseNpmTerminalLine(terminal, line);
+
+  const controlParts = [run.displayCommand, run.cwd, run.truncated ? "output truncated" : ""].map(cleanStatusText).filter(Boolean);
+  const controls = make("div", "release-npm-controls app-runner-output-controls");
+  const actions = make("div", "app-runner-output-actions");
+  const closeButton = appRunnerActionButton("Close", running ? stopAppRunner : clearAppRunner, running ? "danger app-runner-close-action" : "app-runner-close-action");
+  closeButton.title = running ? "Stop this app runner/process/server" : "Close app runner output";
+  const copyButton = appRunnerActionButton("Copy output", () => copyAppRunnerOutput(run), "app-runner-copy-action");
+  copyButton.title = "Copy app runner output";
+  actions.append(closeButton, copyButton);
+  if (running) {
+    actions.append(appRunnerActionButton("Stop", stopAppRunner, "danger"));
+  } else {
+    const canRunAgain = (data.runners || []).some((runner) => runner.id === run.runnerId);
+    if (canRunAgain) actions.append(appRunnerActionButton("Run again", () => runAppRunner(run.runnerId)));
+    actions.append(appRunnerActionButton("Clear", clearAppRunner));
+  }
+  const pills = make("div", "app-runner-output-pills");
+  if (run.kind) pills.append(make("span", "release-npm-pill", run.kind));
+  pills.append(make("span", `release-npm-pill app-runner-status ${run.status || "running"}`.trim(), status));
+  if (elapsed) pills.append(make("span", "release-npm-pill elapsed", elapsed));
+  controls.append(actions, pills, make("span", "app-runner-output-meta", controlParts.join(" · ")));
+  const outputDetails = renderReleaseNpmOutputDetails(`app-runner:${run.id || run.runnerId || "active"}`, streamHeader, terminal, controls);
+  node.append(header, outputDetails);
+  requestAnimationFrame(() => { if (outputDetails.open) terminal.scrollTop = terminal.scrollHeight; });
+  return node;
+}
+
 function renderWidgets() {
   elements.widgetArea.replaceChildren();
   const releaseOutput = renderReleaseNpmOutputWidget();
@@ -5285,6 +5892,8 @@ function renderWidgets() {
   if (releaseAurOutput) elements.widgetArea.append(releaseAurOutput);
   const releaseAurLog = renderReleaseAurLogWidget();
   if (releaseAurLog) elements.widgetArea.append(releaseAurLog);
+  const appRunnerWidget = renderAppRunnerWidget();
+  if (appRunnerWidget) elements.widgetArea.append(appRunnerWidget);
 
   for (const [key, value] of widgets) {
     const widgetFeatureId = optionalFeatureWidgetFeatureId(key);
@@ -8208,6 +8817,13 @@ function setNativeCommandMenuOpen(open) {
   elements.nativeCommandMenuButton.parentElement?.classList.toggle("open", nativeCommandMenuOpen);
 }
 
+function setAppRunnerMenuOpen(open) {
+  appRunnerMenuOpen = !!open;
+  elements.appRunnerMenuButton?.setAttribute("aria-expanded", appRunnerMenuOpen ? "true" : "false");
+  elements.appRunnerMenuButton?.classList.toggle("menu-open", appRunnerMenuOpen);
+  elements.appRunnerMenuButton?.parentElement?.classList.toggle("open", appRunnerMenuOpen);
+}
+
 function setOptionsMenuOpen(open) {
   optionsMenuOpen = !!open;
   elements.optionsMenuButton.setAttribute("aria-expanded", optionsMenuOpen ? "true" : "false");
@@ -8455,6 +9071,7 @@ async function installOptionalFeature(featureId) {
 function runPublishWorkflow(command) {
   setComposerActionsOpen(false);
   setPublishMenuOpen(false);
+  setAppRunnerMenuOpen(false);
   setOptionsMenuOpen(false);
   const commandName = String(command || "").replace(/^\//, "").split(/\s+/)[0];
   const featureId = OPTIONAL_COMMAND_FEATURES.get(commandName);
@@ -8473,6 +9090,7 @@ async function runNativeCommandMenu(command) {
   setComposerActionsOpen(false);
   setPublishMenuOpen(false);
   setNativeCommandMenuOpen(false);
+  setAppRunnerMenuOpen(false);
   setOptionsMenuOpen(false);
   const commandName = String(command || "").replace(/^\//, "").split(/\s+/)[0].toLowerCase();
   const featureId = optionalFeatureIdForCommand(commandName);
@@ -10150,6 +10768,7 @@ async function refreshAll(tabContext = activeTabContext()) {
     refreshCommands(tabContext),
     refreshStats(tabContext),
     refreshWorkspace(tabContext),
+    refreshAppRunners(tabContext),
     refreshNativeSettings(tabContext),
     refreshNetworkStatus(),
     refreshWebuiVersion(),
@@ -10864,6 +11483,11 @@ function handleEvent(event) {
     case "webui_connected":
       setWebuiVersion(event.version);
       setWebuiDevServer(isWebuiDevMetadata(event));
+      if (Object.prototype.hasOwnProperty.call(event, "activeRun")) {
+        setAppRunnerData(event.tabId || activeTabId, { cwd: event.cwd, activeRun: event.activeRun });
+        renderAppRunnerControls();
+        renderWidgets();
+      }
       addEvent(`connected to ${event.tabTitle || "terminal"} for ${event.cwd}`);
       scheduleForegroundReconcile("event stream reconnect", 0);
       break;
@@ -10885,6 +11509,7 @@ function handleEvent(event) {
     case "webui_tab_reloaded":
       addEvent(`${event.tabTitle || "terminal"} reloaded`);
       addTransientMessage({ role: "native", title: "/reload", content: `${event.tabTitle || "terminal"} reloaded. Keybindings, extensions, skills, prompts, and themes were refreshed by restarting the RPC tab${event.sessionFile ? ` and resuming ${event.sessionFile}` : ""}.`, level: "info" });
+      clearContextUsageUnknownAfterCompaction(event.tabId || activeTabId);
       statusEntries.clear();
       widgets.clear();
       resetOptionalFeatureAvailability();
@@ -10902,9 +11527,18 @@ function handleEvent(event) {
       removeQueuedDialogRequests(event.ids || []);
       addEvent(`cancelled ${event.ids?.length || 0} pending extension UI request(s)`, "warn");
       break;
+    case "webui_app_runner_update":
+      setAppRunnerData(event.tabId || activeTabId, { cwd: event.cwd, activeRun: event.activeRun });
+      renderAppRunnerControls();
+      renderWidgets();
+      break;
     case "webui_cwd_changed":
       addEvent(`${event.tabTitle || "terminal"} cwd changed to ${event.cwd}`);
+      setAppRunnerData(event.tabId || activeTabId, { cwd: event.cwd, activeRun: null, runners: [] });
+      renderAppRunnerControls();
+      renderWidgets();
       refreshTabs().catch((error) => addEvent(error.message, "error"));
+      refreshAppRunners(tabContext).catch((error) => addEvent(error.message, "error"));
       scheduleRefreshFooter();
       break;
     case "webui_network_rebinding": {
@@ -10948,6 +11582,7 @@ function handleEvent(event) {
     case "agent_end":
       addEvent("agent finished");
       notifyAgentDone(event.tabId || activeTabId, { activity: event.tabActivity, tabTitle: event.tabTitle });
+      clearContextUsageUnknownAfterCompaction(event.tabId || activeTabId);
       if (currentState) currentState = { ...currentState, isStreaming: false };
       clearRunIndicatorActivity();
       markTabOutputSeen();
@@ -10999,15 +11634,22 @@ function handleEvent(event) {
       break;
     case "compaction_start":
       if (currentState) currentState = { ...currentState, isCompacting: true };
+      markContextUsageUnknownAfterCompaction(event.tabId || activeTabId);
       setRunIndicatorActivity(`Compacting context${event.reason ? ` (${event.reason})` : ""}…`);
       addEvent(`compaction started (${event.reason})`);
+      renderStatus();
       break;
     case "compaction_end":
       if (currentState) currentState = { ...currentState, isCompacting: false };
+      if (event.aborted) clearContextUsageUnknownAfterCompaction(event.tabId || activeTabId);
+      else markContextUsageUnknownAfterCompaction(event.tabId || activeTabId);
       addEvent(`compaction ${event.aborted ? "aborted" : "finished"}`);
       if (!currentState?.isStreaming) clearRunIndicatorActivity();
       markTabOutputSeen();
+      renderStatus();
+      scheduleRefreshState();
       scheduleRefreshMessages();
+      scheduleRefreshFooter();
       break;
     case "auto_retry_start": {
       const seconds = Math.max(0, Math.ceil(Number(event.delayMs || 0) / 1000));
@@ -11051,6 +11693,7 @@ function handleEvent(event) {
           applyOptimisticThinkingSelection(event.data, tabContext);
         } else if (event.command === "new_session") {
           const tabId = event.tabId || activeTabId;
+          clearContextUsageUnknownAfterCompaction(tabId);
           forgetLastUserPrompt(tabId);
           resetGitWorkflowForTab(tabId);
         }
@@ -11169,17 +11812,20 @@ elements.gitWorkflowButton.addEventListener("click", () => {
 const publishMenuContainer = elements.publishButton.parentElement;
 elements.publishButton.addEventListener("click", () => {
   setNativeCommandMenuOpen(false);
+  setAppRunnerMenuOpen(false);
   setOptionsMenuOpen(false);
   setPublishMenuOpen(true);
 });
 publishMenuContainer?.addEventListener("pointerenter", () => {
   setNativeCommandMenuOpen(false);
+  setAppRunnerMenuOpen(false);
   setOptionsMenuOpen(false);
   setPublishMenuOpen(true);
 });
 publishMenuContainer?.addEventListener("pointerleave", () => setPublishMenuOpen(false));
 publishMenuContainer?.addEventListener("focusin", () => {
   setNativeCommandMenuOpen(false);
+  setAppRunnerMenuOpen(false);
   setOptionsMenuOpen(false);
   setPublishMenuOpen(true);
 });
@@ -11191,17 +11837,20 @@ publishMenuContainer?.addEventListener("focusout", () => {
 const nativeCommandMenuContainer = elements.nativeCommandMenuButton.parentElement;
 elements.nativeCommandMenuButton.addEventListener("click", () => {
   setPublishMenuOpen(false);
+  setAppRunnerMenuOpen(false);
   setOptionsMenuOpen(false);
   setNativeCommandMenuOpen(true);
 });
 nativeCommandMenuContainer?.addEventListener("pointerenter", () => {
   setPublishMenuOpen(false);
+  setAppRunnerMenuOpen(false);
   setOptionsMenuOpen(false);
   setNativeCommandMenuOpen(true);
 });
 nativeCommandMenuContainer?.addEventListener("pointerleave", () => setNativeCommandMenuOpen(false));
 nativeCommandMenuContainer?.addEventListener("focusin", () => {
   setPublishMenuOpen(false);
+  setAppRunnerMenuOpen(false);
   setOptionsMenuOpen(false);
   setNativeCommandMenuOpen(true);
 });
@@ -11210,21 +11859,66 @@ nativeCommandMenuContainer?.addEventListener("focusout", () => {
     if (!nativeCommandMenuContainer?.contains(document.activeElement)) setNativeCommandMenuOpen(false);
   }, 0);
 });
+const appRunnerMenuContainer = elements.appRunnerMenuButton?.parentElement;
+elements.appRunnerInfoButton?.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  openAppRunnerInfoDialog();
+});
+elements.appRunnerInfoCloseButton?.addEventListener("click", closeAppRunnerInfoDialog);
+elements.appRunnerMenuButton?.addEventListener("click", async () => {
+  setPublishMenuOpen(false);
+  setNativeCommandMenuOpen(false);
+  setOptionsMenuOpen(false);
+  setAppRunnerMenuOpen(false);
+  const tabContext = activeTabContext();
+  try {
+    await refreshAppRunners(tabContext);
+    if (!isCurrentTabContext(tabContext)) return;
+    if (appRunnerMenuCanOpen()) setAppRunnerMenuOpen(true);
+    else if (!appRunnerIsRunning(activeAppRunnerData().activeRun)) openAppRunnerInfoDialog();
+  } catch (error) {
+    if (isCurrentTabContext(tabContext)) addEvent(error.message || String(error), "error");
+  }
+});
+appRunnerMenuContainer?.addEventListener("pointerenter", () => {
+  if (elements.appRunnerMenuButton?.disabled || !appRunnerMenuCanOpen()) return;
+  setPublishMenuOpen(false);
+  setNativeCommandMenuOpen(false);
+  setOptionsMenuOpen(false);
+  setAppRunnerMenuOpen(true);
+});
+appRunnerMenuContainer?.addEventListener("pointerleave", () => setAppRunnerMenuOpen(false));
+appRunnerMenuContainer?.addEventListener("focusin", () => {
+  if (elements.appRunnerMenuButton?.disabled || !appRunnerMenuCanOpen()) return;
+  setPublishMenuOpen(false);
+  setNativeCommandMenuOpen(false);
+  setOptionsMenuOpen(false);
+  setAppRunnerMenuOpen(true);
+});
+appRunnerMenuContainer?.addEventListener("focusout", () => {
+  setTimeout(() => {
+    if (!appRunnerMenuContainer?.contains(document.activeElement)) setAppRunnerMenuOpen(false);
+  }, 0);
+});
 const optionsMenuContainer = elements.optionsMenuButton.parentElement;
 elements.optionsMenuButton.addEventListener("click", () => {
   setPublishMenuOpen(false);
   setNativeCommandMenuOpen(false);
+  setAppRunnerMenuOpen(false);
   setOptionsMenuOpen(true);
 });
 optionsMenuContainer?.addEventListener("pointerenter", () => {
   setPublishMenuOpen(false);
   setNativeCommandMenuOpen(false);
+  setAppRunnerMenuOpen(false);
   setOptionsMenuOpen(true);
 });
 optionsMenuContainer?.addEventListener("pointerleave", () => setOptionsMenuOpen(false));
 optionsMenuContainer?.addEventListener("focusin", () => {
   setPublishMenuOpen(false);
   setNativeCommandMenuOpen(false);
+  setAppRunnerMenuOpen(false);
   setOptionsMenuOpen(true);
 });
 optionsMenuContainer?.addEventListener("focusout", () => {
@@ -11340,6 +12034,8 @@ elements.compactButton.addEventListener("click", async () => {
     elements.compactButton.textContent = "Compacting…";
     setRunIndicatorActivity("Requesting context compaction…");
     scrollChatToBottom({ force: true });
+    markContextUsageUnknownAfterCompaction(tabContext.tabId);
+    renderFooter();
     addEvent("manual compaction requested");
     await api("/api/compact", { method: "POST", body: {}, tabId: tabContext.tabId });
     if (!isCurrentTabContext(tabContext)) return;
@@ -11348,7 +12044,9 @@ elements.compactButton.addEventListener("click", async () => {
     scheduleRefreshFooter(600, tabContext);
   } catch (error) {
     if (isCurrentTabContext(tabContext)) {
+      clearContextUsageUnknownAfterCompaction(tabContext.tabId);
       clearRunIndicatorActivity();
+      renderFooter();
       addEvent(error.message, "error");
     }
   } finally {
@@ -11460,6 +12158,9 @@ document.addEventListener("pointerdown", (event) => {
   if (nativeCommandMenuOpen && !event.target?.closest?.(".composer-native-command-menu")) {
     setNativeCommandMenuOpen(false);
   }
+  if (appRunnerMenuOpen && !event.target?.closest?.(".composer-app-runner-menu")) {
+    setAppRunnerMenuOpen(false);
+  }
   if (optionsMenuOpen && !event.target?.closest?.(".composer-options-menu")) {
     setOptionsMenuOpen(false);
   }
@@ -11487,7 +12188,7 @@ function isTextEntryTarget(target) {
 
 function shouldHandleNativeAppShortcut(event) {
   if (event.defaultPrevented) return false;
-  if (elements.dialog?.open || elements.pathPickerDialog?.open || elements.nativeCommandDialog?.open) return false;
+  if (elements.dialog?.open || elements.pathPickerDialog?.open || elements.nativeCommandDialog?.open || elements.appRunnerInfoDialog?.open) return false;
   return event.target === elements.promptInput || !isTextEntryTarget(event.target);
 }
 
@@ -11555,6 +12256,10 @@ window.addEventListener("keydown", (event) => {
     setNativeCommandMenuOpen(false);
     return;
   }
+  if (appRunnerMenuOpen) {
+    setAppRunnerMenuOpen(false);
+    return;
+  }
   if (optionsMenuOpen) {
     setOptionsMenuOpen(false);
     return;
@@ -11591,7 +12296,7 @@ window.addEventListener("keydown", (event) => {
     }
     lastEmptyPromptEscapeTime = now;
   }
-  if (isMobileView() && !document.body.classList.contains("side-panel-collapsed")) {
+  if (isSidePanelOverlayView() && !document.body.classList.contains("side-panel-collapsed")) {
     setSidePanelCollapsed(true);
     return;
   }
@@ -11712,6 +12417,7 @@ resizePromptInput();
 focusPromptInput({ defer: true });
 updateComposerModeButtons();
 updateOptionalFeatureAvailability();
+renderAppRunnerControls();
 renderLoadedPromptListPreview();
 loadLastUserPromptCache();
 loadPromptHistoryCache();
@@ -11731,6 +12437,7 @@ bindSidePanelSectionToggles();
 restoreSidePanelState();
 initializeCodexUsage();
 bindMobileViewChanges();
+bindSidePanelOverlayViewChanges();
 registerPwaServiceWorker();
 renderServerOfflinePanel();
 initializeTabs().catch((error) => addEvent(error.message, "error"));

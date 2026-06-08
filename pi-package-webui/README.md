@@ -128,6 +128,7 @@ Environment variables:
 - Model, thinking, session, workspace, theme, optional-feature, Codex usage, network, event, and notification controls in the side panel.
 - Side-panel theme picker backed by optional `@firstpick/pi-themes-bundle` themes when loaded.
 - Per-tab cwd changes, a clickable footer cwd picker, saved path fast picks, server-persisted fast picks, and restart-safe restoration of open tabs.
+- Detected app runner dropdown for the active tab cwd, including Cargo, Bun, npm/npx/pnpm, Python/uv, Go/Golang, Zig, C/C++, Docker Compose, root/dev/scripts shell scripts, and other common project runners with live output pinned at the top of the terminal. Projects can add browseable custom runners in `.pi-webui-runners.json` with a command (default `./`) plus a relative path to the file to run.
 - Browser support for Pi extension UI prompts, widgets, status updates, browser notifications when a tab needs an extension UI response and an optional side-panel toggle for agent-done notifications.
 - Feedback reactions (`👍`, `👎`, `?`) on final assistant output plus tool/bash action cards, which can ask Pi to create or update a LEARNING.
 - Mobile-friendly layout and PWA install support where the browser allows it.

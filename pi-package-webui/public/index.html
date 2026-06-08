@@ -12,7 +12,7 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <link rel="stylesheet" href="/styles.css?v=25" />
+    <link rel="stylesheet" href="/styles.css?v=32" />
   </head>
   <body>
     <button id="sidePanelExpandButton" class="side-panel-expand-button" type="button" aria-controls="sidePanel" aria-expanded="false" aria-label="Expand side panel" title="Expand side panel">
@@ -192,6 +192,30 @@
                     <span>Resume Session</span>
                   </button>
                 </div>
+              </div>
+              <div id="appRunnerMenu" class="composer-publish-menu composer-app-runner-menu" hidden>
+                <button
+                  id="appRunnerInfoButton"
+                  class="composer-icon-button composer-app-runner-info-button"
+                  type="button"
+                  title="Explain app runners"
+                  aria-label="Explain app runners"
+                  aria-controls="appRunnerInfoDialog"
+                  data-tooltip="App runner help: supported runners, detection, and process controls."
+                  hidden
+                ><svg class="composer-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M9.75 9.2a2.4 2.4 0 1 1 4.1 1.7c-.95.9-1.85 1.28-1.85 2.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="17" r="1" fill="currentColor"/></svg></button>
+                <button
+                  id="appRunnerMenuButton"
+                  class="composer-icon-button composer-publish-button composer-app-runner-button"
+                  type="button"
+                  title="Run a detected app runner"
+                  aria-label="Open detected app runners"
+                  aria-haspopup="menu"
+                  aria-expanded="false"
+                  aria-controls="appRunnerMenuPanel"
+                  data-tooltip="App runners: run detected project commands in this tab's working directory."
+                ><svg class="composer-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 5v14l11-7z" fill="currentColor"/></svg></button>
+                <div id="appRunnerMenuPanel" class="composer-publish-menu-panel composer-app-runner-menu-panel" role="menu" aria-label="Detected app runners"></div>
               </div>
             </div>
             <div class="spacer"></div>
@@ -445,6 +469,17 @@
       </form>
     </dialog>
 
+    <dialog id="appRunnerInfoDialog" class="extension-dialog app-runner-info-dialog">
+      <form method="dialog">
+        <h2>App runners</h2>
+        <p class="muted">Run detected project entrypoints directly from the active tab’s working directory, with live output pinned above the chat.</p>
+        <div id="appRunnerInfoBody" class="app-runner-info-body"></div>
+        <menu>
+          <button id="appRunnerInfoCloseButton" type="submit" value="close">Close</button>
+        </menu>
+      </form>
+    </dialog>
+
     <dialog id="promptListDialog" class="extension-dialog prompt-list-dialog">
       <form method="dialog">
         <h2 id="promptListDialogTitle">Create prompt list</h2>
@@ -473,6 +508,6 @@
       </form>
     </dialog>
 
-    <script type="module" src="/app.js?v=25"></script>
+    <script type="module" src="/app.js?v=32"></script>
   </body>
 </html>
