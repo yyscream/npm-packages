@@ -3,6 +3,7 @@
   "version": "0.1.2",
   "description": "Agents should invoke this skill when choosing or evaluating libraries, frameworks, tools, platforms, models, databases, APIs, or architectures for a use case. Produces criteria scoring, ecosystem assessment, and recommendations.",
   "license": "MIT",
+  "homepage": "https://github.com/Firstp1ck/npm-packages/tree/main/pi-skill-tech-deep-dive#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Firstp1ck/npm-packages.git",

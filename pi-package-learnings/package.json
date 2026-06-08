@@ -3,6 +3,7 @@
   "version": "0.1.3",
   "description": "File-based troubleshooting LEARNINGS archive for Pi agents, with retrieval workflow, summary prompts, and sync scripts.",
   "license": "MIT",
+  "homepage": "https://github.com/Firstp1ck/npm-packages/tree/main/pi-package-learnings#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Firstp1ck/npm-packages.git",

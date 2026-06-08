@@ -6,7 +6,7 @@
 #   (pi-extension-*/, pi-skill-*/, pi-package-*/).
 # - Lets you choose which packages to install/update (interactive by default), or installs all actionable packages with --non-interactive/--all.
 # - Compares npm latest versions with Pi-installed versions and hides unchanged ones unless --force is used.
-# - Runs `pi install npm:<package>@latest` for each selected package (or only prints commands with --dry-run).
+# - Runs `pi install npm:<package>` for each selected package (or only prints commands with --dry-run).
 #
 # How to use:
 # - Run `./dev/scripts/install-pi-add.sh` for interactive selection.
@@ -30,7 +30,7 @@ usage() {
 Usage:
   install-pi-add.sh [options]
 
-Discovers local Pi extension/skill/package npm packages and installs their latest npm-published versions.
+Discovers local Pi extension/skill/package npm packages and installs their npm-published versions as unpinned Pi package sources.
 
 Options:
   --non-interactive  Install/update all actionable packages without prompting
@@ -432,7 +432,7 @@ for package_name in "${SELECTED_PACKAGES[@]}"; do
     continue
   fi
 
-  install_target="npm:${package_name}@latest"
+  install_target="npm:${package_name}"
   repo_note=""
   if [[ "$repo_version" != "$target_version" ]]; then
     repo_note=" (repo package.json $repo_version)"

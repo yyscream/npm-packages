@@ -3,6 +3,7 @@
   "version": "0.3.0",
   "description": "Enhanced Pi footer with git status, token usage, context usage, and model telemetry.",
   "license": "MIT",
+  "homepage": "https://github.com/Firstp1ck/npm-packages/tree/main/pi-extension-git-footer-status#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Firstp1ck/npm-packages.git",

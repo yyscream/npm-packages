@@ -3,6 +3,7 @@
   "version": "0.1.8",
   "description": "Toggleable planning mode extension for Pi with model switching, mandatory planning survey, and PLAN.md quality guards.",
   "license": "MIT",
+  "homepage": "https://github.com/Firstp1ck/npm-packages/tree/main/pi-extension-plan-mode-toggle#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Firstp1ck/npm-packages.git",

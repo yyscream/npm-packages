@@ -3,6 +3,7 @@
   "version": "0.1.1",
   "description": "Reusable Pi prompt templates for maintaining durable agent memory.",
   "license": "MIT",
+  "homepage": "https://github.com/Firstp1ck/npm-packages/tree/main/pi-package-prompts-agent-memory#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Firstp1ck/npm-packages.git",
