@@ -188,14 +188,18 @@ Usage:
 Options:
   --host <host>       HTTP bind host (default: ${DEFAULT_HOST})
   --port <port>       HTTP port (default: ${DEFAULT_PORT})
-  --cwd <path>        Working directory for the Pi session (default: current dir)
+  --cwd <path>        Start the first Pi terminal in this working directory
   --pi <command>      Pi executable to spawn (default: bundled dependency, then "pi")
   --no-session        Start Pi RPC with --no-session
   --name <name>       Initial Web UI tab display name
   -h, --help          Show this help
   -v, --version       Print version
 
+If --cwd is omitted, the server starts first and the browser asks for
+  the first terminal CWD.
+
 Examples:
+  pi-webui
   pi-webui --cwd ~/src/my-project
   pi-webui --port 3000 -- --model anthropic/claude-sonnet-4-5:high
   PI_WEBUI_PI_BIN=/path/to/pi pi-webui --no-session
@@ -219,6 +223,7 @@ function parseArgs(argv) {
     host: process.env.PI_WEBUI_HOST || DEFAULT_HOST,
     port: Number.parseInt(process.env.PI_WEBUI_PORT || String(DEFAULT_PORT), 10),
     cwd: process.cwd(),
+    cwdExplicit: false,
     piBin: process.env.PI_WEBUI_PI_BIN || "pi",
     piBinExplicit: !!process.env.PI_WEBUI_PI_BIN,
     noSession: false,
@@ -257,7 +262,8 @@ function parseArgs(argv) {
       continue;
     }
     if (arg === "--cwd") {
-      options.cwd = path.resolve(takeValue(argv, i, arg));
+      options.cwd = path.resolve(expandUserPath(takeValue(argv, i, arg)));
+      options.cwdExplicit = true;
       i++;
       continue;
     }
@@ -286,6 +292,24 @@ function parseArgs(argv) {
   return options;
 }
 
+async function validateStartupCwd(cwd) {
+  const normalized = path.resolve(String(cwd || ""));
+  let info;
+  try {
+    info = await stat(normalized);
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") {
+      throw new Error(`--cwd does not exist: ${normalized}`);
+    }
+    if (error?.code === "EACCES" || error?.code === "EPERM") {
+      throw new Error(`--cwd is not accessible: ${normalized}`);
+    }
+    throw new Error(`Cannot access --cwd ${normalized}: ${formatCliError(error)}`);
+  }
+  if (!info.isDirectory()) throw new Error(`--cwd is not a directory: ${normalized}`);
+  return normalized;
+}
+
 function isLocalHost(host) {
   return host === "localhost" || host === "::1" || host === "[::1]" || host.startsWith("127.");
 }
@@ -302,6 +326,12 @@ function sanitizeError(error) {
   if (!error) return "Unknown error";
   if (typeof error === "string") return error;
   return error.stack || error.message || String(error);
+}
+
+function formatCliError(error) {
+  if (!error) return "Unknown error";
+  if (typeof error === "string") return error;
+  return error.message || String(error);
 }
 
 function delay(ms) {
@@ -2071,7 +2101,7 @@ let options;
 try {
   options = parseArgs(process.argv.slice(2));
 } catch (error) {
-  console.error(`Error: ${sanitizeError(error)}\n`);
+  console.error(`Error: ${formatCliError(error)}\n`);
   usage();
   process.exit(2);
 }
@@ -2083,6 +2113,14 @@ if (options.help) {
 if (options.version) {
   console.log(packageJson.version);
   process.exit(0);
+}
+
+try {
+  options.cwd = await validateStartupCwd(options.cwd);
+} catch (error) {
+  console.error(`Error: ${formatCliError(error)}\n`);
+  usage();
+  process.exit(2);
 }
 
 const startupDelayMs = Number.parseInt(process.env.PI_WEBUI_START_DELAY_MS || "", 10);
@@ -3851,8 +3889,14 @@ function getRequestedTab(req, url, body = {}) {
   return tab;
 }
 
+function directoryPickerActiveCwd(req, url, body = {}) {
+  const id = requestedTabId(req, url, body);
+  if (id) return getRequestedTab(req, url, body).cwd;
+  return firstTab()?.cwd || options.cwd;
+}
+
 async function createInitialTabs() {
-  if (!restoreTabs.length) return [await createTab()];
+  if (!restoreTabs.length) return options.cwdExplicit ? [await createTab()] : [];
 
   const created = [];
   for (const descriptor of restoreTabs) {
@@ -3863,7 +3907,7 @@ async function createInitialTabs() {
     }
   }
 
-  return created.length ? created : [await createTab()];
+  return created.length ? created : options.cwdExplicit ? [await createTab()] : [];
 }
 
 const serverStartedAt = new Date().toISOString();
@@ -4307,20 +4351,20 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/directories" && req.method === "GET") {
-      const tab = getRequestedTab(req, url);
+      const activeCwd = directoryPickerActiveCwd(req, url);
       sendJson(res, 200, {
         ok: true,
-        data: await getDirectoryPickerData(url.searchParams.get("path"), tab.cwd),
+        data: await getDirectoryPickerData(url.searchParams.get("path"), activeCwd),
       });
       return;
     }
 
     if (url.pathname === "/api/directories" && req.method === "POST") {
       const body = await readJsonBody(req);
-      const tab = getRequestedTab(req, url, body);
+      const activeCwd = directoryPickerActiveCwd(req, url, body);
       sendJson(res, 201, {
         ok: true,
-        data: await createDirectoryPickerDirectory(body.parent ?? body.cwd ?? body.path, body.name, tab.cwd),
+        data: await createDirectoryPickerDirectory(body.parent ?? body.cwd ?? body.path, body.name, activeCwd),
       });
       return;
     }
@@ -4590,7 +4634,8 @@ server.listen(options.port, currentHost, () => {
   const urlHost = formatUrlHost(currentHost);
   console.log(`Pi Web UI: http://${urlHost}:${options.port}/`);
   console.log(`Working directory: ${options.cwd}`);
-  console.log(`Pi RPC: ${initialTab.rpc.displayCommand}`);
+  if (initialTab) console.log(`Pi RPC: ${initialTab.rpc.displayCommand}`);
+  else console.log("Pi RPC: waiting for CWD selection in the Web UI");
   if (restoreTabs.length) console.log(`Restored Web UI tabs: ${initialTabs.length}`);
   if (!isLocalHost(currentHost)) {
     console.warn("WARNING: Web UI has no authentication. Only expose it on trusted networks.");

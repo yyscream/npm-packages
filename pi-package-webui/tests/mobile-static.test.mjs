@@ -268,6 +268,7 @@ assert.match(app, /async function createPathPickerDirectory\(\)/, "cwd picker sh
 assert.match(app, /function renderPathPickerDirectoryList\(\)[\s\S]*pathPickerDirectoryMatchesSearch/, "cwd picker should filter current-directory entries in the browser");
 assert.match(app, /elements\.pathPickerSearchInput\.addEventListener\("input", renderPathPickerDirectoryList\)/, "cwd picker should update directory matches as the user types");
 assert.match(server, /async function createDirectoryPickerDirectory\(parentPath, nameValue, activeCwd\)/, "server should implement cwd picker directory creation");
+assert.match(server, /function directoryPickerActiveCwd\(req, url, body = \{\}\)/, "server should let the cwd picker run before any Pi tabs exist");
 assert.match(server, /url\.pathname === "\/api\/directories" && req\.method === "POST"/, "server should expose POST /api/directories for cwd picker directory creation");
 assert.match(css, /@media \(max-width: 720px\), \(max-device-width: 720px\), \(pointer: coarse\) and \(hover: none\)[\s\S]*?\.footer-line-tui \{[\s\S]*?flex-wrap:\s*wrap/, "mobile footer should wrap the minimal TUI-like line instead of using expanded metadata chips");
 assert.match(css, /(?:^|\n)\s*\.side-panel-backdrop\s*\{[\s\S]*?position:\s*fixed/, "mobile side panel backdrop should be fixed overlay UI");
@@ -323,6 +324,11 @@ assert.match(app, /case "webui_connected":[\s\S]*setWebuiVersion\(event\.version
 assert.match(server, /const webuiDevServer = isTruthyEnv\(process\.env\.PI_WEBUI_DEV\) \|\| isSourceCheckout\(packageRoot\)/, "server should derive dev mode from PI_WEBUI_DEV or a source checkout");
 assert.match(server, /webuiDev: webuiDevServer,[\s\S]*webuiMode: webuiDevServer \? "dev" : "production"/, "server status should expose Web UI dev mode");
 assert.match(server, /type: "webui_connected",[\s\S]*webuiDev: webuiDevServer,[\s\S]*webuiMode: webuiDevServer \? "dev" : "production"/, "SSE connect event should expose Web UI dev mode");
+assert.match(server, /async function validateStartupCwd\(cwd\)/, "server should validate startup cwd before spawning Pi");
+assert.match(server, /--cwd does not exist:/, "server should report nonexistent startup cwd paths clearly");
+assert.match(server, /options\.cwd = await validateStartupCwd\(options\.cwd\)/, "server should fail fast for invalid startup cwd paths");
+assert.match(server, /cwdExplicit: false/, "server should track whether startup cwd was explicitly requested");
+assert.match(server, /return options\.cwdExplicit \? \[await createTab\(\)\] : \[\]/, "server should wait for UI cwd selection when no --cwd is supplied");
 assert.match(app, /serverActionSelect\.addEventListener\("change", updateServerActionButton\)/, "Server action dropdown should control the guarded run button");
 assert.match(app, /runServerActionButton\.addEventListener\("click"[\s\S]*runSelectedServerAction/, "Server action run button should execute the selected action");
 assert.match(app, /api\("\/api\/restart", \{ method: "POST", scoped: false \}\)/, "Restart Server action should call the unscoped restart endpoint");
@@ -342,11 +348,13 @@ assert.match(html, /<textarea id="promptInput"[^>]*autofocus/, "prompt composer 
 assert.match(app, /function syncMobileChatToBottomForInput\(\)/, "mobile input focus should force the output view to the latest message");
 assert.match(app, /function focusPromptInput\(\{ defer = false \} = \{\}\)/, "frontend should focus the prompt composer programmatically after tab/app startup");
 assert.match(app, /async function switchTab\(tabId\)[\s\S]*?restoreActiveDraft\(\);\n\s+focusPromptInput\(\{ defer: true \}\);/, "switching to a newly opened tab should focus the prompt input immediately");
-assert.match(app, /async function initializeTabs\(\)[\s\S]*?restoreActiveDraft\(\);\n\s+focusPromptInput\(\{ defer: true \}\);/, "starting the Web UI should focus the prompt input after restoring the active tab");
+assert.match(app, /async function initializeTabs\(\)[\s\S]*?restoreActiveDraft\(\);[\s\S]*if \(!loadedTabs\.length\)[\s\S]*focusPromptInput\(\{ defer: true \}\);/, "starting the Web UI should prompt for cwd when needed and focus active tabs");
 assert.match(app, /resizePromptInput\(\);\nfocusPromptInput\(\{ defer: true \}\);\nupdateComposerModeButtons\(\);/, "startup should request prompt focus before waiting for tab state refreshes");
 assert.match(app, /elements\.promptInput\.addEventListener\("focus", \(\) => \{\n\s+syncMobileChatToBottomForInput\(\);/, "focusing mobile input should scroll output to bottom");
 assert.match(app, /navigator\.serviceWorker\.register\("\/service-worker\.js"\)/, "PWA service worker should be registered by the app");
-assert.match(app, /function serverStartCommandText\(\)[\s\S]*pi-webui --cwd/, "PWA/offline shell should build a pi-webui --cwd recovery command");
+assert.match(app, /function serverStartCommandText\(\)[\s\S]*return `pi-webui\$\{currentPortArg\(\)\}`/, "PWA/offline shell should build a pathless pi-webui recovery command");
+assert.match(app, /async function createFirstTerminalTabFromChosenDirectory\(\)/, "frontend should prompt for the first terminal cwd when no tabs exist");
+assert.match(app, /Choose CWD for first terminal/, "frontend should title the first-terminal cwd picker clearly");
 assert.match(app, /Pi Web UI server is offline/, "PWA/offline shell should clearly report backend-down state");
 assert.match(app, /navigator\.clipboard\.writeText\(text\)/, "backend-offline recovery panel should copy the start command when possible");
 assert.match(app, /function messageCopyText\(message, body = null\)/, "frontend should derive copy text from transcript messages");

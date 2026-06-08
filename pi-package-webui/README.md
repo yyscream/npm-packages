@@ -82,7 +82,7 @@ Use the CLI when you want to start the Web UI without first opening terminal Pi:
 
 ```bash
 npm install -g @firstpick/pi-package-webui
-pi-webui --cwd ~/src/my-project
+pi-webui
 ```
 
 ```text
@@ -92,7 +92,7 @@ pi-webui [options] [-- <pi args...>]
 ```text
   --host <host>       HTTP bind host (default: 127.0.0.1)
   --port <port>       HTTP port (default: 31415)
-  --cwd <path>        Default working directory for Pi tabs (default: current dir)
+  --cwd <path>        Start the first Pi terminal in this working directory
   --pi <command>      Pi executable to spawn (default: bundled dependency, then "pi")
   --no-session        Start Pi RPC with --no-session
   --name <name>       Initial Web UI tab name
@@ -100,9 +100,12 @@ pi-webui [options] [-- <pi args...>]
   -v, --version       Print version
 ```
 
+If `--cwd` is omitted, the server starts first and the browser asks for the first terminal CWD.
+
 Examples:
 
 ```bash
+pi-webui
 pi-webui --cwd ~/src/my-project
 pi-webui --port 3000 -- --model anthropic/claude-sonnet-4-5:high
 PI_WEBUI_PI_BIN=/path/to/pi pi-webui --no-session
@@ -116,6 +119,7 @@ Environment variables:
 
 ## Main features
 
+- Pathless `pi-webui` startup: the server opens first, then the browser prompts for the first terminal CWD.
 - Multi-tab Pi sessions with isolated processes, working directories, prompt drafts, and activity state.
 - Automatic tab naming from the first prompt, with `--name <name>` still available for an explicit initial tab name.
 - Streaming chat transcript with Markdown, thinking output, tool/bash cards, queue and compaction events, and abort controls.

@@ -180,6 +180,7 @@ let eventSource = null;
 let activeDialog = null;
 let nativeCommandTabId = null;
 let pathPickerState = null;
+let firstTerminalCwdPromptShown = false;
 let pathFastPicks = [];
 let pathFastPicksReady = false;
 let pathFastPicksLoadPromise = null;
@@ -1055,8 +1056,7 @@ function currentPortArg() {
 }
 
 function serverStartCommandText() {
-  const cwd = readStoredServerStartCwd() || ".";
-  return `pi-webui --cwd ${quoteCommandArg(cwd)}${currentPortArg()}`;
+  return `pi-webui${currentPortArg()}`;
 }
 
 function serverStartSlashCommandText() {
@@ -2973,10 +2973,15 @@ function currentDirectoryForNewTab() {
 async function createTerminalTab(cwd = currentDirectoryForNewTab(), { triggerButton = elements.newTabButton } = {}) {
   setMobileTabsExpanded(false);
   setNewTabMenuOpen(false);
+  const resolvedCwd = cwd || currentDirectoryForNewTab();
+  if (!resolvedCwd && tabs.length === 0) {
+    await createTerminalTabFromChosenDirectory({ triggerButton });
+    return;
+  }
   const disabledButtons = new Set([elements.newTabButton, triggerButton].filter(Boolean));
   for (const button of disabledButtons) button.disabled = true;
   try {
-    const response = await api("/api/tabs", { method: "POST", body: { cwd: cwd || currentDirectoryForNewTab() }, scoped: false });
+    const response = await api("/api/tabs", { method: "POST", body: { cwd: resolvedCwd }, scoped: false });
     tabs = response.data?.tabs || tabs;
     syncTabMetadata(tabs);
     const tab = response.data?.tab;
@@ -3000,6 +3005,17 @@ async function createTerminalTabFromChosenDirectory({ triggerButton = elements.n
   const cwd = await pickCwd(sourceTab || { id: "new-tab", title: "new tab" }, initialCwd, { title: "Choose CWD for new tab" });
   if (!cwd) return;
   await createTerminalTab(cwd, { triggerButton });
+}
+
+async function createFirstTerminalTabFromChosenDirectory() {
+  if (firstTerminalCwdPromptShown || tabs.length > 0) return;
+  firstTerminalCwdPromptShown = true;
+  const cwd = await pickCwd({ id: "first-terminal", title: "first terminal" }, "", { title: "Choose CWD for first terminal" });
+  if (!cwd) {
+    addEvent("choose a CWD to start the first terminal", "warn");
+    return;
+  }
+  await createTerminalTab(cwd, { triggerButton: null });
 }
 
 function tabHasActiveAgent(tab) {
@@ -3093,10 +3109,14 @@ async function closeAllTerminalTabs() {
 }
 
 async function initializeTabs() {
-  await refreshTabs({ selectStored: true });
+  const loadedTabs = await refreshTabs({ selectStored: true });
   resetActiveTabUi();
   renderTabs();
   restoreActiveDraft();
+  if (!loadedTabs.length) {
+    await createFirstTerminalTabFromChosenDirectory();
+    return;
+  }
   focusPromptInput({ defer: true });
   const tabContext = activeTabContext();
   connectEvents(tabContext);
