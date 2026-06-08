@@ -31,6 +31,16 @@ const elements = {
   composerActionsButton: $("#composerActionsButton"),
   composerActionsPanel: $("#composerActionsPanel"),
   promptInput: $("#promptInput"),
+  busyPromptBehaviorTag: $("#busyPromptBehaviorTag"),
+  busyPromptBehaviorMenu: $("#busyPromptBehaviorMenu"),
+  sessionSkillTags: $("#sessionSkillTags"),
+  skillEditorDialog: $("#skillEditorDialog"),
+  skillEditorTitle: $("#skillEditorTitle"),
+  skillEditorMeta: $("#skillEditorMeta"),
+  skillEditorText: $("#skillEditorText"),
+  skillEditorStatus: $("#skillEditorStatus"),
+  skillEditorCancelButton: $("#skillEditorCancelButton"),
+  skillEditorSaveButton: $("#skillEditorSaveButton"),
   sendButton: $("#sendButton"),
   commandSuggest: $("#commandSuggest"),
   attachmentTray: $("#attachmentTray"),
@@ -174,6 +184,7 @@ let activeTabGeneration = 0;
 let tabDrafts = new Map();
 let tabAttachments = new Map();
 let activeTextAttachmentEditor = null;
+let activeSkillEditor = null;
 let tabActivities = new Map();
 let tabSeenCompletionSerials = new Map();
 let streamBubble = null;
@@ -213,6 +224,8 @@ let openTerminalTabGroupKey = null;
 let newTabMenuOpen = false;
 let nativeCommandMenuOpen = false;
 let appRunnerMenuOpen = false;
+let busyPromptBehaviorMenuOpen = false;
+const skillUsageByTab = new Map();
 let appRunnerCustomDraft = { id: "", label: "", command: "./", path: "", args: "" };
 let appRunnerFileBrowserState = { open: false, loading: false, path: "", data: null, error: "" };
 let optionsMenuOpen = false;
@@ -299,6 +312,8 @@ const TAB_STORAGE_KEY = "pi-webui-active-tab";
 const PATH_FAST_PICKS_STORAGE_KEY = "pi-webui-path-fast-picks";
 const AGENT_DONE_NOTIFICATIONS_STORAGE_KEY = "pi-webui-agent-done-notifications";
 const THINKING_VISIBILITY_STORAGE_KEY = "pi-webui-thinking-visible";
+const BUSY_PROMPT_BEHAVIOR_STORAGE_KEY = "pi-webui-busy-prompt-behavior";
+const SKILL_USAGE_STORAGE_KEY = "pi-webui-skill-usage-v1";
 const TERMINAL_TABS_LAYOUT_STORAGE_KEY = "pi-webui-terminal-tabs-layout";
 const TOOL_OUTPUT_EXPANDED_STORAGE_KEY = "pi-webui-tool-output-expanded";
 const THEME_STORAGE_KEY = "pi-webui-theme";
@@ -331,6 +346,10 @@ const BACKGROUND_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/w
 const DEFAULT_THEME_NAME = "catppuccin-mocha";
 const TERMINAL_TABS_LAYOUTS = new Set(["top", "left"]);
 const TERMINAL_TABS_LAYOUT_LABELS = { top: "Top bar", left: "Left sidebar" };
+const BUSY_PROMPT_BEHAVIOR_VALUES = new Set(["followUp", "steer"]);
+const BUSY_PROMPT_BEHAVIOR_LABELS = { followUp: "Follow-up", steer: "Steer" };
+const SKILL_TAG_MAX_VISIBLE = 6;
+const SKILL_USAGE_LIMIT_PER_TAB = 32;
 const MOBILE_VIEW_QUERY = "(max-width: 720px), (max-device-width: 720px), (pointer: coarse) and (hover: none)";
 const SIDE_PANEL_OVERLAY_QUERY = "(max-width: 1050px), (max-device-width: 720px), (pointer: coarse) and (hover: none)";
 const CHAT_BOTTOM_THRESHOLD_PX = 96;
@@ -905,6 +924,454 @@ function restoreThinkingVisibilitySetting() {
   renderThinkingVisibilityToggle();
 }
 
+function normalizeBusyPromptBehavior(value) {
+  const normalized = String(value || "").trim();
+  if (normalized === "follow-up" || normalized.toLowerCase() === "followup") return "followUp";
+  return BUSY_PROMPT_BEHAVIOR_VALUES.has(normalized) ? normalized : "followUp";
+}
+
+function readStoredBusyPromptBehavior() {
+  try {
+    return normalizeBusyPromptBehavior(localStorage.getItem(BUSY_PROMPT_BEHAVIOR_STORAGE_KEY));
+  } catch {
+    return "followUp";
+  }
+}
+
+function persistBusyPromptBehavior(behavior) {
+  try {
+    localStorage.setItem(BUSY_PROMPT_BEHAVIOR_STORAGE_KEY, normalizeBusyPromptBehavior(behavior));
+  } catch {
+    // Ignore storage failures; the setting should still work for this page load.
+  }
+}
+
+function busyPromptBehaviorMenuItems() {
+  return Array.from(elements.busyPromptBehaviorMenu?.querySelectorAll("[data-busy-prompt-behavior]") || []);
+}
+
+function renderBusyPromptBehaviorMenu() {
+  const behavior = normalizeBusyPromptBehavior(busyPromptBehavior);
+  for (const item of busyPromptBehaviorMenuItems()) {
+    const checked = normalizeBusyPromptBehavior(item.dataset.busyPromptBehavior) === behavior;
+    item.setAttribute("aria-checked", checked ? "true" : "false");
+    item.classList.toggle("active", checked);
+  }
+}
+
+function normalizeSkillName(value) {
+  const raw = String(value || "").trim().replace(/^\/?skill:/i, "");
+  if (!raw) return "";
+  const match = raw.match(/^[a-z0-9][a-z0-9._-]{0,63}$/i);
+  return match ? match[0].toLowerCase() : "";
+}
+
+function skillUsageMapForTab(tabId = activeTabId, { create = true } = {}) {
+  if (!tabId) return null;
+  let map = skillUsageByTab.get(tabId);
+  if (!map && create) {
+    map = new Map();
+    skillUsageByTab.set(tabId, map);
+  }
+  return map || null;
+}
+
+function clearSkillUsageForTab(tabId = activeTabId) {
+  if (!tabId) return;
+  skillUsageByTab.delete(tabId);
+  persistSkillUsage();
+  if (tabId === activeTabId) renderSessionSkillTags(tabId);
+}
+
+function sortedSkillUsageEntries(tabId = activeTabId) {
+  const map = skillUsageMapForTab(tabId, { create: false });
+  if (!map) return [];
+  return [...map.values()].sort((a, b) => b.lastSeenAt - a.lastSeenAt || a.name.localeCompare(b.name));
+}
+
+function serializeSkillUsageEntry(entry) {
+  const name = normalizeSkillName(entry?.name || "");
+  if (!name) return null;
+  const kinds = entry?.kinds instanceof Set ? [...entry.kinds] : Array.isArray(entry?.kinds) ? entry.kinds : [];
+  const paths = entry?.paths instanceof Set ? [...entry.paths] : Array.isArray(entry?.paths) ? entry.paths : [];
+  const sources = entry?.sources instanceof Set ? [...entry.sources] : Array.isArray(entry?.sources) ? entry.sources : [];
+  const path = entry?.path || paths[paths.length - 1] || "";
+  return {
+    name,
+    firstSeenAt: Number.isFinite(entry?.firstSeenAt) ? entry.firstSeenAt : Date.now(),
+    lastSeenAt: Number.isFinite(entry?.lastSeenAt) ? entry.lastSeenAt : Date.now(),
+    kinds: kinds.includes("read") ? kinds : [...kinds, "read"],
+    sources: sources.slice(-12),
+    path,
+    paths: [...new Set([path, ...paths].filter(Boolean))].slice(-8),
+  };
+}
+
+function persistSkillUsage() {
+  try {
+    const storedTabs = {};
+    for (const [tabId, map] of skillUsageByTab.entries()) {
+      const entries = [...map.values()]
+        .filter((entry) => entry?.kinds?.has("read"))
+        .map(serializeSkillUsageEntry)
+        .filter(Boolean)
+        .slice(0, SKILL_USAGE_LIMIT_PER_TAB);
+      if (entries.length) storedTabs[tabId] = entries;
+    }
+    localStorage.setItem(SKILL_USAGE_STORAGE_KEY, JSON.stringify({ version: 1, tabs: storedTabs }));
+  } catch {
+    // Ignore storage failures; tags still work for the current page lifetime.
+  }
+}
+
+function restoreStoredSkillUsage() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SKILL_USAGE_STORAGE_KEY) || "{}");
+    const storedTabs = parsed?.tabs && typeof parsed.tabs === "object" ? parsed.tabs : {};
+    for (const [tabId, entries] of Object.entries(storedTabs)) {
+      if (!tabId || !Array.isArray(entries)) continue;
+      const map = skillUsageMapForTab(tabId);
+      if (!map) continue;
+      for (const stored of entries.slice(0, SKILL_USAGE_LIMIT_PER_TAB)) {
+        const name = normalizeSkillName(stored?.name || "");
+        if (!name) continue;
+        const kinds = new Set(Array.isArray(stored?.kinds) ? stored.kinds : ["read"]);
+        if (!kinds.has("read")) continue;
+        const paths = new Set(Array.isArray(stored?.paths) ? stored.paths.filter(Boolean) : []);
+        if (stored?.path) paths.add(stored.path);
+        map.set(name, {
+          name,
+          firstSeenAt: Number.isFinite(stored?.firstSeenAt) ? stored.firstSeenAt : Date.now(),
+          lastSeenAt: Number.isFinite(stored?.lastSeenAt) ? stored.lastSeenAt : Date.now(),
+          kinds,
+          sources: new Set(Array.isArray(stored?.sources) ? stored.sources : ["stored"]),
+          path: stored?.path || [...paths].at(-1) || "",
+          paths,
+        });
+      }
+    }
+  } catch {
+    // Ignore corrupt stored tag data.
+  }
+}
+
+function pruneSkillUsageForKnownTabs(tabIds) {
+  let changed = false;
+  for (const tabId of skillUsageByTab.keys()) {
+    if (tabIds.has(tabId)) continue;
+    skillUsageByTab.delete(tabId);
+    changed = true;
+  }
+  if (changed) persistSkillUsage();
+}
+
+function skillInfoFromPath(pathText) {
+  const normalized = String(pathText || "").trim().replace(/\\/g, "/");
+  const match = normalized.match(/\/skills\/([^/]+)\/SKILL\.md$/i);
+  const name = normalizeSkillName(match?.[1] || "");
+  return name ? { name, path: normalized } : null;
+}
+
+function skillNameFromPath(pathText) {
+  return skillInfoFromPath(pathText)?.name || "";
+}
+
+function skillNamesFromSlashCommands(text) {
+  const names = new Set();
+  for (const match of String(text || "").matchAll(/\/skill:([a-z0-9][a-z0-9._-]{0,63})/gi)) {
+    const normalized = normalizeSkillName(match[1]);
+    if (normalized) names.add(normalized);
+  }
+  return [...names];
+}
+
+function skillKindsLabel(entry) {
+  return entry?.kinds?.has("read") ? "context read" : "tracked";
+}
+
+function renderSessionSkillTags(tabId = activeTabId) {
+  const container = elements.sessionSkillTags;
+  if (!container) return;
+  const entries = sortedSkillUsageEntries(tabId).filter((entry) => entry.kinds.has("read"));
+  container.replaceChildren();
+  if (!entries.length) {
+    container.hidden = true;
+    return;
+  }
+  const visible = entries.slice(0, SKILL_TAG_MAX_VISIBLE);
+  for (const entry of visible) {
+    const classes = ["composer-skill-tag", "read"];
+    const tag = make("button", classes.join(" "), entry.name);
+    tag.type = "button";
+    tag.dataset.skillName = entry.name;
+    tag.dataset.skillPath = skillPathForEntry(entry);
+    tag.title = `Open and edit skill ${entry.name} (${skillKindsLabel(entry)}) tracked in this tab/session.`;
+    tag.setAttribute("aria-label", `Open skill ${entry.name}`);
+    tag.addEventListener("click", () => openSkillEditor(entry));
+    container.append(tag);
+  }
+  if (entries.length > visible.length) {
+    const overflow = make("span", "composer-skill-tag overflow", `+${entries.length - visible.length}`);
+    overflow.title = `${entries.length - visible.length} more tracked skill${entries.length - visible.length === 1 ? "" : "s"}.`;
+    container.append(overflow);
+  }
+  container.hidden = false;
+}
+
+function trackSkillUsage(tabId, skillName, kind = "used", source = "", details = {}) {
+  const name = normalizeSkillName(skillName);
+  if (!tabId || !name) return;
+  const map = skillUsageMapForTab(tabId);
+  if (!map) return;
+  const now = Date.now();
+  const entry = map.get(name) || { name, firstSeenAt: now, lastSeenAt: now, kinds: new Set(), sources: new Set(), paths: new Set() };
+  entry.lastSeenAt = now;
+  if (["used", "loaded", "read"].includes(kind)) entry.kinds.add(kind);
+  else entry.kinds.add("used");
+  if (source) entry.sources.add(source);
+  if (details?.path) {
+    entry.path = details.path;
+    entry.paths ||= new Set();
+    entry.paths.add(details.path);
+  }
+  map.set(name, entry);
+  if (map.size > SKILL_USAGE_LIMIT_PER_TAB) {
+    const keep = [...map.values()].sort((a, b) => b.lastSeenAt - a.lastSeenAt).slice(0, SKILL_USAGE_LIMIT_PER_TAB);
+    map.clear();
+    for (const item of keep) map.set(item.name, item);
+  }
+  persistSkillUsage();
+  if (tabId === activeTabId) renderSessionSkillTags(tabId);
+}
+
+function trackSkillsFromText(tabId, text, { kind = "used", source = "" } = {}) {
+  // Intentionally do not tag /skill:name mentions. A skill tag means the
+  // agent read that skill's full SKILL.md context, not only its command/name.
+}
+
+function trackSkillsFromValue(tabId, value, { keyHint = "", kind = "used", source = "", depth = 0 } = {}) {
+  if (!tabId || value === undefined || value === null || depth > 5) return;
+  if (Array.isArray(value)) {
+    for (const item of value) trackSkillsFromValue(tabId, item, { keyHint, kind, source, depth: depth + 1 });
+    return;
+  }
+  if (typeof value === "string") {
+    const skillInfo = skillInfoFromPath(value);
+    if (skillInfo) trackSkillUsage(tabId, skillInfo.name, "read", source, { path: skillInfo.path });
+    return;
+  }
+  if (typeof value !== "object") return;
+  for (const [key, nested] of Object.entries(value)) {
+    const hint = String(key || "").toLowerCase();
+    trackSkillsFromValue(tabId, nested, { keyHint: hint, kind, source, depth: depth + 1 });
+  }
+}
+
+function trackSkillsFromToolInvocation(tabId, toolName, args, { sourcePrefix = "tool" } = {}) {
+  if (!tabId) return;
+  const name = String(toolName || "").trim();
+  if (name.toLowerCase() !== "read") return;
+  const source = `${sourcePrefix}:${name}`;
+  trackSkillsFromValue(tabId, args, { kind: "read", source });
+}
+
+function trackSkillsFromMessage(tabId, message) {
+  if (!tabId || !message) return;
+  const role = String(message.role || "");
+  if (role === "toolExecution" || role === "toolCall") {
+    trackSkillsFromToolInvocation(tabId, message.toolName || message.name, message.arguments ?? message.args ?? {}, { sourcePrefix: `message:${role}` });
+    return;
+  }
+  if (role === "user" || role === "assistant" || role === "assistantEvent" || role === "native") {
+    trackSkillsFromText(tabId, textFromContent(message.content), { kind: "used", source: `message:${role}` });
+    return;
+  }
+  if (role === "bashExecution") {
+    trackSkillsFromText(tabId, `${message.command || ""}\n${message.output || ""}`, { kind: "used", source: "message:bash" });
+  }
+}
+
+function trackSkillsFromMessages(messages = latestMessages, tabId = activeTabId) {
+  for (const message of messages || []) trackSkillsFromMessage(tabId, message);
+}
+
+function trackSkillsFromEvent(event) {
+  const tabId = event?.tabId || activeTabId;
+  if (!tabId || !event) return;
+  if (["tool_execution_start", "tool_execution_update", "tool_execution_end"].includes(event.type)) {
+    trackSkillsFromToolInvocation(tabId, event.toolName, event.args, { sourcePrefix: `event:${event.type}` });
+    return;
+  }
+  if (event.type === "message_update") {
+    const update = event.assistantMessageEvent || {};
+    if (update.type === "toolcall_start") {
+      trackSkillsFromToolInvocation(tabId, update.name || update.toolName || update.toolCall?.name, update.arguments || update.args || update.toolCall?.arguments || {}, { sourcePrefix: "event:message_update" });
+    }
+    return;
+  }
+  if (event.type === "response" && event.command === "new_session") {
+    clearSkillUsageForTab(tabId);
+  }
+}
+
+function skillPathForEntry(entry) {
+  if (entry?.path) return entry.path;
+  if (entry?.paths instanceof Set && entry.paths.size) {
+    const paths = [...entry.paths];
+    return paths[paths.length - 1] || "";
+  }
+  return "";
+}
+
+function skillEditorApiPath({ name = "", path = "" } = {}) {
+  const params = new URLSearchParams();
+  if (name) params.set("name", name);
+  if (path) params.set("path", path);
+  const query = params.toString();
+  return query ? `/api/skill-file?${query}` : "/api/skill-file";
+}
+
+function setSkillEditorStatus(message = "", level = "muted") {
+  const status = elements.skillEditorStatus;
+  if (!status) return;
+  status.textContent = message;
+  status.className = `skill-editor-status ${level || "muted"}`;
+  status.hidden = !message;
+}
+
+function closeSkillEditor() {
+  if (elements.skillEditorDialog?.open) elements.skillEditorDialog.close();
+  else activeSkillEditor = null;
+}
+
+function updateSkillEditorMeta(data = activeSkillEditor || {}) {
+  if (!elements.skillEditorMeta) return;
+  const parts = [data.name ? `Skill: ${data.name}` : "Skill", data.path || "path unavailable"].filter(Boolean);
+  elements.skillEditorMeta.textContent = parts.join(" · ");
+}
+
+async function openSkillEditor(entry) {
+  const name = normalizeSkillName(entry?.name || "");
+  const path = skillPathForEntry(entry);
+  if (!name || !elements.skillEditorDialog || !elements.skillEditorText) return;
+  const tabId = activeTabId;
+  activeSkillEditor = { name, path, tabId, mtimeMs: null };
+  if (elements.skillEditorTitle) elements.skillEditorTitle.textContent = `Edit skill: ${name}`;
+  if (elements.skillEditorText) elements.skillEditorText.value = "";
+  if (elements.skillEditorSaveButton) elements.skillEditorSaveButton.disabled = true;
+  updateSkillEditorMeta(activeSkillEditor);
+  setSkillEditorStatus("Loading skill context…", "muted");
+  if (!elements.skillEditorDialog.open) elements.skillEditorDialog.showModal();
+
+  try {
+    const response = await api(skillEditorApiPath({ name, path }), { tabId });
+    if (activeSkillEditor?.tabId !== tabId || activeSkillEditor?.name !== name) return;
+    const data = response.data || {};
+    activeSkillEditor = { name: normalizeSkillName(data.name || name), path: data.path || path, tabId, mtimeMs: data.mtimeMs };
+    if (elements.skillEditorTitle) elements.skillEditorTitle.textContent = `Edit skill: ${activeSkillEditor.name}`;
+    if (elements.skillEditorText) elements.skillEditorText.value = data.content || "";
+    if (elements.skillEditorSaveButton) elements.skillEditorSaveButton.disabled = false;
+    updateSkillEditorMeta(activeSkillEditor);
+    setSkillEditorStatus("Edit this SKILL.md, then save. Reload the tab if title/description metadata should refresh immediately.", "muted");
+    queueMicrotask(() => elements.skillEditorText?.focus());
+  } catch (error) {
+    if (elements.skillEditorSaveButton) elements.skillEditorSaveButton.disabled = true;
+    setSkillEditorStatus(`Failed to open skill: ${error.message || String(error)}`, "error");
+  }
+}
+
+async function saveSkillEditor() {
+  if (!activeSkillEditor || !elements.skillEditorText || !elements.skillEditorSaveButton) return;
+  const editor = activeSkillEditor;
+  const previousLabel = elements.skillEditorSaveButton.textContent;
+  elements.skillEditorSaveButton.disabled = true;
+  elements.skillEditorSaveButton.textContent = "Saving…";
+  setSkillEditorStatus("Saving skill…", "muted");
+  try {
+    const response = await api("/api/skill-file", {
+      method: "POST",
+      tabId: editor.tabId,
+      body: {
+        name: editor.name,
+        path: editor.path,
+        mtimeMs: editor.mtimeMs,
+        content: elements.skillEditorText.value,
+      },
+    });
+    const data = response.data || {};
+    const savedName = normalizeSkillName(data.name || editor.name);
+    activeSkillEditor = { name: savedName, path: data.path || editor.path, tabId: editor.tabId, mtimeMs: data.mtimeMs };
+    const map = skillUsageMapForTab(editor.tabId, { create: false });
+    if (map && savedName !== editor.name) map.delete(editor.name);
+    trackSkillUsage(editor.tabId, savedName, "read", "skill-editor", { path: activeSkillEditor.path });
+    if (elements.skillEditorTitle) elements.skillEditorTitle.textContent = `Edit skill: ${savedName}`;
+    updateSkillEditorMeta(activeSkillEditor);
+    setSkillEditorStatus("Saved SKILL.md. Reload/restart affected tabs before relying on updated skill metadata or newly loaded instructions.", "ok");
+  } catch (error) {
+    setSkillEditorStatus(`Failed to save skill: ${error.message || String(error)}`, "error");
+  } finally {
+    elements.skillEditorSaveButton.textContent = previousLabel || "Save skill";
+    elements.skillEditorSaveButton.disabled = false;
+  }
+}
+
+function renderBusyPromptBehaviorTag() {
+  const tag = elements.busyPromptBehaviorTag;
+  if (!tag) return;
+  const behavior = normalizeBusyPromptBehavior(busyPromptBehavior);
+  const label = BUSY_PROMPT_BEHAVIOR_LABELS[behavior] || BUSY_PROMPT_BEHAVIOR_LABELS.followUp;
+  tag.textContent = label;
+  tag.classList.toggle("follow-up", behavior === "followUp");
+  tag.classList.toggle("steer", behavior === "steer");
+  tag.title = behavior === "steer"
+    ? "While Pi is running, normal prompt submit steers the active run. Click to change."
+    : "While Pi is running, normal prompt submit queues a follow-up. Click to change.";
+  tag.setAttribute("aria-label", tag.title);
+  renderBusyPromptBehaviorMenu();
+  renderSessionSkillTags(activeTabId);
+}
+
+function setBusyPromptBehaviorMenuOpen(open, { focusCurrent = false } = {}) {
+  busyPromptBehaviorMenuOpen = !!open;
+  elements.busyPromptBehaviorTag?.setAttribute("aria-expanded", busyPromptBehaviorMenuOpen ? "true" : "false");
+  elements.busyPromptBehaviorTag?.classList.toggle("menu-open", busyPromptBehaviorMenuOpen);
+  if (elements.busyPromptBehaviorMenu) elements.busyPromptBehaviorMenu.hidden = !busyPromptBehaviorMenuOpen;
+  if (!busyPromptBehaviorMenuOpen) return;
+  renderBusyPromptBehaviorMenu();
+  if (focusCurrent) {
+    requestAnimationFrame(() => {
+      const current = busyPromptBehaviorMenuItems().find((item) => item.getAttribute("aria-checked") === "true") || busyPromptBehaviorMenuItems()[0];
+      current?.focus({ preventScroll: true });
+    });
+  }
+}
+
+function focusBusyPromptBehaviorMenuItem(direction = 1) {
+  const items = busyPromptBehaviorMenuItems();
+  if (!items.length) return;
+  const currentIndex = Math.max(0, items.indexOf(document.activeElement));
+  const nextIndex = (currentIndex + direction + items.length) % items.length;
+  items[nextIndex].focus({ preventScroll: true });
+}
+
+function chooseBusyPromptBehaviorFromMenu(value) {
+  setBusyPromptBehavior(value);
+  setBusyPromptBehaviorMenuOpen(false);
+  focusPromptInput({ defer: true });
+}
+
+function setBusyPromptBehavior(value, { persist = true } = {}) {
+  const next = normalizeBusyPromptBehavior(value);
+  busyPromptBehavior = next;
+  webuiSettings = { ...webuiSettings, busyPromptBehavior: next };
+  if (persist) persistBusyPromptBehavior(next);
+  renderBusyPromptBehaviorTag();
+}
+
+function restoreBusyPromptBehaviorSetting() {
+  setBusyPromptBehavior(readStoredBusyPromptBehavior(), { persist: false });
+}
+
 function clampAutocompleteMaxVisible(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return 12;
@@ -917,6 +1384,7 @@ function applyNativeSettingsForBrowser(settings = {}, { syncThinkingVisibility =
   if (settings.autocompleteMaxVisible !== undefined) autocompleteMaxVisible = clampAutocompleteMaxVisible(settings.autocompleteMaxVisible);
   if (SETTINGS_DOUBLE_ESCAPE_OPTIONS.some((option) => option.value === settings.doubleEscapeAction)) doubleEscapeAction = settings.doubleEscapeAction;
   if (SETTINGS_TREE_FILTER_OPTIONS.includes(settings.treeFilterMode)) treeFilterMode = settings.treeFilterMode;
+  if (BUSY_PROMPT_BEHAVIOR_VALUES.has(settings.busyPromptBehavior)) setBusyPromptBehavior(settings.busyPromptBehavior);
   if (syncThinkingVisibility && typeof settings.hideThinkingBlock === "boolean") setThinkingOutputVisible(!settings.hideThinkingBlock);
 }
 
@@ -936,6 +1404,7 @@ function setComposerActionsOpen(open) {
     setNativeCommandMenuOpen(false);
     setAppRunnerMenuOpen(false);
     setOptionsMenuOpen(false);
+    setBusyPromptBehaviorMenuOpen(false);
   }
 }
 
@@ -993,6 +1462,7 @@ function updateComposerModeButtons() {
   elements.abortButton.textContent = abortRequestInFlight ? "Aborting…" : "Abort";
   elements.abortButton.title = abortAvailable ? "Abort the active Pi run (Esc or hold)" : "Abort is available while Pi is running";
   elements.abortButton.setAttribute("aria-label", elements.abortButton.title);
+  renderBusyPromptBehaviorTag();
   document.body.classList.toggle("pi-run-active", runActive || abortAvailable);
 }
 
@@ -2717,9 +3187,11 @@ function syncTabMetadata(nextTabs = []) {
       tabActivities.delete(tabId);
       tabSeenCompletionSerials.delete(tabId);
       actionFeedbackByTab.delete(tabId);
+      skillUsageByTab.delete(tabId);
       clearGitWorkflowForTab(tabId);
     }
   }
+  pruneSkillUsageForKnownTabs(liveIds);
 }
 
 function applyTabMetadata(tab) {
@@ -2926,7 +3398,7 @@ function restoreActiveDraft() {
 
 function focusPromptInput({ defer = false } = {}) {
   const focus = () => {
-    if (!elements.promptInput || elements.dialog.open || elements.pathPickerDialog.open || elements.nativeCommandDialog.open || elements.appRunnerInfoDialog?.open || elements.promptListDialog?.open || elements.attachmentTextDialog?.open || document.visibilityState === "hidden") return;
+    if (!elements.promptInput || elements.dialog.open || elements.pathPickerDialog.open || elements.nativeCommandDialog.open || elements.appRunnerInfoDialog?.open || elements.promptListDialog?.open || elements.attachmentTextDialog?.open || elements.skillEditorDialog?.open || document.visibilityState === "hidden") return;
     try {
       elements.promptInput.focus({ preventScroll: true });
     } catch {
@@ -3281,6 +3753,7 @@ async function refreshTabs({ selectStored = false } = {}) {
     setActiveTabId((requested && tabs.some((tab) => tab.id === requested) ? requested : stored && tabs.some((tab) => tab.id === stored) ? stored : tabs[0]?.id) || null, { remember: true });
   }
   rememberServerStartCwd(tabs.find((tab) => tab.id === activeTabId)?.cwd || tabs[0]?.cwd);
+  renderSessionSkillTags(activeTabId);
   renderTabs();
   return tabs;
 }
@@ -10205,7 +10678,7 @@ async function openNativeSettingsDialog() {
       if (controls.steering.select.value !== (state.steeringMode || "one-at-a-time")) requests.push(nativeCommandApi("/api/steering-mode", { method: "POST", body: { mode: controls.steering.select.value } }));
       if (controls.followUp.select.value !== (state.followUpMode || "one-at-a-time")) requests.push(nativeCommandApi("/api/follow-up-mode", { method: "POST", body: { mode: controls.followUp.select.value } }));
       if (controls.autoCompact.input.checked !== (state.autoCompactionEnabled !== false)) requests.push(nativeCommandApi("/api/auto-compaction", { method: "POST", body: { enabled: controls.autoCompact.input.checked } }));
-      busyPromptBehavior = controls.busyBehavior.select.value;
+      setBusyPromptBehavior(controls.busyBehavior.select.value);
       if (controls.thinkingOutput.input.checked !== thinkingOutputVisible) setThinkingOutputVisible(controls.thinkingOutput.input.checked);
       if (controls.doneNotifications.input.checked !== agentDoneNotificationsEnabled) await setAgentDoneNotificationsEnabled(controls.doneNotifications.input.checked);
       await Promise.all(requests);
@@ -10678,6 +11151,7 @@ function renderMessages(messages) {
   cleanupLiveToolRunsForMessages(latestMessages);
   syncLastUserPromptFromMessages(latestMessages);
   syncPromptHistoryFromMessages(latestMessages);
+  trackSkillsFromMessages(latestMessages, activeTabId);
   renderAllMessages();
   renderFooter();
   renderFeedbackTray();
@@ -11927,7 +12401,7 @@ async function sendPrompt(kind = "prompt", explicitMessage, { targetTabId = acti
   }
 
   const targetWasStreaming = !!currentState?.isStreaming;
-  const busyBehavior = busyPromptBehavior || "followUp";
+  const busyBehavior = normalizeBusyPromptBehavior(busyPromptBehavior);
   const startsRun = kind === "prompt" && !targetWasStreaming;
   autoFollowChat = true;
   updateJumpToLatestButton();
@@ -12188,6 +12662,7 @@ function handleInactiveTabEvent(event) {
 
 function handleEvent(event) {
   ingestEventTabActivity(event);
+  trackSkillsFromEvent(event);
   if (!eventTargetsActiveTab(event)) {
     handleInactiveTabEvent(event);
     return;
@@ -12485,6 +12960,20 @@ elements.attachmentTextDialog?.addEventListener("keydown", (event) => {
   if (!elements.attachmentTextSaveButton?.disabled) saveTextAttachmentEdit();
 });
 elements.attachmentTextDialog?.querySelector("form")?.addEventListener("submit", (event) => event.preventDefault());
+elements.skillEditorCancelButton?.addEventListener("click", closeSkillEditor);
+elements.skillEditorSaveButton?.addEventListener("click", saveSkillEditor);
+elements.skillEditorText?.addEventListener("input", () => setSkillEditorStatus("Unsaved skill edits.", "warn"));
+elements.skillEditorDialog?.addEventListener("close", () => {
+  activeSkillEditor = null;
+  if (elements.skillEditorText) elements.skillEditorText.value = "";
+  setSkillEditorStatus("");
+});
+elements.skillEditorDialog?.addEventListener("keydown", (event) => {
+  if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.key.toLowerCase() !== "s") return;
+  event.preventDefault();
+  if (!elements.skillEditorSaveButton?.disabled) saveSkillEditor();
+});
+elements.skillEditorDialog?.querySelector("form")?.addEventListener("submit", (event) => event.preventDefault());
 elements.sendFeedbackButton.addEventListener("click", () => submitQueuedActionFeedback());
 elements.composer.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -12492,6 +12981,56 @@ elements.composer.addEventListener("submit", (event) => {
 });
 elements.composerActionsButton.addEventListener("click", () => {
   setComposerActionsOpen(!document.body.classList.contains("composer-actions-open"));
+});
+elements.busyPromptBehaviorTag?.addEventListener("click", (event) => {
+  event.preventDefault();
+  const nextOpen = !busyPromptBehaviorMenuOpen;
+  setPublishMenuOpen(false);
+  setNativeCommandMenuOpen(false);
+  setAppRunnerMenuOpen(false);
+  setOptionsMenuOpen(false);
+  setComposerActionsOpen(false);
+  setBusyPromptBehaviorMenuOpen(nextOpen);
+});
+elements.busyPromptBehaviorTag?.addEventListener("keydown", (event) => {
+  if (!["ArrowDown", "ArrowUp", "Enter", " "].includes(event.key)) return;
+  event.preventDefault();
+  const focusPrevious = event.key === "ArrowUp";
+  setBusyPromptBehaviorMenuOpen(true);
+  requestAnimationFrame(() => {
+    const items = busyPromptBehaviorMenuItems();
+    if (!items.length) return;
+    const currentIndex = Math.max(0, items.findIndex((item) => item.getAttribute("aria-checked") === "true"));
+    const targetIndex = focusPrevious ? (currentIndex - 1 + items.length) % items.length : currentIndex;
+    items[targetIndex]?.focus({ preventScroll: true });
+  });
+});
+elements.busyPromptBehaviorMenu?.addEventListener("click", (event) => {
+  const item = event.target?.closest?.("[data-busy-prompt-behavior]");
+  if (!item) return;
+  chooseBusyPromptBehaviorFromMenu(item.dataset.busyPromptBehavior);
+});
+elements.busyPromptBehaviorMenu?.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    setBusyPromptBehaviorMenuOpen(false);
+    elements.busyPromptBehaviorTag?.focus({ preventScroll: true });
+    return;
+  }
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    focusBusyPromptBehaviorMenuItem(event.key === "ArrowDown" ? 1 : -1);
+    return;
+  }
+  if (event.key === "Home" || event.key === "End") {
+    event.preventDefault();
+    const items = busyPromptBehaviorMenuItems();
+    items[event.key === "Home" ? 0 : items.length - 1]?.focus({ preventScroll: true });
+    return;
+  }
+  if (event.key === "Tab") {
+    setBusyPromptBehaviorMenuOpen(false);
+  }
 });
 elements.steerButton.addEventListener("click", () => sendPromptFromModeButton("steer", elements.steerButton));
 elements.followUpButton.addEventListener("click", () => sendPromptFromModeButton("follow-up", elements.followUpButton));
@@ -12929,6 +13468,9 @@ document.addEventListener("pointerdown", (event) => {
   if (optionsMenuOpen && !event.target?.closest?.(".composer-options-menu")) {
     setOptionsMenuOpen(false);
   }
+  if (busyPromptBehaviorMenuOpen && !event.target?.closest?.(".composer-context-tags, .composer-busy-mode-menu")) {
+    setBusyPromptBehaviorMenuOpen(false);
+  }
   if (document.body.classList.contains("mobile-tabs-expanded") && !elements.tabBar.contains(event.target) && !elements.terminalTabsToggleButton.contains(event.target)) {
     setNewTabMenuOpen(false);
     setMobileTabsExpanded(false);
@@ -13027,6 +13569,11 @@ window.addEventListener("keydown", (event) => {
   }
   if (optionsMenuOpen) {
     setOptionsMenuOpen(false);
+    return;
+  }
+  if (busyPromptBehaviorMenuOpen) {
+    setBusyPromptBehaviorMenuOpen(false);
+    elements.busyPromptBehaviorTag?.focus({ preventScroll: true });
     return;
   }
   if (newTabMenuOpen) {
@@ -13181,6 +13728,8 @@ elements.promptInput.addEventListener("blur", () => {
 
 resizePromptInput();
 focusPromptInput({ defer: true });
+restoreStoredSkillUsage();
+restoreBusyPromptBehaviorSetting();
 updateComposerModeButtons();
 updateOptionalFeatureAvailability();
 renderAppRunnerControls();

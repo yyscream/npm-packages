@@ -33,6 +33,7 @@ const CODEX_TOKEN_REFRESH_SKEW_MS = 5 * 60 * 1000;
 const OPENAI_CODEX_PROVIDER_ID = "openai-codex";
 const OPENAI_CODEX_USAGE_ENDPOINT = process.env.PI_WEBUI_CODEX_USAGE_URL || "https://chatgpt.com/backend-api/wham/usage";
 const BODY_LIMIT_BYTES = 1024 * 1024;
+const SKILL_FILE_BODY_LIMIT_BYTES = 2 * 1024 * 1024;
 const PROMPT_BODY_LIMIT_BYTES = 24 * 1024 * 1024;
 const UPLOAD_BODY_LIMIT_BYTES = 96 * 1024 * 1024;
 const ATTACHMENT_UPLOAD_MAX_FILES = 12;
@@ -4242,6 +4243,109 @@ async function getMergedSkillConfigData(tab) {
   return { skills: mergeRuntimeAndResolvedSkills(runtime.skills || [], resolved.skills || []) };
 }
 
+function normalizeSkillRequestName(value) {
+  return String(value || "").trim().replace(/^skill:/i, "").toLowerCase();
+}
+
+function skillFileRequestParts(source = {}) {
+  return {
+    name: normalizeSkillRequestName(source.name || source.skillName),
+    filePath: String(source.path || source.filePath || "").trim(),
+  };
+}
+
+function sameResolvedPath(left, right) {
+  if (!left || !right) return false;
+  return path.resolve(left) === path.resolve(right);
+}
+
+function skillFilePathInside(root, target) {
+  if (!root || !target) return false;
+  const relative = path.relative(path.resolve(root), path.resolve(target));
+  return !relative || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function skillNameFromSkillFilePath(filePath) {
+  const normalized = String(filePath || "").replace(/\\/g, "/");
+  const match = normalized.match(/\/skills\/([^/]+)\/SKILL\.md$/i);
+  return normalizeSkillRequestName(match?.[1] || "");
+}
+
+async function resolveExplicitSkillFilePath(tab, filePath, requestedName = "") {
+  const resolvedPath = path.resolve(filePath || "");
+  const pathSkillName = skillNameFromSkillFilePath(resolvedPath);
+  if (!pathSkillName) throw makeHttpError(400, "Skill path must point to /skills/<name>/SKILL.md");
+  if (requestedName && requestedName !== pathSkillName) throw makeHttpError(400, "Skill name does not match the requested SKILL.md path");
+  const allowedRoots = [agentDir, path.join(tab?.cwd || options.cwd, ".pi")];
+  if (!allowedRoots.some((root) => skillFilePathInside(root, resolvedPath))) {
+    throw makeHttpError(403, "Skill path is outside allowed Pi skill locations");
+  }
+  const info = await stat(resolvedPath).catch(() => null);
+  if (!info?.isFile()) throw makeHttpError(404, `Skill file not found: ${resolvedPath}`);
+  return {
+    name: pathSkillName,
+    description: "",
+    filePath: resolvedPath,
+    enabled: true,
+    fileStats: info,
+  };
+}
+
+async function resolveEditableSkillFile(tab, request = {}) {
+  const { name, filePath } = skillFileRequestParts(request);
+  if (!name && !filePath) throw makeHttpError(400, "Skill name or path is required");
+  const { skills } = await resolveSkillResources(tab);
+  const skill = skills.find((item) => (
+    filePath ? sameResolvedPath(item.filePath, filePath) : name && normalizeSkillRequestName(item.name) === name
+  ));
+  if (skill?.filePath) {
+    if (path.basename(skill.filePath) !== "SKILL.md") throw makeHttpError(400, "Only SKILL.md files can be edited from skill tags");
+    const info = await stat(skill.filePath).catch(() => null);
+    if (!info?.isFile()) throw makeHttpError(404, `Skill file not found: ${skill.filePath}`);
+    return { ...skill, filePath: path.resolve(skill.filePath), fileStats: info };
+  }
+  if (filePath) return resolveExplicitSkillFilePath(tab, filePath, name);
+  throw makeHttpError(404, "Skill is not configured in this Pi tab");
+}
+
+async function getSkillFileData(tab, request = {}) {
+  const skill = await resolveEditableSkillFile(tab, request);
+  const content = await readFile(skill.filePath, "utf8");
+  return {
+    name: parseSkillFrontmatter(content, skill.filePath).name || skill.name,
+    description: skill.description || "",
+    path: skill.filePath,
+    content,
+    mtimeMs: skill.fileStats.mtimeMs,
+    size: skill.fileStats.size,
+    enabled: skill.enabled === true,
+  };
+}
+
+async function saveSkillFileData(tab, body = {}) {
+  if (typeof body.content !== "string") throw makeHttpError(400, "Skill content must be a string");
+  if (body.content.includes("\0")) throw makeHttpError(400, "Skill content cannot contain null bytes");
+  if (Buffer.byteLength(body.content, "utf8") > SKILL_FILE_BODY_LIMIT_BYTES) throw makeHttpError(413, `Skill file is too large (limit ${formatBytes(SKILL_FILE_BODY_LIMIT_BYTES)})`);
+  const skill = await resolveEditableSkillFile(tab, body);
+  const expectedMtimeMs = Number(body.mtimeMs);
+  if (Number.isFinite(expectedMtimeMs) && Math.abs(skill.fileStats.mtimeMs - expectedMtimeMs) > 5) {
+    throw makeHttpError(409, "Skill file changed on disk after it was opened. Reopen it before saving.");
+  }
+  const tmpFile = `${skill.filePath}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tmpFile, body.content, { encoding: "utf8", mode: skill.fileStats.mode & 0o777 });
+  await rename(tmpFile, skill.filePath);
+  const nextStats = await stat(skill.filePath);
+  const metadata = parseSkillFrontmatter(body.content, skill.filePath);
+  return {
+    name: metadata.name || skill.name,
+    description: metadata.description || skill.description || "",
+    path: skill.filePath,
+    mtimeMs: nextStats.mtimeMs,
+    size: nextStats.size,
+    enabled: skill.enabled === true,
+  };
+}
+
 function getResourcePatternForSkill(tab, skill) {
   const info = skill.sourceInfo || {};
   const baseDir = info.baseDir || (info.scope === "project" ? path.join(tab?.cwd || options.cwd, ".pi") : agentDir);
@@ -5682,6 +5786,20 @@ const server = createServer(async (req, res) => {
       const body = await readJsonBody(req);
       const tab = getRequestedTab(req, url, body);
       sendJson(res, 200, { ok: true, data: await setSkillConfigData(tab, body) });
+      return;
+    }
+
+    if (url.pathname === "/api/skill-file" && req.method === "GET") {
+      const tab = getRequestedTab(req, url);
+      sendJson(res, 200, { ok: true, data: await getSkillFileData(tab, { name: url.searchParams.get("name"), path: url.searchParams.get("path") }) });
+      return;
+    }
+
+    if (url.pathname === "/api/skill-file" && req.method === "POST") {
+      if (!isLocalAddress(req.socket.remoteAddress)) throw makeHttpError(403, "Saving skill files is only allowed from localhost");
+      const body = await readJsonBody(req, { limitBytes: SKILL_FILE_BODY_LIMIT_BYTES });
+      const tab = getRequestedTab(req, url, body);
+      sendJson(res, 200, { ok: true, data: await saveSkillFileData(tab, body) });
       return;
     }
 

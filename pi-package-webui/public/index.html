@@ -85,6 +85,28 @@
         </section>
         <form id="composer" class="composer">
           <div class="composer-input-row">
+            <div class="composer-context-tags">
+              <button
+                id="busyPromptBehaviorTag"
+                class="composer-busy-mode-tag"
+                type="button"
+                aria-haspopup="menu"
+                aria-expanded="false"
+                aria-controls="busyPromptBehaviorMenu"
+                aria-live="polite"
+              >Follow-up</button>
+              <div id="sessionSkillTags" class="composer-skill-tags" aria-live="polite" hidden></div>
+            </div>
+            <div id="busyPromptBehaviorMenu" class="composer-busy-mode-menu" role="menu" aria-labelledby="busyPromptBehaviorTag" hidden>
+              <button class="composer-busy-mode-menu-item" type="button" role="menuitemradio" data-busy-prompt-behavior="followUp" aria-checked="true">
+                <span class="composer-busy-mode-menu-label">Follow-up</span>
+                <span class="composer-busy-mode-menu-description">Queue as the next prompt after this run.</span>
+              </button>
+              <button class="composer-busy-mode-menu-item" type="button" role="menuitemradio" data-busy-prompt-behavior="steer" aria-checked="false">
+                <span class="composer-busy-mode-menu-label">Steer</span>
+                <span class="composer-busy-mode-menu-description">Guide the active run immediately.</span>
+              </button>
+            </div>
             <textarea id="promptInput" rows="1" enterkeyhint="enter" placeholder="Ask Pi…" autofocus></textarea>
             <button
               id="attachButton"
@@ -504,6 +526,19 @@
         <div id="appRunnerInfoBody" class="app-runner-info-body"></div>
         <menu>
           <button id="appRunnerInfoCloseButton" type="submit" value="close">Close</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="skillEditorDialog" class="extension-dialog skill-editor-dialog">
+      <form method="dialog">
+        <h2 id="skillEditorTitle">Edit skill</h2>
+        <p id="skillEditorMeta" class="skill-editor-meta muted"></p>
+        <textarea id="skillEditorText" class="dialog-editor skill-editor-text" spellcheck="false" aria-label="Skill file contents"></textarea>
+        <p id="skillEditorStatus" class="skill-editor-status muted" role="status" aria-live="polite" hidden></p>
+        <menu>
+          <button id="skillEditorCancelButton" type="button">Cancel</button>
+          <button id="skillEditorSaveButton" class="primary" type="button">Save skill</button>
         </menu>
       </form>
     </dialog>
