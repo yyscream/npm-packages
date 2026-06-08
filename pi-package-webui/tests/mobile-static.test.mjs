@@ -61,6 +61,8 @@ assert.match(html, /id="agentDoneNotificationsToggle"/, "side panel should expos
 assert.match(html, /id="agentDoneNotificationsStatus"/, "agent-done notifications toggle should expose status text");
 assert.match(html, /id="thinkingVisibilityToggle"/, "side panel should expose a thinking-output visibility toggle");
 assert.match(html, /id="thinkingVisibilityStatus"/, "thinking-output visibility toggle should expose status text");
+assert.match(html, /id="terminalTabsLayoutSelect"[\s\S]*<option value="left">Left sidebar<\/option>/, "side panel controls should expose a terminal-tabs layout selector");
+assert.match(html, /id="terminalTabsLayoutStatus"/, "terminal-tabs layout selector should expose status text");
 assert.match(html, /id="nativeCommandDialog"/, "native slash selector UI should have a dedicated dialog");
 assert.match(html, /id="nativeCommandSearch"[^>]*type="search"/, "native slash selector dialog should expose a filter box");
 assert.match(html, /id="pathPickerCreateNameInput"[^>]*placeholder="New directory name"/, "cwd picker should expose a new-directory name input");
@@ -253,6 +255,11 @@ assert.match(css, /\.composer-actions-panel > \.composer-publish-menu[\s\S]*?gri
 assert.match(css, /\.composer-actions-panel[\s\S]*?bottom:\s*calc\(100% \+ 0\.42rem\)/, "mobile composer actions should open as an above-composer sheet");
 assert.match(css, /body\.composer-actions-open \.composer-actions-panel \{ display: grid; \}/, "composer actions panel should only open when toggled");
 assert.match(css, /\.terminal-tabs-toggle-button \{ display: none; \}/, "terminal tab toggle should be hidden outside mobile CSS");
+assert.match(css, /body\.terminal-tabs-left \.chat-panel \{[\s\S]*?grid-template-columns:\s*clamp\(13rem, 18vw, 19rem\) minmax\(0, 1fr\)/, "terminal tabs left layout should split the chat panel into a sidebar and transcript area");
+assert.match(css, /body\.terminal-tabs-left \.terminal-tabs-shell \{[\s\S]*?grid-column:\s*1;[\s\S]*?grid-row:\s*1 \/ -1;[\s\S]*?flex-direction:\s*column/, "terminal tabs left layout should turn the top tab strip into a vertical sidebar");
+assert.match(css, /body\.terminal-tabs-left \.terminal-tabs \{[\s\S]*?flex-direction:\s*column/, "terminal tabs left layout should stack tabs vertically");
+assert.match(css, /body\.terminal-tabs-left \.terminal-tab-group-menu \{[\s\S]*?inset:\s*0 auto auto 100%;[\s\S]*?padding-left:\s*var\(--terminal-left-dropdown-bridge\)/, "left-sidebar grouped tab menus should include a hover bridge so they do not vanish between button and dropdown");
+assert.match(css, /body\.terminal-tabs-left \.terminal-new-tab-menu \.composer-publish-menu-panel \{[\s\S]*?inset:\s*0 auto auto 100%;[\s\S]*?padding-left:\s*var\(--terminal-left-dropdown-bridge\)/, "left-sidebar new-tab dropdown should include a hover bridge so it does not vanish between button and dropdown");
 assert.match(css, /\.terminal-new-tab-menu \.composer-publish-menu-panel \{[\s\S]*?inset:\s*100% 0 auto auto;[\s\S]*?padding-top:\s*0\.38rem/, "new-tab dropdown should reuse the shared composer panel and open below the tab bar");
 assert.match(css, /\.terminal-new-tab-menu \.composer-publish-menu-item \{[\s\S]*?color:\s*var\(--ctp-pink\)/, "new-tab dropdown items should reuse shared composer menu items with a tab-specific color");
 assert.match(css, /\.terminal-close-all-button \{[\s\S]*?color:\s*var\(--ctp-red\)/, "close-all tabs action should render as a top-right destructive tab action");
@@ -334,6 +341,9 @@ assert.match(app, /const CUSTOM_BACKGROUNDS_STORAGE_KEY = "pi-webui-custom-backg
 assert.match(app, /const CUSTOM_BACKGROUND_IDB_NAME = "pi-webui-custom-background"/, "custom backgrounds should prefer IndexedDB persistence for large images");
 assert.match(app, /const SIDE_PANEL_SECTION_STORAGE_KEY = "pi-webui-side-panel-sections-collapsed"/, "side-panel section collapse state should be persisted in browser storage");
 assert.match(app, /const AGENT_DONE_NOTIFICATIONS_STORAGE_KEY = "pi-webui-agent-done-notifications"/, "agent-done notification preference should be persisted in browser storage");
+assert.match(app, /const TERMINAL_TABS_LAYOUT_STORAGE_KEY = "pi-webui-terminal-tabs-layout"/, "terminal-tabs layout preference should be persisted in browser storage");
+assert.match(app, /document\.body\.classList\.toggle\("terminal-tabs-left", next === "left"\)/, "terminal-tabs layout should toggle a body class for CSS layout");
+assert.match(app, /terminalTabsLayoutSelect\.addEventListener\("change"/, "terminal-tabs layout selector should update the browser layout immediately");
 assert.match(app, /async function initializeThemes\(\)/, "frontend should initialize bundled themes");
 assert.match(app, /api\("\/api\/themes", \{ scoped: false \}\)/, "theme loading should use the unscoped themes endpoint");
 assert.match(app, /function applyTheme\(theme/, "frontend should apply a selected theme to CSS variables");

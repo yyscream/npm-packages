@@ -83,6 +83,8 @@ const elements = {
   setThinkingButton: $("#setThinkingButton"),
   thinkingVisibilityToggle: $("#thinkingVisibilityToggle"),
   thinkingVisibilityStatus: $("#thinkingVisibilityStatus"),
+  terminalTabsLayoutSelect: $("#terminalTabsLayoutSelect"),
+  terminalTabsLayoutStatus: $("#terminalTabsLayoutStatus"),
   themeSelect: $("#themeSelect"),
   backgroundInput: $("#backgroundInput"),
   backgroundChooseButton: $("#backgroundChooseButton"),
@@ -251,6 +253,7 @@ let blockedTabNotificationPermissionRequested = false;
 let blockedTabNotificationFallbackNoted = false;
 let agentDoneNotificationsEnabled = false;
 let thinkingOutputVisible = true;
+let terminalTabsLayout = "top";
 let webuiSettings = {};
 let busyPromptBehavior = "followUp";
 let autocompleteMaxVisible = 12;
@@ -296,6 +299,7 @@ const TAB_STORAGE_KEY = "pi-webui-active-tab";
 const PATH_FAST_PICKS_STORAGE_KEY = "pi-webui-path-fast-picks";
 const AGENT_DONE_NOTIFICATIONS_STORAGE_KEY = "pi-webui-agent-done-notifications";
 const THINKING_VISIBILITY_STORAGE_KEY = "pi-webui-thinking-visible";
+const TERMINAL_TABS_LAYOUT_STORAGE_KEY = "pi-webui-terminal-tabs-layout";
 const TOOL_OUTPUT_EXPANDED_STORAGE_KEY = "pi-webui-tool-output-expanded";
 const THEME_STORAGE_KEY = "pi-webui-theme";
 const CUSTOM_BACKGROUND_STORAGE_KEY = "pi-webui-custom-background";
@@ -325,6 +329,8 @@ const LONG_INPUT_ATTACHMENT_MIME_TYPE = "text/plain";
 const INLINE_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const BACKGROUND_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const DEFAULT_THEME_NAME = "catppuccin-mocha";
+const TERMINAL_TABS_LAYOUTS = new Set(["top", "left"]);
+const TERMINAL_TABS_LAYOUT_LABELS = { top: "Top bar", left: "Left sidebar" };
 const MOBILE_VIEW_QUERY = "(max-width: 720px), (max-device-width: 720px), (pointer: coarse) and (hover: none)";
 const SIDE_PANEL_OVERLAY_QUERY = "(max-width: 1050px), (max-device-width: 720px), (pointer: coarse) and (hover: none)";
 const CHAT_BOTTOM_THRESHOLD_PX = 96;
@@ -789,6 +795,26 @@ function persistThinkingOutputVisible(visible) {
   }
 }
 
+function normalizeTerminalTabsLayout(value) {
+  return TERMINAL_TABS_LAYOUTS.has(value) ? value : "top";
+}
+
+function readStoredTerminalTabsLayout() {
+  try {
+    return normalizeTerminalTabsLayout(localStorage.getItem(TERMINAL_TABS_LAYOUT_STORAGE_KEY));
+  } catch {
+    return "top";
+  }
+}
+
+function persistTerminalTabsLayout(layout) {
+  try {
+    localStorage.setItem(TERMINAL_TABS_LAYOUT_STORAGE_KEY, normalizeTerminalTabsLayout(layout));
+  } catch {
+    // Ignore storage failures; the layout control should still work for this page load.
+  }
+}
+
 function readStoredToolOutputExpanded() {
   try {
     return localStorage.getItem(TOOL_OUTPUT_EXPANDED_STORAGE_KEY) === "1";
@@ -814,6 +840,30 @@ function renderThinkingVisibilityToggle() {
   elements.thinkingVisibilityToggle.checked = thinkingOutputVisible;
   elements.thinkingVisibilityToggle.setAttribute("aria-describedby", "thinkingVisibilityStatus");
   if (elements.thinkingVisibilityStatus) elements.thinkingVisibilityStatus.textContent = thinkingVisibilityStatusText();
+}
+
+function terminalTabsLayoutStatusText(layout = terminalTabsLayout) {
+  return TERMINAL_TABS_LAYOUT_LABELS[normalizeTerminalTabsLayout(layout)] || TERMINAL_TABS_LAYOUT_LABELS.top;
+}
+
+function renderTerminalTabsLayoutControl() {
+  const layout = normalizeTerminalTabsLayout(terminalTabsLayout);
+  if (elements.terminalTabsLayoutSelect) elements.terminalTabsLayoutSelect.value = layout;
+  if (elements.terminalTabsLayoutStatus) elements.terminalTabsLayoutStatus.textContent = terminalTabsLayoutStatusText(layout);
+}
+
+function setTerminalTabsLayout(layout, { persist = true, announce = false } = {}) {
+  const next = normalizeTerminalTabsLayout(layout);
+  terminalTabsLayout = next;
+  document.body.classList.toggle("terminal-tabs-left", next === "left");
+  if (next === "left" && mobileTabsExpanded) setMobileTabsExpanded(false);
+  if (persist) persistTerminalTabsLayout(next);
+  renderTerminalTabsLayoutControl();
+  if (announce) addEvent(`terminal tabs layout changed to ${terminalTabsLayoutStatusText(next).toLowerCase()}`);
+}
+
+function restoreTerminalTabsLayoutSetting() {
+  setTerminalTabsLayout(readStoredTerminalTabsLayout(), { persist: false });
 }
 
 function removeStreamingThinkingBubble() {
@@ -12831,6 +12881,11 @@ if (elements.thinkingVisibilityToggle) {
     setThinkingOutputVisible(elements.thinkingVisibilityToggle.checked, { announce: true });
   });
 }
+if (elements.terminalTabsLayoutSelect) {
+  elements.terminalTabsLayoutSelect.addEventListener("change", () => {
+    setTerminalTabsLayout(elements.terminalTabsLayoutSelect.value, { announce: true });
+  });
+}
 elements.toggleSidePanelButton.addEventListener("click", () => {
   setSidePanelCollapsed(true);
 });
@@ -13142,6 +13197,7 @@ initializeThemes().catch((error) => {
 initializeFastPicks().catch((error) => addEvent(`failed to initialize path fast picks: ${error.message}`, "error"));
 restoreAgentDoneNotificationsSetting();
 restoreThinkingVisibilitySetting();
+restoreTerminalTabsLayoutSetting();
 restoreToolOutputExpansionSetting();
 restoreSidePanelSectionState();
 bindSidePanelSectionToggles();

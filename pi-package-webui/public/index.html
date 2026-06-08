@@ -12,7 +12,7 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <link rel="stylesheet" href="/styles.css?v=35" />
+    <link rel="stylesheet" href="/styles.css?v=36" />
   </head>
   <body>
     <button id="sidePanelExpandButton" class="side-panel-expand-button" type="button" aria-controls="sidePanel" aria-expanded="false" aria-label="Expand side panel" title="Expand side panel">
@@ -294,6 +294,14 @@
                     </span>
                   </label>
                 </div>
+                <div class="control-field terminal-tabs-layout-control-field">
+                  <label for="terminalTabsLayoutSelect">Tabs layout</label>
+                  <select id="terminalTabsLayoutSelect" title="Terminal tabs layout" aria-describedby="terminalTabsLayoutStatus">
+                    <option value="top">Top bar</option>
+                    <option value="left">Left sidebar</option>
+                  </select>
+                  <div id="terminalTabsLayoutStatus" class="terminal-tabs-layout-status toggle-control-hint">Top bar</div>
+                </div>
                 <div class="control-field">
                   <label for="themeSelect">Theme</label>
                   <select id="themeSelect" title="Theme"></select>
@@ -541,6 +549,6 @@
       </form>
     </dialog>
 
-    <script type="module" src="/app.js?v=36"></script>
+    <script type="module" src="/app.js?v=37"></script>
   </body>
 </html>
