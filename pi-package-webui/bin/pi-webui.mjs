@@ -2754,6 +2754,8 @@ async function getWorkspaceInfo(cwd, startedAt) {
 }
 
 let activeGitWorkflowProcess = null;
+const GIT_CHANGES_COMMAND_TIMEOUT_MS = 5000;
+const GIT_CHANGES_DIFF_MAX_OUTPUT = 500_000;
 
 async function getGitRoot(cwd) {
   const result = await runCommand("git", ["rev-parse", "--show-toplevel"], { cwd, timeoutMs: 2000 });
@@ -2761,6 +2763,120 @@ async function getGitRoot(cwd) {
     throw new Error((result.stderr || result.stdout || "Not inside a git repository").trim());
   }
   return path.resolve(result.stdout.trim());
+}
+
+async function runGitReadCommand(root, args, { timeoutMs = GIT_CHANGES_COMMAND_TIMEOUT_MS, maxOutputLength = GIT_CHANGES_DIFF_MAX_OUTPUT } = {}) {
+  const result = await runCommand("git", args, { cwd: root, timeoutMs, maxOutputLength });
+  if (result.exitCode === 0 && !result.timedOut && !result.error) return result.stdout;
+  const command = formatGitCommand(args);
+  const message = result.timedOut
+    ? `${command} timed out`
+    : (result.stderr || result.stdout || result.error || `${command} failed with exit code ${result.exitCode ?? "unknown"}`);
+  throw new Error(String(message).trim());
+}
+
+function gitBranchFromStatus(statusText) {
+  const branchLine = String(statusText || "").split(/\r?\n/).find((line) => line.startsWith("## ")) || "";
+  return branchLine.slice(3).trim().replace(/\.\.\..*$/, "") || "detached";
+}
+
+function summarizeGitShortStatus(statusText) {
+  const summary = { staged: 0, unstaged: 0, untracked: 0, conflicted: 0 };
+  for (const line of String(statusText || "").split(/\r?\n/)) {
+    if (!line || line.startsWith("## ")) continue;
+    const x = line[0] || " ";
+    const y = line[1] || " ";
+    if (x === "?" && y === "?") {
+      summary.untracked += 1;
+      continue;
+    }
+    if (x === "U" || y === "U" || (x === "A" && y === "A") || (x === "D" && y === "D")) {
+      summary.conflicted += 1;
+      continue;
+    }
+    if (x && x !== " ") summary.staged += 1;
+    if (y && y !== " ") summary.unstaged += 1;
+  }
+  return summary;
+}
+
+function resolveGitRelativePath(root, relativePath) {
+  const normalized = String(relativePath || "").trim();
+  if (!normalized || normalized.includes("\0")) throw new Error("Invalid git path");
+  const resolved = path.resolve(root, normalized);
+  if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) throw new Error(`Git path escapes repository: ${normalized}`);
+  return resolved;
+}
+
+function isLikelyBinaryBuffer(buffer) {
+  return Buffer.isBuffer(buffer) && buffer.includes(0);
+}
+
+function normalizeGitRelativePath(root, relativePath) {
+  const resolved = resolveGitRelativePath(root, relativePath);
+  return path.relative(root, resolved).split(path.sep).join("/");
+}
+
+async function readGitUntrackedEntry(root, file) {
+  const normalized = normalizeGitRelativePath(root, file);
+  const filePath = resolveGitRelativePath(root, normalized);
+  const info = await stat(filePath);
+  if (!info.isFile()) return { path: normalized, size: info.size, binary: false, content: "", error: "Not a regular file" };
+  const buffer = await readFile(filePath);
+  const binary = isLikelyBinaryBuffer(buffer);
+  return {
+    path: normalized,
+    size: info.size,
+    binary,
+    content: binary ? "" : buffer.toString("utf8"),
+  };
+}
+
+async function readGitUntrackedEntries(root, files) {
+  const entries = [];
+  for (const file of files) {
+    try {
+      entries.push(await readGitUntrackedEntry(root, file));
+    } catch (error) {
+      entries.push({ path: file, size: 0, binary: false, content: "", error: sanitizeError(error) });
+    }
+  }
+  return entries;
+}
+
+async function readGitUntrackedFile(cwd, requestedPath) {
+  const root = await getGitRoot(cwd);
+  const normalized = normalizeGitRelativePath(root, requestedPath);
+  const listed = await runGitReadCommand(root, ["ls-files", "--others", "--exclude-standard", "--", normalized], { maxOutputLength: 120_000 });
+  const files = listed.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (!files.includes(normalized)) throw new Error(`Not an untracked file: ${normalized}`);
+  return readGitUntrackedEntry(root, normalized);
+}
+
+async function readGitChanges(cwd) {
+  const root = await getGitRoot(cwd);
+  const diffArgs = ["diff", "--no-ext-diff", "--no-color", "--find-renames", "--src-prefix=a/", "--dst-prefix=b/"];
+  const [statusText, unstagedDiff, stagedDiff, untrackedText] = await Promise.all([
+    runGitReadCommand(root, ["status", "--short", "--branch", "--untracked-files=all"], { maxOutputLength: 120_000 }),
+    runGitReadCommand(root, diffArgs),
+    runGitReadCommand(root, ["diff", "--cached", "--no-ext-diff", "--no-color", "--find-renames", "--src-prefix=a/", "--dst-prefix=b/"]),
+    runGitReadCommand(root, ["ls-files", "--others", "--exclude-standard"], { maxOutputLength: 120_000 }),
+  ]);
+  const untrackedFiles = untrackedText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const untracked = await readGitUntrackedEntries(root, untrackedFiles);
+  return {
+    cwd,
+    root,
+    branch: gitBranchFromStatus(statusText),
+    generatedAt: new Date().toISOString(),
+    summary: summarizeGitShortStatus(statusText),
+    status: statusText.trimEnd(),
+    sections: [
+      { key: "staged", label: "Staged", command: "git diff --cached", diff: stagedDiff.trimEnd() },
+      { key: "unstaged", label: "Unstaged", command: "git diff", diff: unstagedDiff.trimEnd() },
+    ],
+    untracked,
+  };
 }
 
 function commitMessagePaths(root) {
@@ -2827,6 +2943,68 @@ async function currentGitBranch(root) {
   const branch = result.stdout.trim();
   if (result.exitCode !== 0 || !branch) throw new Error((result.stderr || result.stdout || "Cannot determine current git branch").trim());
   return branch;
+}
+
+async function currentGitBranchForPicker(root) {
+  try {
+    return (await runGitReadCommand(root, ["branch", "--show-current"], { timeoutMs: 5000, maxOutputLength: 10_000 })).trim();
+  } catch {
+    return "";
+  }
+}
+
+function normalizeGitBranchList(branchText, current = "") {
+  const seen = new Set();
+  const branches = [];
+  for (const line of String(branchText || "").split(/\r?\n/)) {
+    const name = line.trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    branches.push({ name, current: !!current && name === current });
+  }
+  return branches.sort((left, right) => {
+    if (left.current !== right.current) return left.current ? -1 : 1;
+    return left.name.localeCompare(right.name);
+  });
+}
+
+async function readGitBranches(cwd) {
+  const root = await getGitRoot(cwd);
+  const [current, branchText] = await Promise.all([
+    currentGitBranchForPicker(root),
+    runGitReadCommand(root, ["branch", "--format=%(refname:short)"], { timeoutMs: 5000, maxOutputLength: 120_000 }),
+  ]);
+  return {
+    cwd,
+    root,
+    current,
+    generatedAt: new Date().toISOString(),
+    branches: normalizeGitBranchList(branchText, current),
+  };
+}
+
+async function switchGitBranch(cwd, branch, { create = false } = {}) {
+  const root = await getGitRoot(cwd);
+  const targetBranch = cleanGitBranchName(branch);
+  await validateGitBranchName(root, targetBranch);
+  const branches = await readGitBranches(cwd);
+  const branchExists = branches.branches.some((item) => item.name === targetBranch);
+  if (create && branchExists) throw new Error(`Local git branch already exists: ${targetBranch}`);
+  if (!create && !branchExists) throw new Error(`Unknown local git branch: ${targetBranch}`);
+  if (!create && branches.current === targetBranch) {
+    return { ok: true, data: { command: `git switch ${targetBranch}`, stdout: "", stderr: "", exitCode: 0, branch: targetBranch, root, switched: false, created: false } };
+  }
+  const args = create ? ["switch", "-c", targetBranch] : ["switch", targetBranch];
+  const payload = gitWorkflowCommandPayload(await runGitWorkflowCommand(args, { cwd: root, timeoutMs: 10 * 60 * 1000 }));
+  if (payload.ok) {
+    payload.data.branch = targetBranch;
+    payload.data.root = root;
+    payload.data.switched = true;
+    payload.data.created = create;
+  } else {
+    payload.error = (payload.data?.stderr || payload.data?.stdout || payload.error || `Failed to ${create ? "create and switch to" : "switch to"} ${targetBranch}`).trim();
+  }
+  return payload;
 }
 
 async function defaultGitRemote(root) {
@@ -6094,6 +6272,47 @@ const server = createServer(async (req, res) => {
       const response = await tab.rpc.send(command);
       if (response.success === false && startsVisibleWork) markTabIdle(tab);
       sendJson(res, response.success === false ? 400 : 200, responseWithTab(response, tab));
+      return;
+    }
+
+    if (url.pathname === "/api/git-changes" && req.method === "GET") {
+      const tab = getRequestedTab(req, url);
+      try {
+        sendJson(res, 200, { ok: true, data: await readGitChanges(tab.cwd) });
+      } catch (error) {
+        sendJson(res, 200, { ok: false, error: sanitizeError(error) });
+      }
+      return;
+    }
+
+    if (url.pathname === "/api/git-changes/untracked-file" && req.method === "GET") {
+      const tab = getRequestedTab(req, url);
+      try {
+        sendJson(res, 200, { ok: true, data: await readGitUntrackedFile(tab.cwd, url.searchParams.get("path") || "") });
+      } catch (error) {
+        sendJson(res, 200, { ok: false, error: sanitizeError(error) });
+      }
+      return;
+    }
+
+    if (url.pathname === "/api/git-branches" && req.method === "GET") {
+      const tab = getRequestedTab(req, url);
+      try {
+        sendJson(res, 200, { ok: true, data: await readGitBranches(tab.cwd) });
+      } catch (error) {
+        sendJson(res, 200, { ok: false, error: sanitizeError(error) });
+      }
+      return;
+    }
+
+    if (url.pathname === "/api/git-branch" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const tab = getRequestedTab(req, url, body);
+      try {
+        sendJson(res, 200, await switchGitBranch(tab.cwd, body.branch, { create: body.create === true }));
+      } catch (error) {
+        sendJson(res, 200, { ok: false, error: sanitizeError(error) });
+      }
       return;
     }
 

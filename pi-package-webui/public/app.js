@@ -93,6 +93,13 @@ const elements = {
   gitPrStatus: $("#gitPrStatus"),
   gitPrCancelButton: $("#gitPrCancelButton"),
   gitPrCreateButton: $("#gitPrCreateButton"),
+  gitChangesDialog: $("#gitChangesDialog"),
+  gitChangesTitle: $("#gitChangesTitle"),
+  gitChangesSubtitle: $("#gitChangesSubtitle"),
+  gitChangesStatus: $("#gitChangesStatus"),
+  gitChangesBody: $("#gitChangesBody"),
+  gitChangesRefreshButton: $("#gitChangesRefreshButton"),
+  gitChangesCloseButton: $("#gitChangesCloseButton"),
   modelSelect: $("#modelSelect"),
   setModelButton: $("#setModelButton"),
   thinkingSelect: $("#thinkingSelect"),
@@ -219,6 +226,9 @@ let foregroundReconcileTimer = null;
 let eventSource = null;
 let activeDialog = null;
 let activeGitPrDialogResolve = null;
+let gitChangesState = { loading: false, error: "", data: null, tabId: null };
+let gitChangesRequestSerial = 0;
+const gitChangesUntrackedContentRequests = new Set();
 let nativeCommandTabId = null;
 let pathPickerState = null;
 let firstTerminalCwdPromptShown = false;
@@ -305,6 +315,9 @@ let chatUserScrollIntentUntil = 0;
 let mobileFooterExpanded = false;
 let footerModelPickerOpen = false;
 let footerThinkingPickerOpen = false;
+let footerBranchPickerOpen = false;
+let footerBranchPickerState = { loading: false, error: "", branches: [], current: "", root: "", switching: "", tabId: null };
+let footerBranchPickerRequestSerial = 0;
 let publishMenuOpen = false;
 let maxVisualViewportHeight = 0;
 let abortRequestInFlight = false;
@@ -341,6 +354,7 @@ const GIT_FOOTER_WEBUI_STATUS_KEY = "git-footer-webui";
 const GIT_FOOTER_WEBUI_PAYLOAD_TYPE = "firstpick.git-footer-status.footer";
 const GIT_FOOTER_WEBUI_PAYLOAD_VERSION = 1;
 const GIT_FOOTER_WEBUI_PAYLOAD_CACHE_KEY = "pi-webui-git-footer-webui-payload-cache";
+const GIT_CHANGES_RENDER_ROW_LIMIT = 4000;
 const LAST_USER_PROMPT_STORAGE_KEY = "pi-webui-last-user-prompts";
 const PROMPT_HISTORY_STORAGE_KEY = "pi-webui-prompt-history";
 const PROMPT_LIST_STORAGE_KEY = "pi-webui-prompt-lists";
@@ -1480,10 +1494,11 @@ function updateComposerModeButtons() {
 }
 
 function isFooterPickerOpen() {
-  return footerModelPickerOpen || footerThinkingPickerOpen;
+  return footerModelPickerOpen || footerThinkingPickerOpen || footerBranchPickerOpen;
 }
 
 function footerActivePickerTarget() {
+  if (footerBranchPickerOpen) return elements.statusBar.querySelector(".footer-branch.footer-meta-action");
   if (footerThinkingPickerOpen) return elements.statusBar.querySelector(".footer-thinking.footer-meta-action");
   if (footerModelPickerOpen) return elements.statusBar.querySelector(".footer-model.footer-meta-action, .footer-tui-model");
   return null;
@@ -1534,6 +1549,7 @@ function setMobileFooterExpanded(expanded) {
   if (mobileFooterExpanded && isFooterPickerOpen()) {
     footerModelPickerOpen = false;
     footerThinkingPickerOpen = false;
+    footerBranchPickerOpen = false;
     document.body.classList.remove("footer-model-picker-open");
     elements.statusBar.querySelectorAll(".footer-model-picker").forEach((node) => node.remove());
   }
@@ -1637,6 +1653,7 @@ function updateVisualViewportVars() {
     setMobileTabsExpanded(false);
     setMobileFooterExpanded(false);
     setFooterModelPickerOpen(false);
+    setFooterBranchPickerOpen(false);
     syncMobileChatToBottomForInput();
   }
   updateFooterModelPickerPosition();
@@ -3576,7 +3593,7 @@ function restoreActiveDraft() {
 
 function focusPromptInput({ defer = false } = {}) {
   const focus = () => {
-    if (!elements.promptInput || elements.dialog.open || elements.pathPickerDialog.open || elements.nativeCommandDialog.open || elements.appRunnerInfoDialog?.open || elements.promptListDialog?.open || elements.attachmentTextDialog?.open || elements.skillEditorDialog?.open || document.visibilityState === "hidden") return;
+    if (!elements.promptInput || elements.dialog.open || elements.pathPickerDialog.open || elements.gitChangesDialog?.open || elements.nativeCommandDialog.open || elements.appRunnerInfoDialog?.open || elements.promptListDialog?.open || elements.attachmentTextDialog?.open || elements.skillEditorDialog?.open || document.visibilityState === "hidden") return;
     try {
       elements.promptInput.focus({ preventScroll: true });
     } catch {
@@ -3942,6 +3959,8 @@ async function switchTab(tabId) {
   setMobileTabsExpanded(false);
   footerModelPickerOpen = false;
   footerThinkingPickerOpen = false;
+  footerBranchPickerOpen = false;
+  footerBranchPickerRequestSerial += 1;
   saveActiveDraft();
   const tabContext = setActiveTabId(tabId, { remember: true });
   resetActiveTabUi();
@@ -5048,6 +5067,12 @@ function renderGitFooterPayloadMeta(chip, tab) {
   if (chip.key === "cwd" && tab) {
     options.onClick = changeActiveTabCwd;
     action = `Click to change the working directory for ${tab.title}.`;
+  } else if (chip.key === "git" && chip.value !== "no repo") {
+    options.onClick = () => setFooterBranchPickerOpen(!footerBranchPickerOpen);
+    action = "Click to switch to another local branch.";
+  } else if (chip.key === "changes") {
+    options.onClick = openGitChangesDialog;
+    action = "Click to view the current git diff.";
   } else if (chip.key === "model") {
     options.onClick = () => setFooterModelPickerOpen(!footerModelPickerOpen);
     action = "Click to choose another model.";
@@ -5058,6 +5083,10 @@ function renderGitFooterPayloadMeta(chip, tab) {
   options.title = gitFooterPayloadTooltip(chip, { action });
   options.tooltipAlign = gitFooterTooltipAlign(chip);
   const node = footerMeta(chip.label, chip.value, footerMetaClassForPayload(chip), options);
+  if (chip.key === "git" && options.onClick) {
+    node.setAttribute("aria-haspopup", "listbox");
+    node.setAttribute("aria-expanded", footerBranchPickerOpen ? "true" : "false");
+  }
   return chip.contextUsage ? applyFooterContextUsage(node, chip.contextUsage) : node;
 }
 
@@ -5083,8 +5112,448 @@ function renderGitFooterPayload(payload) {
   elements.statusBar.append(row1, row2);
   if (footerModelPickerOpen) elements.statusBar.append(renderFooterModelPicker());
   if (footerThinkingPickerOpen) elements.statusBar.append(renderFooterThinkingPicker());
+  if (footerBranchPickerOpen) elements.statusBar.append(renderFooterBranchPicker());
   setMobileFooterExpanded(mobileFooterExpanded);
   updateFooterModelPickerPosition();
+}
+
+function cleanGitDiffPath(value = "") {
+  let text = String(value || "").trim();
+  if (!text || text === "/dev/null") return "";
+  if ((text.startsWith("a/") || text.startsWith("b/")) && text.length > 2) text = text.slice(2);
+  return text;
+}
+
+function gitDiffPathFromHeader(line) {
+  const match = String(line || "").match(/^diff --git\s+(.+?)\s+(.+)$/);
+  return cleanGitDiffPath(match?.[2] || match?.[1] || "");
+}
+
+function parseGitUnifiedDiff(diffText = "") {
+  const normalized = String(diffText || "").replace(/\r\n?/g, "\n");
+  const lines = normalized.split("\n");
+  const files = [];
+  let file = null;
+  let hunk = null;
+  let oldLineNumber = 0;
+  let newLineNumber = 0;
+  let deleteBuffer = [];
+  let addBuffer = [];
+
+  const flushChangeRows = () => {
+    if (!hunk || (!deleteBuffer.length && !addBuffer.length)) return;
+    if (file) {
+      file.deletions += deleteBuffer.length;
+      file.additions += addBuffer.length;
+    }
+    const rowCount = Math.max(deleteBuffer.length, addBuffer.length);
+    for (let i = 0; i < rowCount; i++) {
+      const left = deleteBuffer[i] || null;
+      const right = addBuffer[i] || null;
+      hunk.rows.push({
+        type: left && right ? "changed" : left ? "removed" : "added",
+        oldNumber: left?.number ?? "",
+        newNumber: right?.number ?? "",
+        left: left?.text ?? "",
+        right: right?.text ?? "",
+      });
+    }
+    deleteBuffer = [];
+    addBuffer = [];
+  };
+
+  const finishFile = () => {
+    flushChangeRows();
+    if (!file) return;
+    file.path = file.newPath || file.oldPath || file.headerPath || "diff";
+    files.push(file);
+    file = null;
+    hunk = null;
+  };
+
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index] || "";
+    if (index === lines.length - 1 && !line && normalized.endsWith("\n")) continue;
+
+    if (line.startsWith("diff --git ")) {
+      finishFile();
+      file = { path: "", oldPath: "", newPath: "", headerPath: gitDiffPathFromHeader(line), headers: [line], hunks: [], additions: 0, deletions: 0 };
+      continue;
+    }
+
+    if (!file) {
+      if (!line.trim()) continue;
+      file = { path: "diff", oldPath: "", newPath: "", headerPath: "diff", headers: [], hunks: [], additions: 0, deletions: 0 };
+    }
+
+    if (line.startsWith("@@ ")) {
+      flushChangeRows();
+      const match = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+      oldLineNumber = Number.parseInt(match?.[1] || "0", 10) || 0;
+      newLineNumber = Number.parseInt(match?.[2] || "0", 10) || 0;
+      hunk = { header: line, rows: [] };
+      file.hunks.push(hunk);
+      continue;
+    }
+
+    if (!hunk) {
+      file.headers.push(line);
+      if (line.startsWith("--- ")) file.oldPath = cleanGitDiffPath(line.slice(4));
+      if (line.startsWith("+++ ")) file.newPath = cleanGitDiffPath(line.slice(4));
+      continue;
+    }
+
+    if (line.startsWith("-")) {
+      deleteBuffer.push({ number: oldLineNumber, text: line.slice(1) });
+      oldLineNumber += 1;
+      continue;
+    }
+    if (line.startsWith("+")) {
+      addBuffer.push({ number: newLineNumber, text: line.slice(1) });
+      newLineNumber += 1;
+      continue;
+    }
+
+    flushChangeRows();
+    if (line.startsWith(" ")) {
+      const text = line.slice(1);
+      hunk.rows.push({ type: "context", oldNumber: oldLineNumber, newNumber: newLineNumber, left: text, right: text });
+      oldLineNumber += 1;
+      newLineNumber += 1;
+    } else if (line.startsWith("\\")) {
+      hunk.rows.push({ type: "meta", oldNumber: "", newNumber: "", left: line, right: line });
+    } else {
+      hunk.rows.push({ type: "meta", oldNumber: "", newNumber: "", left: line, right: line });
+    }
+  }
+
+  finishFile();
+  return files;
+}
+
+function gitChangesChip(label, value, className = "") {
+  const chip = make("div", `git-changes-chip ${className}`.trim());
+  chip.append(make("span", "git-changes-chip-label", label), make("span", "git-changes-chip-value", String(value ?? "—")));
+  return chip;
+}
+
+function renderGitChangesOverview(data) {
+  const summary = data?.summary || {};
+  const untrackedCount = Array.isArray(data?.untracked) ? data.untracked.length : Number(summary.untracked || 0);
+  const overview = make("div", "git-changes-overview");
+  overview.append(
+    gitChangesChip("repo", data?.root || "—", "wide"),
+    gitChangesChip("branch", data?.branch || "detached"),
+    gitChangesChip("staged", summary.staged || 0, "success"),
+    gitChangesChip("modified", summary.unstaged || 0, "warning"),
+    gitChangesChip("untracked", untrackedCount, "muted"),
+    gitChangesChip("conflicts", summary.conflicted || 0, (summary.conflicted || 0) > 0 ? "danger" : "muted"),
+  );
+  return overview;
+}
+
+function renderGitDiffRow(row) {
+  const node = make("div", `git-diff-row ${row.type || "context"}`.trim());
+  node.append(
+    make("span", "git-diff-line-number old", row.oldNumber === "" ? "" : String(row.oldNumber)),
+    make("code", "git-diff-line old", row.left ?? ""),
+    make("span", "git-diff-line-number new", row.newNumber === "" ? "" : String(row.newNumber)),
+    make("code", "git-diff-line new", row.right ?? ""),
+  );
+  return node;
+}
+
+function renderGitDiffGrid(file) {
+  const grid = make("div", "git-diff-grid");
+  const rowLimit = file.renderRowLimit ?? GIT_CHANGES_RENDER_ROW_LIMIT;
+  let renderedRows = 0;
+  let truncated = false;
+  for (const hunk of file.hunks || []) {
+    if (renderedRows >= rowLimit) {
+      truncated = true;
+      break;
+    }
+    grid.append(renderGitDiffRow({ type: "hunk", oldNumber: "", newNumber: "", left: hunk.header, right: hunk.header }));
+    renderedRows += 1;
+    for (const row of hunk.rows || []) {
+      if (renderedRows >= rowLimit) {
+        truncated = true;
+        break;
+      }
+      grid.append(renderGitDiffRow(row));
+      renderedRows += 1;
+    }
+    if (truncated) break;
+  }
+  if (truncated) {
+    grid.append(renderGitDiffRow({ type: "meta", oldNumber: "", newNumber: "", left: `Diff preview truncated after ${rowLimit} rows.`, right: "Use git diff in the terminal for the full output." }));
+  }
+  return grid;
+}
+
+function renderGitDiffFile(file) {
+  const details = make("details", `git-diff-file ${file.className || ""}`.trim());
+  details.open = true;
+  details.dataset.gitDiffFile = file.path || "diff";
+  const summary = make("summary", "git-diff-file-summary");
+  summary.append(
+    make("span", "git-diff-file-name", file.path || "diff"),
+    make("span", "git-diff-file-stats", file.statsText || `+${file.additions || 0} −${file.deletions || 0}`),
+  );
+  details.append(summary);
+  if (file.hunks?.length) {
+    details.append(renderGitDiffGrid(file));
+  } else {
+    details.append(make("pre", "git-diff-raw", (file.headers || []).join("\n") || "No textual diff for this file."));
+  }
+  return details;
+}
+
+function renderGitDiffSection(section, files) {
+  const key = String(section?.key || "diff").replace(/[^a-z0-9_-]/gi, "-");
+  const wrapper = make("section", `git-diff-section git-diff-section-${key}`);
+  const header = make("div", "git-diff-section-heading");
+  header.append(
+    make("div", "git-diff-section-title", section?.label || "Git diff"),
+    make("div", "git-diff-section-meta", `${files.length} file${files.length === 1 ? "" : "s"} · ${section?.command || "git diff"}`),
+  );
+  wrapper.append(header, ...files.map(renderGitDiffFile));
+  return wrapper;
+}
+
+function normalizeGitUntrackedEntry(value) {
+  if (typeof value === "string") return { path: value, size: 0, binary: false, content: "", contentMissing: true };
+  if (!value || typeof value !== "object") return null;
+  const path = String(value.path || "").trim();
+  if (!path) return null;
+  const hasContent = Object.prototype.hasOwnProperty.call(value, "content");
+  const binary = value.binary === true;
+  const error = value.error ? String(value.error) : "";
+  return {
+    path,
+    size: Number(value.size || 0) || 0,
+    binary,
+    content: hasContent && typeof value.content === "string" ? value.content : "",
+    contentMissing: !hasContent && !binary && !error,
+    error,
+  };
+}
+
+function gitUntrackedEntries(untracked) {
+  return Array.isArray(untracked) ? untracked.map(normalizeGitUntrackedEntry).filter(Boolean) : [];
+}
+
+function gitUntrackedContentLines(content = "") {
+  const normalized = String(content || "").replace(/\r\n?/g, "\n");
+  if (!normalized) return [];
+  const withoutFinalNewline = normalized.endsWith("\n") ? normalized.slice(0, -1) : normalized;
+  return withoutFinalNewline ? withoutFinalNewline.split("\n") : [""];
+}
+
+function gitUntrackedEntryToDiffFile(entry) {
+  const lines = gitUntrackedContentLines(entry.content);
+  return {
+    path: entry.path,
+    className: "git-untracked-full-file",
+    additions: lines.length,
+    deletions: 0,
+    statsText: `${entry.binary ? "binary" : `+${lines.length}`} · ${formatBytes(entry.size)}`,
+    renderRowLimit: Number.POSITIVE_INFINITY,
+    headers: lines.length ? [] : ["Empty untracked file."],
+    hunks: lines.length ? [{
+      header: `@@ -0,0 +1,${lines.length} @@`,
+      rows: lines.map((line, index) => ({ type: "added", oldNumber: "", newNumber: index + 1, left: "", right: line })),
+    }] : [],
+  };
+}
+
+function renderGitUntrackedRawFile(entry) {
+  const details = make("details", "git-diff-file git-untracked-full-file");
+  details.open = true;
+  details.dataset.gitDiffFile = entry.path;
+  const summary = make("summary", "git-diff-file-summary");
+  summary.append(
+    make("span", "git-diff-file-name", entry.path),
+    make("span", "git-diff-file-stats", entry.error ? "unreadable" : `binary · ${formatBytes(entry.size)}`),
+  );
+  details.append(summary, make("pre", "git-diff-raw", entry.error || "Binary untracked file; text preview unavailable."));
+  return details;
+}
+
+function renderGitUntrackedLoadingFile(entry) {
+  const details = make("details", "git-diff-file git-untracked-full-file git-untracked-loading-file");
+  details.open = true;
+  details.dataset.gitDiffFile = entry.path;
+  const summary = make("summary", "git-diff-file-summary");
+  summary.append(make("span", "git-diff-file-name", entry.path), make("span", "git-diff-file-stats", "loading content"));
+  details.append(summary, make("pre", "git-diff-raw", "Loading complete untracked file content…"));
+  return details;
+}
+
+function renderGitUntrackedFile(entry) {
+  if (entry.contentMissing) return renderGitUntrackedLoadingFile(entry);
+  if (entry.error || entry.binary) return renderGitUntrackedRawFile(entry);
+  return renderGitDiffFile(gitUntrackedEntryToDiffFile(entry));
+}
+
+function replaceGitUntrackedEntry(entry, tabId = gitChangesState.tabId) {
+  const data = gitChangesState.data;
+  if (!data || tabId !== gitChangesState.tabId) return;
+  const entries = gitUntrackedEntries(data.untracked);
+  const nextEntries = entries.map((item) => item.path === entry.path ? normalizeGitUntrackedEntry(entry) : item);
+  gitChangesState = { ...gitChangesState, data: { ...data, untracked: nextEntries } };
+  renderGitChangesDialog();
+}
+
+async function loadMissingGitUntrackedContent(entry, tabId = gitChangesState.tabId) {
+  const key = `${tabId || ""}\u0000${entry.path}`;
+  if (!entry.contentMissing || gitChangesUntrackedContentRequests.has(key)) return;
+  gitChangesUntrackedContentRequests.add(key);
+  try {
+    const response = await api(`/api/git-changes/untracked-file?path=${encodeURIComponent(entry.path)}`, { tabId });
+    if (!response.ok) throw new Error(response.error || "Failed to load untracked file content");
+    replaceGitUntrackedEntry(response.data, tabId);
+  } catch (error) {
+    replaceGitUntrackedEntry({ ...entry, contentMissing: false, error: error.message || String(error) }, tabId);
+  } finally {
+    gitChangesUntrackedContentRequests.delete(key);
+  }
+}
+
+function renderGitUntrackedSection(untracked) {
+  const entries = gitUntrackedEntries(untracked);
+  const wrapper = make("section", "git-diff-section git-diff-section-untracked");
+  const header = make("div", "git-diff-section-heading");
+  header.append(
+    make("div", "git-diff-section-title", "Untracked"),
+    make("div", "git-diff-section-meta", `${entries.length} file${entries.length === 1 ? "" : "s"} · complete file contents`),
+  );
+  wrapper.append(header, ...entries.map(renderGitUntrackedFile));
+  for (const entry of entries) {
+    if (entry.contentMissing) queueMicrotask(() => loadMissingGitUntrackedContent(entry));
+  }
+  return wrapper;
+}
+
+function renderGitCurrentFileHeader() {
+  const header = make("div", "git-current-file-header");
+  header.append(make("span", "git-current-file-label", "Current file"), make("span", "git-current-file-name", "—"));
+  return header;
+}
+
+function updateGitChangesCurrentFileHeader() {
+  const body = elements.gitChangesBody;
+  const header = body?.querySelector(".git-current-file-header");
+  const name = header?.querySelector(".git-current-file-name");
+  if (!body || !header || !name) return;
+  const files = Array.from(body.querySelectorAll(".git-diff-file[data-git-diff-file]"));
+  if (!files.length) {
+    name.textContent = "—";
+    return;
+  }
+  const bodyRect = body.getBoundingClientRect();
+  const headerRect = header.getBoundingClientRect();
+  const markerY = Math.min(bodyRect.bottom - 1, Math.max(bodyRect.top, headerRect.bottom + 8));
+  let current = files[0];
+  for (const file of files) {
+    const rect = file.getBoundingClientRect();
+    if (rect.top <= markerY && rect.bottom > markerY) {
+      current = file;
+      break;
+    }
+    if (rect.top <= markerY) current = file;
+    else break;
+  }
+  name.textContent = current?.dataset.gitDiffFile || "—";
+}
+
+function gitChangesGeneratedLabel(data) {
+  const timestamp = Date.parse(data?.generatedAt || "");
+  if (!Number.isFinite(timestamp)) return "";
+  return `Updated ${new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
+}
+
+function renderGitChangesDialog() {
+  if (!elements.gitChangesDialog || !elements.gitChangesBody) return;
+  const { loading, error, data } = gitChangesState;
+  if (elements.gitChangesTitle) elements.gitChangesTitle.textContent = "Uncommitted Changes";
+  if (elements.gitChangesSubtitle) elements.gitChangesSubtitle.textContent = data?.root ? `${data.branch || "detached"} · ${data.root}` : "Current tab git diff";
+  if (elements.gitChangesRefreshButton) {
+    elements.gitChangesRefreshButton.disabled = loading;
+    elements.gitChangesRefreshButton.textContent = loading ? "Refreshing…" : "Refresh";
+  }
+  if (elements.gitChangesStatus) {
+    elements.gitChangesStatus.className = `git-changes-status ${error ? "error" : "muted"}`;
+    elements.gitChangesStatus.textContent = error || (loading ? "Loading git diff…" : data ? gitChangesGeneratedLabel(data) : "");
+    elements.gitChangesStatus.hidden = !elements.gitChangesStatus.textContent;
+  }
+
+  const body = elements.gitChangesBody;
+  body.replaceChildren();
+  if (loading && !data) {
+    body.append(make("div", "git-changes-empty", "Loading git diff…"));
+    return;
+  }
+  if (error) {
+    body.append(make("div", "git-changes-empty error", error));
+    return;
+  }
+  if (!data) {
+    body.append(make("div", "git-changes-empty", "Open from the footer CHANGES chip to load the current git diff."));
+    return;
+  }
+
+  body.append(renderGitChangesOverview(data));
+  const parsedSections = (Array.isArray(data.sections) ? data.sections : [])
+    .map((section) => ({ section, files: parseGitUnifiedDiff(section.diff || "") }))
+    .filter((entry) => entry.files.length > 0);
+  const untracked = gitUntrackedEntries(data.untracked);
+  const hasVisibleFiles = parsedSections.length > 0 || untracked.length > 0;
+  if (hasVisibleFiles) body.append(renderGitCurrentFileHeader());
+  for (const entry of parsedSections) body.append(renderGitDiffSection(entry.section, entry.files));
+  if (untracked.length) body.append(renderGitUntrackedSection(untracked));
+  if (!hasVisibleFiles) body.append(make("div", "git-changes-empty success", "Working tree is clean. No staged or unstaged diff."));
+  if (hasVisibleFiles) requestAnimationFrame(updateGitChangesCurrentFileHeader);
+}
+
+async function loadGitChangesDialog(tabContext = activeTabContext()) {
+  const requestSerial = ++gitChangesRequestSerial;
+  gitChangesUntrackedContentRequests.clear();
+  gitChangesState = { ...gitChangesState, loading: true, error: "", tabId: tabContext.tabId || activeTabId };
+  renderGitChangesDialog();
+  try {
+    const response = await api("/api/git-changes", { tabId: tabContext.tabId });
+    if (requestSerial !== gitChangesRequestSerial) return;
+    if (!response.ok) throw new Error(response.error || "Failed to load git changes");
+    gitChangesState = { loading: false, error: "", data: response.data || null, tabId: tabContext.tabId || activeTabId };
+  } catch (error) {
+    if (requestSerial !== gitChangesRequestSerial) return;
+    gitChangesState = { ...gitChangesState, loading: false, error: error.message || String(error) };
+  }
+  renderGitChangesDialog();
+}
+
+function openGitChangesDialog() {
+  if (!elements.gitChangesDialog) return;
+  hideFooterTooltip();
+  const tabContext = activeTabContext();
+  const tabId = tabContext.tabId || activeTabId;
+  gitChangesState = { loading: true, error: "", data: gitChangesState.tabId === tabId ? gitChangesState.data : null, tabId };
+  renderGitChangesDialog();
+  if (!elements.gitChangesDialog.open) elements.gitChangesDialog.showModal();
+  loadGitChangesDialog(tabContext).catch((error) => addEvent(error.message || String(error), "error"));
+}
+
+function refreshGitChangesDialog() {
+  const tabContext = { tabId: gitChangesState.tabId || activeTabId };
+  loadGitChangesDialog(tabContext).catch((error) => addEvent(error.message || String(error), "error"));
+}
+
+function closeGitChangesDialog() {
+  gitChangesRequestSerial += 1;
+  gitChangesUntrackedContentRequests.clear();
+  gitChangesState = { ...gitChangesState, loading: false };
+  if (elements.gitChangesDialog?.open) elements.gitChangesDialog.close();
 }
 
 function gitFooterFallbackMessage() {
@@ -5118,13 +5587,18 @@ function renderMinimalFooter() {
   }));
   if (footerModelPickerOpen) elements.statusBar.append(renderFooterModelPicker());
   if (footerThinkingPickerOpen) elements.statusBar.append(renderFooterThinkingPicker());
+  if (footerBranchPickerOpen) elements.statusBar.append(renderFooterBranchPicker());
   setMobileFooterExpanded(false);
   updateFooterModelPickerPosition();
 }
 
 function setFooterModelPickerOpen(open) {
   footerModelPickerOpen = !!open;
-  if (footerModelPickerOpen) footerThinkingPickerOpen = false;
+  if (footerModelPickerOpen) {
+    footerThinkingPickerOpen = false;
+    footerBranchPickerOpen = false;
+    footerBranchPickerRequestSerial += 1;
+  }
   if (footerModelPickerOpen && isMobileView()) {
     mobileFooterExpanded = false;
     document.body.classList.remove("footer-details-expanded");
@@ -5138,7 +5612,11 @@ function setFooterModelPickerOpen(open) {
 
 function setFooterThinkingPickerOpen(open) {
   footerThinkingPickerOpen = !!open;
-  if (footerThinkingPickerOpen) footerModelPickerOpen = false;
+  if (footerThinkingPickerOpen) {
+    footerModelPickerOpen = false;
+    footerBranchPickerOpen = false;
+    footerBranchPickerRequestSerial += 1;
+  }
   if (footerThinkingPickerOpen && isMobileView()) {
     mobileFooterExpanded = false;
     document.body.classList.remove("footer-details-expanded");
@@ -5148,6 +5626,239 @@ function setFooterThinkingPickerOpen(open) {
   document.body.classList.toggle("footer-model-picker-open", isFooterPickerOpen());
   renderFooter();
   updateFooterModelPickerPosition();
+}
+
+function normalizeFooterGitBranches(data = {}) {
+  const current = cleanStatusText(data.current || "");
+  const seen = new Set();
+  const branches = [];
+  for (const item of Array.isArray(data.branches) ? data.branches : []) {
+    const name = cleanStatusText(typeof item === "string" ? item : item?.name);
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    branches.push({ name, current: Boolean(item?.current) || (!!current && name === current) });
+  }
+  return {
+    root: cleanFooterPayloadText(data.root, "", 4000),
+    current,
+    branches,
+  };
+}
+
+function applyOptimisticGitFooterBranch(branch, tabContext = activeTabContext()) {
+  const nextBranch = cleanStatusText(branch);
+  if (!nextBranch) return;
+  const raw = statusEntries.get(GIT_FOOTER_WEBUI_STATUS_KEY) || readCachedGitFooterWebuiPayloadRaw();
+  const payload = parseGitFooterWebuiPayloadRaw(raw);
+  if (!payload) return;
+  const nextPayload = {
+    type: GIT_FOOTER_WEBUI_PAYLOAD_TYPE,
+    version: GIT_FOOTER_WEBUI_PAYLOAD_VERSION,
+    generatedAt: Date.now(),
+    main: payload.main,
+    meta: payload.meta.map((chip) => chip.key === "git" ? { ...chip, value: nextBranch, title: `git branch: ${nextBranch}` } : chip),
+  };
+  const nextRaw = JSON.stringify(nextPayload);
+  statusEntries.set(GIT_FOOTER_WEBUI_STATUS_KEY, nextRaw);
+  cacheGitFooterWebuiPayload(nextRaw, tabContext.tabId);
+}
+
+async function loadFooterBranchPicker(tabContext = activeTabContext()) {
+  const requestSerial = ++footerBranchPickerRequestSerial;
+  const tabId = tabContext.tabId || activeTabId;
+  footerBranchPickerState = {
+    loading: true,
+    error: "",
+    branches: footerBranchPickerState.tabId === tabId ? footerBranchPickerState.branches : [],
+    current: footerBranchPickerState.tabId === tabId ? footerBranchPickerState.current : "",
+    root: footerBranchPickerState.tabId === tabId ? footerBranchPickerState.root : "",
+    switching: "",
+    tabId,
+  };
+  if (isCurrentTabContext(tabContext)) {
+    renderFooter();
+    updateFooterModelPickerPosition();
+  }
+  try {
+    const response = await api("/api/git-branches", { tabId });
+    if (requestSerial !== footerBranchPickerRequestSerial || !footerBranchPickerOpen || !isCurrentTabContext(tabContext)) return;
+    if (!response.ok) throw new Error(response.error || "Failed to load git branches");
+    footerBranchPickerState = { loading: false, error: "", switching: "", tabId, ...normalizeFooterGitBranches(response.data || {}) };
+  } catch (error) {
+    if (requestSerial !== footerBranchPickerRequestSerial || !footerBranchPickerOpen || !isCurrentTabContext(tabContext)) return;
+    footerBranchPickerState = { ...footerBranchPickerState, loading: false, switching: "", error: error.message || String(error) };
+  }
+  if (isCurrentTabContext(tabContext)) {
+    renderFooter();
+    updateFooterModelPickerPosition();
+  }
+}
+
+function setFooterBranchPickerOpen(open) {
+  footerBranchPickerOpen = !!open;
+  if (footerBranchPickerOpen) {
+    footerModelPickerOpen = false;
+    footerThinkingPickerOpen = false;
+    if (isMobileView()) {
+      mobileFooterExpanded = false;
+      document.body.classList.remove("footer-details-expanded");
+      setComposerActionsOpen(false);
+      setMobileTabsExpanded(false);
+    }
+    loadFooterBranchPicker(activeTabContext()).catch((error) => addEvent(error.message || String(error), "error"));
+  } else {
+    footerBranchPickerRequestSerial += 1;
+  }
+  document.body.classList.toggle("footer-model-picker-open", isFooterPickerOpen());
+  renderFooter();
+  updateFooterModelPickerPosition();
+}
+
+function pathLooksInside(parentPath, childPath) {
+  const normalizePath = (value) => String(value || "").replace(/\\+/g, "/").replace(/\/+$/, "");
+  const parent = normalizePath(parentPath);
+  const child = normalizePath(childPath);
+  return !!parent && !!child && (child === parent || child.startsWith(`${parent}/`));
+}
+
+function footerBranchActiveAgentTabs(tabContext = activeTabContext()) {
+  const active = activeTab();
+  const activeCwd = latestWorkspace?.cwd || active?.cwd || "";
+  const root = footerBranchPickerState.root || "";
+  return tabs.filter((tab) => {
+    const sameWorktree = root ? pathLooksInside(root, tab.cwd) : !!activeCwd && tab.cwd === activeCwd;
+    if (!sameWorktree) return false;
+    if (tab.id === tabContext.tabId) return currentState?.isStreaming || currentState?.isCompacting || tabHasActiveAgent(tab);
+    return tabHasActiveAgent(tab);
+  });
+}
+
+function footerBranchAgentWarningLines(tabContext = activeTabContext()) {
+  const busyTabs = footerBranchActiveAgentTabs(tabContext);
+  if (!busyTabs.length) return [];
+  const list = busyTabs.slice(0, 4).map((tab) => `- ${tab.title || tab.id}`).join("\n");
+  const extra = busyTabs.length > 4 ? `\n- … +${busyTabs.length - 4} more` : "";
+  return [
+    "",
+    `WARNING: ${busyTabs.length === 1 ? "An agent is" : "Agents are"} still running or waiting for input in this Git working tree:`,
+    `${list}${extra}`,
+    "Switching branches can change files underneath the running agent.",
+  ];
+}
+
+function confirmFooterGitBranchAction(branch, { create = false, requireConfirm = false, tabContext = activeTabContext() } = {}) {
+  const branchName = cleanStatusText(branch);
+  const warningLines = footerBranchAgentWarningLines(tabContext);
+  if (!requireConfirm && warningLines.length === 0) return true;
+  const action = create ? "Create and switch to new git branch" : "Switch git branch";
+  const message = [
+    `${action}: ${branchName}?`,
+    "",
+    `Repository: ${footerBranchPickerState.root || currentGitFooterCacheCwd(tabContext.tabId) || "current tab"}`,
+    ...warningLines,
+    "",
+    "Continue?",
+  ].join("\n");
+  return window.confirm(message);
+}
+
+function promptFooterGitBranchName() {
+  const value = window.prompt("New git branch name:", "");
+  if (value === null) return "";
+  return cleanStatusText(value);
+}
+
+async function createFooterGitBranch() {
+  const branchName = promptFooterGitBranchName();
+  if (!branchName) return;
+  const tabContext = activeTabContext();
+  if (!confirmFooterGitBranchAction(branchName, { create: true, requireConfirm: true, tabContext })) return;
+  await applyFooterGitBranch(branchName, { create: true, tabContext, skipConfirm: true });
+}
+
+async function applyFooterGitBranch(branch, { create = false, tabContext = activeTabContext(), skipConfirm = false } = {}) {
+  const branchName = cleanStatusText(branch);
+  if (!branchName) return;
+  const tabId = tabContext.tabId || activeTabId;
+  if (!skipConfirm && !confirmFooterGitBranchAction(branchName, { create, tabContext })) return;
+  try {
+    footerBranchPickerState = { ...footerBranchPickerState, loading: true, error: "", switching: branchName, tabId };
+    renderFooter();
+    const response = await api("/api/git-branch", { method: "POST", body: { branch: branchName, create }, tabId });
+    if (!isCurrentTabContext(tabContext)) return;
+    if (!response.ok) throw new Error(response.error || `Failed to ${create ? "create and switch to" : "switch to"} ${branchName}`);
+    const switchedBranch = cleanStatusText(response.data?.branch || branchName);
+    footerBranchPickerOpen = false;
+    footerBranchPickerRequestSerial += 1;
+    footerBranchPickerState = { ...footerBranchPickerState, loading: false, switching: "", current: switchedBranch };
+    applyOptimisticGitFooterBranch(switchedBranch, tabContext);
+    addEvent(response.data?.created ? `Created and switched to git branch ${switchedBranch}.` : response.data?.switched === false ? `Already on git branch ${switchedBranch}.` : `Switched git branch to ${switchedBranch}.`, "info");
+    requestGitFooterWebuiPayload(tabContext, { force: true });
+  } catch (error) {
+    if (isCurrentTabContext(tabContext)) {
+      footerBranchPickerState = { ...footerBranchPickerState, loading: false, switching: "", error: error.message || String(error) };
+      addEvent(error.message || String(error), "error");
+    }
+  } finally {
+    if (isCurrentTabContext(tabContext)) {
+      document.body.classList.toggle("footer-model-picker-open", isFooterPickerOpen());
+      renderFooter();
+      updateFooterModelPickerPosition();
+    }
+  }
+}
+
+function renderFooterBranchPicker() {
+  const picker = make("div", "footer-model-picker footer-branch-picker");
+  picker.setAttribute("role", "listbox");
+  picker.setAttribute("aria-label", "Git branches");
+  const state = footerBranchPickerState;
+  const current = state.current || "detached";
+  picker.append(make("div", "footer-model-picker-title", "Git branches"));
+  picker.append(make("div", "footer-model-picker-source", `${state.loading ? "Refreshing" : "Current"}: ${state.switching || current}${state.root ? ` · ${state.root}` : ""}`));
+
+  if (state.error) {
+    const error = make("div", "footer-model-picker-empty error");
+    error.append(make("strong", undefined, "Cannot load branches."), make("span", undefined, ` ${state.error}`));
+    picker.append(error);
+    return picker;
+  }
+  if (state.loading && state.branches.length === 0) {
+    picker.append(make("div", "footer-model-picker-empty muted", "Loading local branches…"));
+    return picker;
+  }
+
+  const hasOtherBranches = state.branches.some((branch) => !branch.current && branch.name !== state.current);
+  if (!state.loading && !hasOtherBranches) {
+    const empty = make("div", "footer-model-picker-empty muted");
+    empty.append(make("strong", undefined, "No other local branches available."), make("span", undefined, " Create a branch from the current HEAD to continue."));
+    const createButton = make("button", "footer-model-option footer-branch-create-option");
+    createButton.type = "button";
+    createButton.append(
+      make("span", "footer-model-option-main", "Create new branch"),
+      make("span", "footer-model-option-name", "prompts for a name, confirms, then runs git switch -c"),
+    );
+    createButton.addEventListener("click", () => createFooterGitBranch().catch((error) => addEvent(error.message || String(error), "error")));
+    picker.append(empty, createButton);
+  }
+
+  for (const branch of state.branches) {
+    const selected = branch.current || (!!state.current && branch.name === state.current);
+    const disabled = selected || state.loading || !!state.switching;
+    const button = make("button", `footer-model-option footer-branch-option${selected ? " active" : ""}`);
+    button.type = "button";
+    button.disabled = disabled;
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", selected ? "true" : "false");
+    button.title = selected ? `Current branch: ${branch.name}` : `git switch ${branch.name}`;
+    button.append(
+      make("span", "footer-model-option-main", branch.name),
+      make("span", "footer-model-option-name", selected ? "current branch" : state.switching === branch.name ? "switching…" : "switch to this branch"),
+    );
+    if (!disabled) button.addEventListener("click", () => applyFooterGitBranch(branch.name));
+    picker.append(button);
+  }
+  return picker;
 }
 
 async function applyFooterModel(model) {
@@ -13661,6 +14372,7 @@ document.addEventListener("pointerdown", (event) => {
   if (isFooterPickerOpen() && !elements.statusBar.contains(event.target)) {
     setFooterModelPickerOpen(false);
     setFooterThinkingPickerOpen(false);
+    setFooterBranchPickerOpen(false);
   }
 }, { passive: true });
 document.addEventListener("pointermove", (event) => {
@@ -13678,7 +14390,7 @@ function isTextEntryTarget(target) {
 
 function shouldHandleNativeAppShortcut(event) {
   if (event.defaultPrevented) return false;
-  if (elements.dialog?.open || elements.pathPickerDialog?.open || elements.nativeCommandDialog?.open || elements.appRunnerInfoDialog?.open) return false;
+  if (elements.dialog?.open || elements.pathPickerDialog?.open || elements.gitChangesDialog?.open || elements.nativeCommandDialog?.open || elements.appRunnerInfoDialog?.open) return false;
   return event.target === elements.promptInput || !isTextEntryTarget(event.target);
 }
 
@@ -13737,7 +14449,7 @@ window.addEventListener("focus", () => scheduleForegroundReconcile("window focus
 window.addEventListener("online", () => scheduleForegroundReconcile("network online", 0));
 window.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
-  if (elements.dialog?.open || elements.pathPickerDialog?.open) return;
+  if (elements.dialog?.open || elements.pathPickerDialog?.open || elements.gitChangesDialog?.open) return;
   if (publishMenuOpen) {
     setPublishMenuOpen(false);
     return;
@@ -13775,6 +14487,7 @@ window.addEventListener("keydown", (event) => {
   if (isFooterPickerOpen()) {
     setFooterModelPickerOpen(false);
     setFooterThinkingPickerOpen(false);
+    setFooterBranchPickerOpen(false);
     return;
   }
   if (!elements.commandSuggest.hidden) {
@@ -13799,6 +14512,18 @@ window.addEventListener("keydown", (event) => {
     event.preventDefault();
     abortActiveRun({ source: "escape" });
   }
+});
+
+elements.gitChangesRefreshButton?.addEventListener("click", refreshGitChangesDialog);
+elements.gitChangesCloseButton?.addEventListener("click", closeGitChangesDialog);
+elements.gitChangesBody?.addEventListener("scroll", updateGitChangesCurrentFileHeader, { passive: true });
+elements.gitChangesDialog?.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeGitChangesDialog();
+});
+elements.gitChangesDialog?.addEventListener("close", () => {
+  gitChangesRequestSerial += 1;
+  gitChangesState = { ...gitChangesState, loading: false };
 });
 
 elements.refreshCodexUsageButton?.addEventListener("click", () => {

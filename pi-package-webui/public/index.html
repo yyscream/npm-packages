@@ -12,7 +12,7 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <link rel="stylesheet" href="/styles.css?v=39" />
+    <link rel="stylesheet" href="/styles.css?v=43" />
   </head>
   <body>
     <button id="sidePanelExpandButton" class="side-panel-expand-button" type="button" aria-controls="sidePanel" aria-expanded="false" aria-label="Expand side panel" title="Expand side panel">
@@ -495,6 +495,24 @@
       </form>
     </dialog>
 
+    <dialog id="gitChangesDialog" class="extension-dialog git-changes-dialog">
+      <form method="dialog">
+        <div class="git-changes-header">
+          <div>
+            <span class="git-changes-kicker">Git diff</span>
+            <h2 id="gitChangesTitle">Uncommitted Changes</h2>
+            <p id="gitChangesSubtitle" class="muted">Current tab git diff</p>
+          </div>
+          <button id="gitChangesRefreshButton" type="button">Refresh</button>
+        </div>
+        <p id="gitChangesStatus" class="git-changes-status muted" role="status" aria-live="polite"></p>
+        <div id="gitChangesBody" class="git-changes-body"></div>
+        <menu>
+          <button id="gitChangesCloseButton" type="button">Close</button>
+        </menu>
+      </form>
+    </dialog>
+
     <dialog id="pathPickerDialog" class="extension-dialog path-picker-dialog">
       <form method="dialog">
         <h2 id="pathPickerTitle">Choose working directory</h2>
@@ -598,6 +616,6 @@
       </form>
     </dialog>
 
-    <script type="module" src="/app.js?v=38"></script>
+    <script type="module" src="/app.js?v=43"></script>
   </body>
 </html>
