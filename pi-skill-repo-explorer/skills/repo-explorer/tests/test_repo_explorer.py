@@ -54,6 +54,16 @@ class RepoExplorerTests(unittest.TestCase):
         self.assertTrue(extension_path.exists())
         source = extension_path.read_text(encoding="utf-8")
         self.assertIn('name: "repo_explorer_explore"', source)
+        self.assertIn("writeEffectivenessReport", source)
+        self.assertIn("repo-explorer-effectiveness-", source)
+        self.assertIn("effectiveness_report", source)
+
+    def test_skill_documents_effectiveness_report_requirement(self):
+        source = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+
+        self.assertIn("Write Effectiveness Report", source)
+        self.assertIn("skills/repo-explorer/repo-explorer-effectiveness-<timestamp>-<repo-key>.md", source)
+        self.assertIn("effectiveness_report", source)
 
     def test_validator_rejects_missing_required_contract_fields(self):
         handoff_missing_index_info_and_errors = {

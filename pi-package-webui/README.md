@@ -125,11 +125,12 @@ Environment variables:
 - Streaming chat transcript with Markdown, thinking output, tool/bash cards, queue and compaction events, and abort controls.
 - Prompt composer with uploads, drag/drop/paste, inline image support, slash-command autocomplete, and `@` file/path references with live suggestions.
 - Browser dialogs for common Pi selectors such as `/model`, `/settings`, `/theme`, `/fork`, `/clone`, `/resume`, `/tree`, `/scoped-models`, `/tools`, and `/skills`.
-- Model, thinking, session, workspace, theme, optional-feature, Codex usage, network, event, and notification controls in the side panel.
+- Model, thinking, session, workspace, theme, optional-feature, Codex usage, network, update/restart, event, and notification controls in the side panel.
 - Side-panel theme picker backed by optional `@firstpick/pi-themes-bundle` themes when loaded.
 - Per-tab cwd changes, a clickable footer cwd picker, saved path fast picks, server-persisted fast picks, and restart-safe restoration of open tabs.
 - Detected app runner dropdown for the active tab cwd, including Cargo, Bun, npm/npx/pnpm, Python/uv, Go/Golang, Zig, C/C++, Docker Compose, root/dev/scripts shell scripts, and other common project runners with live output pinned at the top of the terminal. Projects can add browseable custom runners in `.pi-webui-runners.json` with a command (default `./`) plus a relative path to the file to run.
 - Browser support for Pi extension UI prompts, widgets, status updates, browser notifications when a tab needs an extension UI response and an optional side-panel toggle for agent-done notifications.
+- Localhost-only Pi update checks with a top-right update notification and a confirmed **Update & restart** action that runs `pi update`, then restarts the Web UI server.
 - Feedback reactions (`👍`, `👎`, `?`) on final assistant output plus tool/bash action cards, which can ask Pi to create or update a LEARNING.
 - Mobile-friendly layout and PWA install support where the browser allows it.
 
@@ -138,6 +139,7 @@ Useful browser endpoints exposed by the local server include:
 - `GET /api/path-suggestions?tab=<tabId>&query=<path>` for `@` file/path references with live suggestions.
 - `POST /api/action-feedback?tab=<tabId>` for feedback on final assistant output and action cards.
 - `POST /api/optional-feature-install` for installing known optional companion packages from the side panel.
+- `GET /api/update-status` and localhost-only `POST /api/update` for checking Pi/Web UI updates and running `pi update` followed by a Web UI server restart.
 
 For local development, run the checkout helper directly, for example:
 
@@ -191,6 +193,7 @@ This requires `/git-staged-msg` and `/pr` from `@firstpick/pi-prompts-git-pr`; b
 - The side-panel **Open to network** button rebinds the server to `0.0.0.0`, shows LAN URLs when available, and toggles to "Close for network".
 - `--host 0.0.0.0` also exposes the Web UI to the local network.
 - Any connected browser client can control Pi and run Web UI bash actions as the Web UI process user.
+- The Web UI update endpoint is restricted to localhost, because it runs `pi update` and restarts the server.
 - Treat Pi Web UI as a local companion, not a hardened multi-user web service.
 
 ## Troubleshooting

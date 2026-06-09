@@ -19,6 +19,13 @@ const webuiHelperExtensionPath = path.join(packageRoot, "webui-rpc-helper.mjs");
 const agentDir = process.env.PI_CODING_AGENT_DIR || path.join(homedir(), ".pi", "agent");
 const OPTIONAL_FEATURE_INSTALL_ROOT_ENV = "PI_WEBUI_OPTIONAL_FEATURE_INSTALL_ROOT";
 const packageJson = JSON.parse(await readFile(path.join(packageRoot, "package.json"), "utf8"));
+let piPackageJson = {};
+try {
+  const piPackageJsonPath = require.resolve("@earendil-works/pi-coding-agent/package.json", { paths: [packageRoot] });
+  piPackageJson = JSON.parse(await readFile(piPackageJsonPath, "utf8"));
+} catch {
+  piPackageJson = {};
+}
 const nativeParityMatrix = JSON.parse(await readFile(path.join(packageRoot, "WEBUI_TUI_NATIVE_PARITY.json"), "utf8"));
 const webuiDevServer = isTruthyEnv(process.env.PI_WEBUI_DEV) || isSourceCheckout(packageRoot);
 
@@ -28,6 +35,14 @@ const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 const WEBUI_HELPER_TIMEOUT_MS = 8 * 1000;
 const WEBUI_HELPER_COMMAND = "webui-helper";
 const WEBUI_HELPER_RESPONSE_PREFIX = "__PI_WEBUI_HELPER_RESPONSE__:";
+const PI_CODING_AGENT_PACKAGE = "@earendil-works/pi-coding-agent";
+const WEBUI_PACKAGE = packageJson.name || "@firstpick/pi-package-webui";
+const PI_LATEST_VERSION_URL = process.env.PI_WEBUI_PI_LATEST_VERSION_URL || "https://pi.dev/api/latest-version";
+const NPM_REGISTRY_URL = (process.env.PI_WEBUI_NPM_REGISTRY_URL || "https://registry.npmjs.org").replace(/\/+$/, "");
+const UPDATE_STATUS_CACHE_MS = 10 * 60 * 1000;
+const UPDATE_STATUS_TIMEOUT_MS = 10 * 1000;
+const PI_UPDATE_TIMEOUT_MS = 15 * 60 * 1000;
+const PI_UPDATE_OUTPUT_MAX_CHARS = 120_000;
 const CODEX_USAGE_TIMEOUT_MS = 15 * 1000;
 const CODEX_TOKEN_REFRESH_SKEW_MS = 5 * 60 * 1000;
 const OPENAI_CODEX_PROVIDER_ID = "openai-codex";
@@ -361,6 +376,51 @@ function formatCliError(error) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function truncateLongText(value, maxLength = 8000) {
+  const text = String(value || "");
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
+function parsePackageVersion(version) {
+  const match = String(version || "").trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+.*)?$/);
+  if (!match) return undefined;
+  return {
+    major: Number.parseInt(match[1], 10),
+    minor: Number.parseInt(match[2], 10),
+    patch: Number.parseInt(match[3], 10),
+    prerelease: match[4],
+  };
+}
+
+function comparePackageVersions(leftVersion, rightVersion) {
+  const left = parsePackageVersion(leftVersion);
+  const right = parsePackageVersion(rightVersion);
+  if (!left || !right) return undefined;
+  if (left.major !== right.major) return left.major - right.major;
+  if (left.minor !== right.minor) return left.minor - right.minor;
+  if (left.patch !== right.patch) return left.patch - right.patch;
+  if (left.prerelease === right.prerelease) return 0;
+  if (!left.prerelease) return 1;
+  if (!right.prerelease) return -1;
+  return left.prerelease.localeCompare(right.prerelease);
+}
+
+function isNewerPackageVersion(candidateVersion, currentVersion) {
+  const comparison = comparePackageVersions(candidateVersion, currentVersion);
+  if (comparison !== undefined) return comparison > 0;
+  return String(candidateVersion || "").trim() !== String(currentVersion || "").trim();
+}
+
+async function fetchJsonWithTimeout(url, { timeoutMs = UPDATE_STATUS_TIMEOUT_MS, headers = {} } = {}) {
+  const response = await fetch(url, {
+    headers,
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) throw new Error(`${response.status}${response.statusText ? ` ${response.statusText}` : ""}`);
+  return response.json();
 }
 
 class PiRpcProcess {
@@ -3912,6 +3972,173 @@ function spawnRestartServer(restorableTabs) {
   return child;
 }
 
+let updateStatusCache = null;
+let updateStatusCacheAt = 0;
+let piUpdateInProgress = false;
+
+function updateChecksSkippedReason() {
+  if (process.env.PI_OFFLINE) return "PI_OFFLINE is set";
+  if (process.env.PI_SKIP_VERSION_CHECK) return "PI_SKIP_VERSION_CHECK is set";
+  return "";
+}
+
+function basePackageUpdateStatus(packageName, currentVersion) {
+  return {
+    packageName,
+    currentVersion: String(currentVersion || ""),
+    latestVersion: null,
+    updateAvailable: false,
+    checked: false,
+    skipped: false,
+    skippedReason: "",
+    error: "",
+  };
+}
+
+async function checkLatestPiReleaseStatus() {
+  const status = basePackageUpdateStatus(PI_CODING_AGENT_PACKAGE, piPackageJson.version);
+  const skippedReason = updateChecksSkippedReason();
+  if (skippedReason) {
+    status.skipped = true;
+    status.skippedReason = skippedReason;
+    return status;
+  }
+  try {
+    const data = await fetchJsonWithTimeout(PI_LATEST_VERSION_URL, {
+      headers: {
+        "User-Agent": `pi-webui/${packageJson.version} pi/${piPackageJson.version || "unknown"}`,
+        accept: "application/json",
+      },
+    });
+    const latestVersion = typeof data.version === "string" ? data.version.trim() : "";
+    if (!latestVersion) throw new Error("latest-version response did not include a version");
+    status.latestVersion = latestVersion;
+    status.packageName = typeof data.packageName === "string" && data.packageName.trim() ? data.packageName.trim() : PI_CODING_AGENT_PACKAGE;
+    status.note = typeof data.note === "string" && data.note.trim() ? data.note.trim() : "";
+    status.updateAvailable = status.currentVersion ? isNewerPackageVersion(latestVersion, status.currentVersion) : false;
+    status.checked = true;
+  } catch (error) {
+    status.error = sanitizeError(error);
+  }
+  return status;
+}
+
+function npmLatestPackageUrl(packageName) {
+  return `${NPM_REGISTRY_URL}/${encodeURIComponent(packageName)}/latest`;
+}
+
+async function checkLatestNpmPackageStatus(packageName, currentVersion) {
+  const status = basePackageUpdateStatus(packageName, currentVersion);
+  const skippedReason = updateChecksSkippedReason();
+  if (skippedReason) {
+    status.skipped = true;
+    status.skippedReason = skippedReason;
+    return status;
+  }
+  try {
+    const data = await fetchJsonWithTimeout(npmLatestPackageUrl(packageName), {
+      headers: {
+        "User-Agent": `pi-webui/${packageJson.version}`,
+        accept: "application/json",
+      },
+    });
+    const latestVersion = typeof data.version === "string" ? data.version.trim() : "";
+    if (!latestVersion) throw new Error(`${packageName} latest metadata did not include a version`);
+    status.latestVersion = latestVersion;
+    status.updateAvailable = status.currentVersion ? isNewerPackageVersion(latestVersion, status.currentVersion) : false;
+    status.checked = true;
+  } catch (error) {
+    status.error = sanitizeError(error);
+  }
+  return status;
+}
+
+function updateStatusForRequest(status, req) {
+  return {
+    ...status,
+    canRunUpdate: isLocalAddress(req?.socket?.remoteAddress),
+    updateInProgress: piUpdateInProgress,
+  };
+}
+
+async function getUpdateStatus({ force = false } = {}) {
+  const now = Date.now();
+  if (!force && updateStatusCache && now - updateStatusCacheAt < UPDATE_STATUS_CACHE_MS) return updateStatusCache;
+  const [piStatus, webuiStatus] = await Promise.all([
+    checkLatestPiReleaseStatus(),
+    checkLatestNpmPackageStatus(WEBUI_PACKAGE, packageJson.version),
+  ]);
+  const updateAvailable = !!(piStatus.updateAvailable || webuiStatus.updateAvailable);
+  updateStatusCache = {
+    checkedAt: new Date(now).toISOString(),
+    updateAvailable,
+    restartRequired: true,
+    command: "pi update",
+    webuiDev: webuiDevServer,
+    pi: piStatus,
+    webui: webuiStatus,
+    packages: {
+      checked: false,
+      note: "pi update will also update configured unpinned Pi packages.",
+    },
+  };
+  updateStatusCacheAt = now;
+  return updateStatusCache;
+}
+
+async function resolvePiUpdateCommand() {
+  if (options.piBinExplicit) {
+    return { command: options.piBin, args: ["update"], displayCommand: formatCommandForDisplay(options.piBin, ["update"]) };
+  }
+
+  const pathPi = await runCommand(options.piBin, ["--version"], { timeoutMs: 3000, maxOutputLength: 4000 });
+  if (pathPi.exitCode === 0 && !pathPi.timedOut && !pathPi.error) {
+    return { command: options.piBin, args: ["update"], displayCommand: formatCommandForDisplay(options.piBin, ["update"]) };
+  }
+
+  return resolvePiCommand(["update"]);
+}
+
+async function runPiUpdateAndPrepareRestart() {
+  if (piUpdateInProgress) throw makeHttpError(409, "A Pi update is already running.");
+  piUpdateInProgress = true;
+  let restartPrepared = false;
+  try {
+    const restorableTabs = await restorableTabsForRestart();
+    const piCommand = await resolvePiUpdateCommand();
+    const command = piCommand.displayCommand || formatCommandForDisplay(piCommand.command, piCommand.args || []);
+    recordEvent({ type: "webui_update_started", command, restorableTabCount: restorableTabs.length });
+    const result = await runCommand(piCommand.command, piCommand.args || [], {
+      cwd: process.cwd(),
+      timeoutMs: PI_UPDATE_TIMEOUT_MS,
+      maxOutputLength: PI_UPDATE_OUTPUT_MAX_CHARS,
+    });
+    const ok = result.exitCode === 0 && !result.timedOut && !result.error;
+    if (!ok) {
+      const details = [result.error, result.timedOut ? "timed out" : undefined, result.stderr?.trim(), result.stdout?.trim()].filter(Boolean).join("\n");
+      recordEvent({ type: "webui_update_failed", command, error: truncateStatusText(details || `exit code ${result.exitCode ?? "unknown"}`) });
+      throw makeHttpError(500, truncateLongText(`Pi update failed: ${command}${details ? `\n${details}` : ""}`));
+    }
+
+    updateStatusCache = null;
+    updateStatusCacheAt = 0;
+    const child = spawnRestartServer(restorableTabs);
+    restartPrepared = true;
+    recordEvent({ type: "webui_update_restarting", command, nextWebuiPid: child.pid, restorableTabCount: restorableTabs.length });
+    return {
+      message: "Pi update completed. Pi Web UI is restarting.",
+      command,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      webuiPid: process.pid,
+      nextWebuiPid: child.pid,
+      restorableTabCount: restorableTabs.length,
+    };
+  } finally {
+    if (!restartPrepared) piUpdateInProgress = false;
+  }
+}
+
 function rememberClosedRestorableTab(tab, state = null) {
   const descriptor = restorableTabDescriptor(tab, state);
   if (!descriptor) return;
@@ -5517,6 +5744,13 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === "/api/update-status" && req.method === "GET") {
+      const force = ["1", "true", "yes", "refresh"].includes(String(url.searchParams.get("refresh") || "").toLowerCase());
+      const status = await getUpdateStatus({ force });
+      sendJson(res, 200, { ok: true, data: updateStatusForRequest(status, req) });
+      return;
+    }
+
     if (url.pathname === "/api/native-parity" && req.method === "GET") {
       sendJson(res, 200, { ok: true, data: nativeParityMatrix });
       return;
@@ -5574,6 +5808,14 @@ const server = createServer(async (req, res) => {
       const child = spawnRestartServer(restorableTabs);
       sendJson(res, 200, { ok: true, message: "Pi Web UI restarting", webuiPid: process.pid, nextWebuiPid: child.pid, restorableTabCount: restorableTabs.length });
       setTimeout(() => shutdown("api restart"), 20).unref();
+      return;
+    }
+
+    if (url.pathname === "/api/update" && req.method === "POST") {
+      if (!isLocalAddress(req.socket.remoteAddress)) throw makeHttpError(403, "Updating Pi from the Web UI is only allowed from localhost");
+      const data = await runPiUpdateAndPrepareRestart();
+      sendJson(res, 200, { ok: true, data });
+      setTimeout(() => shutdown("api update"), 20).unref();
       return;
     }
 

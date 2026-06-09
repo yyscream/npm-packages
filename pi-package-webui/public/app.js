@@ -15,6 +15,12 @@ const elements = {
   serverOfflinePanel: $("#serverOfflinePanel"),
   serverRestartPanel: $("#serverRestartPanel"),
   serverRestartMessage: $("#serverRestartMessage"),
+  updateNotification: $("#updateNotification"),
+  updateNotificationTitle: $("#updateNotificationTitle"),
+  updateNotificationMessage: $("#updateNotificationMessage"),
+  updateNotificationDetail: $("#updateNotificationDetail"),
+  updateNotificationUpdateButton: $("#updateNotificationUpdateButton"),
+  updateNotificationDismissButton: $("#updateNotificationDismissButton"),
   serverOfflineCommand: $("#serverOfflineCommand"),
   serverOfflineSlashCommand: $("#serverOfflineSlashCommand"),
   copyServerCommandButton: $("#copyServerCommandButton"),
@@ -251,6 +257,10 @@ let refreshCodexUsageTimer = null;
 let codexUsageRenderTimer = null;
 let backendOffline = false;
 let serverRestartInProgress = false;
+let updateRequestInProgress = false;
+let latestUpdateStatus = null;
+let updateStatusRefreshTimer = null;
+let updateNotificationHideTimer = null;
 let backendOfflineNoticeShown = false;
 let latestMessages = [];
 let promptHistoryByTab = new Map();
@@ -311,6 +321,7 @@ const SIDE_PANEL_SECTION_STORAGE_KEY = "pi-webui-side-panel-sections-collapsed";
 const TAB_STORAGE_KEY = "pi-webui-active-tab";
 const PATH_FAST_PICKS_STORAGE_KEY = "pi-webui-path-fast-picks";
 const AGENT_DONE_NOTIFICATIONS_STORAGE_KEY = "pi-webui-agent-done-notifications";
+const UPDATE_NOTIFICATION_DISMISS_STORAGE_KEY = "pi-webui-update-notification-dismissed";
 const THINKING_VISIBILITY_STORAGE_KEY = "pi-webui-thinking-visible";
 const BUSY_PROMPT_BEHAVIOR_STORAGE_KEY = "pi-webui-busy-prompt-behavior";
 const SKILL_USAGE_STORAGE_KEY = "pi-webui-skill-usage-v1";
@@ -360,6 +371,8 @@ const CHAT_PROGRAMMATIC_SCROLL_GRACE_MS = 500;
 const CHAT_USER_SCROLL_INTENT_MS = 700;
 const CODEX_USAGE_REFRESH_MS = 5 * 60 * 1000;
 const CODEX_USAGE_RENDER_TICK_MS = 30 * 1000;
+const UPDATE_STATUS_REFRESH_MS = 6 * 60 * 60 * 1000;
+const UPDATE_STATUS_INITIAL_DELAY_MS = 1800;
 const RUN_INDICATOR_TICK_MS = 1000;
 const RUN_INDICATOR_START_GRACE_MS = 2500;
 const RUN_INDICATOR_STATE_RECHECK_MS = 5000;
@@ -1698,6 +1711,7 @@ function setServerRestartOverlay(active, message = "Waiting for the server to co
   document.body.classList.toggle("server-restarting", serverRestartInProgress);
   if (elements.serverRestartPanel) elements.serverRestartPanel.hidden = !serverRestartInProgress;
   if (elements.serverRestartMessage) elements.serverRestartMessage.textContent = message;
+  if (serverRestartInProgress) hideUpdateNotification();
   if (serverRestartInProgress && elements.serverOfflinePanel) elements.serverOfflinePanel.hidden = true;
 }
 
@@ -1708,6 +1722,7 @@ function setBackendOffline(offline, error) {
   if (elements.serverOfflinePanel) elements.serverOfflinePanel.hidden = !showOfflinePanel;
   renderServerOfflinePanel();
   if (backendOffline) {
+    hideUpdateNotification();
     if (!serverRestartInProgress && !backendOfflineNoticeShown) {
       backendOfflineNoticeShown = true;
       addEvent(`Pi Web UI server is offline${error?.message ? `: ${error.message}` : ""}`, "warn");
@@ -1948,6 +1963,169 @@ async function refreshWebuiVersion() {
   const health = await api("/api/health", { scoped: false });
   setWebuiVersion(health.webuiVersion);
   setWebuiDevServer(isWebuiDevMetadata(health));
+}
+
+function packageUpdateText(label, status = {}) {
+  const current = formatWebuiVersion(status.currentVersion || "");
+  const latest = formatWebuiVersion(status.latestVersion || "");
+  if (current && latest) return `${label} ${current} → ${latest}`;
+  if (latest) return `${label} ${latest}`;
+  return label;
+}
+
+function updateNotificationItems(status = latestUpdateStatus) {
+  const items = [];
+  if (status?.pi?.updateAvailable) items.push(packageUpdateText("Pi", status.pi));
+  if (status?.webui?.updateAvailable) items.push(packageUpdateText("Web UI", status.webui));
+  return items;
+}
+
+function updateNotificationDismissKey(status = latestUpdateStatus) {
+  const parts = [status?.pi?.latestVersion, status?.webui?.latestVersion]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  return parts.length ? parts.join("|") : "";
+}
+
+function storedDismissedUpdateKey() {
+  try {
+    return localStorage.getItem(UPDATE_NOTIFICATION_DISMISS_STORAGE_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function rememberDismissedUpdateKey(key) {
+  if (!key) return;
+  try {
+    localStorage.setItem(UPDATE_NOTIFICATION_DISMISS_STORAGE_KEY, key);
+  } catch {
+    // Ignore private-mode storage failures.
+  }
+}
+
+function hideUpdateNotification({ remember = false } = {}) {
+  const panel = elements.updateNotification;
+  if (!panel) return;
+  clearTimeout(updateNotificationHideTimer);
+  if (remember) rememberDismissedUpdateKey(updateNotificationDismissKey());
+  panel.classList.remove("show");
+  updateNotificationHideTimer = setTimeout(() => {
+    panel.hidden = true;
+  }, 360);
+}
+
+function renderUpdateNotification(status = latestUpdateStatus, { force = false } = {}) {
+  const panel = elements.updateNotification;
+  if (!panel) return;
+  latestUpdateStatus = status || latestUpdateStatus;
+  const items = updateNotificationItems(latestUpdateStatus);
+  const dismissKey = updateNotificationDismissKey(latestUpdateStatus);
+  const shouldShow = !!latestUpdateStatus?.updateAvailable && items.length > 0 && !updateRequestInProgress;
+  if (!shouldShow || (!force && dismissKey && storedDismissedUpdateKey() === dismissKey)) {
+    hideUpdateNotification();
+    return;
+  }
+
+  const canRunUpdate = latestUpdateStatus.canRunUpdate !== false;
+  if (elements.updateNotificationTitle) elements.updateNotificationTitle.textContent = items.length === 1 ? `${items[0]} available` : "Pi updates available";
+  if (elements.updateNotificationMessage) {
+    elements.updateNotificationMessage.textContent = canRunUpdate
+      ? "Run pi update now, then restart this Web UI server automatically."
+      : "Updates are available. Direct Web UI updates are only enabled from localhost on the host machine.";
+  }
+  const details = [
+    items.join(" · "),
+    latestUpdateStatus.webuiDev && latestUpdateStatus.webui?.updateAvailable ? "The current Web UI is a dev checkout; pi update updates installed Pi packages, not this checkout." : "",
+    latestUpdateStatus.packages?.note || "",
+  ].filter(Boolean).join(" ");
+  if (elements.updateNotificationDetail) elements.updateNotificationDetail.textContent = details;
+  if (elements.updateNotificationUpdateButton) {
+    elements.updateNotificationUpdateButton.hidden = !canRunUpdate;
+    elements.updateNotificationUpdateButton.disabled = updateRequestInProgress || latestUpdateStatus.updateInProgress;
+    elements.updateNotificationUpdateButton.textContent = latestUpdateStatus.updateInProgress ? "Updating…" : "Update & restart";
+  }
+  clearTimeout(updateNotificationHideTimer);
+  panel.hidden = false;
+  requestAnimationFrame(() => panel.classList.add("show"));
+}
+
+async function refreshUpdateStatus({ force = false, notify = true } = {}) {
+  const path = force ? "/api/update-status?refresh=1" : "/api/update-status";
+  const response = await api(path, { scoped: false });
+  latestUpdateStatus = response.data || null;
+  if (notify) renderUpdateNotification(latestUpdateStatus);
+  return latestUpdateStatus;
+}
+
+function scheduleUpdateStatusRefresh() {
+  clearTimeout(updateStatusRefreshTimer);
+  updateStatusRefreshTimer = setTimeout(() => {
+    updateStatusRefreshTimer = null;
+    refreshUpdateStatus({ force: true }).catch((error) => addEvent(`Pi update check failed: ${error.message || String(error)}`, "warn"));
+    scheduleUpdateStatusRefresh();
+  }, UPDATE_STATUS_REFRESH_MS);
+}
+
+function initializeUpdateNotifications() {
+  setTimeout(() => {
+    refreshUpdateStatus().catch((error) => addEvent(`Pi update check failed: ${error.message || String(error)}`, "warn"));
+    scheduleUpdateStatusRefresh();
+  }, UPDATE_STATUS_INITIAL_DELAY_MS);
+}
+
+function piUpdateConfirmationText() {
+  const items = updateNotificationItems();
+  const workingWarning = hasWorkingTab() ? "\n\nOne or more Pi tabs look busy or blocked. Finish or abort in-flight work before updating if you need to preserve it." : "";
+  const versionText = items.length ? `\n\nDetected update: ${items.join(" · ")}.` : "";
+  return `Run pi update now?${versionText}\n\nThis will run \"pi update\" on the Web UI host. After it finishes, Pi Web UI will restart itself. Browser clients will briefly disconnect, and managed Pi tabs/RPC processes will be restarted from saved session state when possible.${workingWarning}`;
+}
+
+async function runPiUpdateAndRestart() {
+  if (updateRequestInProgress) return;
+  if (latestUpdateStatus?.canRunUpdate === false) {
+    addEvent("Pi update can only be started from localhost on the Web UI host", "warn");
+    renderUpdateNotification(latestUpdateStatus, { force: true });
+    return;
+  }
+  if (!confirm(piUpdateConfirmationText())) return;
+
+  updateRequestInProgress = true;
+  hideUpdateNotification();
+  setServerActionBusy("Updating…");
+  setServerActionStatus("Running pi update. The server will restart after the update completes…", "warn");
+  setServerRestartOverlay(true, "Running pi update. The server will restart after the update completes…");
+  try {
+    await api("/api/update", { method: "POST", scoped: false });
+    addEvent("Pi update completed; Pi Web UI server restart requested", "warn");
+  } catch (error) {
+    if (!error?.backendOffline) {
+      updateRequestInProgress = false;
+      setServerRestartOverlay(false);
+      resetServerActionControls();
+      const message = error.message || String(error);
+      setServerActionStatus(message, "error");
+      addEvent(message, "error");
+      renderUpdateNotification(latestUpdateStatus, { force: true });
+      return;
+    }
+    addEvent("Pi Web UI server connection dropped during update restart request", "warn");
+  }
+
+  setBackendOffline(true, new Error("update requested from side panel"));
+  const restarted = await waitForServerRestart();
+  updateRequestInProgress = false;
+  resetServerActionControls();
+  if (restarted) {
+    hideUpdateNotification({ remember: true });
+    setServerActionStatus("Updated, restarted, and reconnected.", "success");
+    refreshUpdateStatus({ force: true, notify: false }).catch(() => {});
+  } else {
+    setServerRestartOverlay(false);
+    setBackendOffline(true, new Error("update restart reconnect timed out"));
+    setServerActionStatus("Update completed, but the server did not reconnect automatically.", "error");
+    addEvent("Pi Web UI server did not come back online after update request", "error");
+  }
 }
 
 function formatBytes(bytes) {
@@ -12084,9 +12262,11 @@ function updateServerActionButton() {
   const button = elements.runServerActionButton;
   if (!button) return;
   button.disabled = !action;
-  button.textContent = action === "restart" ? "Restart" : action === "stop" ? "Stop" : "Run";
+  button.textContent = action === "restart" ? "Restart" : action === "update" ? "Update" : action === "stop" ? "Stop" : "Run";
   button.classList.toggle("danger", action === "stop");
-  if (action) setServerActionStatus(action === "restart" ? "Ready to restart the Web UI server." : "Ready to stop the Web UI server.", "info");
+  if (action === "restart") setServerActionStatus("Ready to restart the Web UI server.", "info");
+  else if (action === "update") setServerActionStatus("Ready to run pi update, then restart the Web UI server.", "info");
+  else if (action === "stop") setServerActionStatus("Ready to stop the Web UI server.", "info");
   else setServerActionStatus();
 }
 
@@ -12192,6 +12372,7 @@ async function stopServer() {
 async function runSelectedServerAction() {
   const action = elements.serverActionSelect?.value || "";
   if (action === "restart") await restartServer();
+  else if (action === "update") await runPiUpdateAndRestart();
   else if (action === "stop") await stopServer();
 }
 
@@ -13405,6 +13586,8 @@ if (elements.backgroundClearButton) {
 elements.openNetworkButton.addEventListener("click", openToNetwork);
 elements.serverActionSelect.addEventListener("change", updateServerActionButton);
 elements.runServerActionButton.addEventListener("click", () => runSelectedServerAction().catch((error) => addEvent(error.message || String(error), "error")));
+elements.updateNotificationUpdateButton?.addEventListener("click", () => runPiUpdateAndRestart().catch((error) => addEvent(error.message || String(error), "error")));
+elements.updateNotificationDismissButton?.addEventListener("click", () => hideUpdateNotification({ remember: true }));
 updateServerActionButton();
 elements.agentDoneNotificationsToggle.addEventListener("change", () => {
   setAgentDoneNotificationsEnabled(elements.agentDoneNotificationsToggle.checked, {
@@ -13752,6 +13935,7 @@ restoreSidePanelSectionState();
 bindSidePanelSectionToggles();
 restoreSidePanelState();
 initializeCodexUsage();
+initializeUpdateNotifications();
 bindMobileViewChanges();
 bindSidePanelOverlayViewChanges();
 registerPwaServiceWorker();

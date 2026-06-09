@@ -106,6 +106,7 @@ assert.match(html, /id="stickyUserPromptButton"/, "chat should expose a fixed la
 assert.match(html, /id="feedbackTray"/, "chat should expose a queued action-feedback tray");
 assert.match(html, /id="sendFeedbackButton"/, "action feedback should be submittable after the agent finishes");
 assert.match(html, /<textarea id="promptInput"[^>]*rows="1"[^>]*enterkeyhint="enter"/, "prompt textarea should start at one row and hint that Return inserts a newline");
+assert.ok(html.includes('id="commandSuggest"') && html.indexOf('id="commandSuggest"') < html.indexOf('id="promptInput"'), "slash-command and @ path suggestions should render above the prompt input");
 assert.match(html, /id="busyPromptBehaviorTag"[\s\S]*class="composer-busy-mode-tag"[\s\S]*aria-controls="busyPromptBehaviorMenu"/, "composer should expose a clickable busy prompt behavior tag on the input frame");
 assert.doesNotMatch(html, /Busy send:/i, "busy prompt behavior tag should show only the current mode label");
 assert.match(html, /id="sessionSkillTags" class="composer-skill-tags"[\s\S]*hidden/, "composer should expose a hidden-until-used skill tag strip beside the busy mode tag");
@@ -243,6 +244,7 @@ assert.match(css, /\.command-item \{[\s\S]*?width:\s*100%/, "side-panel commands
 assert.match(css, /\.toggle-control \{[\s\S]*?grid-template-columns:\s*auto minmax\(0, 1fr\)/, "side-panel notification toggle should align checkbox and label text");
 assert.match(css, /\.toggle-control:has\(input:checked\)/, "side-panel notification toggle should style the enabled state");
 assert.match(css, /\.command-item:hover,[\s\S]*?\.command-item:focus-visible/, "side-panel commands should have hover and keyboard focus affordances");
+assert.match(css, /\.command-suggest \{\n\s+margin:\s*0 0 0\.5rem;[\s\S]*?max-height:\s*15rem/, "slash-command and @ path suggestions should reserve spacing below themselves above the prompt input");
 assert.match(css, /\.command-suggest-item:hover \{\n\s+box-shadow: none;\n\s+transform: none;\n\}\n\.command-suggest-item\.active \{/, "autocomplete hover should not render as the selected suggestion unless JS marks it active");
 assert.doesNotMatch(css, /\.command-suggest-item:hover,\n\.command-suggest-item\.active/, "autocomplete hover and active selection styles should stay separate");
 assert.match(css, /\.feedback-tray\[hidden\] \{ display: none; \}/, "queued action-feedback tray should hide when empty");
@@ -286,9 +288,11 @@ assert.match(css, /\.terminal-tab-group\.active \{[\s\S]*?background:[\s\S]*?var
 assert.match(css, /\.terminal-tab-group\.stopped \{[\s\S]*?opacity:\s*1/, "stopped terminal tab groups should not become transparent");
 assert.match(css, /\.terminal-tabs:has\(\.terminal-tab-group\.menu-open\)/, "open terminal tab groups should keep the tab strip usable across rerenders");
 assert.match(css, /\.terminal-tab-group\.menu-open \.terminal-tab-group-menu \{[\s\S]*?display:\s*flex/, "open terminal tab group menus should remain visible without hover");
-assert.match(css, /\.terminal-tab\.activity-working[\s\S]*?terminal-tab-working-pulse/, "working tab indicators should be visibly animated");
+assert.match(css, /\.terminal-tab\.activity-working > \.terminal-tab-button \.terminal-tab-activity-indicator[\s\S]*?terminal-tab-working-pulse/, "working tab indicators should be visibly animated");
+assert.match(css, /\.terminal-tab-group-item\.activity-working > \.terminal-tab-button \.terminal-tab-activity-indicator[\s\S]*?terminal-tab-working-pulse/, "working indicators should still animate on grouped tab menu items themselves");
 assert.match(css, /\.terminal-tab\.activity-blocked[\s\S]*?rgba\(250, 179, 135/, "blocked tab indicators should use orange styling");
-assert.match(css, /\.terminal-tab\.activity-blocked \.terminal-tab-activity-indicator[\s\S]*?background:\s*var\(--ctp-peach\)/, "blocked tab indicator dots should be orange");
+assert.match(css, /\.terminal-tab\.activity-blocked > \.terminal-tab-button \.terminal-tab-activity-indicator[\s\S]*?background:\s*var\(--ctp-peach\)/, "blocked tab indicator dots should be orange");
+assert.doesNotMatch(css, /\.terminal-tab\.activity-(?:working|blocked|done)\s+\.terminal-tab-activity-indicator/, "group status styling should not cascade into child tabs in the group menu");
 assert.match(css, /\.terminal-tab\.activity-done/, "completed unseen work should have a distinct tab style");
 assert.match(css, /\.terminal-tabs[\s\S]*?position:\s*absolute/, "expanded mobile tabs should overlay instead of consuming transcript space");
 assert.match(css, /body\.mobile-keyboard-open \.terminal-tabs-shell,[\s\S]*?body\.mobile-keyboard-open \.widget-area,[\s\S]*?body\.mobile-keyboard-open \.statusbar/, "mobile keyboard mode should hide header, widgets, and footer");

@@ -12,7 +12,7 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <link rel="stylesheet" href="/styles.css?v=36" />
+    <link rel="stylesheet" href="/styles.css?v=38" />
   </head>
   <body>
     <button id="sidePanelExpandButton" class="side-panel-expand-button" type="button" aria-controls="sidePanel" aria-expanded="false" aria-label="Expand side panel" title="Expand side panel">
@@ -42,6 +42,19 @@
         <span class="server-restart-kicker">Restarting</span>
         <h1>Restarting Pi Web UI server</h1>
         <p id="serverRestartMessage">Waiting for the server to come back…</p>
+      </div>
+    </section>
+
+    <section id="updateNotification" class="update-notification" aria-live="polite" hidden>
+      <div class="update-notification-card" role="status">
+        <span class="update-notification-kicker">Update available</span>
+        <h2 id="updateNotificationTitle">Pi update available</h2>
+        <p id="updateNotificationMessage">A newer Pi version is available.</p>
+        <p id="updateNotificationDetail" class="update-notification-detail muted"></p>
+        <div class="update-notification-actions">
+          <button id="updateNotificationUpdateButton" class="primary" type="button">Update &amp; restart</button>
+          <button id="updateNotificationDismissButton" type="button">Later</button>
+        </div>
       </div>
     </section>
 
@@ -84,6 +97,7 @@
           <div id="gitWorkflowActions" class="git-workflow-actions"></div>
         </section>
         <form id="composer" class="composer">
+          <div id="commandSuggest" class="command-suggest" role="listbox" aria-label="Command and path suggestions" hidden></div>
           <div class="composer-input-row">
             <div class="composer-context-tags">
               <button
@@ -118,7 +132,6 @@
             ><svg class="composer-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M21.44 11.05 12.25 20.24a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.82-2.82l8.48-8.49" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
             <input id="attachmentInput" class="attachment-input" type="file" multiple accept="image/*,video/*,audio/*,text/*,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/json,application/xml,.md,.markdown,.csv,.ts,.tsx,.js,.jsx,.mjs,.cjs,.py,.rs,.go,.java,.c,.cpp,.h,.hpp,.sh,.bash,.zsh,.fish,.yaml,.yml,.toml,.ini,.log" />
           </div>
-          <div id="commandSuggest" class="command-suggest" role="listbox" aria-label="Command and path suggestions" hidden></div>
           <div id="attachmentTray" class="attachment-tray" aria-live="polite" hidden></div>
           <div class="composer-row">
             <button id="composerActionsButton" class="composer-actions-button" type="button" aria-controls="composerActionsPanel" aria-expanded="false" title="Open session, workflow, and follow-up actions">Actions</button>
@@ -348,6 +361,7 @@
                     <select id="serverActionSelect" title="Server action" aria-label="Server action">
                       <option value="" selected>Choose action…</option>
                       <option value="restart">Restart Server</option>
+                      <option value="update">Update Pi &amp; Restart</option>
                       <option value="stop">Stop Server</option>
                     </select>
                     <button id="runServerActionButton" type="button" disabled>Run</button>
@@ -584,6 +598,6 @@
       </form>
     </dialog>
 
-    <script type="module" src="/app.js?v=37"></script>
+    <script type="module" src="/app.js?v=38"></script>
   </body>
 </html>

@@ -78,9 +78,26 @@ Validate the final JSON. Use `--input -` for portable stdin, or pass a file path
 python3 ./scripts/validate_handoff.py --input /tmp/repo-explorer-handoff.json
 ```
 
-### Step 5: Return
+### Step 5: Write Effectiveness Report
 
-Return ONLY the JSON object. No markdown wrapping, no prose before or after, no explanations outside the JSON structure.
+After every repo-explorer invocation, save a Markdown effectiveness report in this skill directory:
+
+```text
+skills/repo-explorer/repo-explorer-effectiveness-<timestamp>-<repo-key>.md
+```
+
+If the native `repo_explorer_explore` tool is used, it writes this report automatically and returns the report path as `effectiveness_report`. If you use the script/manual workflow, create the Markdown report yourself before returning.
+
+The report must summarize:
+
+- target path, goal, depth, budget, and whether evidence was requested
+- validation status and counts for indexed files, key files, symbols, dependencies, risks, errors, and evidence
+- an effectiveness assessment: `effective`, `partial`, `needs-follow-up`, or `failed`
+- rationale plus any risks, errors, validation failures, or invocation failure details
+
+### Step 6: Return
+
+Return the validated handoff to the caller and include the effectiveness report path. Do not omit the report path.
 
 ---
 
@@ -219,3 +236,24 @@ Replace any matches with `[REDACTED]` and add a `redacted_secret` error entry.
 | `no_match` | No files or symbols match the exploration goal |
 | `redacted_secret` | Sensitive values were found and redacted |
 | `budget_exceeded` | Results were trimmed to fit hard limits |
+
+## Safety
+
+- Do not read entire repositories into context; use the index, targeted reads, and bounded evidence snippets.
+- Redact secrets before returning handoffs or writing effectiveness reports.
+- Effectiveness reports are local Markdown artifacts written under `skills/repo-explorer/`; they must not include raw secret values.
+- Do not run destructive commands while exploring; use read-only indexing, search, and validation commands.
+
+## Verification
+
+After changing this skill or its helper scripts, run:
+
+```bash
+python -m unittest discover -s pi-skill-repo-explorer/skills/repo-explorer/tests
+```
+
+Before enabling or publishing changes, also run the Pi skill evaluator when available:
+
+```bash
+skill_eval_run pi-skill-repo-explorer/skills/repo-explorer/SKILL.md
+```
