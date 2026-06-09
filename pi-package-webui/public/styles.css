@@ -5564,14 +5564,21 @@ button.composer-skill-tag:focus-visible {
   }
   .terminal-tab { min-width: min(11rem, 100%); max-width: 100%; flex: 1 1 9rem; }
   .terminal-tab-group {
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: stretch;
   }
   .terminal-tab-group:hover,
   .terminal-tab-group:focus-within,
   .terminal-tab-group.menu-open {
     flex-basis: 100%;
   }
+  .terminal-tab-group-button {
+    width: auto;
+    min-width: 0;
+  }
   .terminal-tab-group-menu {
+    grid-column: 1 / -1;
     position: static;
     flex-direction: column;
     flex-wrap: nowrap;
@@ -5579,7 +5586,7 @@ button.composer-skill-tag:focus-visible {
     max-width: none;
     max-height: none;
     min-width: 0;
-    margin: 0.34rem;
+    margin: 0.34rem 0 0;
     padding-top: 0;
     overflow: visible;
   }
@@ -5853,6 +5860,7 @@ button.composer-skill-tag:focus-visible {
   .composer {
     position: sticky;
     bottom: 0;
+    z-index: 50;
     padding: 0.55rem 0.55rem calc(0.55rem + env(safe-area-inset-bottom));
     background: linear-gradient(180deg, rgba(var(--ctp-crust-rgb), 0.92), rgba(var(--ctp-crust-rgb), 0.98));
     box-shadow: 0 -0.85rem 1.8rem rgba(var(--ctp-crust-rgb), 0.56), inset 0 1px 0 rgba(255,255,255,0.04);
@@ -5916,12 +5924,12 @@ button.composer-skill-tag:focus-visible {
     left: 0.55rem;
     right: 0.55rem;
     bottom: calc(100% + 0.42rem);
-    z-index: 8;
+    z-index: 55;
     display: none;
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 0.45rem;
     max-height: min(42dvh, 22rem);
-    overflow: auto;
+    overflow: visible;
     padding: 0.68rem;
     border: 1px solid rgba(249, 226, 175, 0.24);
     border-radius: 0.95rem;
@@ -5954,8 +5962,17 @@ button.composer-skill-tag:focus-visible {
     font-size: 0.92rem;
   }
   body:not(.pi-run-active):not(.mobile-keyboard-open) .composer-row button.primary { grid-column: span 4; }
-  body.pi-run-active:not(.mobile-keyboard-open) .composer-abort-button:not([hidden]) { grid-column: span 2; }
-  body.pi-run-active:not(.mobile-keyboard-open) .composer-row button.primary { grid-column: span 4; }
+  body.pi-run-active:not(.mobile-keyboard-open) .composer-abort-button:not([hidden]) {
+    order: 1;
+    grid-column: span 2;
+  }
+  body.pi-run-active:not(.mobile-keyboard-open) .composer-row > #steerButton { order: 2; }
+  body.pi-run-active:not(.mobile-keyboard-open) .composer-row > #followUpButton { order: 3; }
+  body.pi-run-active:not(.mobile-keyboard-open) .composer-actions-button { order: 4; }
+  body.pi-run-active:not(.mobile-keyboard-open) .composer-row button.primary {
+    order: 5;
+    grid-column: span 4;
+  }
   .composer-row > #followUpButton,
   .composer-row > #steerButton,
   .composer-actions-button { grid-column: span 2; }
@@ -5969,31 +5986,49 @@ button.composer-skill-tag:focus-visible {
     width: 100%;
     margin-right: 0;
   }
+  .composer-actions-panel > .composer-publish-menu::after {
+    content: "";
+    position: absolute;
+    left: -0.32rem;
+    right: -0.32rem;
+    bottom: 100%;
+    display: none;
+    height: 0.8rem;
+    pointer-events: auto;
+  }
+  .composer-actions-panel > .composer-publish-menu:hover::after,
+  .composer-actions-panel > .composer-publish-menu:focus-within::after,
+  .composer-actions-panel > .composer-publish-menu.open::after {
+    display: block;
+  }
   .composer-actions-panel > .composer-publish-menu.open {
-    display: grid;
-    grid-column: 1 / -1;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0.42rem;
+    z-index: 120;
   }
-  .composer-actions-panel > .composer-publish-menu.open .composer-publish-button,
-  .composer-actions-panel > .composer-publish-menu .composer-publish-menu-panel {
-    grid-column: 1 / -1;
+  .composer-actions-panel > .composer-publish-menu.open .composer-publish-button {
+    min-width: 0;
   }
   .composer-actions-panel > .composer-publish-menu .composer-publish-menu-panel {
-    position: static;
+    position: absolute;
+    inset: auto auto calc(100% + 0.38rem) 0;
     flex-direction: column;
     width: 100%;
     min-width: 0;
     max-width: 100%;
-    max-height: none;
-    margin-left: 0;
+    max-height: min(34dvh, 18rem);
+    margin: 0;
     padding-bottom: 0;
-    overflow: visible;
+    overflow: auto;
+  }
+  .composer-actions-panel > .composer-options-menu .composer-publish-menu-panel {
+    inset-inline: auto 0;
+    max-height: min(76dvh, 34rem);
   }
   .composer-actions-panel > .composer-publish-menu .composer-publish-menu-item {
     width: 100%;
+    min-width: 0;
     max-width: 100%;
-    flex: 1 1 0;
+    flex: 1 1 auto;
+    white-space: normal;
   }
   .command-suggest {
     max-height: 35dvh;
