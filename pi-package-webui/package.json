@@ -20,7 +20,7 @@
     "extension"
   ],
   "pi": {
-    "image": "https://unpkg.com/@firstpick/pi-package-webui/images/Main_Window_v0.1.7.png",
+    "image": "https://unpkg.com/@firstpick/pi-package-webui/images/WebUI_v0.3.7.png",
     "extensions": [
       "./index.ts",
       "../pi-extension-git-footer-status/index.ts",

@@ -2,7 +2,7 @@
 
 Local browser UI for [Pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent).
 
-![Pi Web UI main window showing multi-tab chat, controls, theme picker, and local status](https://unpkg.com/@firstpick/pi-package-webui/images/Main_Window_v0.1.7.png)
+![Pi Web UI main window showing multi-tab chat, controls, theme picker, and local status](https://unpkg.com/@firstpick/pi-package-webui/images/WebUI_v0.3.7.png)
 
 Pi Web UI gives you a local browser companion for Pi: multi-tab chat, streaming output, model controls, uploads, slash-command helpers, workspace navigation, and optional extension widgets.
 
