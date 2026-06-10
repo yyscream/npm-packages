@@ -13,6 +13,15 @@ import {
 } from "@firstpick/pi-utils";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
+type GitChangeKind = "staged" | "modified" | "untracked" | "conflicted";
+
+type GitChangedFile = {
+  kind: GitChangeKind;
+  path: string;
+  oldPath?: string;
+  status: string;
+};
+
 type GitSnapshot = {
   branch: string;
   isDetached: boolean;
@@ -22,6 +31,7 @@ type GitSnapshot = {
   unstaged: number;
   untracked: number;
   conflicted: number;
+  changedFiles: GitChangedFile[];
   operation?: string;
   stashCount: number;
   submoduleDirty: number;
@@ -40,6 +50,7 @@ type SigningDiagnostics = {
 
 const LIVE_TOKEN_SPEED_ROLLING_WINDOW_MS = 2000;
 const GIT_AUTO_REFRESH_INTERVAL_MS = 2000;
+const GIT_CHANGED_FILES_LIMIT = 80;
 const WEBUI_FOOTER_STATUS_KEY = "git-footer-webui";
 const GIT_FOOTER_STATUS_KEY = "git-footer";
 const WEBUI_FOOTER_PAYLOAD_TYPE = "firstpick.git-footer-status.footer";
@@ -99,6 +110,8 @@ type FooterTelemetry = {
   usingSubscription: boolean;
 };
 
+type WebuiFooterChangedFile = GitChangedFile;
+
 type WebuiFooterChip = {
   key: string;
   label: string;
@@ -106,6 +119,7 @@ type WebuiFooterChip = {
   icon?: string;
   tone?: "pink" | "blue" | "mauve" | "yellow" | "green" | "teal";
   title?: string;
+  files?: WebuiFooterChangedFile[];
   contextUsage?: {
     percent: number | null;
     contextWindow: number;
@@ -238,6 +252,37 @@ async function detectGitOperation(pi: ExtensionAPI, cwd: string): Promise<string
   return undefined;
 }
 
+function splitPorcelainFields(line: string, fieldCount: number): string[] {
+  const fields: string[] = [];
+  let start = 0;
+  for (let index = 0; index < fieldCount - 1; index++) {
+    const next = line.indexOf(" ", start);
+    if (next === -1) break;
+    fields.push(line.slice(start, next));
+    start = next + 1;
+  }
+  fields.push(line.slice(start));
+  return fields;
+}
+
+function parsePorcelainPathField(value: string): { path: string; oldPath?: string } {
+  const [path = "", oldPath] = value.split("\t");
+  return oldPath ? { path, oldPath } : { path };
+}
+
+function addChangedFile(files: GitChangedFile[], kind: GitChangeKind, path: string, status: string, oldPath?: string) {
+  const entry: GitChangedFile = { kind, path, status };
+  if (oldPath) entry.oldPath = oldPath;
+  files.push(entry);
+}
+
+function addTrackedChangedFiles(files: GitChangedFile[], xy: string, path: string, oldPath?: string) {
+  const x = xy[0] ?? ".";
+  const y = xy[1] ?? ".";
+  if (x !== ".") addChangedFile(files, "staged", path, xy, oldPath);
+  if (y !== ".") addChangedFile(files, "modified", path, xy, oldPath);
+}
+
 async function readGitSnapshot(pi: ExtensionAPI, cwd: string): Promise<GitSnapshot | null> {
   const result = await pi
     .exec("git", ["status", "--porcelain=2", "--branch"], { cwd, timeout: 3000 })
@@ -255,6 +300,7 @@ async function readGitSnapshot(pi: ExtensionAPI, cwd: string): Promise<GitSnapsh
   let unstaged = 0;
   let untracked = 0;
   let conflicted = 0;
+  const changedFiles: GitChangedFile[] = [];
 
   for (const line of result.stdout.split(/\r?\n/)) {
     if (!line) continue;
@@ -279,22 +325,42 @@ async function readGitSnapshot(pi: ExtensionAPI, cwd: string): Promise<GitSnapsh
       continue;
     }
 
-    if (line.startsWith("1 ") || line.startsWith("2 ")) {
-      const xy = line.split(" ")[1] ?? "..";
+    if (line.startsWith("1 ")) {
+      const fields = splitPorcelainFields(line, 9);
+      const xy = fields[1] ?? "..";
       const x = xy[0] ?? ".";
       const y = xy[1] ?? ".";
       if (x !== ".") staged++;
       if (y !== ".") unstaged++;
+      const filePath = fields[8] ?? "";
+      if (filePath) addTrackedChangedFiles(changedFiles, xy, filePath);
+      continue;
+    }
+
+    if (line.startsWith("2 ")) {
+      const fields = splitPorcelainFields(line, 10);
+      const xy = fields[1] ?? "..";
+      const x = xy[0] ?? ".";
+      const y = xy[1] ?? ".";
+      if (x !== ".") staged++;
+      if (y !== ".") unstaged++;
+      const parsedPath = parsePorcelainPathField(fields[9] ?? "");
+      if (parsedPath.path) addTrackedChangedFiles(changedFiles, xy, parsedPath.path, parsedPath.oldPath);
       continue;
     }
 
     if (line.startsWith("u ")) {
       conflicted++;
+      const fields = splitPorcelainFields(line, 11);
+      const filePath = fields[10] ?? "";
+      if (filePath) changedFiles.push({ kind: "conflicted", path: filePath, status: fields[1] ?? "UU" });
       continue;
     }
 
     if (line.startsWith("? ")) {
       untracked++;
+      const filePath = line.slice(2);
+      if (filePath) changedFiles.push({ kind: "untracked", path: filePath, status: "??" });
       continue;
     }
   }
@@ -356,6 +422,7 @@ async function readGitSnapshot(pi: ExtensionAPI, cwd: string): Promise<GitSnapsh
     unstaged,
     untracked,
     conflicted,
+    changedFiles: changedFiles.slice(0, GIT_CHANGED_FILES_LIMIT),
     operation,
     stashCount,
     submoduleDirty,
@@ -404,6 +471,7 @@ function gitSnapshotFingerprint(snapshot: GitSnapshot | null): string {
     snapshot.unstaged,
     snapshot.untracked,
     snapshot.conflicted,
+    snapshot.changedFiles.map((file) => `${file.kind}:${file.status}:${file.oldPath ? `${file.oldPath}->` : ""}${file.path}`).join("\u001e"),
     snapshot.operation ?? "",
     snapshot.stashCount,
     snapshot.submoduleDirty,
@@ -525,7 +593,15 @@ function buildWebuiGitMeta(snapshot: GitSnapshot | null): WebuiFooterChip[] {
   ];
   if (state) chips.push({ key: "git-state", label: "state", value: state, title: `git state: ${state}`, tone: "yellow" });
   if (sync) chips.push({ key: "sync", label: "sync", value: sync, title: `git sync: ${sync}`, tone: "blue" });
-  if (changes) chips.push({ key: "changes", label: "changes", value: changes, title: `git changes: ${changes}` });
+  if (changes) {
+    chips.push({
+      key: "changes",
+      label: "changes",
+      value: changes,
+      title: `git changes: ${changes}`,
+      files: snapshot.changedFiles.slice(0, GIT_CHANGED_FILES_LIMIT),
+    });
+  }
   if (extra) {
     chips.push({
       key: "git-extra",

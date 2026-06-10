@@ -305,6 +305,7 @@ let chatUserScrollIntentUntil = 0;
 let mobileFooterExpanded = false;
 let footerModelPickerOpen = false;
 let footerThinkingPickerOpen = false;
+let footerAutoCompactionToggleInFlight = false;
 let publishMenuOpen = false;
 let maxVisualViewportHeight = 0;
 let abortRequestInFlight = false;
@@ -626,20 +627,22 @@ const GIT_WORKFLOW_ACTIVE_INDEX = {
   done: 4,
 };
 const GIT_WORKFLOW_CREATE_PR_TOOLTIP = [
-  "Create PR:",
+  "Create PR branch:",
   "1. Ask Pi to generate a type/feature-name branch from staged changes.",
   "2. Read dev/COMMIT/staged-branch-name.txt.",
   "3. Let you confirm or edit the generated branch name.",
   "4. Run git switch -c <branch>.",
-  "5. Return here so you can choose Commit short or Commit long on that branch.",
+  "5. Return here to commit short or long on that branch.",
+  "6. Push and Create PR will push upstream, run /pr, let you review, then run gh pr create.",
 ].join("\n");
 const GIT_WORKFLOW_MANUAL_BRANCH_TOOLTIP = [
-  "Manual branch:",
+  "Manual PR branch:",
   "1. Skip agent branch-name generation.",
   "2. Prefill a branch from the commit message if possible.",
   "3. Let you type or edit the type/feature-name branch name.",
   "4. Run git switch -c <branch>.",
-  "5. Return here so you can choose Commit short or Commit long on that branch.",
+  "5. Return here to commit short or long on that branch.",
+  "6. Push and Create PR will push upstream, run /pr, let you review, then run gh pr create.",
 ].join("\n");
 
 function make(tag, className, text) {
@@ -4645,11 +4648,15 @@ function footerStatsCostDisplay(stats = latestStats) {
   return `$${Number(stats.cost || 0).toFixed(3)} (${footerCostAuthLabel()})`;
 }
 
+function footerAutoCompactionEnabled(state = currentState) {
+  return state?.autoCompactionEnabled !== false;
+}
+
 function footerContextDisplayWithAuto(value, state = currentState) {
   const text = cleanStatusText(value);
   if (!text) return "";
   const withoutAuto = text.replace(/\s*\(auto\)\s*$/i, "");
-  return state?.autoCompactionEnabled !== false ? `${withoutAuto} (auto)` : withoutAuto;
+  return footerAutoCompactionEnabled(state) ? `${withoutAuto} (auto)` : withoutAuto;
 }
 
 function footerStatsContextDisplay(stats = latestStats) {
@@ -4660,6 +4667,48 @@ function footerStatsContextDisplay(stats = latestStats) {
   const rawPercent = Number(usage?.percent);
   const percent = Number.isFinite(rawPercent) ? `${rawPercent.toFixed(1)}%` : "?";
   return footerContextDisplayWithAuto(`${percent}/${formatFooterTokenCount(contextWindow)}`);
+}
+
+function footerAutoCompactionToggleAction(state = currentState) {
+  return `Click to ${footerAutoCompactionEnabled(state) ? "disable" : "enable"} auto-compaction.`;
+}
+
+async function toggleFooterAutoCompaction(tabContext = activeTabContext()) {
+  if (footerAutoCompactionToggleInFlight || !tabContext.tabId) return;
+  const previousState = currentState;
+  const enabled = !footerAutoCompactionEnabled(previousState);
+  footerAutoCompactionToggleInFlight = true;
+  if (isCurrentTabContext(tabContext) && currentState) {
+    currentState = { ...currentState, autoCompactionEnabled: enabled };
+    renderStatus();
+  }
+  try {
+    await api("/api/auto-compaction", { method: "POST", body: { enabled }, tabId: tabContext.tabId });
+    if (!isCurrentTabContext(tabContext)) return;
+    addEvent(`Auto-compaction ${enabled ? "enabled" : "disabled"}`, "info");
+    try {
+      await refreshState(tabContext);
+    } catch (error) {
+      if (isCurrentTabContext(tabContext)) addEvent(`Auto-compaction updated, but state refresh failed: ${error.message || String(error)}`, "warn");
+    }
+  } catch (error) {
+    if (isCurrentTabContext(tabContext)) {
+      if (previousState) currentState = previousState;
+      addEvent(error.message || String(error), "error");
+      renderStatus();
+    }
+  } finally {
+    footerAutoCompactionToggleInFlight = false;
+    if (isCurrentTabContext(tabContext)) renderStatus();
+  }
+}
+
+function applyGitFooterContextToggleOptions(chip, options) {
+  if (chip?.key !== "context") return "";
+  options.onClick = () => toggleFooterAutoCompaction();
+  options.ariaPressed = footerAutoCompactionEnabled();
+  if (footerAutoCompactionToggleInFlight) options.ariaBusy = true;
+  return footerAutoCompactionToggleInFlight ? "Updating auto-compaction…" : footerAutoCompactionToggleAction();
 }
 
 function fallbackFooterStats() {
@@ -4774,7 +4823,14 @@ function applyFooterTooltip(node, tooltip, options = {}) {
 }
 
 function footerMetric(icon, label, value, tone = "", options = {}) {
-  const node = make("span", `footer-metric ${tone}`.trim());
+  const isAction = typeof options.onClick === "function";
+  const node = make(isAction ? "button" : "span", ["footer-metric", tone, isAction ? "footer-metric-action" : ""].filter(Boolean).join(" "));
+  if (isAction) {
+    node.type = "button";
+    node.addEventListener("click", options.onClick);
+    if (options.ariaPressed !== undefined) node.setAttribute("aria-pressed", options.ariaPressed ? "true" : "false");
+    if (options.ariaBusy) node.setAttribute("aria-busy", "true");
+  }
   node.append(make("span", "footer-metric-icon", icon), make("span", "footer-metric-label", label), make("span", "footer-metric-value", value));
   return applyFooterTooltip(node, options.title || `${label}: ${value}`, { align: options.tooltipAlign });
 }
@@ -4816,16 +4872,26 @@ function applyFooterContextUsage(node, contextUsage) {
 
 function footerMeta(label, value, className = "", options = {}) {
   const isAction = typeof options.onClick === "function";
-  const node = make(isAction ? "button" : "span", `footer-meta ${className}${isAction ? " footer-meta-action" : ""}`.trim());
+  const node = make(isAction ? "button" : "span", ["footer-meta", className, isAction ? "footer-meta-action" : ""].filter(Boolean).join(" "));
   if (isAction) {
     node.type = "button";
     node.addEventListener("click", options.onClick);
+    if (options.ariaPressed !== undefined) node.setAttribute("aria-pressed", options.ariaPressed ? "true" : "false");
+    if (options.ariaBusy) node.setAttribute("aria-busy", "true");
   }
   node.append(make("span", "footer-meta-label", label), make("span", "footer-meta-value", value));
   return applyFooterTooltip(node, options.title || `${label}: ${value}`, { align: options.tooltipAlign });
 }
 
 const FOOTER_PAYLOAD_TONES = new Set(["pink", "blue", "mauve", "yellow", "green", "teal"]);
+const FOOTER_CHANGED_FILE_KINDS = new Set(["modified", "staged", "untracked", "conflicted"]);
+const FOOTER_CHANGED_FILE_KIND_ORDER = ["modified", "staged", "untracked", "conflicted"];
+const FOOTER_CHANGED_FILE_KIND_LABELS = {
+  modified: "Modified",
+  staged: "Staged",
+  untracked: "Untracked",
+  conflicted: "Conflicted",
+};
 const FOOTER_META_CLASS_BY_KEY = new Map([
   ["cwd", "footer-workspace"],
   ["git", "footer-branch"],
@@ -4860,6 +4926,21 @@ function cleanFooterPayloadText(value, fallback = "", maxLength = 240) {
   return text || fallback;
 }
 
+function normalizeFooterPayloadChangedFile(value) {
+  if (!value || typeof value !== "object") return null;
+  const path = cleanFooterPayloadText(value.path, "", 1000);
+  if (!path) return null;
+  const kind = FOOTER_CHANGED_FILE_KINDS.has(value.kind) ? value.kind : "modified";
+  const file = {
+    kind,
+    path,
+    status: cleanFooterPayloadText(value.status, "", 12),
+  };
+  const oldPath = cleanFooterPayloadText(value.oldPath, "", 1000);
+  if (oldPath) file.oldPath = oldPath;
+  return file;
+}
+
 function normalizeFooterPayloadChip(value, index) {
   if (!value || typeof value !== "object") return null;
   const key = cleanFooterPayloadText(value.key, `item-${index}`).replace(/[^a-z0-9_.:-]/gi, "-").slice(0, 64) || `item-${index}`;
@@ -4872,6 +4953,10 @@ function normalizeFooterPayloadChip(value, index) {
     tone: FOOTER_PAYLOAD_TONES.has(value.tone) ? value.tone : "",
     title: cleanFooterPayloadText(value.title, "", 4000),
   };
+  if (Array.isArray(value.files)) {
+    const files = value.files.map(normalizeFooterPayloadChangedFile).filter(Boolean).slice(0, 80);
+    if (files.length) chip.files = files;
+  }
   if (value.contextUsage && typeof value.contextUsage === "object") {
     const percent = typeof value.contextUsage.percent === "number" ? value.contextUsage.percent : Number.NaN;
     const contextWindow = Number(value.contextUsage.contextWindow);
@@ -5034,11 +5119,77 @@ function renderTuiFooterLine({ cwd, cwdTitle, message = "", stats = [], model = 
   return line;
 }
 
-function renderGitFooterPayloadMetric(chip) {
-  const node = footerMetric(chip.icon || "•", chip.label, chip.value, chip.tone ? `tone-${chip.tone}` : "", {
-    title: gitFooterPayloadTooltip(chip),
-    tooltipAlign: gitFooterTooltipAlign(chip),
+function insertChangedFilePathReference(path) {
+  const input = elements.promptInput;
+  if (!input) return;
+  const reference = formatPathReference(path);
+  const start = input.selectionStart ?? input.value.length;
+  const end = input.selectionEnd ?? start;
+  const before = input.value.slice(0, start);
+  const after = input.value.slice(end);
+  const prefix = before && !/\s$/.test(before) ? " " : "";
+  const suffix = after && !/^\s/.test(after) ? " " : "";
+  input.value = `${before}${prefix}${reference}${suffix}${after}`;
+  const cursor = before.length + prefix.length + reference.length + suffix.length;
+  input.setSelectionRange(cursor, cursor);
+  input.focus();
+  resizePromptInput();
+  addEvent(`Added ${reference} to the prompt`, "info");
+}
+
+function changedFileDisplayPath(file) {
+  if (!file?.oldPath) return file?.path || "";
+  return `${file.oldPath} → ${file.path}`;
+}
+
+function renderChangedFileButton(file) {
+  const button = make("button", `footer-changed-file ${file.kind}`.trim());
+  button.type = "button";
+  button.title = `Add ${file.path} as an @ reference`;
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    insertChangedFilePathReference(file.path);
   });
+  button.append(
+    make("span", "footer-changed-file-status", file.status || ""),
+    make("span", "footer-changed-file-path", changedFileDisplayPath(file)),
+  );
+  return button;
+}
+
+function renderChangedFilesGroup(kind, files) {
+  if (!files.length) return null;
+  const group = make("span", "footer-changed-files-group");
+  group.append(make("span", "footer-changed-files-heading", `${FOOTER_CHANGED_FILE_KIND_LABELS[kind] || kind} (${files.length})`));
+  const list = make("span", "footer-changed-files-list");
+  list.append(...files.map(renderChangedFileButton));
+  group.append(list);
+  return group;
+}
+
+function applyFooterChangedFilesDropdown(node, chip) {
+  if (chip?.key !== "changes" || !Array.isArray(chip.files) || chip.files.length === 0) return node;
+  node.classList.add("footer-changes-with-files");
+  node.tabIndex = 0;
+  node.removeAttribute("data-tooltip");
+  node.setAttribute("aria-label", `changes: ${chip.value}. Hover or focus to choose changed files. Click a file to add it as an @ reference.`);
+
+  const popover = make("span", "footer-changed-files-popover");
+  popover.append(make("span", "footer-changed-files-title", "Changed files"));
+  for (const kind of FOOTER_CHANGED_FILE_KIND_ORDER) {
+    const group = renderChangedFilesGroup(kind, chip.files.filter((file) => file.kind === kind));
+    if (group) popover.append(group);
+  }
+  node.append(popover);
+  return node;
+}
+
+function renderGitFooterPayloadMetric(chip) {
+  const options = { tooltipAlign: gitFooterTooltipAlign(chip) };
+  const action = applyGitFooterContextToggleOptions(chip, options);
+  options.title = gitFooterPayloadTooltip(chip, { action });
+  const node = footerMetric(chip.icon || "•", chip.label, chip.value, chip.tone ? `tone-${chip.tone}` : "", options);
   return chip.contextUsage ? applyFooterContextUsage(node, chip.contextUsage) : node;
 }
 
@@ -5055,9 +5206,11 @@ function renderGitFooterPayloadMeta(chip, tab) {
     options.onClick = () => setFooterThinkingPickerOpen(!footerThinkingPickerOpen);
     action = "Click to change thinking effort.";
   }
+  action = applyGitFooterContextToggleOptions(chip, options) || action;
   options.title = gitFooterPayloadTooltip(chip, { action });
   options.tooltipAlign = gitFooterTooltipAlign(chip);
   const node = footerMeta(chip.label, chip.value, footerMetaClassForPayload(chip), options);
+  applyFooterChangedFilesDropdown(node, chip);
   return chip.contextUsage ? applyFooterContextUsage(node, chip.contextUsage) : node;
 }
 
@@ -5881,7 +6034,7 @@ function renderStatus() {
     File: state?.sessionFile || "in-memory",
     Messages: String(state?.messageCount ?? "?"),
     Queue: String(state?.pendingMessageCount ?? 0),
-    "Auto compact": state?.autoCompactionEnabled ? "on" : "off",
+    "Auto compact": footerAutoCompactionEnabled(state) ? "on" : "off",
   };
   for (const [key, value] of Object.entries(details)) {
     elements.stateDetails.append(make("dt", undefined, key), make("dd", undefined, value));

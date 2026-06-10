@@ -1878,6 +1878,7 @@ button.footer-tui-item {
   padding: 0.28rem 0.52rem;
   border-radius: 0.7rem;
 }
+button.footer-metric,
 button.footer-meta {
   appearance: none;
   color: inherit;
@@ -1885,17 +1886,25 @@ button.footer-meta {
   text-align: left;
   cursor: pointer;
 }
+.footer-metric-action,
 .footer-meta-action {
   position: relative;
   border-color: rgba(148, 226, 213, 0.26);
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.045), inset 0 0 0 1px rgba(148, 226, 213, 0.055), 0 0.45rem 1rem rgba(0, 0, 0, 0.10);
   transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
 }
+.footer-metric-action:hover,
+.footer-metric-action:focus-visible,
 .footer-meta-action:hover,
 .footer-meta-action:focus-visible {
   border-color: rgba(166, 227, 161, 0.46);
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.055), 0 0 1rem rgba(166, 227, 161, 0.16);
   outline: none;
+}
+.footer-metric-action[aria-busy="true"],
+.footer-meta-action[aria-busy="true"] {
+  cursor: progress;
+  opacity: 0.9;
 }
 .footer-workspace.footer-meta-action .footer-meta-value {
   color: var(--ctp-green);
@@ -2032,6 +2041,32 @@ button.footer-meta {
   border-color: rgba(249, 226, 175, 0.36);
   background: transparent;
 }
+.footer-changes-with-files {
+  position: relative;
+  cursor: default;
+}
+.footer-changes-with-files:hover,
+.footer-changes-with-files:focus,
+.footer-changes-with-files:focus-within {
+  z-index: 50;
+}
+.footer-changes-with-files:focus-visible {
+  outline: 1px solid rgba(249, 226, 175, 0.48);
+  outline-offset: 2px;
+}
+.footer-changes-with-files::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 100%;
+  display: none;
+  height: 0.62rem;
+}
+.footer-changes-with-files:hover::after,
+.footer-changes-with-files:focus-within::after {
+  display: block;
+}
 .footer-changes .footer-meta-label {
   color: rgba(249, 226, 175, 0.88);
   text-shadow: 0 0 0.52rem rgba(249, 226, 175, 0.20);
@@ -2042,6 +2077,82 @@ button.footer-meta {
   letter-spacing: 0.01em;
   text-shadow: 0 0 0.72rem rgba(249, 226, 175, 0.28);
 }
+.footer-changed-files-popover {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 0.48rem);
+  z-index: 60;
+  display: none;
+  gap: 0.44rem;
+  width: min(32rem, calc(100vw - 2rem));
+  max-height: min(42dvh, 28rem);
+  overflow: auto;
+  padding: 0.68rem;
+  border: 1px solid rgba(249, 226, 175, 0.32);
+  border-radius: 0.85rem;
+  background:
+    radial-gradient(circle at 8% 0%, rgba(249, 226, 175, 0.13), transparent 12rem),
+    linear-gradient(145deg, rgba(var(--ctp-crust-rgb), 0.98), rgba(var(--ctp-base-rgb), 0.96));
+  box-shadow: 0 1rem 2.4rem rgba(var(--ctp-crust-rgb), 0.64), 0 0 1.2rem rgba(249, 226, 175, 0.12), inset 0 1px 0 rgba(255,255,255,0.055);
+}
+.footer-changes-with-files:hover .footer-changed-files-popover,
+.footer-changes-with-files:focus .footer-changed-files-popover,
+.footer-changes-with-files:focus-within .footer-changed-files-popover {
+  display: grid;
+}
+.footer-changed-files-title,
+.footer-changed-files-heading {
+  color: var(--ctp-yellow);
+  font-size: 0.7rem;
+  font-weight: 950;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.footer-changed-files-group {
+  display: grid;
+  gap: 0.28rem;
+}
+.footer-changed-files-list {
+  display: grid;
+  gap: 0.22rem;
+}
+.footer-changed-file {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 0.42rem;
+  width: 100%;
+  padding: 0.34rem 0.45rem;
+  border: 1px solid rgba(180, 190, 254, 0.15);
+  border-radius: 0.52rem;
+  color: rgba(var(--ctp-text-rgb), 0.92);
+  background: rgba(var(--ctp-crust-rgb), 0.42);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.footer-changed-file:hover,
+.footer-changed-file:focus-visible {
+  border-color: rgba(249, 226, 175, 0.44);
+  background: rgba(249, 226, 175, 0.10);
+  outline: none;
+}
+.footer-changed-file-status {
+  color: rgba(var(--ctp-subtext-rgb), 0.72);
+  font-weight: 950;
+}
+.footer-changed-file-path {
+  min-width: 0;
+  overflow: hidden;
+  color: rgba(var(--ctp-text-rgb), 0.94);
+  font-weight: 760;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.footer-changed-file.modified .footer-changed-file-status { color: var(--ctp-yellow); }
+.footer-changed-file.staged .footer-changed-file-status { color: var(--ctp-green); }
+.footer-changed-file.untracked .footer-changed-file-status { color: var(--ctp-blue); }
+.footer-changed-file.conflicted .footer-changed-file-status { color: var(--ctp-red); }
 .footer-git-extra {
   border-color: rgba(137, 180, 250, 0.34);
   background: transparent;
