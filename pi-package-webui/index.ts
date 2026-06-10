@@ -391,14 +391,25 @@ function commandLooksLikeWebui(command: string, options: StartWebuiOptions): boo
   return new RegExp(`(?:^|\\s)--port\\s+${escapedPort}(?:\\s|$)`).test(command);
 }
 
-async function findWebuiPidsByCommand(options: StartWebuiOptions): Promise<number[]> {
-  if (process.platform === "win32") return [];
+async function listProcessCommandLines(): Promise<string> {
+  if (process.platform === "win32") {
+    // tasklist has no command lines; CIM is the reliable way to find pi-webui.mjs --port matches.
+    const result = await runCommand(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", 'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.CommandLine)" }'],
+      5_000,
+    );
+    return result.exitCode === 0 ? result.stdout : "";
+  }
   let result = await runCommand("ps", ["-Ao", "pid=,args="], 1_500);
   if (result.exitCode !== 0) result = await runCommand("ps", ["-eo", "pid=,args="], 1_500);
-  if (result.exitCode !== 0) return [];
+  return result.exitCode === 0 ? result.stdout : "";
+}
 
+async function findWebuiPidsByCommand(options: StartWebuiOptions): Promise<number[]> {
+  const processList = await listProcessCommandLines();
   const pids: number[] = [];
-  for (const line of result.stdout.split(/\r?\n/)) {
+  for (const line of processList.split(/\r?\n/)) {
     const match = line.match(/^\s*(\d+)\s+(.+)$/);
     if (!match) continue;
     const pid = Number.parseInt(match[1], 10);

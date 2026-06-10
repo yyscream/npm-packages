@@ -108,14 +108,28 @@ for (const id of [
   const surface = parity.surfaces.find((item) => item.id === id);
   assert.ok(surface, `P0 foundation surface ${id} should be tracked`);
   assert.equal(surface.priority, "P0", `${id} should remain P0`);
+  assert.equal(surface.webStatus, "implemented", `${id} should be implemented`);
 }
 
 assert.match(server, /WEBUI_TUI_NATIVE_PARITY\.json/, "server should load the native parity matrix file");
-assert.match(server, /function nativeSlashCommandEntries\(matrix = nativeParityMatrix\)/, "server should derive native slash commands from the parity matrix");
-assert.match(server, /const NATIVE_SLASH_COMMANDS = nativeSlashCommandEntries\(\)/, "native slash commands should use the matrix-derived source of truth");
-assert.match(server, /function nativeCommandResponse\(command, data = \{\}\)/, "server should define a centralized native command adapter response helper");
-assert.match(server, /function nativeCommandUnavailable\(command, details = \{\}\)/, "server should define structured unavailable native command output");
-assert.match(server, /default:\n\s+return nativeCommandUnavailable\(parsed\.name\)/, "unsupported native commands should return structured unavailable cards instead of raw HTTP errors");
+assert.match(server, /from "\.\.\/lib\/native-command-adapter\.mjs"/, "server should import the native command adapter module");
+assert.match(server, /from "\.\.\/lib\/trust-boundaries\.mjs"/, "server should import the shared trust-boundaries module");
+assert.match(server, /const NATIVE_SLASH_COMMANDS = nativeSlashCommandEntries\(nativeParityMatrix\)/, "native slash commands should use the matrix-derived source of truth");
+assert.match(server, /const respondNative = \(command, data = \{\}\) => nativeCommandResponse\(command, data, nativeParityMatrix\)/, "server should bind native command responses to the parity matrix");
+assert.match(server, /default:\n\s+return unavailableNative\(parsed\.name\)/, "unsupported native commands should return structured unavailable cards instead of raw HTTP errors");
+assert.match(server, /return nativeCommandBlocked\(parsed\.name, req, nativeParityMatrix/, "guarded native commands should return blocked adapter cards for failed trust checks");
+assert.match(
+  server,
+  /const evaluation = evaluateDispatchTrustGuards\(guardsForNativeCommand\(parsed\.name, nativeParityMatrix\)/,
+  "native command dispatch should evaluate matrix guards for every command, not only sensitive ones",
+);
+assert.doesNotMatch(server, /if \(surface\?\.sensitive\)/, "native command dispatch must not key trust checks on the sensitive flag");
+assert.match(server, /requireLocalhostRoute\(req, url\.pathname\)/, "localhost-only API routes should use the shared trust-boundaries helper");
+assert.match(server, /remoteShellTrustWarning\(req, networkStatus\(\)\.open\)/, "remote bash clients should receive LAN shell trust warnings");
+assert.match(server, /url\.pathname === "\/api\/session-rename" && req\.method === "POST"/, "server should expose POST /api/session-rename for resume metadata rename");
+assert.match(server, /url\.pathname === "\/api\/session-delete" && req\.method === "POST"/, "server should expose localhost-only POST /api/session-delete");
+assert.match(server, /url\.pathname === "\/api\/auth-providers" && req\.method === "GET"/, "server should expose GET /api/auth-providers");
+assert.match(server, /url\.pathname === "\/api\/auth-logout" && req\.method === "POST"/, "server should expose localhost-only POST /api/auth-logout");
 assert.match(server, /url\.pathname === "\/api\/native-parity" && req\.method === "GET"/, "server should expose the native parity matrix for clients/tests");
 assert.match(server, /const NATIVE_DOWNLOAD_TOKEN_TTL_MS = 10 \* 60 \* 1000/, "native downloads should use short-lived tokens");
 assert.match(server, /const WEBUI_HELPER_COMMAND = "webui-helper"/, "server should declare the hidden Web UI RPC helper command");
@@ -136,7 +150,9 @@ assert.match(server, /tab\.rpc\.send\(\{ type: "export_html", outputPath \}\)/, 
 assert.match(server, /registerNativeDownload\(exportedPath/, "no-path /export should return a short-lived browser download token");
 assert.match(server, /copyFile\(sessionFile, targetPath\)/, "explicit .jsonl /export should copy the active session file");
 assert.match(app, /function triggerNativeDownload\(download\)/, "frontend should know how to trigger native command downloads");
-assert.match(app, /response\?\.command === "native_slash_command" && response\.data\?\.download/, "frontend should handle download responses from native commands");
+assert.match(app, /function applyNativeSlashCommandEffects\(response, message, tabContext/, "frontend should apply centralized native slash-command adapter effects");
+assert.match(app, /data\.download && triggerNativeDownload\(data\.download\)/, "frontend should handle download responses from native commands");
+assert.match(app, /for \(const warning of response\.warnings/, "frontend should surface remote bash trust warnings");
 assert.match(server, /case "\/api\/bash": \{[\s\S]*?return \{ type: "bash", command, excludeFromContext: body\.excludeFromContext === true \}/, "server should expose RPC bash with include/exclude context semantics");
 assert.match(server, /case "\/api\/abort-bash":[\s\S]*?return \{ type: "abort_bash" \}/, "server should expose abort_bash for user bash cancellation");
 assert.match(app, /function parseUserBashInput\(message\)[\s\S]*?text\.startsWith\("!!"\)/, "frontend should detect !! bash commands before prompt forwarding");
@@ -166,4 +182,7 @@ assert.match(app, /enqueueUserBashCommand\(parsed, \{ usesPromptInput, targetTab
 assert.match(server, /function sendQueuedBashCommand\(tab, command\)/, "server should serialize user bash commands per tab");
 assert.match(server, /command\.type === "bash"[\s\S]*?await sendQueuedBashCommand\(tab, command\)[\s\S]*?: await tab\.rpc\.send\(command\)/, "generic POST handling should route bash through the FIFO queue");
 assert.ok(pkg.files.includes("WEBUI_TUI_NATIVE_PARITY.json"), "published package should include the native parity matrix");
+assert.ok(pkg.files.includes("lib"), "published package should include shared Web UI foundation modules");
 assert.ok(pkg.files.includes("webui-rpc-helper.mjs"), "published package should include the Web UI RPC helper extension");
+
+console.log("native-parity.test.mjs passed");

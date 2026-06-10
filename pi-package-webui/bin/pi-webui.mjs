@@ -10,6 +10,29 @@ import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { AuthStorage, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { authProvidersPayload, createAuthContext, logoutStoredProvider } from "../lib/auth-actions.mjs";
+import {
+  collectOpenSessionFiles,
+  deleteSessionFile,
+  isSessionPathAllowed,
+  renameSessionMetadata,
+  validateSessionDelete,
+} from "../lib/session-actions.mjs";
+import { sweepStaleTempEntries } from "../lib/temp-artifacts.mjs";
+import {
+  evaluateDispatchTrustGuards,
+  guardsForNativeCommand,
+  isLocalRequest,
+  remoteShellTrustWarning,
+  requireLocalhostRoute,
+} from "../lib/trust-boundaries.mjs";
+import {
+  nativeCommandBlocked,
+  nativeCommandResponse,
+  nativeCommandUnavailable,
+  nativeSlashCommandEntries,
+  parseSlashCommand as parseNativeSlashCommand,
+} from "../lib/native-command-adapter.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -94,6 +117,11 @@ const TREE_SELECTOR_TEXT_LIMIT = 260;
 const NETWORK_REBIND_DELAY_MS = 100;
 const NETWORK_REBIND_FORCE_CLOSE_MS = 750;
 const NATIVE_DOWNLOAD_TOKEN_TTL_MS = 10 * 60 * 1000;
+const UPLOAD_TEMP_ROOT = path.join(tmpdir(), "pi-webui-uploads");
+const NATIVE_EXPORT_TEMP_ROOT = path.join(tmpdir(), "pi-webui-native-exports");
+const UPLOAD_TEMP_TTL_MS = 24 * 60 * 60 * 1000;
+const NATIVE_EXPORT_TEMP_TTL_MS = 60 * 60 * 1000;
+const TEMP_ARTIFACT_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 const AUTO_TAB_TITLE_MAX_LENGTH = 44;
 const AUTO_TAB_TITLE_WORD_LIMIT = 8;
 const AUTO_TAB_TITLE_STOP_WORDS = new Set([
@@ -178,37 +206,19 @@ function isSourceCheckout(root) {
   return normalized.includes("/npm-packages/") && !normalized.includes("/node_modules/");
 }
 
-function nativeParitySurfaces(matrix = nativeParityMatrix) {
-  return Array.isArray(matrix?.surfaces) ? matrix.surfaces : [];
-}
-
-function nativeSlashCommandEntries(matrix = nativeParityMatrix) {
-  return nativeParitySurfaces(matrix)
-    .filter((surface) => surface?.kind === "slash-command")
-    .map((surface) => {
-      const name = String(surface.command?.name || surface.id || "").replace(/^\//, "").trim();
-      return {
-        name,
-        description: String(surface.command?.description || surface.title || `/${name}`),
-        source: "native",
-        location: "Pi",
-        nativeParity: {
-          status: surface.webStatus || "unsupported",
-          priority: surface.priority || "P2",
-          guards: Array.isArray(surface.guards) ? surface.guards : [],
-          sensitive: surface.sensitive === true,
-        },
-      };
-    })
-    .filter((command) => command.name);
-}
-
-const NATIVE_SLASH_COMMANDS = nativeSlashCommandEntries();
+const NATIVE_SLASH_COMMANDS = nativeSlashCommandEntries(nativeParityMatrix);
 const NATIVE_SLASH_COMMAND_NAMES = new Set(NATIVE_SLASH_COMMANDS.map((command) => command.name));
+const respondNative = (command, data = {}) => nativeCommandResponse(command, data, nativeParityMatrix);
+const unavailableNative = (command, details = {}) => nativeCommandUnavailable(command, details, nativeParityMatrix);
+
+function parseSlashCommand(message) {
+  return parseNativeSlashCommand(message, NATIVE_SLASH_COMMAND_NAMES);
+}
 const OPTIONAL_FEATURE_PACKAGES = new Map([
   ["gitWorkflow", "@firstpick/pi-prompts-git-pr"],
   ["releaseNpm", "@firstpick/pi-extension-release-npm"],
   ["releaseAur", "@firstpick/pi-extension-release-aur"],
+  ["safetyGuard", "@firstpick/pi-extension-safety-guard"],
   ["tuiSkillsCommand", "@firstpick/pi-extension-setup-skills"],
   ["todoProgressWidget", "@firstpick/pi-extension-todo-progress"],
   ["tuiToolsCommand", "@firstpick/pi-extension-tools"],
@@ -356,10 +366,6 @@ function isLocalHost(host) {
 
 function formatUrlHost(host) {
   return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
-}
-
-function isLocalAddress(address = "") {
-  return address === "::1" || address.startsWith("127.") || address === "::ffff:127.0.0.1" || address.startsWith("::ffff:127.");
 }
 
 function sanitizeError(error) {
@@ -782,16 +788,6 @@ async function handleActionFeedback(tab, body) {
   const response = await tab.rpc.send(command);
   if (response.success === false) markTabIdle(tab);
   return response;
-}
-
-function parseSlashCommand(message) {
-  const text = String(message || "").trim();
-  if (!text.startsWith("/") || text.includes("\n")) return undefined;
-  const match = text.match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/);
-  if (!match) return undefined;
-  const name = match[1].toLowerCase();
-  if (!NATIVE_SLASH_COMMAND_NAMES.has(name)) return undefined;
-  return { name, args: (match[2] || "").trim(), text };
 }
 
 function truncateTabTitle(title, maxLength = AUTO_TAB_TITLE_MAX_LENGTH) {
@@ -3349,7 +3345,7 @@ async function saveUploadedAttachments(body) {
     });
   }
 
-  const uploadDir = path.join(tmpdir(), "pi-webui-uploads", randomUUID());
+  const uploadDir = path.join(UPLOAD_TEMP_ROOT, randomUUID());
   await mkdir(uploadDir, { recursive: true });
   const saved = [];
   for (const [index, file] of decoded.entries()) {
@@ -4234,7 +4230,7 @@ async function checkLatestNpmPackageStatus(packageName, currentVersion) {
 function updateStatusForRequest(status, req) {
   return {
     ...status,
-    canRunUpdate: isLocalAddress(req?.socket?.remoteAddress),
+    canRunUpdate: isLocalRequest(req),
     updateInProgress: piUpdateInProgress,
   };
 }
@@ -4374,9 +4370,16 @@ async function updateTabCwd(id, cwd) {
   const nextCwd = await resolveCwd(cwd, tab.cwd);
   if (nextCwd === tab.cwd) return { tab, changed: false };
 
+  // Capture the live session before stopping the old RPC so the conversation
+  // survives the cwd restart, mirroring restartTabRpc. Best-effort: a dead RPC
+  // falls back to the last remembered session file.
+  if (tab.rpc?.isRunning()) await safeRpcData(tab, { type: "get_state" }, STATUS_RPC_TIMEOUT_MS);
+  const sessionFile = tabRestorableSessionFile(tab);
+
   const piArgs = buildPiArgsForTab(tab.index, tab.title);
+  if (sessionFile && !options.noSession) piArgs.push("--session", sessionFile);
   const piCommand = await resolvePiCommand(piArgs);
-  const restartingEvent = { type: "webui_tab_restarting", tabId: tab.id, tabTitle: tab.title, cwd: nextCwd };
+  const restartingEvent = { type: "webui_tab_restarting", tabId: tab.id, tabTitle: tab.title, cwd: nextCwd, sessionFile };
   recordEvent(restartingEvent);
   for (const client of tab.sseClients) {
     sendSse(client, restartingEvent);
@@ -4390,15 +4393,16 @@ async function updateTabCwd(id, cwd) {
   oldRpc.stop();
 
   tab.cwd = nextCwd;
-  forgetTabState(tab);
   resetTabActivity(tab);
   clearPendingExtensionUiRequests(tab);
   clearExtensionStatuses(tab);
   const rpc = new PiRpcProcess({ ...piCommand, cwd: tab.cwd });
   attachRpcToTab(tab, rpc);
   rpc.start();
+  // Non-fatal: a failed start surfaces through pi_process_error/exit events.
+  await primeTabRpc(tab).catch(() => {});
 
-  const changedEvent = { type: "webui_cwd_changed", tabId: tab.id, tabTitle: tab.title, cwd: tab.cwd, pid: tab.rpc.child?.pid, tabActivity: tabActivitySnapshot(tab) };
+  const changedEvent = { type: "webui_cwd_changed", tabId: tab.id, tabTitle: tab.title, cwd: tab.cwd, pid: tab.rpc.child?.pid, sessionFile, tabActivity: tabActivitySnapshot(tab) };
   recordEvent(changedEvent);
   for (const client of tab.sseClients) {
     sendSse(client, changedEvent);
@@ -5047,6 +5051,18 @@ function configuredSessionDir() {
   return undefined;
 }
 
+/** Roots that session switch/rename/delete paths must stay inside. */
+function allowedSessionDirs() {
+  const configured = configuredSessionDir();
+  return configured ? [configured] : [path.join(agentDir, "sessions")];
+}
+
+function requireAllowedSessionPath(targetPath) {
+  if (!isSessionPathAllowed(targetPath, allowedSessionDirs())) {
+    throw makeHttpError(403, "sessionPath must stay inside the Pi session directory");
+  }
+}
+
 function requirePersistentSessions() {
   if (options.noSession) throw makeHttpError(400, "Session selectors are unavailable when Web UI was started with --no-session.");
 }
@@ -5215,6 +5231,7 @@ async function switchTabSession(tab, sessionPath) {
   const targetPath = resolveTabPath(tab, sessionPath);
   if (!targetPath) throw makeHttpError(400, "sessionPath is required");
   if (!targetPath.endsWith(".jsonl")) throw makeHttpError(400, "sessionPath must point to a .jsonl session file");
+  requireAllowedSessionPath(targetPath);
   const targetStats = await stat(targetPath).catch(() => null);
   if (!targetStats?.isFile()) throw makeHttpError(404, `Session file not found: ${targetPath}`);
   const manager = SessionManager.open(targetPath, configuredSessionDir());
@@ -5230,6 +5247,51 @@ async function switchTabSession(tab, sessionPath) {
     result: response.data,
     tab: tabMeta(tab),
   });
+}
+
+let authContextCache;
+
+function authContext() {
+  if (!authContextCache) authContextCache = createAuthContext();
+  return authContextCache;
+}
+
+async function renameSessionData(tab, body) {
+  requirePersistentSessions();
+  const sessionPath = resolveTabPath(tab, body.sessionPath || body.path);
+  const result = await renameSessionMetadata(sessionPath, body.name, configuredSessionDir(), { allowedDirs: allowedSessionDirs() });
+  return {
+    message: `Renamed session metadata to: ${result.name}`,
+    ...result,
+  };
+}
+
+async function deleteSessionData(tab, body) {
+  requirePersistentSessions();
+  const state = await currentSessionState(tab).catch(() => tab.lastState || {});
+  const validation = validateSessionDelete(resolveTabPath(tab, body.sessionPath || body.path), {
+    openSessionFiles: collectOpenSessionFiles([...tabs.values()]),
+    currentSessionFile: state.sessionFile || tabRestorableSessionFile(tab),
+    confirmed: body.confirmed === true,
+    allowedDirs: allowedSessionDirs(),
+  });
+  if (!validation.allowed) {
+    throw makeHttpError(validation.reason === "confirmation_required" ? 409 : validation.reason === "outside_session_dir" ? 403 : 400, validation.message);
+  }
+  const deleted = await deleteSessionFile(validation.sessionPath, { allowedDirs: allowedSessionDirs() });
+  return {
+    message: deleted.method === "trash" ? "Session moved to trash." : "Session deleted.",
+    ...deleted,
+  };
+}
+
+function getAuthProvidersData() {
+  return authProvidersPayload(authContext().modelRegistry);
+}
+
+function logoutAuthProviderData(body) {
+  if (body.confirmed !== true) throw makeHttpError(409, "Logout requires explicit confirmation (confirmed: true).");
+  return logoutStoredProvider(authContext().modelRegistry, body.provider || body.providerId);
 }
 
 async function navigateSessionTree(tab, body) {
@@ -5278,9 +5340,8 @@ function nativeExportBaseName(tab, state = {}) {
 }
 
 async function nativeExportTempPath(tab, state = {}, ext = ".html") {
-  const dir = path.join(tmpdir(), "pi-webui-native-exports");
-  await mkdir(dir, { recursive: true });
-  return path.join(dir, `${nativeExportBaseName(tab, state)}-${randomUUID()}${ext}`);
+  await mkdir(NATIVE_EXPORT_TEMP_ROOT, { recursive: true });
+  return path.join(NATIVE_EXPORT_TEMP_ROOT, `${nativeExportBaseName(tab, state)}-${randomUUID()}${ext}`);
 }
 
 function exportTargetExtension(targetPath) {
@@ -5306,22 +5367,24 @@ async function handleNativeExportCommand(tab, args, req) {
       fileName: `${nativeExportBaseName(tab, state)}.html`,
       contentType: MIME_TYPES.get(".html"),
     });
-    return nativeCommandResponse("export", {
+    return respondNative("export", {
       status: "succeeded",
       level: "info",
       message: `Exported current session to HTML.\nDownload: ${download.fileName}\nLink expires: ${download.expiresAt}`,
       download,
       result: response.data,
+      refresh: ["state"],
     });
   }
 
-  if (!isLocalAddress(req?.socket?.remoteAddress)) {
-    return nativeCommandResponse("export", {
-      status: "unavailable",
-      level: "warn",
+  if (!isLocalRequest(req)) {
+    return respondNative("export", {
+      status: "blocked",
+      level: "error",
       reason: "Server-side export paths are only allowed from localhost.",
       safetyRestriction: "Explicit /export paths write files on the server and are blocked for non-local browser clients.",
       message: "Explicit /export paths are only allowed from localhost. Run /export without a path for a browser download, or retry from the local machine.",
+      refresh: [],
     });
   }
 
@@ -5329,12 +5392,13 @@ async function handleNativeExportCommand(tab, args, req) {
   const ext = exportTargetExtension(targetPath);
   if (![".html", ".jsonl"].includes(ext)) throw makeHttpError(400, "Usage: /export [path.html|path.jsonl]");
   if (await exportTargetExists(targetPath)) {
-    return nativeCommandResponse("export", {
+    return respondNative("export", {
       status: "confirmation_required",
       level: "warn",
       reason: `Export target already exists: ${targetPath}`,
       safetyRestriction: "Overwrites require an explicit confirmation flow, which is not available from plain slash-command text yet.",
       message: `Export target already exists and was not overwritten:\n${targetPath}\n\nUse /export without a path for a browser download, or delete/rename the existing file first.`,
+      refresh: [],
     });
   }
 
@@ -5343,12 +5407,13 @@ async function handleNativeExportCommand(tab, args, req) {
   if (ext === ".html") {
     const response = await tab.rpc.send({ type: "export_html", outputPath: targetPath });
     if (response.success === false) return response;
-    return nativeCommandResponse("export", {
+    return respondNative("export", {
       status: "succeeded",
       level: "info",
       message: `Exported current session HTML to server path:\n${response.data?.path || targetPath}`,
       serverPath: response.data?.path || targetPath,
       result: response.data,
+      refresh: ["state"],
     });
   }
 
@@ -5358,12 +5423,13 @@ async function handleNativeExportCommand(tab, args, req) {
   const sourceStats = await stat(sessionFile).catch(() => null);
   if (!sourceStats?.isFile()) throw makeHttpError(404, `Current session file not found: ${sessionFile}`);
   await copyFile(sessionFile, targetPath);
-  return nativeCommandResponse("export", {
+  return respondNative("export", {
     status: "succeeded",
     level: "info",
     message: `Copied current session JSONL to server path:\n${targetPath}`,
     serverPath: targetPath,
     result: { path: targetPath, sourcePath: sessionFile },
+    refresh: ["state"],
   });
 }
 
@@ -5379,70 +5445,68 @@ function webuiHotkeysOutput() {
   ].join("\n");
 }
 
-function nativeParitySurfaceForCommand(name) {
-  return nativeParitySurfaces().find((surface) => surface.kind === "slash-command" && surface.command?.name === name) || null;
-}
-
-function nativeCommandResponse(command, data = {}) {
-  const surface = nativeParitySurfaceForCommand(command);
-  const status = data.status || (surface?.webStatus === "implemented" ? "succeeded" : surface?.webStatus === "degraded" ? "degraded" : "unavailable");
-  const level = data.level || (status === "succeeded" ? "info" : "warn");
-  return rpcSuccess("native_slash_command", {
-    command,
-    status,
-    level,
-    nativeParity: surface ? {
-      webStatus: surface.webStatus,
-      priority: surface.priority,
-      sensitive: surface.sensitive === true,
-      guards: Array.isArray(surface.guards) ? surface.guards : [],
-    } : undefined,
-    ...data,
-  });
-}
-
-function nativeCommandUnavailable(command, details = {}) {
-  const surface = nativeParitySurfaceForCommand(command);
-  const guards = Array.isArray(surface?.guards) ? surface.guards.filter((guard) => guard !== "none") : [];
-  const reason = details.reason || surface?.currentBehavior || "This native Pi TUI command is not implemented in the Web UI yet.";
-  const nextActions = details.nextActions || [
-    surface?.targetBehavior ? `Planned Web UI behavior: ${surface.targetBehavior}` : "Use the Pi TUI for this command until Web UI parity is implemented.",
-  ];
-  return nativeCommandResponse(command, {
-    status: "unavailable",
-    level: "warn",
-    reason,
-    safetyRestriction: details.safetyRestriction || (guards.length ? `Guarded by: ${guards.join(", ")}.` : undefined),
-    nextActions,
-    message: details.message || [`/${command} is not available in the Web UI yet.`, reason, ...nextActions].filter(Boolean).join("\n"),
-  });
-}
-
 async function handleNativeSlashCommand(tab, body, req) {
   const parsed = parseSlashCommand(body.message);
   if (!parsed) return undefined;
 
+  // Dispatch guards come straight from the parity matrix guards array (not the
+  // sensitive flag), so localhost/trusted-context entries cannot drift out of
+  // enforcement; confirmation guards stay handler/browser-specific by design.
+  const evaluation = evaluateDispatchTrustGuards(guardsForNativeCommand(parsed.name, nativeParityMatrix), {
+    isLocal: isLocalRequest(req),
+    confirmed: body.confirmed === true,
+    networkOpen: networkStatus().open,
+  });
+  if (!evaluation.allowed) {
+    return nativeCommandBlocked(parsed.name, req, nativeParityMatrix, {
+      confirmed: body.confirmed === true,
+      networkOpen: networkStatus().open,
+    });
+  }
+
   switch (parsed.name) {
     case "reload": {
       const reloaded = await restartTabRpc(tab, "slash-command");
-      return rpcSuccess("native_slash_command", { command: "reload", tab: tabMeta(reloaded), message: "Reloaded keybindings, extensions, skills, prompts, and themes." });
+      return respondNative("reload", {
+        status: "succeeded",
+        message: "Reloaded keybindings, extensions, skills, prompts, and themes.",
+        tab: tabMeta(reloaded),
+        refresh: ["tabs", "state", "commands"],
+      });
     }
     case "new": {
       const response = await tab.rpc.send({ type: "new_session" });
       if (response.success === false) return response;
       tab.conversationStarted = false;
-      return rpcSuccess("native_slash_command", { command: "new", tab: tabMeta(tab), message: "Started a new session.", result: response.data });
+      return respondNative("new", {
+        status: "succeeded",
+        message: "Started a new session.",
+        tab: tabMeta(tab),
+        result: response.data,
+        refresh: ["tabs", "state"],
+      });
     }
     case "compact": {
       const response = await tab.rpc.send(parsed.args ? { type: "compact", customInstructions: parsed.args } : { type: "compact" });
-      return response.success === false ? response : rpcSuccess("native_slash_command", { command: "compact", message: "Compaction finished.", result: response.data });
+      if (response.success === false) return response;
+      return respondNative("compact", {
+        status: "succeeded",
+        message: "Compaction finished.",
+        result: response.data,
+        refresh: ["state"],
+      });
     }
     case "name": {
       if (!parsed.args) throw makeHttpError(400, "Usage: /name <session name>");
       const response = await tab.rpc.send({ type: "set_session_name", name: parsed.args });
       if (response.success === false) return response;
       renameTab(tab, parsed.args, { source: "explicit" });
-      return rpcSuccess("native_slash_command", { command: "name", tab: tabMeta(tab), message: `Session and tab name set to: ${tab.title}` });
+      return respondNative("name", {
+        status: "succeeded",
+        message: `Session and tab name set to: ${tab.title}`,
+        tab: tabMeta(tab),
+        refresh: ["tabs"],
+      });
     }
     case "session": {
       const [state, stats] = await Promise.all([
@@ -5450,7 +5514,11 @@ async function handleNativeSlashCommand(tab, body, req) {
         tab.rpc.send({ type: "get_session_stats" }).catch((error) => ({ success: false, error: sanitizeError(error) })),
       ]);
       if (state.success === false) return state;
-      return rpcSuccess("native_slash_command", { command: "session", message: formatSessionOutput(tab, state.data || {}, stats.success === false ? null : stats.data) });
+      return respondNative("session", {
+        status: "succeeded",
+        message: formatSessionOutput(tab, state.data || {}, stats.success === false ? null : stats.data),
+        refresh: ["state"],
+      });
     }
     case "export": {
       return handleNativeExportCommand(tab, parsed.args, req);
@@ -5460,17 +5528,32 @@ async function handleNativeSlashCommand(tab, body, req) {
       if (response.success === false) return response;
       const text = String(response.data?.text || "");
       if (!text.trim()) throw makeHttpError(400, "No assistant message to copy.");
-      return rpcSuccess("native_slash_command", { command: "copy", message: "Copied the last assistant message.", copyText: text });
+      return respondNative("copy", {
+        status: "succeeded",
+        message: "Copied the last assistant message.",
+        copyText: text,
+        refresh: [],
+      });
     }
     case "hotkeys": {
-      return rpcSuccess("native_slash_command", { command: "hotkeys", message: webuiHotkeysOutput() });
+      return respondNative("hotkeys", {
+        status: "degraded",
+        message: webuiHotkeysOutput(),
+        refresh: [],
+      });
     }
     case "clone": {
       const response = await runCloneCommand(tab);
-      return response.success === false ? response : rpcSuccess("native_slash_command", { command: "clone", message: response.data?.message || "Cloned the current session.", result: response.data?.result });
+      if (response.success === false) return response;
+      return respondNative("clone", {
+        status: "succeeded",
+        message: response.data?.message || "Cloned the current session.",
+        result: response.data?.result,
+        refresh: ["tabs", "state"],
+      });
     }
     default:
-      return nativeCommandUnavailable(parsed.name);
+      return unavailableNative(parsed.name);
   }
 }
 
@@ -5960,7 +6043,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/network/open" && req.method === "POST") {
-      if (!isLocalAddress(req.socket.remoteAddress)) throw makeHttpError(403, "Opening to the network is only allowed from localhost");
+      requireLocalhostRoute(req, url.pathname);
       const before = networkStatus();
       const shouldOpen = !before.open && !networkRebindInProgress;
       sendJson(res, 202, { ok: true, data: { ...before, opening: shouldOpen || before.opening, closing: before.closing } }, { connection: "close" });
@@ -5971,6 +6054,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/network/close" && req.method === "POST") {
+      requireLocalhostRoute(req, url.pathname);
       const before = networkStatus();
       const shouldClose = before.open && !networkRebindInProgress;
       sendJson(res, 202, { ok: true, data: { ...before, opening: before.opening, closing: shouldClose || before.closing } }, { connection: "close" });
@@ -5981,7 +6065,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/restart" && req.method === "POST") {
-      if (!isLocalAddress(req.socket.remoteAddress)) throw makeHttpError(403, "Restart is only allowed from localhost");
+      requireLocalhostRoute(req, url.pathname);
       const restorableTabs = await restorableTabsForRestart();
       const child = spawnRestartServer(restorableTabs);
       sendJson(res, 200, { ok: true, message: "Pi Web UI restarting", webuiPid: process.pid, nextWebuiPid: child.pid, restorableTabCount: restorableTabs.length });
@@ -5990,7 +6074,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/update" && req.method === "POST") {
-      if (!isLocalAddress(req.socket.remoteAddress)) throw makeHttpError(403, "Updating Pi from the Web UI is only allowed from localhost");
+      requireLocalhostRoute(req, url.pathname);
       const data = await runPiUpdateAndPrepareRestart();
       sendJson(res, 200, { ok: true, data });
       setTimeout(() => shutdown("api update"), 20).unref();
@@ -5998,7 +6082,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/shutdown" && req.method === "POST") {
-      if (!isLocalAddress(req.socket.remoteAddress)) throw makeHttpError(403, "Shutdown is only allowed from localhost");
+      requireLocalhostRoute(req, url.pathname);
       sendJson(res, 200, { ok: true, message: "Pi Web UI shutting down", webuiPid: process.pid });
       setTimeout(() => shutdown("api shutdown"), 20).unref();
       return;
@@ -6167,6 +6251,33 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === "/api/session-rename" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const tab = getRequestedTab(req, url, body);
+      sendJson(res, 200, { ok: true, data: await renameSessionData(tab, body), tab: tabMeta(tab) });
+      return;
+    }
+
+    if (url.pathname === "/api/session-delete" && req.method === "POST") {
+      requireLocalhostRoute(req, url.pathname);
+      const body = await readJsonBody(req);
+      const tab = getRequestedTab(req, url, body);
+      sendJson(res, 200, { ok: true, data: await deleteSessionData(tab, body), tab: tabMeta(tab) });
+      return;
+    }
+
+    if (url.pathname === "/api/auth-providers" && req.method === "GET") {
+      sendJson(res, 200, { ok: true, data: getAuthProvidersData() });
+      return;
+    }
+
+    if (url.pathname === "/api/auth-logout" && req.method === "POST") {
+      requireLocalhostRoute(req, url.pathname);
+      const body = await readJsonBody(req);
+      sendJson(res, 200, { ok: true, data: logoutAuthProviderData(body) });
+      return;
+    }
+
     if (url.pathname === "/api/tree-navigate" && req.method === "POST") {
       const body = await readJsonBody(req);
       const tab = getRequestedTab(req, url, body);
@@ -6176,7 +6287,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/optional-feature-install" && req.method === "POST") {
-      if (!isLocalAddress(req.socket.remoteAddress)) throw makeHttpError(403, "Installing optional Web UI features is only allowed from localhost");
+      requireLocalhostRoute(req, url.pathname);
       const body = await readJsonBody(req);
       const data = await installOptionalFeaturePackage(String(body.featureId || ""));
       sendJson(res, 200, { ok: true, data });
@@ -6216,7 +6327,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/skill-file" && req.method === "POST") {
-      if (!isLocalAddress(req.socket.remoteAddress)) throw makeHttpError(403, "Saving skill files is only allowed from localhost");
+      requireLocalhostRoute(req, url.pathname);
       const body = await readJsonBody(req, { limitBytes: SKILL_FILE_BODY_LIMIT_BYTES });
       const tab = getRequestedTab(req, url, body);
       sendJson(res, 200, { ok: true, data: await saveSkillFileData(tab, body) });
@@ -6367,11 +6478,15 @@ const server = createServer(async (req, res) => {
           maybeNameTabForConversation(tab, command);
           markTabWorking(tab);
         }
-        const response = command.type === "set_thinking_level"
+        let response = command.type === "set_thinking_level"
           ? await setThinkingLevelForTab(tab, command.level)
           : command.type === "bash"
             ? await sendQueuedBashCommand(tab, command)
             : await tab.rpc.send(command);
+        if (command.type === "bash" && response.success !== false) {
+          const trustWarning = remoteShellTrustWarning(req, networkStatus().open);
+          if (trustWarning) response = { ...response, warnings: [trustWarning] };
+        }
         if (response.success === false && startsVisibleWork) markTabIdle(tab);
         if (response.success !== false && command.type === "new_session") {
           tab.conversationStarted = false;
@@ -6405,6 +6520,14 @@ server.on("error", (error) => {
   }
   process.exit(1);
 });
+
+function sweepWebuiTempArtifacts() {
+  sweepStaleTempEntries(UPLOAD_TEMP_ROOT, { ttlMs: UPLOAD_TEMP_TTL_MS }).catch(() => {});
+  sweepStaleTempEntries(NATIVE_EXPORT_TEMP_ROOT, { ttlMs: NATIVE_EXPORT_TEMP_TTL_MS }).catch(() => {});
+}
+
+sweepWebuiTempArtifacts();
+setInterval(sweepWebuiTempArtifacts, TEMP_ARTIFACT_SWEEP_INTERVAL_MS).unref();
 
 server.listen(options.port, currentHost, () => {
   const urlHost = formatUrlHost(currentHost);

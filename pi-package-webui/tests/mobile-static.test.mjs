@@ -27,6 +27,7 @@ const companionDependencies = {
   "@firstpick/pi-extension-git-footer-status": "^0.2.1",
   "@firstpick/pi-extension-release-aur": "^0.1.3",
   "@firstpick/pi-extension-release-npm": "^0.3.3",
+  "@firstpick/pi-extension-safety-guard": "^0.2.3",
   "@firstpick/pi-extension-setup-skills": "^0.1.5",
   "@firstpick/pi-extension-stats": "^0.2.0",
   "@firstpick/pi-extension-todo-progress": "^0.1.7",
@@ -533,7 +534,7 @@ assert.match(app, /function footerStatsCostDisplay\(stats = latestStats\)[\s\S]*
 assert.doesNotMatch(app, /Git footer status disabled/, "disabled git footer should show only the minimal footer metadata");
 assert.doesNotMatch(app, /footerMeta\("runtime"/, "minimal Web UI footer should not render runtime metadata");
 assert.match(app, /statusEntries\.has\(GIT_FOOTER_WEBUI_STATUS_KEY\)/, "optional feature detection should recognize the git-footer-status Web UI payload");
-assert.match(app, /\/git-footer-refresh --webui-silent/, "Web UI should quietly request the extension-owned footer payload when idle and missing");
+assert.match(app, /message: `\/\$\{refreshCommand\} --webui-silent`/, "Web UI should quietly request the extension-owned footer payload when idle and missing, using the loaded RPC command name");
 assert.match(app, /function requestGitFooterWebuiPayload\(tabContext = activeTabContext\(\), \{ force = false \} = \{\}\)[\s\S]*?!force && statusEntries\.has\(GIT_FOOTER_WEBUI_STATUS_KEY\)/, "git footer payload refresh should support forced refresh even when a live payload already exists");
 assert.doesNotMatch(app, /function requestGitFooterWebuiPayload\([\s\S]*?statusEntries\.delete\(GIT_FOOTER_WEBUI_STATUS_KEY\)/, "forced git footer refreshes should keep the existing payload visible while the refresh runs");
 assert.match(app, /function applyOptimisticModelSelection\(model, tabContext = activeTabContext\(\)\)[\s\S]*?currentState = \{ \.\.\.currentState, model: nextModel \}[\s\S]*?renderStatus\(\)[\s\S]*?requestGitFooterWebuiPayload\(tabContext, \{ force: true \}\)/, "model changes should update current state and footer immediately before async refreshes complete");
@@ -557,13 +558,16 @@ assert.match(app, /nativeSkillsButton\.hidden = !isOptionalFeatureEnabled\("tuiS
 assert.match(app, /function renderCommands\(\)/, "side-panel commands should be re-renderable from current optional feature state");
 assert.match(app, /function installOptionalFeature\(featureId\)/, "optional features should expose an install action");
 assert.match(app, /api\("\/api\/optional-feature-install"/, "optional feature install action should call the backend installer endpoint");
+assert.match(app, /id: "safetyGuard"[\s\S]*?@firstpick\/pi-extension-safety-guard/, "optional features should include the safety guard companion");
 assert.match(app, /id: "tuiSkillsCommand"[\s\S]*?@firstpick\/pi-extension-setup-skills/, "optional features should include the TUI skills command companion");
 assert.match(app, /id: "tuiToolsCommand"[\s\S]*?@firstpick\/pi-extension-tools/, "optional features should include the TUI tools command companion");
-assert.match(app, /function updateOptionalFeatureAvailability\(\)[\s\S]*hasAvailableCommand\("git-staged-msg"\)[\s\S]*hasAvailableCommand\("release-npm"\)[\s\S]*hasAvailableCommand\("release-aur"\)[\s\S]*hasLoadedRpcCommand\("skills"\)[\s\S]*hasAvailableCommand\("todo-progress-status"\)[\s\S]*hasLoadedRpcCommand\("tools"\)/, "optional feature detection should call RPC-visible commands directly and distinguish native resource selectors from TUI companions");
+assert.match(app, /function updateOptionalFeatureAvailability\(\)[\s\S]*hasAvailableCommand\("git-staged-msg"\)[\s\S]*hasAvailableCommand\("release-npm"\)[\s\S]*hasAvailableCommand\("release-aur"\)[\s\S]*hasAvailableCommand\("safety-guard"\)[\s\S]*hasLoadedRpcCommand\("skills"\)[\s\S]*hasAvailableCommand\("todo-progress-status"\)[\s\S]*hasLoadedRpcCommand\("tools"\)/, "optional feature detection should call RPC-visible commands directly and distinguish native resource selectors from TUI companions");
+assert.match(app, /function combineIdenticalDuplicateCommands\(commands\)[\s\S]*duplicateGroups[\s\S]*duplicateCount: group\.length/, "identical duplicate RPC commands should be combined into one visible command entry");
+assert.match(app, /if \(kind === "prompt" && attachments\.length === 0\) message = resolveRpcSlashCommandMessage\(message\)/, "manual slash prompts should resolve combined duplicate command aliases before reaching Pi RPC");
 assert.match(app, /if \(!isOptionalFeatureEnabled\("todoProgressWidget"\)\) return String\(text \|\| ""\)/, "todo progress line stripping should only run when the todo feature is detected and enabled");
 assert.match(app, /const releasePrompt = detectedReleasePrompt && isOptionalFeatureEnabled\(detectedReleasePrompt\.featureId\) \? detectedReleasePrompt : null/, "release confirmation dialogs should use specialized rendering only when their release optional feature is enabled");
 assert.match(app, /case "webui_tab_reloaded":[\s\S]*resetOptionalFeatureAvailability\(\)/, "optional feature state should reset when the RPC tab reloads resources");
-assert.match(app, /function runPublishWorkflow\(command\)[\s\S]*hasAvailableCommand\(commandName\)/, "publish workflow launch should guard on loaded slash commands");
+assert.match(app, /function runPublishWorkflow\(command\)[\s\S]*resolveAvailableCommandName\(commandName, \{ rpcOnly: true \}\)/, "publish workflow launch should guard on loaded slash commands, including duplicate-suffixed RPC command names");
 assert.match(app, /if \(!isOptionalFeatureEnabled\("gitWorkflow"\)\)/, "guided git workflow should guard on enabled /git-staged-msg feature");
 assert.doesNotMatch(html, /gitWorkflowProcessSelect/, "guided git workflow should not expose process selection as a dropdown");
 assert.match(app, /const GIT_WORKFLOW_PROCESSES = \[[\s\S]*value: "stage", label: "Stage"[\s\S]*value: "message", label: "Message"[\s\S]*value: "commit", label: "Commit"[\s\S]*value: "push", label: "Push"/, "guided git workflow should define Stage/Message/Commit/Push process buttons");
@@ -757,7 +761,7 @@ assert.match(app, /busyPromptBehaviorMenu\?\.addEventListener\("click"[\s\S]*cho
 assert.match(app, /setBusyPromptBehavior\(controls\.busyBehavior\.select\.value\)/, "native settings should update the busy prompt behavior tag immediately");
 assert.match(app, /sendPromptFromModeButton\("steer", elements\.steerButton\)/, "Steer should show tooltip instead of silently doing nothing when input is empty");
 assert.match(app, /sendPromptFromModeButton\("follow-up", elements\.followUpButton\)/, "Follow-up should show tooltip instead of silently doing nothing when input is empty");
-assert.match(app, /function runPublishWorkflow\(command\)[\s\S]*?sendPrompt\("prompt", command\)/, "Publish workflows should send slash commands directly without replacing the draft");
+assert.match(app, /function runPublishWorkflow\(command\)[\s\S]*?sendPrompt\("prompt", `\/\$\{resolvedCommandName\}\$\{commandRest\}`\)/, "Publish workflows should send resolved slash commands directly without replacing the draft");
 assert.match(app, /async function runNativeCommandMenu\(command\)[\s\S]*?await handleNativeSlashSelectorCommand\(command\)/, "skills/tools command menu should open native selector dialogs directly");
 assert.match(app, /async function runNativeCommandMenu\(command\)[\s\S]*?sendPrompt\("prompt", command\)/, "generic native command menu should fall back to slash-command prompt execution");
 assert.match(app, /function setOptionsMenuOpen\(open\)/, "Options menu should have explicit open state");
@@ -790,8 +794,11 @@ assert.match(app, /function openNativeSettingsDialog\(\)[\s\S]*?\/api\/steering-
 assert.match(app, /function openNativeNameDialog\(\)[\s\S]*?sendPrompt\("prompt", `\/name \$\{name\}`\)/, "native /name selector should prompt before running the slash command");
 assert.match(app, /function openNativeForkSelector\(\)[\s\S]*?\/api\/fork-messages[\s\S]*?\/api\/fork/, "native /fork selector should pair fork-point loading with the fork action");
 assert.match(app, /function openNativeResumeSelector\(scope = "current"\)[\s\S]*?\/api\/sessions\?scope=\$\{encodeURIComponent\(selectedScope\)\}/, "native /resume selector should list current-cwd or all sessions");
+assert.match(app, /\/api\/session-rename/, "native /resume selector should rename session metadata");
+assert.match(app, /\/api\/session-delete/, "native /resume selector should delete sessions with confirmation");
 assert.match(app, /function openNativeTreeSelector\(\)[\s\S]*?\/api\/session-tree[\s\S]*?\/api\/tree-navigate/, "native /tree selector should list tree entries and navigate through the backend helper");
-assert.match(app, /Provider credential entry is intentionally not implemented in the browser yet/, "native /login should remain a safe non-secret guidance dialog");
+assert.match(app, /async function openNativeAuthSelector\(mode\)[\s\S]*?\/api\/auth-providers[\s\S]*?Browser login is not implemented yet/, "native /login should list provider status without browser credential entry");
+assert.match(app, /\/api\/auth-logout[\s\S]*?confirmed: true/, "native /logout should remove stored credentials through a confirmed localhost-only endpoint");
 assert.match(app, /const HIDDEN_COMMAND_NAMES = new Set\(\["webui-tree-navigate", "webui-helper"\]\)/, "internal Web UI helper commands should stay out of command pickers");
 assert.match(app, /function shouldSendPromptFromEnter\(event\)/, "prompt keyboard handling should be centralized");
 assert.match(app, /const PROMPT_HISTORY_STORAGE_KEY = "pi-webui-prompt-history"/, "prompt history should be persisted per browser for keyboard recall");
@@ -905,8 +912,8 @@ assert.match(app, /bindMobileViewChanges\(/, "side panel state should react to m
 assert.match(app, /function restoreSidePanelState\(\) \{\n\s+if \(isSidePanelOverlayView\(\)\)/, "mobile and narrow overlay layouts should start with side panel collapsed even if desktop state was expanded");
 assert.match(app, /case "webui_tab_reloaded":/, "frontend should handle native /reload tab restart events");
 assert.match(app, /addTransientMessage\(\{ role: "native", title: "\/reload"/, "native /reload should produce visible transcript output");
-assert.match(app, /await copyText\(response\.data\.copyText\)/, "native /copy should use the shared browser clipboard helper when available");
-assert.match(app, /Clipboard access failed:[\s\S]*?response\.data\.copyText/, "native /copy should show text in transcript when clipboard access fails");
+assert.match(app, /copyText\(data\.copyText\)\.catch/, "native /copy should use the shared browser clipboard helper when available");
+assert.match(app, /Clipboard access failed:[\s\S]*?data\.copyText/, "native /copy should show text in transcript when clipboard access fails");
 assert.match(app, /setTimeout\(\(\) => \{[\s\S]*?refreshAll\(tabContext\)\.catch/, "frontend should refresh state after native /reload restarts the RPC process");
 assert.match(app, /api\("\/api\/path-fast-picks"/, "frontend should load/save fast picks through the server API");
 assert.match(app, /loadLegacyFastPicks\(/, "frontend should migrate existing browser-local fast picks");
@@ -916,7 +923,9 @@ assert.equal(manifest.start_url, "/", "PWA manifest should start at the web UI r
 assert.ok(manifest.icons?.some((icon) => icon.src === "/apple-touch-icon.png" && icon.sizes === "180x180"), "PWA manifest should include a conventional 180px apple touch icon");
 assert.ok(manifest.icons?.some((icon) => icon.src === "/icon-192.png" && icon.sizes === "192x192"), "PWA manifest should include a 192px icon");
 assert.ok(manifest.icons?.some((icon) => icon.src === "/icon-512.png" && icon.sizes === "512x512"), "PWA manifest should include a 512px icon");
-assert.match(serviceWorker, /const CACHE_NAME = "pi-webui-pwa-v25"/, "PWA service worker should define an app-shell cache");
+assert.match(serviceWorker, /const CACHE_NAME = "pi-webui-pwa-v\d+"/, "PWA service worker should define a versioned app-shell cache");
+assert.match(serviceWorker, /fetchThenCache\(request\)\.catch\(/, "PWA service worker should serve the app shell network-first with offline cache fallback");
+assert.match(serviceWorker, /ignoreSearch: true/, "PWA service worker offline fallback should ignore ?v= cache busters");
 assert.match(serviceWorker, /self\.addEventListener\("notificationclick"/, "PWA service worker should focus Web UI when blocked-tab notifications are clicked");
 assert.match(serviceWorker, /event\.notification\.data\?\.url/, "blocked-tab notifications should carry a URL for service-worker click handling");
 assert.match(serviceWorker, /"\/apple-touch-icon\.png"/, "PWA service worker should cache the apple touch icon");
@@ -933,7 +942,7 @@ assert.match(server, /AuthStorage, SessionManager/, "server should import AuthSt
 assert.match(server, /const CODEX_TOKEN_REFRESH_SKEW_MS = 5 \* 60 \* 1000/, "server should refresh Codex OAuth tokens before they expire");
 assert.match(server, /url\.pathname === "\/api\/codex-usage" && req\.method === "GET"/, "server should expose a sanitized Codex usage endpoint");
 assert.match(server, /OPENAI_CODEX_USAGE_ENDPOINT/, "server should query Codex usage from the backend, not the browser");
-assert.match(server, /const NATIVE_SLASH_COMMANDS = nativeSlashCommandEntries\(\)/, "server should define Pi native slash commands for autocomplete from the parity matrix");
+assert.match(server, /const NATIVE_SLASH_COMMANDS = nativeSlashCommandEntries\(nativeParityMatrix\)/, "server should define Pi native slash commands for autocomplete from the parity matrix");
 assert.match(server, /WEBUI_TUI_NATIVE_PARITY\.json/, "native command descriptions should come from the parity matrix source of truth");
 assert.match(server, /function parseSlashCommand\(message\)/, "server should parse native slash commands before prompt forwarding");
 assert.match(server, /function generatedTabTitleFromPrompt\(message\)/, "server should derive concise automatic tab titles from first prompts");
@@ -1001,6 +1010,9 @@ assert.match(server, /case "copy": \{[\s\S]*?get_last_assistant_text[\s\S]*?copy
 assert.match(server, /case "export": \{[\s\S]*?handleNativeExportCommand\(tab, parsed\.args, req\)/, "native /export should run through the Web UI export helper");
 assert.match(server, /url\.pathname\.startsWith\("\/api\/native-download\/"\) && req\.method === "GET"/, "native /export should expose short-lived opaque download URLs");
 assert.match(app, /function triggerNativeDownload\(download\)/, "frontend should auto-start native command downloads");
+assert.match(app, /function safeHttpUrl\(value/, "frontend should validate server-provided URLs through a shared helper");
+assert.match(app, /const url = safeHttpUrl\(download\?\.url\)/, "native downloads must reject non-http(s) URL schemes");
+assert.match(app, /const href = safeHttpUrl\(url\);/, "network status links must reject non-http(s) URL schemes");
 assert.match(server, /case "\/api\/bash": \{[\s\S]*?type: "bash", command, excludeFromContext: body\.excludeFromContext === true/, "server should expose user bash execution with exclude-from-context support");
 assert.match(server, /case "\/api\/abort-bash":[\s\S]*?type: "abort_bash"/, "server should expose user bash abort");
 assert.match(server, /function sendQueuedBashCommand\(tab, command\)/, "server should serialize user bash through a per-tab FIFO queue");
@@ -1039,6 +1051,7 @@ assert.match(server, /type: "set_follow_up_mode"/, "server should expose follow-
 assert.match(server, /type: "set_auto_compaction"/, "server should expose auto-compaction changes for native /settings");
 assert.match(server, /@firstpick\/pi-themes-bundle/, "server should discover themes from the optional theme package");
 assert.match(server, /const OPTIONAL_FEATURE_PACKAGES = new Map/, "server should whitelist optional feature packages for install actions");
+assert.match(server, /\["safetyGuard", "@firstpick\/pi-extension-safety-guard"\]/, "server should allow installing the safety guard optional feature");
 assert.match(server, /\["tuiSkillsCommand", "@firstpick\/pi-extension-setup-skills"\]/, "server should allow installing the TUI skills optional feature");
 assert.match(server, /\["tuiToolsCommand", "@firstpick\/pi-extension-tools"\]/, "server should allow installing the TUI tools optional feature");
 assert.match(server, /function installOptionalFeaturePackage\(featureId\)/, "server should provide optional feature package installation helper");
@@ -1048,9 +1061,9 @@ assert.match(server, /installRootDeclaresPackage\(.*?@firstpick\/pi-package-webu
 assert.match(server, /if \(webuiDevServer\) return installRoot/, "source-checkout Web UI launches should still use the checkout root for optional feature installs");
 assert.match(server, /Could not determine a safe optional feature install root/, "optional feature installs should fail closed when no declared package root can be found");
 assert.match(server, /url\.pathname === "\/api\/optional-feature-install" && req\.method === "POST"/, "server should expose optional feature install endpoint");
-assert.match(server, /Installing optional Web UI features is only allowed from localhost/, "optional feature install endpoint should be localhost-only");
+assert.match(server, /requireLocalhostRoute\(req, url\.pathname\)/, "optional feature install endpoint should use shared localhost trust policy");
 assert.match(server, /url\.pathname === "\/api\/skill-file" && req\.method === "GET"[\s\S]*?getSkillFileData/, "server should expose GET /api/skill-file for editable skill content");
-assert.match(server, /url\.pathname === "\/api\/skill-file" && req\.method === "POST"[\s\S]*?Saving skill files is only allowed from localhost[\s\S]*?saveSkillFileData/, "server should expose localhost-only POST /api/skill-file for saving skill content");
+assert.match(server, /url\.pathname === "\/api\/skill-file" && req\.method === "POST"[\s\S]*?requireLocalhostRoute\(req, url\.pathname\)[\s\S]*?saveSkillFileData/, "server should expose localhost-only POST /api/skill-file for saving skill content");
 assert.match(server, /function resolveEditableSkillFile\(tab, request = \{\}\)[\s\S]*?path\.basename\(skill\.filePath\) !== "SKILL\.md"/, "skill file API should validate that edits target resolved SKILL.md resources");
 assert.match(server, /function resolveExplicitSkillFilePath\(tab, filePath, requestedName = ""\)[\s\S]*?Skill path must point to \/skills\/<name>\/SKILL\.md[\s\S]*?allowedRoots/, "skill file API should allow exact read SKILL.md paths from trusted Pi skill roots");
 assert.match(server, /Skill path is outside allowed Pi skill locations/, "explicit skill path fallback should reject paths outside Pi skill roots");
@@ -1087,8 +1100,7 @@ assert.match(startScript, /webui_cmd=\(node "\$local_webui_bin"\)/, "start-webui
 assert.match(startScript, /export PI_WEBUI_DEV=1/, "start-webui.sh --dev should mark the Web UI server as dev mode");
 assert.match(startScript, /"\$\{webui_cmd\[@\]\}" --cwd "\$cwd" --host "\$host" --port "\$port" "\$\{pass_args\[@\]\}"/, "start-webui.sh should launch through the selected server command without forwarding --dev");
 
-assert.match(pkg.scripts?.test || "", /node tests\/mobile-static\.test\.mjs/, "package test script should run the mobile static harness");
-assert.match(pkg.scripts?.test || "", /node tests\/native-parity\.test\.mjs/, "package test script should run the native parity harness");
+assert.match(pkg.scripts?.test || "", /node tests\/run-all\.mjs/, "package test script should run every tests/*.test.mjs through the shared runner");
 assert.ok(pkg.files?.includes("start-webui.sh"), "npm package should include the Bash helper launcher");
 assert.ok(pkg.files?.includes("start-webui.ps1"), "npm package should include the PowerShell helper launcher");
 for (const [name, range] of Object.entries(companionDependencies)) {
@@ -1100,6 +1112,7 @@ for (const extensionPath of [
   "../pi-extension-git-footer-status/index.ts",
   "../pi-extension-release-aur/index.ts",
   "../pi-extension-release-npm/index.ts",
+  "../pi-extension-safety-guard/index.ts",
   "../pi-extension-setup-skills/index.ts",
   "../pi-extension-stats/index.ts",
   "../pi-extension-todo-progress/index.ts",
@@ -1107,6 +1120,7 @@ for (const extensionPath of [
   "node_modules/@firstpick/pi-extension-git-footer-status/index.ts",
   "node_modules/@firstpick/pi-extension-release-aur/index.ts",
   "node_modules/@firstpick/pi-extension-release-npm/index.ts",
+  "node_modules/@firstpick/pi-extension-safety-guard/index.ts",
   "node_modules/@firstpick/pi-extension-setup-skills/index.ts",
   "node_modules/@firstpick/pi-extension-stats/index.ts",
   "node_modules/@firstpick/pi-extension-todo-progress/index.ts",
@@ -1121,6 +1135,6 @@ assert.ok(pkg.pi?.prompts?.includes("node_modules/@firstpick/pi-prompts-git-pr/p
 assert.ok(pkg.pi?.themes?.includes("../pi-package-themes-bundle/themes"), "webui Pi manifest should load sibling bundled themes when present");
 assert.ok(pkg.pi?.themes?.includes("node_modules/@firstpick/pi-themes-bundle/themes"), "webui Pi manifest should load nested bundled themes when present");
 assert.ok(pkg.scripts?.check?.includes("node --check public/app.js"), "check script should syntax-check app.js");
-assert.ok(pkg.scripts?.check?.includes("node tests/mobile-static.test.mjs"), "check script should include mobile static assertions");
+assert.ok(pkg.scripts?.check?.includes("node tests/run-all.mjs"), "check script should run the shared test runner");
 
 console.log("mobile static checks passed");
