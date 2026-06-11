@@ -50,6 +50,8 @@ type SigningDiagnostics = {
 
 const LIVE_TOKEN_SPEED_ROLLING_WINDOW_MS = 2000;
 const GIT_AUTO_REFRESH_INTERVAL_MS = 2000;
+const GIT_INITIAL_FETCH_TIMEOUT_MS = 30_000;
+const GIT_FETCH_MESSAGE_MAX_LENGTH = 240;
 const GIT_CHANGED_FILES_LIMIT = 80;
 const WEBUI_FOOTER_STATUS_KEY = "git-footer-webui";
 const GIT_FOOTER_STATUS_KEY = "git-footer";
@@ -89,6 +91,13 @@ type GitStatusItem = {
 type GitStatusSection = {
   key: "branch" | "sync" | "changes" | "extra";
   items: GitStatusItem[];
+};
+
+type GitFetchState = {
+  status: "idle" | "fetching" | "ok" | "error" | "skipped";
+  startedAt?: number;
+  completedAt?: number;
+  message?: string;
 };
 
 type FooterTelemetry = {
@@ -208,6 +217,19 @@ async function runGit(pi: ExtensionAPI, cwd: string, args: string[], timeout = 2
   const result = await pi.exec("git", args, { cwd, timeout }).catch(() => undefined);
   if (!result || result.code !== 0) return undefined;
   return result.stdout.trim();
+}
+
+function compactFetchMessage(value: string): string {
+  const text = value.replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  return text.length > GIT_FETCH_MESSAGE_MAX_LENGTH ? `${text.slice(0, GIT_FETCH_MESSAGE_MAX_LENGTH - 1)}…` : text;
+}
+
+function gitFetchResultMessage(result: { stdout?: string; stderr?: string; code?: number; killed?: boolean }): string {
+  const output = compactFetchMessage([result.stderr, result.stdout].filter(Boolean).join("\n"));
+  if (output) return output;
+  if (result.killed) return "git fetch timed out";
+  return result.code === 0 ? "git fetch completed" : `git fetch failed with exit code ${result.code ?? "unknown"}`;
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -536,12 +558,33 @@ function sectionValue(section: GitStatusSection | undefined): string | undefined
   return section.items.map((item) => item.text).join(" · ");
 }
 
-function webuiChangesValue(snapshot: GitSnapshot): string | undefined {
+function webuiRemoteChangeValue(snapshot: GitSnapshot, fetchState: GitFetchState): string | undefined {
+  if (fetchState.status === "fetching") return "🔄 fetch";
+  if (snapshot.behind > 0) return `⬇️ ${snapshot.behind}`;
+  if (fetchState.status === "error") return "⚠️ fetch";
+  if (fetchState.status === "ok") return "✓ fetch";
+  return undefined;
+}
+
+function gitFetchTitle(fetchState: GitFetchState, snapshot: GitSnapshot): string | undefined {
+  if (fetchState.status === "idle" || fetchState.status === "skipped") return undefined;
+  const parts: string[] = [];
+  if (fetchState.status === "fetching") parts.push("git fetch is running for this tab");
+  else if (fetchState.status === "ok") parts.push("git fetch completed for this tab");
+  else if (fetchState.status === "error") parts.push("git fetch failed for this tab");
+  if (snapshot.behind > 0) parts.push(`${snapshot.behind} remote commit${snapshot.behind === 1 ? "" : "s"} to pull`);
+  if (fetchState.message && !["git fetch", "git fetch completed"].includes(fetchState.message)) parts.push(fetchState.message);
+  return parts.length > 0 ? parts.join("; ") : undefined;
+}
+
+function webuiChangesValue(snapshot: GitSnapshot, fetchState: GitFetchState): string | undefined {
   const parts: string[] = [];
   if (snapshot.staged > 0) parts.push(`🟢 ${snapshot.staged}`);
   if (snapshot.unstaged > 0) parts.push(`✏️ ${snapshot.unstaged}`);
   if (snapshot.untracked > 0) parts.push(`➕ ${snapshot.untracked}`);
   if (snapshot.conflicted > 0) parts.push(`⚠️ ${snapshot.conflicted}`);
+  const remoteChange = webuiRemoteChangeValue(snapshot, fetchState);
+  if (remoteChange) parts.push(remoteChange);
   if (parts.length === 0 && isWorkingTreeClean(snapshot)) parts.push("✅");
   return parts.length > 0 ? parts.join(" · ") : undefined;
 }
@@ -573,13 +616,14 @@ function footerTone(tone: GitStatusTone): WebuiFooterChip["tone"] {
   }
 }
 
-function buildWebuiGitMeta(snapshot: GitSnapshot | null): WebuiFooterChip[] {
+function buildWebuiGitMeta(snapshot: GitSnapshot | null, fetchState: GitFetchState): WebuiFooterChip[] {
   if (!snapshot) return [{ key: "git", label: "git", value: "no repo", title: "git: no repo" }];
 
   const sections = buildGitStatusSections(snapshot);
   const state = sectionValue(sections.find((section) => section.key === "branch"));
   const sync = sectionValue(sections.find((section) => section.key === "sync"));
-  const changes = webuiChangesValue(snapshot);
+  const changes = webuiChangesValue(snapshot, fetchState);
+  const changesFetchTitle = gitFetchTitle(fetchState, snapshot);
   const extraSection = sections.find((section) => section.key === "extra");
   const extra = webuiExtraValue(snapshot);
 
@@ -598,7 +642,7 @@ function buildWebuiGitMeta(snapshot: GitSnapshot | null): WebuiFooterChip[] {
       key: "changes",
       label: "changes",
       value: changes,
-      title: `git changes: ${changes}`,
+      title: [`git changes: ${changes}`, changesFetchTitle].filter(Boolean).join("\n"),
       files: snapshot.changedFiles.slice(0, GIT_CHANGED_FILES_LIMIT),
     });
   }
@@ -658,7 +702,7 @@ function formatPromptEstimateDebugSnapshot(label: string, snapshot: InitialPromp
   ];
 }
 
-function buildWebuiFooterPayload(ctx: ExtensionContext, snapshot: GitSnapshot | null, telemetry: FooterTelemetry): WebuiFooterPayload {
+function buildWebuiFooterPayload(ctx: ExtensionContext, snapshot: GitSnapshot | null, telemetry: FooterTelemetry, fetchState: GitFetchState): WebuiFooterPayload {
   const speed = telemetry.latestTokenSpeed;
   const speedPrefix = telemetry.liveOutputTokens > 0 ? `${footerMetricValue(telemetry.liveOutputTokens)} tok @ ` : "";
   const providerPrefix = telemetry.showModelProvider && telemetry.modelProvider ? `(${telemetry.modelProvider}) ` : "";
@@ -740,7 +784,7 @@ function buildWebuiFooterPayload(ctx: ExtensionContext, snapshot: GitSnapshot | 
         contextWindow: telemetry.contextWindow,
       },
     },
-    ...buildWebuiGitMeta(snapshot),
+    ...buildWebuiGitMeta(snapshot, fetchState),
     {
       key: "model",
       label: "model",
@@ -769,6 +813,9 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
   let footerUsageSnapshot: FooterUsageSnapshot = emptyFooterUsageSnapshot();
   let latestGitSnapshot: GitSnapshot | null = null;
   let latestGitSnapshotFingerprint: string | null = null;
+  let latestGitFetchState: GitFetchState = { status: "idle" };
+  let gitInitialFetchPromise: Promise<void> | null = null;
+  let activeSessionSerial = 0;
   let latestPromptEstimateContext: ExtensionContext | null = null;
   let requestFooterRender: (() => void) | null = null;
   let webuiFooterPublishTimer: ReturnType<typeof setTimeout> | null = null;
@@ -880,7 +927,7 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
 
   const publishWebuiFooter = (ctx: ExtensionContext, snapshot: GitSnapshot | null = latestGitSnapshot) => {
     lastWebuiFooterPublishMs = Date.now();
-    const payload = buildWebuiFooterPayload(ctx, snapshot, buildFooterTelemetry(ctx));
+    const payload = buildWebuiFooterPayload(ctx, snapshot, buildFooterTelemetry(ctx), latestGitFetchState);
     ctx.ui.setStatus(WEBUI_FOOTER_STATUS_KEY, JSON.stringify(payload));
   };
 
@@ -1029,7 +1076,50 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
     gitAutoRefreshTimer.unref?.();
   };
 
+  const runInitialGitFetch = async (ctx: ExtensionContext, sessionSerial: number) => {
+    if (gitInitialFetchPromise || !latestGitSnapshot) return;
+
+    const remotes = await runGit(pi, ctx.cwd, ["remote"], 2000);
+    if (sessionSerial !== activeSessionSerial || !remotes) return;
+
+    latestGitFetchState = { status: "fetching", startedAt: Date.now(), message: "git fetch" };
+    publishWebuiFooter(ctx);
+    requestFooterRender?.();
+
+    gitInitialFetchPromise = pi
+      .exec("git", ["-c", "credential.interactive=false", "fetch"], { cwd: ctx.cwd, timeout: GIT_INITIAL_FETCH_TIMEOUT_MS })
+      .then((result) => {
+        if (sessionSerial !== activeSessionSerial) return;
+        latestGitFetchState = {
+          status: result.code === 0 ? "ok" : "error",
+          startedAt: latestGitFetchState.startedAt,
+          completedAt: Date.now(),
+          message: gitFetchResultMessage(result),
+        };
+      })
+      .catch((error) => {
+        if (sessionSerial !== activeSessionSerial) return;
+        latestGitFetchState = {
+          status: "error",
+          startedAt: latestGitFetchState.startedAt,
+          completedAt: Date.now(),
+          message: compactFetchMessage(error instanceof Error ? error.message : String(error)),
+        };
+      })
+      .finally(() => {
+        if (sessionSerial !== activeSessionSerial) return;
+        gitInitialFetchPromise = null;
+        void refresh(ctx);
+        requestFooterRender?.();
+      });
+
+    await gitInitialFetchPromise;
+  };
+
   pi.on("session_start", async (_event, ctx) => {
+    const sessionSerial = ++activeSessionSerial;
+    gitInitialFetchPromise = null;
+    latestGitFetchState = { status: "idle" };
     promptEstimateService.clear();
     promptEstimateKeyCheck = null;
     latestPromptEstimateContext = null;
@@ -1164,6 +1254,7 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
     });
 
     await refresh(ctx);
+    void runInitialGitFetch(ctx, sessionSerial);
     startGitAutoRefresh(ctx);
   });
 
@@ -1231,6 +1322,9 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    activeSessionSerial += 1;
+    gitInitialFetchPromise = null;
+    latestGitFetchState = { status: "idle" };
     stopGitAutoRefresh();
     if (webuiFooterPublishTimer) {
       clearTimeout(webuiFooterPublishTimer);

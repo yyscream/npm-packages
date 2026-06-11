@@ -2780,10 +2780,23 @@ function gitBranchFromStatus(statusText) {
   return branchLine.slice(3).trim().replace(/\.\.\..*$/, "") || "detached";
 }
 
+function gitDivergenceFromBranchStatus(line) {
+  const details = String(line || "").match(/\[(.+)\]\s*$/)?.[1] || "";
+  const ahead = Number.parseInt(details.match(/ahead\s+(\d+)/i)?.[1] || "0", 10) || 0;
+  const behind = Number.parseInt(details.match(/behind\s+(\d+)/i)?.[1] || "0", 10) || 0;
+  return { ahead, behind };
+}
+
 function summarizeGitShortStatus(statusText) {
-  const summary = { staged: 0, unstaged: 0, untracked: 0, conflicted: 0 };
+  const summary = { staged: 0, unstaged: 0, untracked: 0, conflicted: 0, ahead: 0, behind: 0 };
   for (const line of String(statusText || "").split(/\r?\n/)) {
-    if (!line || line.startsWith("## ")) continue;
+    if (!line) continue;
+    if (line.startsWith("## ")) {
+      const divergence = gitDivergenceFromBranchStatus(line);
+      summary.ahead = divergence.ahead;
+      summary.behind = divergence.behind;
+      continue;
+    }
     const x = line[0] || " ";
     const y = line[1] || " ";
     if (x === "?" && y === "?") {

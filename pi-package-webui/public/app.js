@@ -4934,7 +4934,7 @@ const GIT_FOOTER_TOOLTIP_COPY = {
   git: "Current Git branch. detached means HEAD is not on a branch; no repo means the cwd is outside a Git work tree.",
   "git-state": "Active Git operation or detached state. Finish or abort rebase/merge/cherry-pick/revert/bisect before normal commits.",
   sync: "Remote tracking divergence. ↑ means local commits ahead; ↓ means remote commits to pull.",
-  changes: "Working tree summary. 🟢 staged, ✏️ modified unstaged, ➕ untracked, ⚠️ conflicted; ✅ means no changes.",
+  changes: "Working tree and fetched remote summary. 🟢 staged, ✏️ modified unstaged, ➕ untracked, ⚠️ conflicted; ⬇️ means fetched remote commits to pull; 🔄/✓/⚠️ fetch shows the tab git fetch state; ✅ means no changes.",
   "git-extra": "Extra Git signals. 📦 stash, 🧩 dirty submodules, 🌳 worktrees, 🏷️ tag at HEAD, 🕒 last commit age, 🔓 signing mismatch.",
   model: "Scoped model for this tab.",
   thinking: "Reasoning/thinking effort for this tab.",
@@ -5393,10 +5393,14 @@ function gitChangesChip(label, value, className = "") {
 function renderGitChangesOverview(data) {
   const summary = data?.summary || {};
   const untrackedCount = Array.isArray(data?.untracked) ? data.untracked.length : Number(summary.untracked || 0);
+  const ahead = Number(summary.ahead || 0) || 0;
+  const behind = Number(summary.behind || 0) || 0;
   const overview = make("div", "git-changes-overview");
   overview.append(
     gitChangesChip("repo", data?.root || "—", "wide"),
     gitChangesChip("branch", data?.branch || "detached"),
+    gitChangesChip("ahead", ahead > 0 ? `↑${ahead}` : 0, ahead > 0 ? "warning" : "muted"),
+    gitChangesChip("remote", behind > 0 ? `↓${behind}` : 0, behind > 0 ? "danger" : "muted"),
     gitChangesChip("staged", summary.staged || 0, "success"),
     gitChangesChip("modified", summary.unstaged || 0, "warning"),
     gitChangesChip("untracked", untrackedCount, "muted"),
@@ -6537,6 +6541,8 @@ function scheduleRefreshFooter(delay = 300, tabContext = activeTabContext()) {
 function formatCodexPlanType(value) {
   const text = String(value || "").trim();
   if (!text) return "unknown plan";
+  const normalized = text.replace(/[\s_-]+/g, "").toLowerCase();
+  if (normalized === "prolite") return "Usage";
   return text.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
