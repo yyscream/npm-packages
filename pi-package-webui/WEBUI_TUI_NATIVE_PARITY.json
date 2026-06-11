@@ -235,7 +235,7 @@
       "priority": "P1",
       "sensitive": true,
       "guards": ["trusted-context", "confirmation", "feature-flag"],
-      "currentBehavior": "Browser shows non-secret guidance only.",
+      "currentBehavior": "Browser selector lists provider auth status from GET /api/auth-providers but still directs OAuth/API-key login to the Pi TUI.",
       "targetBehavior": "Support OAuth/device-code/API-key providers through server AuthStorage; API keys only over trusted contexts and never browser storage/logs/transcripts."
     },
     {
@@ -244,12 +244,12 @@
       "category": "native-command",
       "title": "Provider logout",
       "command": { "name": "logout", "description": "Remove provider authentication" },
-      "webStatus": "degraded",
+      "webStatus": "implemented",
       "priority": "P1",
       "sensitive": true,
       "guards": ["confirmation", "feature-flag"],
-      "currentBehavior": "Browser shows guidance only.",
-      "targetBehavior": "List auth.json credentials only, label env/config credentials as not removable here, confirm per provider, and refresh auth/model state."
+      "currentBehavior": "Browser selector lists auth.json credentials only, confirms per provider, and removes them through localhost-only POST /api/auth-logout.",
+      "targetBehavior": "Keep auth.json-only removal with env/config credentials labeled as not removable from the Web UI."
     },
     {
       "id": "/new",
@@ -287,8 +287,8 @@
       "priority": "P1",
       "sensitive": true,
       "guards": ["confirmation", "feature-flag"],
-      "currentBehavior": "Partial browser selector supports current/all scope and switch.",
-      "targetBehavior": "Add sort/path/named toggles, metadata rename, safe trash delete, active/open tab guards, and compact path default."
+      "currentBehavior": "Browser selector supports current/all scope, switch, metadata rename, and localhost-only safe delete with open-tab/active-session guards.",
+      "targetBehavior": "Add sort/path/named toggles and compact path default."
     },
     {
       "id": "/reload",
@@ -517,7 +517,7 @@
       "priority": "P1",
       "sensitive": true,
       "guards": ["confirmation"],
-      "currentBehavior": "Switch endpoint validates .jsonl path, opens SessionManager, and sends RPC switch_session.",
+      "currentBehavior": "Switch endpoint validates .jsonl path, confines it to the configured Pi session directory, opens SessionManager, and sends RPC switch_session.",
       "targetBehavior": "Preserve tab-scoped switch and add richer selector metadata."
     },
     {
@@ -525,24 +525,24 @@
       "kind": "session-action",
       "category": "session",
       "title": "Resume rename metadata",
-      "webStatus": "unsupported",
+      "webStatus": "implemented",
       "priority": "P1",
       "sensitive": false,
       "guards": ["feature-flag"],
-      "currentBehavior": "No Web UI resume rename endpoint.",
-      "targetBehavior": "Append-only session_info metadata rename without file rename."
+      "currentBehavior": "POST /api/session-rename appends session_info metadata through SessionManager.appendSessionInfo without renaming the .jsonl file; target paths are confined to the Pi session directory.",
+      "targetBehavior": "Keep append-only session_info metadata rename without file rename."
     },
     {
       "id": "session.resume.delete",
       "kind": "session-action",
       "category": "session",
       "title": "Resume safe delete",
-      "webStatus": "unsupported",
+      "webStatus": "implemented",
       "priority": "P1",
       "sensitive": true,
       "guards": ["confirmation", "feature-flag"],
-      "currentBehavior": "No Web UI session delete endpoint.",
-      "targetBehavior": "Trash/noninvasive delete with active/open-tab guards and confirmation."
+      "currentBehavior": "POST /api/session-delete is localhost-only, requires confirmed: true, blocks active/open-tab sessions, confines targets to the Pi session directory, and prefers trash with unlink fallback.",
+      "targetBehavior": "Keep trash/noninvasive delete with active/open-tab guards and confirmation."
     },
     {
       "id": "extension-ui.notify",
@@ -657,36 +657,36 @@
       "kind": "native-command-adapter",
       "category": "foundation",
       "title": "Native command adapter response shape",
-      "webStatus": "unsupported",
+      "webStatus": "implemented",
       "priority": "P0",
       "sensitive": false,
       "guards": ["none"],
-      "currentBehavior": "Native command handling is split between frontend selectors and server switch cases with inconsistent result shape.",
-      "targetBehavior": "Central server-authoritative adapter response supporting transcript cards, toasts/events, tab metadata, downloads/open URLs, clipboard text, warnings/confirmations, refresh hints, and degraded/unavailable states."
+      "currentBehavior": "Server-native slash commands route through lib/native-command-adapter.mjs with a shared response envelope (status, cards, toasts, warnings, refresh, download, copyText, tab metadata). Frontend applyNativeSlashCommandEffects consumes the adapter shape.",
+      "targetBehavior": "Keep the centralized adapter current as new native slash commands and selector flows are added."
     },
     {
       "id": "security.trust-boundaries",
       "kind": "security-guard",
       "category": "foundation",
       "title": "Sensitive native feature trust boundaries",
-      "webStatus": "degraded",
+      "webStatus": "implemented",
       "priority": "P0",
       "sensitive": true,
       "guards": ["localhost", "trusted-context", "confirmation"],
-      "currentBehavior": "Some endpoints are localhost-gated; native parity features do not yet share a common policy.",
-      "targetBehavior": "Shared localhost/trusted-context/confirmation policy for login/logout/share/import/export/quit/bash/optional installs/network exposure."
+      "currentBehavior": "lib/trust-boundaries.mjs centralizes localhost route gating (including network open/close), native-command guard evaluation, and remote-shell warnings for LAN clients. Session switch/rename/delete paths are confined to the Pi session directory. Sensitive slash commands return blocked adapter cards instead of raw HTTP errors.",
+      "targetBehavior": "Extend the shared policy to remaining sensitive native flows (login/logout/share/import/quit) and explicit confirmation UI where required."
     },
     {
       "id": "tests.native-parity-harness",
       "kind": "test-harness",
       "category": "foundation",
       "title": "Native parity helper/endpoint tests",
-      "webStatus": "degraded",
+      "webStatus": "implemented",
       "priority": "P0",
       "sensitive": false,
       "guards": ["none"],
-      "currentBehavior": "Static tests exist; no focused native parity matrix/helper harness yet.",
-      "targetBehavior": "Fixture-driven server helper tests first, lightweight HTTP endpoint tests where request semantics matter, and fake RPC tab adapters in normal CI."
+      "currentBehavior": "tests/native-parity-harness.test.mjs exercises trust-boundaries and native-command-adapter helpers against WEBUI_TUI_NATIVE_PARITY.json fixtures, and tests/http-endpoints-harness.test.mjs boots the real server with a fake pi RPC stub to cover command routing, bash queue serialization, session-dir confinement, and localhost trust guards over HTTP.",
+      "targetBehavior": "Extend HTTP endpoint coverage to SSE events, tab lifecycle (create/patch/close), and session selector flows."
     }
   ]
 }

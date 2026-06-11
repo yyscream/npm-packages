@@ -209,6 +209,7 @@ let streamTextRenderTimer = null;
 let streamToolCallSeen = false;
 let streamThinkingBubble = null;
 let streamThinking = null;
+let streamMessageActive = false;
 let runIndicatorBubble = null;
 let runIndicatorText = null;
 let runIndicatorMeta = null;
@@ -425,6 +426,7 @@ const optionalFeatureAvailability = {
   gitWorkflow: false,
   releaseNpm: false,
   releaseAur: false,
+  safetyGuard: false,
   statsCommand: false,
   gitFooterStatus: false,
   tuiSkillsCommand: false,
@@ -453,6 +455,13 @@ const OPTIONAL_FEATURES = [
     packageName: "@firstpick/pi-extension-release-aur",
     capabilityLabel: "/release-aur",
     description: "Publish menu action, setup helpers, skills, and AUR release widgets.",
+  },
+  {
+    id: "safetyGuard",
+    label: "Safety guard",
+    packageName: "@firstpick/pi-extension-safety-guard",
+    capabilityLabel: "/safety-guard command or safety-guard status event",
+    description: "Interactive guardrails for dangerous bash commands and protected file edits.",
   },
   {
     id: "tuiSkillsCommand",
@@ -504,6 +513,7 @@ const OPTIONAL_COMMAND_FEATURES = new Map([
   ["pr", "gitWorkflow"],
   ["release-npm", "releaseNpm"],
   ["release-aur", "releaseAur"],
+  ["safety-guard", "safetyGuard"],
   ["skills", "tuiSkillsCommand"],
   ["tools", "tuiToolsCommand"],
   ["stats", "statsCommand"],
@@ -1856,11 +1866,22 @@ function attachMessageCopyButton(bubble, message, body) {
   return button;
 }
 
+function safeHttpUrl(value, base = window.location.href) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  try {
+    const url = new URL(text, base);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.href : "";
+  } catch {
+    return "";
+  }
+}
+
 function triggerNativeDownload(download) {
-  const url = String(download?.url || "").trim();
+  const url = safeHttpUrl(download?.url);
   if (!url) return false;
   const anchor = document.createElement("a");
-  anchor.href = new URL(url, window.location.href).href;
+  anchor.href = url;
   anchor.download = String(download.fileName || "");
   anchor.rel = "noopener";
   anchor.hidden = true;
@@ -6473,7 +6494,7 @@ async function changeActiveTabCwd() {
   const currentCwd = latestWorkspace?.cwd || tab.cwd || "";
   const cwd = await pickCwd(tab, currentCwd);
   if (!isCurrentTabContext(tabContext) || !cwd || cwd === currentCwd) return;
-  if (!window.confirm(`Restart ${tab.title} in:\n${cwd}\n\nCurrent in-flight work in this tab will be stopped.`)) return;
+  if (!window.confirm(`Restart ${tab.title} in:\n${cwd}\n\nCurrent in-flight work in this tab will be stopped. The conversation continues in the new directory.`)) return;
 
   saveActiveDraft();
   try {
@@ -6985,8 +7006,9 @@ function appendReleaseNpmTerminalLine(parent, line) {
 
 async function sendReleaseNpmCommand(command) {
   const tabContext = activeTabContext();
+  const resolvedCommand = resolveRpcSlashCommandMessage(command);
   try {
-    await api("/api/prompt", { method: "POST", body: { message: command }, tabId: tabContext.tabId });
+    await api("/api/prompt", { method: "POST", body: { message: resolvedCommand }, tabId: tabContext.tabId });
     if (!isCurrentTabContext(tabContext)) return;
     addEvent(`${command} sent`, "info");
     scheduleRefreshState(120, tabContext);
@@ -10906,6 +10928,59 @@ function renderAllMessages({ preserveScroll = false } = {}) {
   updateStickyUserPromptButton();
 }
 
+function applyNativeSlashCommandEffects(response, message, tabContext = activeTabContext()) {
+  const data = response?.data || {};
+  if (!isCurrentTabContext(tabContext)) return;
+
+  for (const warning of data.warnings || []) {
+    if (warning) addEvent(String(warning), "warn");
+  }
+  for (const toast of data.toasts || []) {
+    if (toast?.message) addEvent(String(toast.message), toast.level || "info");
+  }
+
+  if (data.copyText) {
+    copyText(data.copyText).catch((error) => {
+      addTransientMessage({
+        role: "native",
+        title: message.split(/\s+/, 1)[0],
+        content: `${data.message || "Copy requested, but clipboard access failed."}\n\nClipboard access failed: ${error.message}\n\n${data.copyText}`,
+        level: "warn",
+      });
+    });
+  }
+
+  if (data.download && triggerNativeDownload(data.download)) {
+    addEvent(`download started: ${data.download.fileName || data.download.url}`, "info");
+  }
+
+  const cards = Array.isArray(data.cards) && data.cards.length ? data.cards : null;
+  if (cards) {
+    for (const card of cards) {
+      addTransientMessage({
+        role: "native",
+        title: card.title || message.split(/\s+/, 1)[0],
+        content: card.content,
+        level: card.level || data.level || "info",
+      });
+    }
+  } else if (data.message) {
+    addTransientMessage({
+      role: "native",
+      title: message.split(/\s+/, 1)[0],
+      content: data.message,
+      level: data.level || "info",
+    });
+  }
+
+  const refresh = Array.isArray(data.refresh) ? data.refresh : ["state"];
+  if (refresh.includes("state")) scheduleRefreshState(120, tabContext);
+  if (refresh.includes("tabs")) scheduleRefreshTabs(300);
+  if (refresh.includes("commands")) refreshCommands(tabContext).catch((error) => addEvent(error.message || String(error), "error"));
+  if (refresh.includes("workspace")) scheduleRefreshState(120, tabContext);
+  if (refresh.includes("themes")) initializeThemes().catch((error) => addEvent(error.message || String(error), "error"));
+}
+
 function addTransientMessage({ role = "notice", title, content, level = "info", ...details }) {
   transientMessages.push({
     role,
@@ -11067,10 +11142,11 @@ function setOptionsMenuOpen(open) {
 }
 
 function optionalFeatureIdForCommand(name) {
-  if (OPTIONAL_COMMAND_FEATURES.has(name)) return OPTIONAL_COMMAND_FEATURES.get(name);
-  if (name === "release-toggle" || name === "release-abort" || name === "release-npm-logs") return "releaseNpm";
-  if (name === "release-aur" || name.startsWith("release-aur-")) return "releaseAur";
-  if (name === "stats" || name.startsWith("stats-") || name === "calibrate") return "statsCommand";
+  const baseName = commandBaseName(name);
+  if (OPTIONAL_COMMAND_FEATURES.has(baseName)) return OPTIONAL_COMMAND_FEATURES.get(baseName);
+  if (baseName === "release-toggle" || baseName === "release-abort" || baseName === "release-npm-logs") return "releaseNpm";
+  if (baseName === "release-aur" || baseName.startsWith("release-aur-")) return "releaseAur";
+  if (baseName === "stats" || baseName.startsWith("stats-") || baseName === "calibrate") return "statsCommand";
   return null;
 }
 
@@ -11085,12 +11161,51 @@ function visibleCommands() {
   return availableCommands.filter(isCommandVisible);
 }
 
+function commandBaseName(name) {
+  return String(name || "").replace(/:\d+$/, "");
+}
+
+function commandNameMatches(commandName, requestedName) {
+  const commandText = String(commandName || "");
+  const requested = String(requestedName || "");
+  if (!requested) return false;
+  if (commandText === requested) return true;
+  if (!commandText.startsWith(`${requested}:`)) return false;
+  return /^\d+$/.test(commandText.slice(requested.length + 1));
+}
+
+function canUseCommandBaseAlias(name) {
+  return availableCommands.some((command) => commandBaseName(command.name) === name && command.invokeName && command.duplicateCount > 1);
+}
+
+function resolveAvailableCommand(name, { rpcOnly = false } = {}) {
+  const requested = String(name || "").trim();
+  if (!requested) return null;
+  const commands = (rpcOnly ? rawAvailableCommands : availableCommands).filter((command) => !rpcOnly || command.source !== "native");
+  const exact = commands.find((command) => command.name === requested || command.invokeName === requested || command.duplicateNames?.includes(requested));
+  if (exact) return exact;
+  if (!canUseCommandBaseAlias(requested)) return null;
+  return commands.find((command) => commandNameMatches(command?.name, requested)) || null;
+}
+
+function resolveAvailableCommandName(name, options = {}) {
+  return resolveAvailableCommand(name, options)?.name || "";
+}
+
+function resolveRpcSlashCommandMessage(message) {
+  const text = String(message || "");
+  const match = text.match(/^\/([^\s]+)([\s\S]*)$/);
+  if (!match) return text;
+  const resolvedName = resolveAvailableCommandName(match[1], { rpcOnly: true });
+  return resolvedName && resolvedName !== match[1] ? `/${resolvedName}${match[2]}` : text;
+}
+
 function hasAvailableCommand(name) {
-  return availableCommands.some((command) => command.name === name);
+  return !!resolveAvailableCommand(name);
 }
 
 function hasLoadedRpcCommand(name) {
-  return rawAvailableCommands.some((command) => command.name === name && command.source !== "native");
+  return !!resolveAvailableCommand(name, { rpcOnly: true });
 }
 
 function optionalFeatureUnavailableMessage(featureId) {
@@ -11136,14 +11251,15 @@ function resetOptionalFeatureAvailability() {
 function requestGitFooterWebuiPayload(tabContext = activeTabContext(), { force = false } = {}) {
   if (!tabContext.tabId || isOptionalFeatureDisabled("gitFooterStatus")) return;
   if (currentState?.isStreaming || currentState?.isCompacting) return;
-  if (!hasAvailableCommand("git-footer-refresh") || (!force && statusEntries.has(GIT_FOOTER_WEBUI_STATUS_KEY))) return;
+  const refreshCommand = resolveAvailableCommandName("git-footer-refresh", { rpcOnly: true });
+  if (!refreshCommand || (!force && statusEntries.has(GIT_FOOTER_WEBUI_STATUS_KEY))) return;
   if (gitFooterPayloadRefreshInFlightByTab.has(tabContext.tabId)) return;
 
   gitFooterPayloadRefreshInFlightByTab.add(tabContext.tabId);
   if (isCurrentTabContext(tabContext)) renderFooter();
   api("/api/prompt", {
     method: "POST",
-    body: { message: "/git-footer-refresh --webui-silent", streamingBehavior: "steer" },
+    body: { message: `/${refreshCommand} --webui-silent`, streamingBehavior: "steer" },
     tabId: tabContext.tabId,
   }).catch((error) => {
     if (isCurrentTabContext(tabContext)) addEvent(`git footer payload refresh failed: ${error.message || String(error)}`, "warn");
@@ -11157,6 +11273,7 @@ function updateOptionalFeatureAvailability() {
   optionalFeatureAvailability.gitWorkflow = hasAvailableCommand("git-staged-msg");
   optionalFeatureAvailability.releaseNpm = hasAvailableCommand("release-npm");
   optionalFeatureAvailability.releaseAur = hasAvailableCommand("release-aur");
+  optionalFeatureAvailability.safetyGuard = hasAvailableCommand("safety-guard") || optionalFeatureAvailability.safetyGuard || statusEntries.has("safety-guard");
   optionalFeatureAvailability.statsCommand = hasAvailableCommand("stats");
   optionalFeatureAvailability.gitFooterStatus = hasAvailableCommand("git-footer-refresh") || optionalFeatureAvailability.gitFooterStatus || statusEntries.has("git-footer") || statusEntries.has(GIT_FOOTER_WEBUI_STATUS_KEY);
   optionalFeatureAvailability.tuiSkillsCommand = hasLoadedRpcCommand("skills");
@@ -11308,9 +11425,13 @@ function runPublishWorkflow(command) {
   setPublishMenuOpen(false);
   setAppRunnerMenuOpen(false);
   setOptionsMenuOpen(false);
-  const commandName = String(command || "").replace(/^\//, "").split(/\s+/)[0];
+  const commandText = String(command || "");
+  const commandWithoutSlash = commandText.replace(/^\//, "");
+  const commandName = commandWithoutSlash.split(/\s+/)[0];
+  const commandRest = commandWithoutSlash.slice(commandName.length);
   const featureId = OPTIONAL_COMMAND_FEATURES.get(commandName);
-  if ((featureId && !isOptionalFeatureEnabled(featureId)) || !hasAvailableCommand(commandName)) {
+  const resolvedCommandName = resolveAvailableCommandName(commandName, { rpcOnly: true });
+  if ((featureId && !isOptionalFeatureEnabled(featureId)) || !resolvedCommandName) {
     const tabContext = activeTabContext();
     addEvent(commandUnavailableMessage(commandName), "warn");
     refreshCommands(tabContext).catch((error) => {
@@ -11318,7 +11439,7 @@ function runPublishWorkflow(command) {
     });
     return;
   }
-  sendPrompt("prompt", command);
+  sendPrompt("prompt", `/${resolvedCommandName}${commandRest}`);
 }
 
 async function runNativeCommandMenu(command) {
@@ -11846,9 +11967,69 @@ function openNativeNameDialog() {
 }
 
 async function openNativeResumeSelector(scope = "current") {
-  openNativeCommandDialog({ title: "/resume", message: "Resume another persisted Pi session.", searchPlaceholder: "Filter sessions…" });
+  openNativeCommandDialog({ title: "/resume", message: "Select a session, then resume, rename metadata, or delete it.", searchPlaceholder: "Filter sessions…" });
   renderNativeLoading("Loading sessions…");
   const selectedScope = scope === "all" ? "all" : "current";
+  let selectedItem = null;
+  let resumeDeleteArmed = false;
+
+  const renderActions = () => {
+    elements.nativeCommandActions.replaceChildren();
+    const resumeButton = addNativeCommandAction("Resume", async () => {
+      if (!selectedItem || selectedItem.disabled) return;
+      setNativeCommandError("");
+      try {
+        const result = await nativeCommandApi("/api/switch-session", { method: "POST", body: { sessionPath: selectedItem.session.path } });
+        applyResponseTab(result);
+        addTransientMessage({ role: "native", title: "/resume", content: result.data?.message || "Resumed selected session.", level: "info" });
+        closeNativeCommandDialog();
+        await refreshAll();
+      } catch (error) {
+        setNativeCommandError(error.message || String(error));
+      }
+    }, selectedItem && !selectedItem.disabled ? "primary" : undefined);
+    resumeButton.disabled = !selectedItem || selectedItem.disabled;
+
+    const renameButton = addNativeCommandAction("Rename", async () => {
+      if (!selectedItem) return;
+      const nextName = window.prompt("Session display name", selectedItem.session.name || selectedItem.label || "");
+      if (nextName === null) return;
+      setNativeCommandError("");
+      try {
+        const result = await nativeCommandApi("/api/session-rename", { method: "POST", body: { sessionPath: selectedItem.session.path, name: nextName } });
+        addTransientMessage({ role: "native", title: "/resume", content: result.data?.message || "Renamed session metadata.", level: "info" });
+        await openNativeResumeSelector(selectedScope);
+      } catch (error) {
+        setNativeCommandError(error.message || String(error));
+      }
+    });
+    renameButton.disabled = !selectedItem;
+
+    const deleteButton = addNativeCommandAction(resumeDeleteArmed ? "Confirm delete" : "Delete", async () => {
+      if (!selectedItem || selectedItem.disabled) return;
+      if (!resumeDeleteArmed) {
+        resumeDeleteArmed = true;
+        setNativeCommandError("Delete is permanent when trash is unavailable. Click Confirm delete to proceed.");
+        renderActions();
+        return;
+      }
+      setNativeCommandError("");
+      try {
+        const result = await nativeCommandApi("/api/session-delete", { method: "POST", body: { sessionPath: selectedItem.session.path, confirmed: true } });
+        addTransientMessage({ role: "native", title: "/resume", content: result.data?.message || "Session deleted.", level: "warn" });
+        await openNativeResumeSelector(selectedScope);
+      } catch (error) {
+        setNativeCommandError(error.message || String(error));
+        resumeDeleteArmed = false;
+        renderActions();
+      }
+    }, resumeDeleteArmed ? "danger" : undefined);
+    deleteButton.disabled = !selectedItem || selectedItem.disabled;
+
+    addNativeCommandAction(selectedScope === "all" ? "Current cwd" : "All sessions", () => openNativeResumeSelector(selectedScope === "all" ? "current" : "all"));
+    addNativeCommandAction("Cancel", closeNativeCommandDialog);
+  };
+
   try {
     const response = await nativeCommandApi(`/api/sessions?scope=${encodeURIComponent(selectedScope)}`);
     const items = (response.data?.sessions || []).map((session) => ({
@@ -11860,25 +12041,26 @@ async function openNativeResumeSelector(scope = "current") {
       disabled: session.current,
       session,
     }));
-    const render = () => renderNativeSelectorItems(items, {
-      emptyText: selectedScope === "all" ? "No sessions match this filter." : "No sessions for this working directory match this filter.",
-      onSelect: async (item) => {
-        setNativeCommandError("");
-        try {
-          const result = await nativeCommandApi("/api/switch-session", { method: "POST", body: { sessionPath: item.session.path } });
-          applyResponseTab(result);
-          addTransientMessage({ role: "native", title: "/resume", content: result.data?.message || "Resumed selected session.", level: "info" });
-          closeNativeCommandDialog();
-          await refreshAll();
-        } catch (error) {
-          setNativeCommandError(error.message || String(error));
-        }
-      },
-    });
-    elements.nativeCommandSearch.oninput = render;
-    elements.nativeCommandActions.replaceChildren();
-    addNativeCommandAction(selectedScope === "all" ? "Current cwd" : "All sessions", () => openNativeResumeSelector(selectedScope === "all" ? "current" : "all"));
-    addNativeCommandAction("Cancel", closeNativeCommandDialog);
+    const render = () => {
+      resumeDeleteArmed = false;
+      renderNativeSelectorItems(items, {
+        emptyText: selectedScope === "all" ? "No sessions match this filter." : "No sessions for this working directory match this filter.",
+        activeId: selectedItem?.id,
+        onSelect: (item) => {
+          selectedItem = item;
+          setNativeCommandError("");
+          render();
+          renderActions();
+        },
+      });
+    };
+    elements.nativeCommandSearch.oninput = () => {
+      selectedItem = null;
+      resumeDeleteArmed = false;
+      render();
+      renderActions();
+    };
+    renderActions();
     render();
   } catch (error) {
     setNativeCommandError(error.message || String(error));
@@ -12117,14 +12299,63 @@ async function openNativeSkillsSelector() {
   }
 }
 
-function openNativeAuthInfo(mode) {
+async function openNativeAuthSelector(mode) {
   const command = mode === "logout" ? "/logout" : "/login";
-  openNativeCommandDialog({ title: command, message: "Provider credential entry is intentionally not implemented in the browser yet." });
-  const note = [
-    "Use native Pi TUI authentication for now, or configure provider credentials through environment variables or models.json.",
-    "This avoids accepting or storing API keys in the Web UI until the credential flow has a dedicated security design.",
-  ].join("\n\n");
-  elements.nativeCommandBody.append(make("p", "native-command-note", note));
+  openNativeCommandDialog({
+    title: command,
+    message: mode === "logout" ? "Remove stored provider credentials from auth.json." : "Provider login still requires the Pi TUI.",
+    searchPlaceholder: "Filter providers…",
+  });
+  renderNativeLoading("Loading provider auth status…");
+  try {
+    const response = await nativeCommandApi("/api/auth-providers");
+    const providers = mode === "logout" ? response.data?.logoutProviders || [] : response.data?.loginProviders || [];
+    const guidance = String(response.data?.guidance || "").trim();
+    const items = providers.map((provider) => ({
+      id: provider.id,
+      label: provider.name || provider.id,
+      description: provider.authType === "oauth" ? "OAuth / subscription" : "API key",
+      meta: provider.status?.configured
+        ? `configured via ${provider.status.source || "stored"}`
+        : "not configured in auth.json",
+      badge: provider.status?.configured ? "configured" : "",
+      provider,
+    }));
+    if (!items.length) {
+      elements.nativeCommandBody.replaceChildren(make("p", "native-command-note", mode === "logout"
+        ? "No stored credentials to remove. /logout only removes credentials saved by /login."
+        : "No providers are currently available."));
+      if (guidance) elements.nativeCommandBody.append(make("p", "native-command-note muted", guidance));
+      return;
+    }
+    const render = () => renderNativeSelectorItems(items, {
+      emptyText: "No providers match this filter.",
+      onSelect: async (item) => {
+        if (mode === "login") {
+          setNativeCommandError(`Run /login in the Pi TUI for ${item.label}. Browser login is not implemented yet.`);
+          return;
+        }
+        if (!window.confirm(`Remove stored credentials for ${item.label}?`)) return;
+        setNativeCommandError("");
+        try {
+          const result = await nativeCommandApi("/api/auth-logout", {
+            method: "POST",
+            body: { provider: item.provider.id, confirmed: true },
+          });
+          addTransientMessage({ role: "native", title: "/logout", content: result.data?.message || "Provider credentials removed.", level: "info" });
+          closeNativeCommandDialog();
+          scheduleRefreshState(120);
+        } catch (error) {
+          setNativeCommandError(error.message || String(error));
+        }
+      },
+    });
+    elements.nativeCommandSearch.oninput = render;
+    render();
+  } catch (error) {
+    setNativeCommandError(error.message || String(error));
+    elements.nativeCommandBody.replaceChildren();
+  }
 }
 
 async function handleNativeSlashSelectorCommand(message, { usesPromptInput = false } = {}) {
@@ -12181,7 +12412,7 @@ async function handleNativeSlashSelectorCommand(message, { usesPromptInput = fal
       return true;
     case "login":
     case "logout":
-      openNativeAuthInfo(name);
+      await openNativeAuthSelector(name);
       return true;
     default:
       return false;
@@ -12298,6 +12529,30 @@ function resetStreamBubble() {
   streamToolCallSeen = false;
   streamThinkingBubble = null;
   streamThinking = null;
+  streamMessageActive = false;
+}
+
+function liveStreamRenderActive() {
+  return streamMessageActive && currentState?.isStreaming === true && Boolean(streamBubble || streamThinkingBubble || streamRawText);
+}
+
+/**
+ * The chat DOM was rebuilt while an assistant message is still streaming:
+ * drop references to the detached nodes but keep stream text state, then
+ * re-append the live thinking/text bubbles so no partial output is lost.
+ */
+function restoreStreamRenderAfterChatRebuild() {
+  const thinkingText = streamThinking?.textContent || "";
+  const thinkingComplete = streamThinkingBubble?.classList.contains("complete") === true;
+  streamBubble = null;
+  streamText = null;
+  streamThinkingBubble = null;
+  streamThinking = null;
+  streamBubbleVisibleSince = 0;
+  if (thinkingText && setStreamingThinkingText(thinkingText) && thinkingComplete) {
+    streamThinkingBubble?.classList.add("complete");
+  }
+  if (stripTodoProgressLines(streamRawText, { streaming: true })) renderStreamingAssistantText();
 }
 
 function thinkingDeltaText(update) {
@@ -12482,11 +12737,12 @@ function renderNetworkStatus() {
   const list = make("div", "network-url-list");
 
   const addUrl = (label, url) => {
-    if (!url) return;
+    const href = safeHttpUrl(url);
+    if (!href) return;
     const row = make("div", "network-status-url-row");
     const labelNode = make("span", "network-status-url-label", label);
     const link = make("a", "network-status-url", url);
-    link.href = url;
+    link.href = href;
     link.target = "_blank";
     link.rel = "noreferrer";
     row.append(labelNode, link);
@@ -12525,8 +12781,10 @@ async function refreshMessages(tabContext = activeTabContext()) {
   const response = await api("/api/messages", { tabId: tabContext.tabId });
   if (!isCurrentTabContext(tabContext)) return;
   latestMessages = response.data?.messages || [];
-  resetStreamBubble();
+  const preserveLiveStream = liveStreamRenderActive();
+  if (!preserveLiveStream) resetStreamBubble();
   renderMessages(latestMessages);
+  if (preserveLiveStream) restoreStreamRenderAfterChatRebuild();
   markTabOutputSeen();
   renderFooter();
 }
@@ -12576,23 +12834,67 @@ function syncModelSelectToState() {
   }
 }
 
+function normalizedCommandIdentity(command) {
+  return [commandBaseName(command.name), command.description, command.source, command.enabled ? "enabled" : "disabled"].join("\u0000");
+}
+
+function combineIdenticalDuplicateCommands(commands) {
+  const duplicateGroups = new Map();
+  for (const command of commands) {
+    if (commandBaseName(command.name) === command.name) continue;
+    const key = normalizedCommandIdentity(command);
+    if (!duplicateGroups.has(key)) duplicateGroups.set(key, []);
+    duplicateGroups.get(key).push(command);
+  }
+  const combinedKeys = new Set([...duplicateGroups.entries()].filter(([, group]) => group.length > 1).map(([key]) => key));
+  const emittedKeys = new Set();
+  const emittedNames = new Set();
+  const result = [];
+
+  for (const command of commands) {
+    const key = normalizedCommandIdentity(command);
+    if (!combinedKeys.has(key)) {
+      if (emittedNames.has(command.name)) continue;
+      emittedNames.add(command.name);
+      result.push(command);
+      continue;
+    }
+
+    if (emittedKeys.has(key)) continue;
+    emittedKeys.add(key);
+    const group = duplicateGroups.get(key);
+    const baseName = commandBaseName(command.name);
+    const displayName = emittedNames.has(baseName) ? command.name : baseName;
+    emittedNames.add(displayName);
+    result.push({
+      ...command,
+      name: displayName,
+      invokeName: command.name,
+      duplicateNames: group.map((item) => item.name),
+      duplicateCount: group.length,
+      location: command.location || `${group.length} identical loaded commands`,
+    });
+  }
+
+  return result;
+}
+
 function normalizeCommands(commands, { dedupe = true } = {}) {
-  const seen = new Set();
-  return (commands || [])
-    .map((command) => ({
-      name: String(command.name || "").trim(),
-      description: String(command.description || "").trim(),
-      source: String(command.source || "command").trim(),
-      location: String(command.location || "").trim(),
-      enabled: command.enabled !== false,
-    }))
-    .filter((command) => {
-      if (!command.name) return false;
-      if (!dedupe) return true;
-      if (seen.has(command.name)) return false;
-      seen.add(command.name);
-      return true;
+  const normalized = (commands || [])
+    .map((command) => {
+      const name = String(command.name || "").trim();
+      return {
+        name,
+        invokeName: name,
+        description: String(command.description || "").trim(),
+        source: String(command.source || "command").trim(),
+        location: String(command.location || "").trim(),
+        enabled: command.enabled !== false,
+      };
     })
+    .filter((command) => command.name);
+
+  return (dedupe ? combineIdenticalDuplicateCommands(normalized) : normalized)
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -12659,11 +12961,13 @@ function getPathTrigger() {
 function scoreCommandSuggestion(command, query) {
   if (!query) return 0;
   const q = query.toLowerCase();
-  const name = command.name.toLowerCase();
+  const names = [command.name, command.invokeName, ...(command.duplicateNames || [])]
+    .filter(Boolean)
+    .map((name) => name.toLowerCase());
   const description = command.description.toLowerCase();
-  if (name === q) return 0;
-  if (name.startsWith(q)) return 1;
-  if (name.includes(q)) return 2;
+  if (names.some((name) => name === q)) return 0;
+  if (names.some((name) => name.startsWith(q))) return 1;
+  if (names.some((name) => name.includes(q))) return 2;
   if (description.includes(q)) return 3;
   return Number.POSITIVE_INFINITY;
 }
@@ -12683,7 +12987,7 @@ function commandSearchQuery() {
 
 function commandMatchesSearch(command, query) {
   if (!query) return true;
-  return [command.name, command.description, command.source, command.location]
+  return [command.name, command.invokeName, ...(command.duplicateNames || []), command.description, command.source, command.location]
     .filter(Boolean)
     .join(" ")
     .toLowerCase()
@@ -13386,6 +13690,9 @@ async function runUserBashCommand(parsed, { usesPromptInput = false, targetTabId
     const result = response.data || {};
     applyResponseTab(response);
     if (isCurrentTabContext(tabContext)) {
+      for (const warning of response.warnings || []) {
+        if (warning) addEvent(String(warning), "warn");
+      }
       addTransientMessage({
         role: "bashExecution",
         title: excludeFromContext ? "bash (!! complete)" : "bash (! complete)",
@@ -13466,6 +13773,7 @@ async function sendPrompt(kind = "prompt", explicitMessage, { targetTabId = acti
   try {
     const prepared = attachments.length ? await prepareAttachmentsForPrompt(attachments, targetTabId) : { images: [], uploadedFiles: [], inlineImageIds: new Set() };
     message = composeMessageWithAttachments(originalMessage, prepared.uploadedFiles, prepared.inlineImageIds);
+    if (kind === "prompt" && attachments.length === 0) message = resolveRpcSlashCommandMessage(message);
     const bodyBase = { message };
     if (prepared.images.length) bodyBase.images = prepared.images;
     if (!message.startsWith("/")) {
@@ -13495,19 +13803,8 @@ async function sendPrompt(kind = "prompt", explicitMessage, { targetTabId = acti
     } else if (targetStillActive && kind === "follow-up" && currentState?.isStreaming) {
       setRunIndicatorActivity("Follow-up queued; current agent run is still active…");
     }
-    if (targetStillActive && response?.command === "native_slash_command" && response.data?.copyText) {
-      try {
-        await copyText(response.data.copyText);
-      } catch (error) {
-        response.data.message = `${response.data.message || "Copy requested, but clipboard access failed."}\n\nClipboard access failed: ${error.message}\n\n${response.data.copyText}`;
-        response.data.level = "warn";
-      }
-    }
-    if (targetStillActive && response?.command === "native_slash_command" && response.data?.download) {
-      if (triggerNativeDownload(response.data.download)) addEvent(`download started: ${response.data.download.fileName || response.data.download.url}`, "info");
-    }
-    if (targetStillActive && response?.command === "native_slash_command" && response.data?.message) {
-      addTransientMessage({ role: "native", title: message.split(/\s+/, 1)[0], content: response.data.message, level: response.data.level || "info" });
+    if (targetStillActive && response?.command === "native_slash_command") {
+      applyNativeSlashCommandEffects(response, message, tabContext);
     }
     if (usesPromptInput) {
       clearAttachments(targetTabId);
@@ -13520,8 +13817,8 @@ async function sendPrompt(kind = "prompt", explicitMessage, { targetTabId = acti
     }
     if (targetStillActive) {
       hideCommandSuggestions();
-      scheduleRefreshState(120, tabContext);
-    } else {
+      if (response?.command !== "native_slash_command") scheduleRefreshState(120, tabContext);
+    } else if (response?.command !== "native_slash_command") {
       scheduleRefreshTabs(300);
     }
   } catch (error) {
@@ -13820,12 +14117,14 @@ function handleEvent(event) {
       renderFeedbackTray();
       break;
     case "agent_end":
+      streamMessageActive = false;
       addEvent("agent finished");
       notifyAgentDone(event.tabId || activeTabId, { activity: event.tabActivity, tabTitle: event.tabTitle });
       clearContextUsageUnknownAfterCompaction(event.tabId || activeTabId);
       if (currentState) currentState = { ...currentState, isStreaming: false };
       clearRunIndicatorActivity();
       markTabOutputSeen();
+      requestGitFooterWebuiPayload(tabContext, { force: true });
       scheduleRefreshState();
       scheduleRefreshMessages();
       scheduleRefreshFooter();
@@ -13846,6 +14145,7 @@ function handleEvent(event) {
     case "message_start":
       if (event.message?.role === "assistant") {
         resetStreamBubble();
+        streamMessageActive = true;
         setRunIndicatorActivity("Starting assistant message…", { scroll: false });
       }
       break;
@@ -13853,6 +14153,7 @@ function handleEvent(event) {
       handleMessageUpdate(event);
       break;
     case "message_end":
+      streamMessageActive = false;
       if (runIndicatorIsActive()) setRunIndicatorActivity("Assistant message finished; waiting for the next step…", { scroll: false });
       scheduleRefreshMessages();
       scheduleRefreshState();

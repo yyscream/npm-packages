@@ -196,6 +196,8 @@ http_ok() {
     curl -fsS --max-time 2 "$url" >/dev/null 2>&1
   elif command -v wget >/dev/null 2>&1; then
     wget -q --timeout=2 --tries=1 --spider "$url" >/dev/null 2>&1
+  elif command -v node >/dev/null 2>&1; then
+    node -e 'fetch(process.argv[1], { signal: AbortSignal.timeout(2000) }).then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1));' "$url" >/dev/null 2>&1
   else
     return 1
   fi
@@ -214,6 +216,8 @@ http_get() {
     curl -fsS --max-time 5 "$url"
   elif command -v wget >/dev/null 2>&1; then
     wget -q --timeout=5 --tries=1 -O - "$url"
+  elif command -v node >/dev/null 2>&1; then
+    node -e 'fetch(process.argv[1], { signal: AbortSignal.timeout(5000) }).then(async (r) => { if (!r.ok) process.exit(1); process.stdout.write(await r.text()); }, () => process.exit(1));' "$url"
   else
     return 1
   fi
@@ -225,6 +229,8 @@ http_post_json() {
 
   if command -v curl >/dev/null 2>&1; then
     curl -fsS --max-time 10 -X POST "$url" -H "Content-Type: application/json" --data "$body"
+  elif command -v node >/dev/null 2>&1; then
+    node -e 'fetch(process.argv[1], { method: "POST", headers: { "Content-Type": "application/json" }, body: process.argv[2], signal: AbortSignal.timeout(10000) }).then(async (r) => { if (!r.ok) process.exit(1); process.stdout.write(await r.text()); }, () => process.exit(1));' "$url" "$body"
   else
     return 1
   fi
@@ -335,11 +341,6 @@ port_is_in_use() {
 wait_until_ready() {
   local url="$1"
   local pid="$2"
-
-  if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
-    sleep 1
-    return 0
-  fi
 
   for _ in {1..50}; do
     if ! kill -0 "$pid" 2>/dev/null; then

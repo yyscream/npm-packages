@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-package-webui",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "description": "Pi Web UI companion package with a local browser UI CLI plus /webui-start and /webui-status commands.",
   "license": "MIT",
   "homepage": "https://github.com/Firstp1ck/npm-packages/tree/main/pi-package-webui#readme",
@@ -26,6 +26,7 @@
       "../pi-extension-git-footer-status/index.ts",
       "../pi-extension-release-aur/index.ts",
       "../pi-extension-release-npm/index.ts",
+      "../pi-extension-safety-guard/index.ts",
       "../pi-extension-setup-skills/index.ts",
       "../pi-extension-stats/index.ts",
       "../pi-extension-todo-progress/index.ts",
@@ -33,6 +34,7 @@
       "node_modules/@firstpick/pi-extension-git-footer-status/index.ts",
       "node_modules/@firstpick/pi-extension-release-aur/index.ts",
       "node_modules/@firstpick/pi-extension-release-npm/index.ts",
+      "node_modules/@firstpick/pi-extension-safety-guard/index.ts",
       "node_modules/@firstpick/pi-extension-setup-skills/index.ts",
       "node_modules/@firstpick/pi-extension-stats/index.ts",
       "node_modules/@firstpick/pi-extension-todo-progress/index.ts",
@@ -55,8 +57,8 @@
     "pi-webui": "./bin/pi-webui.mjs"
   },
   "scripts": {
-    "check": "node --check public/app.js && node --check bin/pi-webui.mjs && node --check webui-rpc-helper.mjs && node tests/mobile-static.test.mjs && node tests/native-parity.test.mjs",
-    "test": "node tests/mobile-static.test.mjs && node tests/native-parity.test.mjs"
+    "check": "node --check public/app.js && node --check bin/pi-webui.mjs && node --check webui-rpc-helper.mjs && node --check lib/trust-boundaries.mjs && node --check lib/native-command-adapter.mjs && node --check lib/session-actions.mjs && node --check lib/auth-actions.mjs && node --check lib/temp-artifacts.mjs && node tests/run-all.mjs",
+    "test": "node tests/run-all.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.78.0"
@@ -65,6 +67,7 @@
     "@firstpick/pi-extension-git-footer-status": "^0.2.1",
     "@firstpick/pi-extension-release-aur": "^0.1.3",
     "@firstpick/pi-extension-release-npm": "^0.3.3",
+    "@firstpick/pi-extension-safety-guard": "^0.2.3",
     "@firstpick/pi-extension-setup-skills": "^0.1.5",
     "@firstpick/pi-extension-stats": "^0.2.0",
     "@firstpick/pi-extension-todo-progress": "^0.1.7",
@@ -74,6 +77,7 @@
   },
   "files": [
     "index.ts",
+    "lib",
     "webui-rpc-helper.mjs",
     "bin",
     "public",

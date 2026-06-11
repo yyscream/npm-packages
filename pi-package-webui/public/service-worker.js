@@ -1,4 +1,4 @@
-const CACHE_NAME = "pi-webui-pwa-v25";
+const CACHE_NAME = "pi-webui-pwa-v26";
 const APP_SHELL = [
   "/",
   "/index.html",
@@ -37,6 +37,26 @@ self.addEventListener("notificationclick", (event) => {
   );
 });
 
+// Network-first keeps the app shell fresh after deploys regardless of
+// CACHE_NAME or ?v= cache-buster drift; the cache only serves offline clients.
+function fetchThenCache(request) {
+  return fetch(request).then((response) => {
+    if (response.ok) {
+      const copy = response.clone();
+      caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+    }
+    return response;
+  });
+}
+
+// ignoreSearch lets precached bare paths satisfy ?v= cache-busted requests offline.
+function cachedAppShell(request, fallbackPath) {
+  return caches.match(request, { ignoreSearch: true }).then((cached) => {
+    if (cached || !fallbackPath) return cached;
+    return caches.match(fallbackPath, { ignoreSearch: true });
+  });
+}
+
 self.addEventListener("fetch", (event) => {
   const { request } = event;
   if (request.method !== "GET") return;
@@ -45,16 +65,10 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin || url.pathname.startsWith("/api/")) return;
 
   if (request.mode === "navigate") {
-    event.respondWith(fetch(request).catch(() => caches.match("/index.html")));
+    event.respondWith(fetchThenCache(request).catch(() => cachedAppShell(request, "/index.html")));
     return;
   }
 
   if (!APP_SHELL.includes(url.pathname)) return;
-  event.respondWith(
-    caches.match(request).then((cached) => cached || fetch(request).then((response) => {
-      const copy = response.clone();
-      caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
-      return response;
-    })),
-  );
+  event.respondWith(fetchThenCache(request).catch(() => cachedAppShell(request)));
 });
