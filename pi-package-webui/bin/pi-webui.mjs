@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
@@ -9,6 +9,8 @@ import { homedir, networkInterfaces, tmpdir } from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
+import { brotliCompress, constants as zlibConstants, gzip } from "node:zlib";
 import { AuthStorage, SessionManager, SettingsManager, DefaultPackageManager } from "@earendil-works/pi-coding-agent";
 import { authProvidersPayload, createAuthContext, logoutStoredProvider } from "../lib/auth-actions.mjs";
 import {
@@ -3306,6 +3308,43 @@ function normalizeStaticPath(urlPath) {
   return name;
 }
 
+const compressWithBrotli = promisify(brotliCompress);
+const compressWithGzip = promisify(gzip);
+const STATIC_COMPRESSIBLE_EXTENSIONS = new Set([".html", ".css", ".js", ".mjs", ".svg", ".json", ".webmanifest"]);
+const STATIC_COMPRESSION_MIN_BYTES = 1024;
+// filePath -> { mtimeMs, size, etag, raw, br, gz }; invalidated by mtime/size change.
+const staticAssetCache = new Map();
+
+async function loadStaticAsset(filePath) {
+  const stats = await stat(filePath);
+  const cached = staticAssetCache.get(filePath);
+  if (cached && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size) return cached;
+  const raw = await readFile(filePath);
+  const entry = {
+    mtimeMs: stats.mtimeMs,
+    size: stats.size,
+    etag: `"${createHash("sha1").update(raw).digest("base64url")}"`,
+    raw,
+    br: null,
+    gz: null,
+  };
+  staticAssetCache.set(filePath, entry);
+  return entry;
+}
+
+function acceptedStaticEncoding(req) {
+  const header = String(req.headers["accept-encoding"] || "");
+  if (/\bbr\b/i.test(header)) return "br";
+  if (/\bgzip\b/i.test(header)) return "gzip";
+  return "";
+}
+
+function requestEtagMatches(req, etag) {
+  const header = String(req.headers["if-none-match"] || "");
+  if (!header) return false;
+  return header.split(",").some((candidate) => candidate.trim() === etag);
+}
+
 async function serveStatic(req, res, url) {
   if (req.method !== "GET") return false;
   const staticName = normalizeStaticPath(url.pathname);
@@ -3313,13 +3352,42 @@ async function serveStatic(req, res, url) {
 
   const filePath = path.join(publicDir, staticName);
   const ext = path.extname(filePath);
-  const content = await readFile(filePath);
-  res.writeHead(200, {
+  const asset = await loadStaticAsset(filePath);
+  const headers = {
     "content-type": MIME_TYPES.get(ext) || "application/octet-stream",
-    "cache-control": "no-store",
+    // no-cache (unlike no-store) allows conditional revalidation via ETag/304
+    // while still guaranteeing fresh content after deploys.
+    "cache-control": "no-cache",
+    etag: asset.etag,
+    vary: "Accept-Encoding",
     "x-content-type-options": "nosniff",
-  });
-  res.end(content);
+  };
+  if (requestEtagMatches(req, asset.etag)) {
+    res.writeHead(304, headers);
+    res.end();
+    return true;
+  }
+  let body = asset.raw;
+  if (STATIC_COMPRESSIBLE_EXTENSIONS.has(ext) && asset.raw.length >= STATIC_COMPRESSION_MIN_BYTES) {
+    const encoding = acceptedStaticEncoding(req);
+    if (encoding === "br") {
+      asset.br ||= await compressWithBrotli(asset.raw, {
+        params: {
+          [zlibConstants.BROTLI_PARAM_QUALITY]: 6,
+          [zlibConstants.BROTLI_PARAM_SIZE_HINT]: asset.raw.length,
+        },
+      });
+      body = asset.br;
+      headers["content-encoding"] = "br";
+    } else if (encoding === "gzip") {
+      asset.gz ||= await compressWithGzip(asset.raw, { level: 7 });
+      body = asset.gz;
+      headers["content-encoding"] = "gzip";
+    }
+  }
+  headers["content-length"] = body.length;
+  res.writeHead(200, headers);
+  res.end(body);
   return true;
 }
 
@@ -3478,6 +3546,23 @@ function commandFromPost(pathname, body) {
     default:
       return undefined;
   }
+}
+
+/**
+ * Delta transcript support (P1-1): /api/messages?since=N serializes only the
+ * tail starting at message index N plus { totalCount, since } so clients can
+ * merge appended messages instead of re-downloading the whole transcript on
+ * every agent event. Without ?since= the legacy full payload is returned.
+ */
+function applyMessagesSinceParam(response, url) {
+  const sinceRaw = url.searchParams.get("since");
+  if (sinceRaw === null) return;
+  const messages = response?.data?.messages;
+  if (!Array.isArray(messages)) return;
+  const parsed = Number.parseInt(sinceRaw, 10);
+  const total = messages.length;
+  const since = Number.isInteger(parsed) ? Math.min(Math.max(parsed, 0), total) : 0;
+  response.data = { ...response.data, messages: messages.slice(since), totalCount: total, since };
 }
 
 function commandFromGet(pathname) {
@@ -6847,6 +6932,7 @@ const server = createServer(async (req, res) => {
     if (getCommand) {
       const tab = getRequestedTab(req, url);
       const response = await safeRpcResponse(tab, getCommand);
+      if (url.pathname === "/api/messages") applyMessagesSinceParam(response, url);
       sendJson(res, response.success === false ? 400 : 200, response);
       return;
     }

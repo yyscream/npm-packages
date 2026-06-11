@@ -47,7 +47,16 @@ rl.on("line", (line) => {
       });
       return;
     case "get_messages":
-      respond({ ...base, data: { messages: [] } });
+      respond({
+        ...base,
+        data: {
+          messages: [
+            { role: "user", content: "fake prompt", timestamp: 1000 },
+            { role: "assistant", content: [{ type: "text", text: "fake answer" }], timestamp: 2000 },
+            { role: "user", content: "fake follow-up", timestamp: 3000 },
+          ],
+        },
+      });
       return;
     case "get_available_models":
       respond({ ...base, data: { models: [{ provider: "fake", id: "fake-model", name: "Fake Model" }] } });

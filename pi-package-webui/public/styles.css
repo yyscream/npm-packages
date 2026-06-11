@@ -6614,3 +6614,48 @@ button.composer-skill-tag:focus-visible {
   }
   .path-picker-list { max-height: min(18rem, 42dvh); }
 }
+
+/* Transcript search (Ctrl/Cmd+F) */
+.chat-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-3);
+}
+.chat-search-bar[hidden] { display: none; }
+.chat-search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0.3rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--panel);
+  color: inherit;
+  font: inherit;
+}
+.chat-search-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.chat-search-count {
+  flex: 0 0 auto;
+  min-width: 3.2em;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.chat-search-button {
+  flex: 0 0 auto;
+  padding: 0.25rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--panel-2);
+  color: inherit;
+  cursor: pointer;
+}
+.chat-search-button:hover { background: var(--panel); }
+.message.search-current {
+  outline: 2px solid var(--accent-2);
+  outline-offset: 2px;
+}

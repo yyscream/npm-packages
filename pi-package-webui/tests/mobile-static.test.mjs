@@ -552,7 +552,7 @@ assert.match(app, /function setOptionalFeatureDisabled\(featureId, disabled\)[\s
 const workspaceInfoSource = server.match(/async function getWorkspaceInfo[\s\S]*?\n}\n\nlet activeGitWorkflowProcess/)?.[0] || "";
 assert.ok(workspaceInfoSource, "server workspace info source should be inspectable");
 assert.doesNotMatch(workspaceInfoSource, /runCommand\("git"|branchStatus|isRepo/, "Web UI workspace endpoint should not duplicate git footer status collection");
-assert.match(app, /function renderOptionalFeatureDependentDisplays\(\)[\s\S]*renderOptionalFeatureControls\(\);[\s\S]*renderThemeSelect\(\);[\s\S]*renderWidgets\(\);[\s\S]*renderStatus\(\);[\s\S]*renderCommands\(\);[\s\S]*renderAllMessages\(\{ preserveScroll: true \}\);[\s\S]*if \(streamRawText\) renderStreamingAssistantText\(\);/, "optional feature toggles should immediately refresh visible controls, commands, transcript, and live stream displays");
+assert.match(app, /function renderOptionalFeatureDependentDisplays\(\)[\s\S]*renderOptionalFeatureControls\(\);[\s\S]*renderThemeSelect\(\);[\s\S]*renderWidgets\(\);[\s\S]*renderStatus\(\);[\s\S]*renderCommands\(\);[\s\S]*renderAllMessages\(\{ preserveScroll: true, forceRebuild: true \}\);[\s\S]*if \(streamRawText\) renderStreamingAssistantText\(\);/, "optional feature toggles should immediately refresh visible controls, commands, transcript, and live stream displays");
 assert.match(app, /function setOptionalFeatureDisabled\(featureId, disabled\)[\s\S]*renderOptionalFeatureDependentDisplays\(\);[\s\S]*const tabContext = activeTabContext\(\);[\s\S]*refreshCommands\(tabContext\)/, "optional feature enable/disable should re-render the GUI and then refresh command capabilities");
 assert.match(app, /function setOptionalControlState\(button, available, unavailableTitle\)[\s\S]*setAttribute\("aria-label", nextAriaLabel\)[\s\S]*setAttribute\("data-tooltip", nextTooltip\)/, "optional feature button disabled state should update accessible labels and visible tooltips");
 assert.match(app, /const hasGitWorkflow = isOptionalFeatureEnabled\("gitWorkflow"\);\n\s+elements\.gitWorkflowButton\.hidden = !hasGitWorkflow/, "guided git workflow composer button should be hidden when unavailable or disabled");
@@ -648,7 +648,7 @@ assert.match(app, /function scheduleLiveToolRunRender\(run[\s\S]*?liveToolRender
 assert.match(app, /function handleToolExecutionUpdate\(event\)[\s\S]*?event\.partialResult[\s\S]*?scheduleLiveToolRunRender\(run, \{ scroll: false \}\)/, "live tool_execution_update events should update transcript-visible tool cards without replacing them per event");
 assert.match(app, /function captureReusableToolCards\(\)[\s\S]*?\.message\.toolExecution\[data-tool-call-id\]/, "full transcript re-renders should capture existing tool cards before clearing the chat");
 assert.match(app, /function appendMessage\(message,[\s\S]*?reusableToolCards = null[\s\S]*?reuseToolExecutionBubble\(reusableToolCards, message/, "message rendering should reuse matching tool cards instead of replacing them during refreshes");
-assert.match(app, /function renderAllMessages\(\{ preserveScroll = false \} = \{\}\)[\s\S]*?const reusableToolCards = captureReusableToolCards\(\);[\s\S]*?appendTranscriptMessage\(item\.message,[\s\S]*?reusableToolCards,/, "transcript refreshes should pass reusable tool cards through to item rendering");
+assert.match(app, /function renderAllMessages\(\{ preserveScroll = false, forceRebuild = false \} = \{\}\)[\s\S]*?const reusableToolCards = captureReusableToolCards\(\);[\s\S]*?appendTranscriptMessage\(entry\.item\.message,[\s\S]*?reusableToolCards,/, "transcript refreshes should pass reusable tool cards through to item rendering");
 assert.match(app, /const keyedToolExecution = message\.role === "toolExecution" && message\.toolCallId[\s\S]*?keyedToolExecution \? "toolExecution"[\s\S]*?keyedToolExecution \? "" : message\.title[\s\S]*?keyedToolExecution \? "" : message\.timestamp/, "tool action entry identity should stay stable when live transient cards become persisted transcript cards");
 assert.match(app, /appendText\(preview, toolResultPreviewText\(message, 10\), "code-block tool-result-preview-text"\)/, "collapsed tool results should render the first ten preview lines by default");
 assert.match(app, /function assistantDisplayMessages\(message\)/, "assistant history should split thinking and tool-call parts out of the final Assistant output card");
@@ -681,7 +681,7 @@ assert.match(app, /function renderStreamingAssistantText\(\)[\s\S]*?const assist
 assert.match(app, /const STREAM_OUTPUT_HIDE_DELAY_MS = 300/, "stream output hiding should be debounced to prevent rapid flicker");
 assert.match(app, /const STREAM_OUTPUT_TOOLCALL_GUARD_MS = 220/, "live assistant text should be briefly guarded so pre-tool-call text can be suppressed");
 assert.match(app, /function scheduleStreamBubbleHide\([\s\S]*?STREAM_OUTPUT_MIN_VISIBLE_MS/, "stream output cards should observe a minimum visible duration before hiding");
-assert.match(app, /if \(assistantText\) \{[\s\S]*?renderMarkdown\(streamText, assistantText\);[\s\S]*?\} else \{\n\s+scheduleStreamBubbleHide\(\);/, "empty filtered stream output should schedule hide while visible stream output renders as Markdown");
+assert.match(app, /if \(assistantText\) \{[\s\S]*?renderStreamingMarkdown\(streamText, assistantText\);[\s\S]*?\} else \{\n\s+scheduleStreamBubbleHide\(\);/, "empty filtered stream output should schedule hide while visible stream output renders as Markdown");
 assert.match(app, /if \(streamToolCallSeen \|\| streamBubble\) renderStreamingAssistantText\(\);\n\s+else scheduleStreamingAssistantTextRender\(\);/, "live assistant text should wait briefly before showing unless it is already visible or follows a tool call");
 assert.match(app, /streamToolCallSeen = true;\n\s+suppressStreamingAssistantTextBeforeToolCall\(\);/, "tool-call starts should remove pending assistant text from the live transcript");
 assert.match(app, /const created = appendMessage\(\{ role: "assistant", title: "final output"/, "live Assistant cards should be created only for final output text without a noisy Assistant label");
@@ -1162,5 +1162,36 @@ assert.ok(pkg.pi?.themes?.includes("node_modules/@firstpick/pi-themes-bundle/the
 assert.ok(!pkg.pi?.themes?.includes("../pi-package-themes-bundle/themes"), "webui Pi manifest should avoid duplicate sibling bundled themes");
 assert.ok(pkg.scripts?.check?.includes("node --check public/app.js"), "check script should syntax-check app.js");
 assert.ok(pkg.scripts?.check?.includes("node tests/run-all.mjs"), "check script should run the shared test runner");
+
+// --- Performance: keyed transcript reconciliation (P0-1) ---
+assert.match(app, /let renderedTranscriptState = \{ epoch: "", entries: \[\] \};/, "transcript reconciliation should track rendered entries");
+assert.match(app, /function renderAllMessages\(\{ preserveScroll = false, forceRebuild = false \} = \{\}\)[\s\S]*?if \(prefixLength === 0\) resetChatOutput\(\);[\s\S]*?removeChatBubblesAfterPrefix\(/, "renderAllMessages should reuse the unchanged transcript prefix instead of always rebuilding");
+assert.match(app, /function removeChatBubblesAfterPrefix\(keptKeys\)[\s\S]*?child === elements\.stickyUserPromptButton \|\| child === runIndicatorBubble/, "prefix removal must preserve the sticky prompt button and run indicator");
+assert.match(app, /function resetChatOutput\(\) \{\n  liveToolCards\.clear\(\);\n  renderedTranscriptState = \{ epoch: "", entries: \[\] \};/, "full chat resets must clear reconciliation state");
+assert.match(app, /function transcriptRenderEpoch\(\)[\s\S]*?thinkingOutputVisible/, "reconciliation epoch must include thinking visibility so toggles rebuild the transcript");
+assert.match(app, /pruneDisconnectedLiveToolCards\(\);/, "reconciliation must prune live tool card references to removed DOM nodes");
+
+// --- Performance: incremental streaming markdown (P0-3) ---
+assert.match(app, /function streamingMarkdownStableBoundary\(text\)[\s\S]*?for \(let index = 0; index < lines\.length - 1; index \+= 1\)/, "streaming markdown boundary must never treat the final partial line as stable");
+assert.match(app, /function renderStreamingMarkdown\(block, text\)[\s\S]*?if \(!text\.startsWith\(state\.stableText\)\)/, "streaming markdown must fall back to a full re-render when earlier content changes");
+assert.match(app, /streamRawText = "";\n  streamMarkdownState = null;/, "resetting the stream bubble must clear incremental markdown state");
+
+// --- Performance: delta transcript fetch (P1-1) ---
+assert.match(app, /function mergeMessagesDelta\(previous, data\)[\s\S]*?messagesLookEqual\(previous\[since\], data\.messages\[0\]\)/, "delta merges must verify the one-message overlap before applying");
+assert.match(app, /async function refreshMessages\(tabContext = activeTabContext\(\)\)[\s\S]*?\/api\/messages\?since=/, "message refreshes should request transcript deltas");
+assert.match(app, /if \(!nextMessages\) \{[\s\S]*?api\("\/api\/messages", \{ tabId: tabContext\.tabId \}\)/, "delta failures must fall back to a full transcript fetch");
+assert.match(server, /function applyMessagesSinceParam\(response, url\)/, "server should slice get_messages results for \\?since= requests");
+assert.match(app, /const messageStaticSignatureCache = new WeakMap\(\);/, "static message signatures should be cached by object identity");
+assert.match(app, /case "tool_execution_end":(?:(?!scheduleRefreshMessages)[\s\S])*?break;/, "tool completions must not trigger full transcript refreshes");
+assert.match(app, /case "message_end":[\s\S]*?scheduleRefreshMessages\(\);/, "assistant message completion must still reconcile the transcript");
+
+// --- UX: transcript search (P2-1) ---
+assert.match(html, /id="chatSearchBar"[\s\S]*?id="chatSearchInput"[\s\S]*?id="chatSearchPrevButton"[\s\S]*?id="chatSearchNextButton"[\s\S]*?id="chatSearchCloseButton"/, "transcript search bar markup should exist with navigation controls");
+assert.match(app, /function openChatSearch\(\)[\s\S]*?elements\.chatSearchInput\?\.focus\(\)/, "opening transcript search should focus the input");
+assert.match(app, /\(event\.ctrlKey \|\| event\.metaKey\) && !event\.altKey && !event\.shiftKey && event\.key\.toLowerCase\(\) === "f"/, "Ctrl\/Cmd+F should open the transcript search");
+assert.match(app, /function focusChatSearchMatch\(\)[\s\S]*?details\.open = true;[\s\S]*?scrollIntoView/, "navigating to a search match should expand collapsed tool output and scroll to the bubble");
+assert.match(app, /autoFollowChat = false;\n  lastChatProgrammaticScrollAt = performance\.now\(\);/, "search navigation must not fight chat auto-follow");
+assert.match(css, /\.message\.search-current \{/, "current search match should have a highlight style");
+assert.match(css, /\.chat-search-bar \{/, "transcript search bar should be styled");
 
 console.log("mobile static checks passed");

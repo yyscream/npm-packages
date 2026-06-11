@@ -28,6 +28,12 @@ const elements = {
   widgetArea: $("#widgetArea"),
   stickyUserPromptButton: $("#stickyUserPromptButton"),
   chat: $("#chat"),
+  chatSearchBar: $("#chatSearchBar"),
+  chatSearchInput: $("#chatSearchInput"),
+  chatSearchCount: $("#chatSearchCount"),
+  chatSearchPrevButton: $("#chatSearchPrevButton"),
+  chatSearchNextButton: $("#chatSearchNextButton"),
+  chatSearchCloseButton: $("#chatSearchCloseButton"),
   feedbackTray: $("#feedbackTray"),
   feedbackTraySummary: $("#feedbackTraySummary"),
   sendFeedbackButton: $("#sendFeedbackButton"),
@@ -3035,7 +3041,7 @@ function renderOptionalFeatureDependentDisplays() {
   streamBubble = null;
   streamText = null;
   streamBubbleVisibleSince = 0;
-  renderAllMessages({ preserveScroll: true });
+  renderAllMessages({ preserveScroll: true, forceRebuild: true });
   if (streamRawText) renderStreamingAssistantText();
 }
 
@@ -9285,6 +9291,64 @@ function renderMarkdown(block, text) {
   renderMarkdownInto(block, text);
 }
 
+/**
+ * Incremental renderer for streaming assistant markdown. The block-based
+ * parser in renderMarkdownInto only ever closes a block at a blank line
+ * outside a code fence, so everything before the last such boundary is
+ * stable: it is parsed exactly once and its DOM is never rebuilt. Only the
+ * open tail is re-parsed per streaming tick, keeping per-tick cost flat
+ * instead of O(message length).
+ */
+let streamMarkdownState = null;
+
+function streamingMarkdownStableBoundary(text) {
+  const lines = text.split("\n");
+  let inFence = false;
+  let boundary = 0;
+  let offset = 0;
+  // Exclude the final line: it may still be streaming in.
+  for (let index = 0; index < lines.length - 1; index += 1) {
+    const line = lines[index];
+    if (inFence) {
+      if (/^\s*```\s*$/.test(line)) inFence = false;
+    } else if (/^\s*```\s*[\w.+-]*\s*$/.test(line)) {
+      inFence = true;
+    }
+    offset += line.length + 1;
+    if (!inFence && !line.trim()) boundary = offset;
+  }
+  return boundary;
+}
+
+function renderStreamingMarkdown(block, text) {
+  let state = streamMarkdownState;
+  if (!state || state.block !== block) {
+    block.replaceChildren();
+    state = streamMarkdownState = { block, stableText: "", tailNodes: [] };
+  }
+  if (!text.startsWith(state.stableText)) {
+    // Earlier content changed retroactively (e.g. todo-progress stripping);
+    // fall back to a full re-render for correctness.
+    block.replaceChildren();
+    state.stableText = "";
+    state.tailNodes = [];
+  }
+  for (const node of state.tailNodes) node.remove();
+  state.tailNodes = [];
+  const boundary = streamingMarkdownStableBoundary(text);
+  if (boundary > state.stableText.length) {
+    renderMarkdownInto(block, text.slice(state.stableText.length, boundary));
+    state.stableText = text.slice(0, boundary);
+  }
+  const tail = text.slice(state.stableText.length);
+  if (tail.trim()) {
+    const fragment = document.createDocumentFragment();
+    renderMarkdownInto(fragment, tail);
+    state.tailNodes = [...fragment.childNodes];
+    block.append(fragment);
+  }
+}
+
 function appendImage(parent, part) {
   const wrapper = make("div", "image-block");
   const img = document.createElement("img");
@@ -9915,6 +9979,7 @@ function stickyUserPromptViewportGap() {
 
 function resetChatOutput() {
   liveToolCards.clear();
+  renderedTranscriptState = { epoch: "", entries: [] };
   const preservedNodes = [];
   if (elements.stickyUserPromptButton) preservedNodes.push(elements.stickyUserPromptButton);
   if (runIndicatorBubble?.parentElement === elements.chat) preservedNodes.push(runIndicatorBubble);
@@ -10599,9 +10664,12 @@ function jumpToStickyUserPrompt() {
   requestAnimationFrame(updateStickyUserPromptButton);
 }
 
-function appendMessage(message, { streaming = false, messageIndex = -1, transient = false, animateEntry = false, reusableToolCards = null } = {}) {
+function appendMessage(message, { streaming = false, messageIndex = -1, transient = false, animateEntry = false, reusableToolCards = null, itemKey = "" } = {}) {
   const reused = reuseToolExecutionBubble(reusableToolCards, message, { streaming, messageIndex, transient });
-  if (reused) return reused;
+  if (reused) {
+    if (itemKey) reused.bubble.dataset.itemKey = itemKey;
+    return reused;
+  }
   const role = String(message.role || "message");
   const safeRole = role.replace(/[^a-z0-9_-]/gi, "");
   const bubble = make("article", `message ${safeRole}${message.level ? ` ${message.level}` : ""}${streaming ? " streaming" : ""}${animateEntry ? " action-enter" : ""}`);
@@ -10610,6 +10678,7 @@ function appendMessage(message, { streaming = false, messageIndex = -1, transien
     bubble.dataset.messageIndex = String(messageIndex);
     if (role === "user") bubble.dataset.userPrompt = "true";
   }
+  if (itemKey) bubble.dataset.itemKey = itemKey;
   const isCollapsibleOutput = !streaming && (message.role === "toolResult" || message.role === "bashExecution" || message.role === "compactionSummary");
 
   const hideMessageHeader = message.role === "assistant" && !isCollapsibleOutput;
@@ -10661,9 +10730,9 @@ function appendMessage(message, { streaming = false, messageIndex = -1, transien
   return { bubble, body };
 }
 
-function appendTranscriptMessage(message, { streaming = false, messageIndex = -1, transient = false, animateEntry = false, reusableToolCards = null } = {}) {
+function appendTranscriptMessage(message, { streaming = false, messageIndex = -1, transient = false, animateEntry = false, reusableToolCards = null, itemKey = "" } = {}) {
   if (streaming || transient || message?.role !== "assistant") {
-    return appendMessage(message, { streaming, messageIndex, transient, animateEntry, reusableToolCards });
+    return appendMessage(message, { streaming, messageIndex, transient, animateEntry, reusableToolCards, itemKey });
   }
 
   let finalOutput = null;
@@ -10693,6 +10762,7 @@ function appendTranscriptMessage(message, { streaming = false, messageIndex = -1
       transient: false,
       animateEntry: animateEntry && isActionTranscriptMessage(transcriptMessage),
       reusableToolCards,
+      itemKey,
     });
     if (transcriptMessage.role === "assistant") finalOutput = created;
   });
@@ -10964,20 +11034,169 @@ function orderedTranscriptItems() {
   return items.sort((a, b) => a.timestampMs - b.timestampMs || a.order - b.order);
 }
 
-function renderAllMessages({ preserveScroll = false } = {}) {
+/**
+ * Keyed transcript reconciliation state. Each transcript item gets a stable
+ * key plus a cheap content signature; renders reuse the longest common
+ * prefix of unchanged items and only rebuild DOM from the first divergence
+ * (typically the last one or two items), instead of rebuilding every bubble.
+ */
+let renderedTranscriptState = { epoch: "", entries: [] };
+
+function transcriptRenderEpoch() {
+  return `${activeTabId || ""}|${thinkingOutputVisible ? 1 : 0}`;
+}
+
+function transcriptItemKey(item) {
+  if (!item.transient) return `m:${item.messageIndex}`;
+  if (item.messageIndex >= 0) return `t:${item.messageIndex}`;
+  return `live:${item.message?.toolCallId || `o${item.order}`}`;
+}
+
+function safeJsonLength(value) {
+  if (value === undefined || value === null) return 0;
+  try {
+    return JSON.stringify(value).length;
+  } catch {
+    return -1;
+  }
+}
+
+function contentSignature(content) {
+  if (content === undefined || content === null) return "";
+  if (typeof content === "string") return `s${content.length}`;
+  if (!Array.isArray(content)) return `o${safeJsonLength(content)}`;
+  let sig = `a${content.length}`;
+  for (const part of content) {
+    if (!part || typeof part !== "object") {
+      sig += ";x";
+      continue;
+    }
+    const text = typeof part.text === "string" ? part.text
+      : typeof part.thinking === "string" ? part.thinking
+        : typeof part.data === "string" ? part.data
+          : typeof part.content === "string" ? part.content : "";
+    sig += `;${part.type || "?"}:${text.length}:${part.toolCallId || part.id || ""}`;
+  }
+  return sig;
+}
+
+function toolCallLiveStateSignature(toolCallId) {
+  if (!toolCallId) return "";
+  const id = String(toolCallId);
+  const result = toolResultForCallId(id);
+  const run = liveToolRuns.get(id);
+  let sig = "";
+  if (result) sig += `r:${contentSignature(result.content)}:${result.isError ? "e" : ""}`;
+  if (run) sig += `|l:${run.isPartial ? "p" : ""}${run.isError ? "e" : ""}:${run.endedAt || ""}:${contentSignature(run.result?.content)}:${safeJsonLength(run.arguments)}`;
+  return sig;
+}
+
+function actionFeedbackSignature(messageIndex) {
+  const map = actionFeedbackByTab.get(activeTabId);
+  if (!map?.size) return "";
+  let sig = "";
+  for (const entry of map.values()) {
+    if (entry.messageIndex === messageIndex) sig += `${entry.key}=${entry.reaction};`;
+  }
+  return sig;
+}
+
+// Cache of the message-object-derived part of an item signature. Session
+// messages are append-only and treated as immutable, and delta merges keep
+// previous object identities, so cached entries stay valid until a full
+// fetch replaces the array (when the cache simply rebuilds).
+const messageStaticSignatureCache = new WeakMap();
+
+function messageStaticSignature(message) {
+  const cacheable = message && typeof message === "object";
+  if (cacheable) {
+    const cached = messageStaticSignatureCache.get(message);
+    if (cached !== undefined) return cached;
+  }
+  const sig = [
+    message.role || "",
+    String(message.timestamp || ""),
+    message.level || "",
+    String(message.title || ""),
+    contentSignature(message.content),
+    typeof message.command === "string" ? `c${message.command.length}` : "",
+    typeof message.output === "string" ? `out${message.output.length}` : "",
+    typeof message.summary === "string" ? `sum${message.summary.length}` : "",
+    typeof message.thinking === "string" ? `th${message.thinking.length}` : "",
+  ];
+  if (message.role === "toolExecution") {
+    sig.push(
+      message.live ? "live" : "",
+      message.isPartial ? "p" : "",
+      message.isError ? "e" : "",
+      String(message.startedAt || ""),
+      String(message.endedAt || ""),
+      contentSignature(message.result?.content),
+      String(safeJsonLength(message.arguments)),
+    );
+  }
+  const joined = sig.join("|");
+  if (cacheable) messageStaticSignatureCache.set(message, joined);
+  return joined;
+}
+
+function transcriptItemSignature(item) {
+  const message = item.message || {};
+  const sig = [messageStaticSignature(message)];
+  if (message.role === "toolExecution") sig.push(toolCallLiveStateSignature(message.toolCallId));
+  if (message.role === "assistant" && Array.isArray(message.content)) {
+    for (const part of message.content) {
+      if (isAssistantToolCallPart(part)) sig.push(toolCallLiveStateSignature(assistantToolCallId(part)));
+    }
+  }
+  if (!item.transient && item.messageIndex >= 0) sig.push(actionFeedbackSignature(item.messageIndex));
+  return sig.join("|");
+}
+
+function removeChatBubblesAfterPrefix(keptKeys) {
+  for (const child of [...elements.chat.children]) {
+    if (child === elements.stickyUserPromptButton || child === runIndicatorBubble) continue;
+    const key = child.dataset?.itemKey;
+    if (key && keptKeys.has(key)) continue;
+    child.remove();
+  }
+}
+
+function pruneDisconnectedLiveToolCards() {
+  for (const [id, bubble] of liveToolCards) {
+    if (!bubble.isConnected) liveToolCards.delete(id);
+  }
+}
+
+function renderAllMessages({ preserveScroll = false, forceRebuild = false } = {}) {
   const shouldFollow = !preserveScroll && (autoFollowChat || isChatNearBottom());
   const previousScrollTop = elements.chat.scrollTop;
-  const reusableToolCards = captureReusableToolCards();
-  resetChatOutput();
   const transcriptItems = orderedTranscriptItems();
-  for (const item of transcriptItems) {
-    appendTranscriptMessage(item.message, {
-      messageIndex: item.messageIndex,
-      transient: item.transient,
-      animateEntry: shouldAnimateActionEntry(item),
+  const epoch = transcriptRenderEpoch();
+  const nextEntries = transcriptItems.map((item) => ({ item, key: transcriptItemKey(item), sig: transcriptItemSignature(item) }));
+  let prefixLength = 0;
+  if (!forceRebuild && epoch === renderedTranscriptState.epoch) {
+    const previous = renderedTranscriptState.entries;
+    const limit = Math.min(previous.length, nextEntries.length);
+    while (prefixLength < limit && previous[prefixLength].key === nextEntries[prefixLength].key && previous[prefixLength].sig === nextEntries[prefixLength].sig) {
+      prefixLength += 1;
+    }
+  }
+  const reusableToolCards = captureReusableToolCards();
+  if (prefixLength === 0) resetChatOutput();
+  else removeChatBubblesAfterPrefix(new Set(nextEntries.slice(0, prefixLength).map((entry) => entry.key)));
+  for (let index = prefixLength; index < nextEntries.length; index += 1) {
+    const entry = nextEntries[index];
+    appendTranscriptMessage(entry.item.message, {
+      messageIndex: entry.item.messageIndex,
+      transient: entry.item.transient,
+      animateEntry: shouldAnimateActionEntry(entry.item),
       reusableToolCards,
+      itemKey: entry.key,
     });
   }
+  pruneDisconnectedLiveToolCards();
+  renderedTranscriptState = { epoch, entries: nextEntries.map(({ key, sig }) => ({ key, sig })) };
   rememberActionEntries(transcriptItems);
   applyToolOutputExpansionToDom();
   renderRunIndicator({ scroll: false });
@@ -12535,7 +12754,7 @@ function renderStreamingAssistantText() {
   const assistantText = stripTodoProgressLines(streamRawText, { streaming: true });
   if (assistantText) {
     ensureStreamBubble();
-    renderMarkdown(streamText, assistantText);
+    renderStreamingMarkdown(streamText, assistantText);
   } else {
     scheduleStreamBubbleHide();
   }
@@ -12588,6 +12807,7 @@ function resetStreamBubble() {
   streamBubble = null;
   streamText = null;
   streamRawText = "";
+  streamMarkdownState = null;
   streamBubbleVisibleSince = 0;
   streamToolCallSeen = false;
   streamThinkingBubble = null;
@@ -12839,11 +13059,53 @@ async function refreshFooterData(tabContext = activeTabContext()) {
   await Promise.allSettled([refreshStats(tabContext), refreshWorkspace(tabContext)]);
 }
 
+// Session key of the last applied transcript fetch; deltas are only
+// attempted while the tab+session is unchanged.
+let latestMessagesSessionKey = "";
+
+function messagesLookEqual(a, b) {
+  return !!a && !!b && a.role === b.role && String(a.timestamp || "") === String(b.timestamp || "")
+    && contentSignature(a.content) === contentSignature(b.content);
+}
+
+/**
+ * Merge a /api/messages?since= delta into the previous transcript. Returns
+ * null whenever the delta cannot be applied safely — history shrank
+ * (compaction), counts are inconsistent, or the one-message overlap no
+ * longer matches (fork/resume/retroactive edit) — in which case the caller
+ * falls back to a full fetch. Merged arrays keep previous message object
+ * identities, which keeps the WeakMap signature cache hot.
+ */
+function mergeMessagesDelta(previous, data) {
+  if (!data || !Array.isArray(data.messages)) return null;
+  const since = Number(data.since);
+  const totalCount = Number(data.totalCount);
+  if (!Number.isInteger(since) || !Number.isInteger(totalCount)) return null;
+  if (since > previous.length || totalCount < previous.length) return null;
+  if (totalCount !== since + data.messages.length) return null;
+  if (since < previous.length && !messagesLookEqual(previous[since], data.messages[0])) return null;
+  return previous.slice(0, since).concat(data.messages);
+}
+
 async function refreshMessages(tabContext = activeTabContext()) {
   if (!tabContext.tabId) return;
-  const response = await api("/api/messages", { tabId: tabContext.tabId });
-  if (!isCurrentTabContext(tabContext)) return;
-  latestMessages = response.data?.messages || [];
+  const previousMessages = latestMessages;
+  const sessionKey = `${tabContext.tabId}|${currentState?.sessionId || ""}`;
+  let nextMessages = null;
+  if (previousMessages.length > 1 && sessionKey === latestMessagesSessionKey) {
+    // Delta fetch with a one-message overlap: the last known message is
+    // re-requested so retroactive changes are detected via mergeMessagesDelta.
+    const response = await api(`/api/messages?since=${previousMessages.length - 1}`, { tabId: tabContext.tabId });
+    if (!isCurrentTabContext(tabContext)) return;
+    nextMessages = mergeMessagesDelta(previousMessages, response.data);
+  }
+  if (!nextMessages) {
+    const response = await api("/api/messages", { tabId: tabContext.tabId });
+    if (!isCurrentTabContext(tabContext)) return;
+    nextMessages = response.data?.messages || [];
+  }
+  latestMessages = nextMessages;
+  latestMessagesSessionKey = sessionKey;
   const preserveLiveStream = liveStreamRenderActive();
   if (!preserveLiveStream) resetStreamBubble();
   renderMessages(latestMessages);
@@ -14237,7 +14499,9 @@ function handleEvent(event) {
       handleToolExecutionEnd(event);
       setRunIndicatorActivity(`Tool ${runIndicatorToolName(event.toolName)} ${event.isError ? "failed" : "finished"}; waiting for the agent's next step…`);
       addEvent(`tool ${event.toolName} ${event.isError ? "failed" : "finished"}`, event.isError ? "error" : "info");
-      scheduleRefreshMessages();
+      // No transcript refresh here: the live tool card already shows the
+      // result via renderLiveToolRun, and message_end/agent_end reconcile the
+      // transcript. This avoids one fetch+render per tool call.
       scheduleRefreshFooter();
       break;
     case "compaction_start":
@@ -14962,6 +15226,118 @@ function handleNativeAppShortcut(event) {
     restoreQueuedMessagesToComposerFromShortcut();
   }
 }
+
+// --- Transcript search (Ctrl/Cmd+F) ---
+let chatSearchMatches = [];
+let chatSearchIndex = -1;
+let chatSearchTimer = null;
+
+function chatSearchQueryText() {
+  return (elements.chatSearchInput?.value || "").trim().toLowerCase();
+}
+
+function collectChatSearchMatches(query) {
+  if (!query) return [];
+  const matches = [];
+  for (const bubble of elements.chat.querySelectorAll(".message")) {
+    if (bubble === runIndicatorBubble || bubble.classList.contains("runIndicator")) continue;
+    if ((bubble.textContent || "").toLowerCase().includes(query)) matches.push(bubble);
+  }
+  return matches;
+}
+
+function clearChatSearchHighlights() {
+  for (const bubble of elements.chat.querySelectorAll(".message.search-current")) bubble.classList.remove("search-current");
+}
+
+function updateChatSearchCount() {
+  if (!elements.chatSearchCount) return;
+  const query = chatSearchQueryText();
+  elements.chatSearchCount.textContent = !query ? "" : chatSearchMatches.length === 0 ? "0/0" : `${chatSearchIndex + 1}/${chatSearchMatches.length}`;
+}
+
+function focusChatSearchMatch() {
+  const bubble = chatSearchMatches[chatSearchIndex];
+  if (!bubble) return;
+  if (!bubble.isConnected) {
+    runChatSearch({ navigate: false });
+    return;
+  }
+  clearChatSearchHighlights();
+  bubble.classList.add("search-current");
+  const query = chatSearchQueryText();
+  for (const details of bubble.querySelectorAll("details")) {
+    if (!details.open && (details.textContent || "").toLowerCase().includes(query)) details.open = true;
+  }
+  autoFollowChat = false;
+  lastChatProgrammaticScrollAt = performance.now();
+  bubble.scrollIntoView({ block: "center", behavior: "instant" });
+  updateJumpToLatestButton();
+  updateChatSearchCount();
+}
+
+function runChatSearch({ navigate = false } = {}) {
+  const query = chatSearchQueryText();
+  clearChatSearchHighlights();
+  chatSearchMatches = collectChatSearchMatches(query);
+  if (chatSearchIndex >= chatSearchMatches.length || chatSearchIndex < 0) chatSearchIndex = chatSearchMatches.length - 1;
+  updateChatSearchCount();
+  if (navigate) focusChatSearchMatch();
+}
+
+function stepChatSearch(step) {
+  if (chatSearchMatches.some((bubble) => !bubble.isConnected)) runChatSearch();
+  if (!chatSearchMatches.length) {
+    runChatSearch();
+    if (!chatSearchMatches.length) return;
+  }
+  chatSearchIndex = (chatSearchIndex + step + chatSearchMatches.length) % chatSearchMatches.length;
+  focusChatSearchMatch();
+}
+
+function openChatSearch() {
+  if (!elements.chatSearchBar) return;
+  elements.chatSearchBar.hidden = false;
+  elements.chatSearchInput?.focus();
+  elements.chatSearchInput?.select();
+  if (chatSearchQueryText()) runChatSearch();
+}
+
+function closeChatSearch() {
+  if (!elements.chatSearchBar || elements.chatSearchBar.hidden) return;
+  elements.chatSearchBar.hidden = true;
+  clearChatSearchHighlights();
+  chatSearchMatches = [];
+  chatSearchIndex = -1;
+  updateChatSearchCount();
+}
+
+elements.chatSearchInput?.addEventListener("input", () => {
+  clearTimeout(chatSearchTimer);
+  chatSearchTimer = setTimeout(() => {
+    chatSearchIndex = -1;
+    runChatSearch({ navigate: true });
+  }, 150);
+});
+elements.chatSearchInput?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    stepChatSearch(event.shiftKey ? -1 : 1);
+  } else if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    closeChatSearch();
+  }
+});
+elements.chatSearchPrevButton?.addEventListener("click", () => stepChatSearch(-1));
+elements.chatSearchNextButton?.addEventListener("click", () => stepChatSearch(1));
+elements.chatSearchCloseButton?.addEventListener("click", closeChatSearch);
+window.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "f") {
+    event.preventDefault();
+    openChatSearch();
+  }
+});
 
 window.addEventListener("keydown", handleNativeAppShortcut, { capture: true });
 document.addEventListener("visibilitychange", () => {

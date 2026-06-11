@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdtemp, rm, stat } from "node:fs/promises";
 import { networkInterfaces, tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -68,6 +68,38 @@ try {
   assert.equal(health.body.ok, true);
   assert.equal(health.body.piRunning, true, "fake pi RPC process should be attached and running");
 
+  // Static assets: brotli/gzip compression plus ETag revalidation (P0-2).
+  const brotliResponse = await fetch(`http://127.0.0.1:${port}/app.js`, {
+    headers: { "accept-encoding": "br, gzip" },
+    signal: AbortSignal.timeout(5_000),
+  });
+  assert.equal(brotliResponse.status, 200);
+  assert.equal(brotliResponse.headers.get("content-encoding"), "br", "app.js should be served brotli-compressed");
+  assert.equal(brotliResponse.headers.get("cache-control"), "no-cache", "static assets should allow ETag revalidation");
+  assert.equal(brotliResponse.headers.get("vary"), "Accept-Encoding");
+  const appEtag = brotliResponse.headers.get("etag");
+  assert.ok(appEtag, "app.js response should carry an ETag");
+  // Node fetch transparently decompresses; equal size proves the brotli
+  // round-trip reproduced the exact raw asset.
+  const appBody = await brotliResponse.arrayBuffer();
+  const rawAppSize = (await stat(join(root, "public", "app.js"))).size;
+  assert.equal(appBody.byteLength, rawAppSize, "decompressed app.js should match the raw file byte-for-byte in size");
+
+  const conditionalResponse = await fetch(`http://127.0.0.1:${port}/app.js`, {
+    headers: { "if-none-match": appEtag },
+    signal: AbortSignal.timeout(5_000),
+  });
+  assert.equal(conditionalResponse.status, 304, "matching If-None-Match should return 304");
+  await conditionalResponse.arrayBuffer();
+
+  const gzipResponse = await fetch(`http://127.0.0.1:${port}/styles.css`, {
+    headers: { "accept-encoding": "gzip" },
+    signal: AbortSignal.timeout(5_000),
+  });
+  assert.equal(gzipResponse.status, 200);
+  assert.equal(gzipResponse.headers.get("content-encoding"), "gzip", "styles.css should fall back to gzip");
+  await gzipResponse.arrayBuffer();
+
   const tabsResponse = await request("127.0.0.1", "/api/tabs");
   assert.equal(tabsResponse.status, 200);
   const tabList = tabsResponse.body?.data?.tabs || tabsResponse.body?.tabs || [];
@@ -78,6 +110,24 @@ try {
   const state = await request("127.0.0.1", `/api/state?tab=${encodeURIComponent(tabId)}`);
   assert.equal(state.status, 200);
   assert.equal(state.body?.data?.model?.provider, "fake", "state should come from the fake pi RPC");
+
+  // Delta transcript endpoint (P1-1): ?since= returns only the tail plus merge metadata.
+  const fullMessages = await request("127.0.0.1", `/api/messages?tab=${encodeURIComponent(tabId)}`);
+  assert.equal(fullMessages.status, 200);
+  assert.equal((fullMessages.body?.data?.messages || []).length, 3, "fake pi should provide a 3-message transcript");
+  assert.equal(fullMessages.body?.data?.totalCount, undefined, "full fetches should keep the legacy payload shape");
+
+  const deltaMessages = await request("127.0.0.1", `/api/messages?since=2&tab=${encodeURIComponent(tabId)}`);
+  assert.equal(deltaMessages.status, 200);
+  assert.equal(deltaMessages.body?.data?.since, 2);
+  assert.equal(deltaMessages.body?.data?.totalCount, 3);
+  assert.equal((deltaMessages.body?.data?.messages || []).length, 1, "since=2 should return only the tail message");
+  assert.equal(deltaMessages.body?.data?.messages?.[0]?.content, "fake follow-up");
+
+  const clampedMessages = await request("127.0.0.1", `/api/messages?since=99&tab=${encodeURIComponent(tabId)}`);
+  assert.equal(clampedMessages.status, 200);
+  assert.equal(clampedMessages.body?.data?.since, 3, "since beyond the transcript should clamp to the total count");
+  assert.equal((clampedMessages.body?.data?.messages || []).length, 0);
 
   // Native slash command routed through the adapter (/copy → get_last_assistant_text).
   const copy = await request("127.0.0.1", "/api/prompt", {
