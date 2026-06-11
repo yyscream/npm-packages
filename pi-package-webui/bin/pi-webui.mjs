@@ -2955,6 +2955,159 @@ function cleanGitCommitMessageInput(value) {
   return message;
 }
 
+function cleanGitHubUsername(value) {
+  const username = String(value || "").trim().replace(/^@+/, "");
+  if (!username) throw new Error("GitHub username is required");
+  if (username.length > 39 || !/^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/.test(username) || username.includes("--")) {
+    throw new Error("Invalid GitHub username");
+  }
+  return username;
+}
+
+function cleanGitHubRepoName(value) {
+  let repoName = String(value || "").trim();
+  const githubUrlMatch = repoName.match(/github\.com[:/][^/\s]+\/([^/\s]+?)(?:\.git)?\/?$/i);
+  if (githubUrlMatch) repoName = githubUrlMatch[1];
+  if (repoName.includes("/")) repoName = repoName.split("/").filter(Boolean).pop() || "";
+  repoName = repoName.replace(/\.git$/i, "");
+  if (!repoName) throw new Error("GitHub repository name is required");
+  if (repoName.length > 100 || repoName === "." || repoName === ".." || !/^[A-Za-z0-9._-]+$/.test(repoName)) {
+    throw new Error("Invalid GitHub repository name");
+  }
+  return repoName;
+}
+
+function gitHubOriginUrl(username, repoName) {
+  return `https://github.com/${cleanGitHubUsername(username)}/${cleanGitHubRepoName(repoName)}.git`;
+}
+
+function defaultGitRepoNameFromRoot(root) {
+  try {
+    return cleanGitHubRepoName(path.basename(root));
+  } catch {
+    return "new-repo";
+  }
+}
+
+async function ensureOutsideGitRepository(cwd) {
+  const result = await runCommand("git", ["rev-parse", "--show-toplevel"], { cwd, timeoutMs: 2000 });
+  if (result.exitCode === 0 && result.stdout.trim()) throw new Error(`Already inside a git repository: ${path.resolve(result.stdout.trim())}`);
+}
+
+async function regularFileExists(filePath) {
+  try {
+    return (await stat(filePath)).isFile();
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function detectRepositoryStack(root) {
+  let names = new Set();
+  try {
+    names = new Set(await readdir(root));
+  } catch {
+    return "";
+  }
+  const detected = [];
+  if (names.has("package.json")) {
+    try {
+      const manifest = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
+      const deps = { ...(manifest.dependencies || {}), ...(manifest.devDependencies || {}) };
+      if (deps.next) detected.push("Next.js");
+      else if (deps.react || deps.vite) detected.push("React / Vite");
+      else detected.push("Node.js / TypeScript");
+      if (deps.typescript || names.has("tsconfig.json")) detected.push("TypeScript");
+    } catch {
+      detected.push("Node.js");
+    }
+  }
+  if (names.has("pyproject.toml") || names.has("requirements.txt") || names.has("setup.py")) detected.push("Python");
+  if (names.has("manage.py")) detected.push("Django");
+  if (names.has("Cargo.toml")) detected.push("Rust");
+  if (names.has("go.mod")) detected.push("Go");
+  if (names.has("pom.xml") || names.has("build.gradle") || names.has("build.gradle.kts")) detected.push("Java / Gradle");
+  if (names.has("Dockerfile") || names.has("docker-compose.yml") || names.has("compose.yml")) detected.push("Docker");
+  return [...new Set(detected)].join(", ");
+}
+
+async function initialRepositoryFilesStatus(cwd) {
+  const root = await getGitRoot(cwd);
+  const readmePath = path.join(root, "README.md");
+  const gitignorePath = path.join(root, ".gitignore");
+  const [readmeExists, gitignoreExists, detectedStack] = await Promise.all([
+    regularFileExists(readmePath),
+    regularFileExists(gitignorePath),
+    detectRepositoryStack(root),
+  ]);
+  return { root, readmePath, gitignorePath, readmeExists, gitignoreExists, detectedStack };
+}
+
+function gitignoreLinesForStack(stackInput, detectedStack = "") {
+  const stack = `${stackInput || ""} ${detectedStack || ""}`.toLowerCase();
+  const sections = [
+    ["# OS / editors", ".DS_Store", "Thumbs.db", ".idea/", ".vscode/", "*.swp", "*.swo"],
+    ["# Local env / secrets", ".env", ".env.*", "!.env.example", "*.local"],
+    ["# Logs / temp", "*.log", "logs/", "tmp/", "temp/", ".cache/"],
+  ];
+  if (/node|npm|pnpm|yarn|bun|typescript|javascript|react|vite|next/.test(stack)) {
+    sections.push(["# Node / frontend", "node_modules/", "dist/", "build/", ".next/", "out/", "coverage/", ".turbo/", ".vite/", "*.tsbuildinfo"]);
+  }
+  if (/python|django|fastapi|flask/.test(stack)) {
+    sections.push(["# Python", "__pycache__/", "*.py[cod]", ".pytest_cache/", ".ruff_cache/", ".mypy_cache/", ".venv/", "venv/", "htmlcov/", "*.egg-info/"]);
+  }
+  if (/rust|cargo/.test(stack)) sections.push(["# Rust", "target/"]);
+  if (/\bgo\b|golang/.test(stack)) sections.push(["# Go", "bin/", "*.test", "coverage.out"]);
+  if (/java|gradle|maven|kotlin/.test(stack)) sections.push(["# Java / JVM", "target/", "build/", ".gradle/", "*.class"]);
+  if (/docker|container/.test(stack)) sections.push(["# Docker", ".docker/", "docker-compose.override.yml"]);
+  if (sections.length === 3) {
+    sections.push(["# Common dependency / build outputs", "node_modules/", ".venv/", "venv/", "target/", "dist/", "build/", "coverage/", "vendor/", "*.tmp"]);
+  }
+  const seen = new Set();
+  const lines = [];
+  for (const section of sections) {
+    lines.push(section[0]);
+    for (const pattern of section.slice(1)) {
+      if (seen.has(pattern)) continue;
+      seen.add(pattern);
+      lines.push(pattern);
+    }
+    lines.push("");
+  }
+  return `${lines.join("\n").replace(/\n{3,}/g, "\n\n").trim()}\n`;
+}
+
+async function prepareInitialRepositoryFiles(cwd, { repoName: repoNameInput, stack = "" } = {}) {
+  const before = await initialRepositoryFilesStatus(cwd);
+  const repoName = repoNameInput ? cleanGitHubRepoName(repoNameInput) : defaultGitRepoNameFromRoot(before.root);
+  if (await regularFileExists(before.readmePath)) {
+    // Explicit pre-add check: keep existing README.md unchanged.
+  } else {
+    await writeFile(before.readmePath, `# ${repoName}\n\nInitialized by Pi Web UI.\n`, "utf8");
+  }
+  let gitignoreCreated = false;
+  let gitignoreSource = before.gitignoreExists ? "existing" : "fallback";
+  if (!(await regularFileExists(before.gitignorePath))) {
+    await writeFile(before.gitignorePath, gitignoreLinesForStack(stack, before.detectedStack), "utf8");
+    gitignoreCreated = true;
+  }
+  const payload = gitWorkflowCommandPayload(await runGitWorkflowCommand(["add", "--", "README.md", ".gitignore"], { cwd: before.root, label: "git add README.md .gitignore" }));
+  if (payload.data) {
+    payload.data.root = before.root;
+    payload.data.readme = { path: before.readmePath, exists: true, created: !before.readmeExists };
+    payload.data.gitignore = { path: before.gitignorePath, exists: true, created: gitignoreCreated, source: gitignoreSource };
+    payload.data.detectedStack = before.detectedStack;
+    payload.data.stack = stack;
+    payload.data.stdout = [
+      before.readmeExists ? `Using existing ${before.readmePath}` : `Created ${before.readmePath}`,
+      before.gitignoreExists ? `Using existing ${before.gitignorePath}` : `Created ${before.gitignorePath} (${gitignoreSource})`,
+      payload.data.stdout?.trimEnd(),
+    ].filter(Boolean).join("\n");
+  }
+  return payload;
+}
+
 async function validateGitBranchName(root, branch) {
   const result = await runGitWorkflowCommand(["check-ref-format", "--branch", branch], { cwd: root, timeoutMs: 5000 });
   if (result.exitCode !== 0 || result.timedOut || result.cancelled || result.error) {
@@ -3151,6 +3304,40 @@ async function handleGitWorkflowRequest(pathname, body = {}, cwd = options.cwd) 
         return { ok: true, data: await readGitWorkflowBranchName(cwd) };
       case "/api/git-workflow/pr-description":
         return { ok: true, data: await readGitWorkflowPrDescription(cwd) };
+      case "/api/git-workflow/init":
+        await ensureOutsideGitRepository(cwd);
+        return gitWorkflowCommandPayload(await runGitWorkflowCommand(["init"], { cwd }));
+      case "/api/git-workflow/init-files-status":
+        return { ok: true, data: await initialRepositoryFilesStatus(cwd) };
+      case "/api/git-workflow/readme":
+        return prepareInitialRepositoryFiles(cwd, { repoName: body.repoName, stack: body.stack });
+      case "/api/git-workflow/initial-commit": {
+        const root = await getGitRoot(cwd);
+        return gitWorkflowCommandPayload(await runGitWorkflowCommand(["commit", "-m", "Initial commit"], { cwd: root, label: "git commit -m \"Initial commit\"" }));
+      }
+      case "/api/git-workflow/main-branch": {
+        const root = await getGitRoot(cwd);
+        return gitWorkflowCommandPayload(await runGitWorkflowCommand(["branch", "-M", "main"], { cwd: root }));
+      }
+      case "/api/git-workflow/remote": {
+        const root = await getGitRoot(cwd);
+        const username = cleanGitHubUsername(body.username);
+        const repoName = cleanGitHubRepoName(body.repoName);
+        const remoteUrl = gitHubOriginUrl(username, repoName);
+        const payload = gitWorkflowCommandPayload(await runGitWorkflowCommand(["remote", "add", "origin", remoteUrl], { cwd: root }));
+        if (payload.data) {
+          payload.data.root = root;
+          payload.data.remote = "origin";
+          payload.data.remoteUrl = remoteUrl;
+          payload.data.repoName = repoName;
+          payload.data.username = username;
+        }
+        return payload;
+      }
+      case "/api/git-workflow/init-push": {
+        const root = await getGitRoot(cwd);
+        return gitWorkflowCommandPayload(await runGitWorkflowCommand(["push", "-u", "origin", "main"], { cwd: root, timeoutMs: 15 * 60 * 1000 }));
+      }
       case "/api/git-workflow/add":
         await getGitRoot(cwd);
         return gitWorkflowCommandPayload(await runGitWorkflowCommand(["add", "."], { cwd }));

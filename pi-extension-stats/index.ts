@@ -65,6 +65,9 @@ const MAX_BAR_WIDTH = 24;
 const COST_BAR_WIDTH = 10;
 const FIRST_USER_MESSAGE_FRAMING_TOKENS = 16;
 const CALIBRATION_PROMPT = "Calibration probe: reply with exactly `calibration-ok` and no other text.";
+const WEBUI_STATS_STATUS_KEY = "stats-webui";
+const WEBUI_STATS_PAYLOAD_TYPE = "firstpick.pi-extension-stats.overlay";
+const WEBUI_STATS_PAYLOAD_VERSION = 1;
 
 function addPromptSource(sources: PromptInjectionSource[], label: string, content: string | undefined): number {
   if (!content) return 0;
@@ -616,6 +619,23 @@ function parseDaysArg(args: string): { mode: "range"; days: number } | { mode: "
   return { mode: "range", days: n };
 }
 
+function parseStatsWebuiArgs(args: string): { statsArgs: string; open: boolean } {
+  const tokens = args.trim().split(/\s+/).filter(Boolean);
+  const kept: string[] = [];
+  let open = false;
+
+  for (const token of tokens) {
+    const normalized = token.toLowerCase();
+    if (normalized === "webui" || normalized === "--webui" || normalized === "--webui-open") {
+      open = true;
+      continue;
+    }
+    kept.push(token);
+  }
+
+  return { statsArgs: kept.join(" "), open };
+}
+
 function parseStatsPiArg(args: string): { detailed: boolean } | null {
   const tokens = args.trim().toLowerCase().split(/\s+/).filter(Boolean);
   if (tokens.length === 0) return { detailed: false };
@@ -1068,7 +1088,7 @@ export default function statsExtension(pi: ExtensionAPI) {
     const totals = sumUsage(byDay, dayKeys);
     const calibration = collectInitialPromptCalibration(sessionDir);
     const scopeLabel = parsedArgs.mode === "all" ? "all days" : `last ${parsedArgs.days} days`;
-    return { files, records, byDay, dayKeys, totals, calibration, scopeLabel };
+    return { files, records, byDay, dayKeys, totals, calibration, scopeLabel, scope: parsedArgs };
   };
 
   const parseStatsCommandArgs = (args: string, ctx: ExtensionCommandContext) => {
@@ -1106,6 +1126,92 @@ export default function statsExtension(pi: ExtensionAPI) {
           "Most expensive sessions:",
           ...topSessions.map((s, i) => `${i + 1}. ${s.day} ${s.displayName} — ${formatCost(s.cost)} · ${formatTokens(s.tokens)} tok · ${s.model}`),
         ];
+  };
+
+  const buildWebuiStatsPayload = async (data: ReturnType<typeof loadStatsData>, ctx: ExtensionCommandContext, options: { open?: boolean } = {}) => {
+    const promptSnapshot = await estimateStableInitialPromptFromPiContext(pi, ctx, getPromptCalibration);
+    const systemPrompt = promptSnapshot.systemPrompt;
+    const promptEstimate = promptSnapshot.estimate;
+    const daily = data.dayKeys.map((day) => ({ day, ...(data.byDay.get(day) ?? emptyUsage()) }));
+    const activeDays = daily.filter((day) => day.total > 0 || day.cost > 0);
+    const highestDay = daily
+      .filter((day) => day.total > 0 || day.cost > 0)
+      .sort((a, b) => b.cost - a.cost || b.total - a.total)[0] ?? null;
+    const cacheHitRate = data.totals.total > 0 ? (data.totals.cacheRead / data.totals.total) * 100 : 0;
+    const nonCacheTokens = data.totals.input + data.totals.output + data.totals.cacheWrite;
+    const calendarAvgCost = data.totals.cost / Math.max(data.dayKeys.length, 1);
+    const activeAvgCost = data.totals.cost / Math.max(activeDays.length, 1);
+    const contextUsage = ctx.getContextUsage();
+    const contextSources = buildCurrentContextTokenSources(systemPrompt, latestSystemPromptOptions, ctx);
+    const contextWindow = contextUsage?.contextWindow ? ` / ${formatTokens(contextUsage.contextWindow)} window` : "";
+    const contextPercent = contextUsage?.percent !== null && contextUsage?.percent !== undefined ? ` (${contextUsage.percent.toFixed(1)}%)` : "";
+    const contextUsageLine = `Context usage: ${contextUsage?.tokens ? formatTokens(contextUsage.tokens) : "?"}${contextWindow}${contextPercent}`;
+
+    return {
+      type: WEBUI_STATS_PAYLOAD_TYPE,
+      version: WEBUI_STATS_PAYLOAD_VERSION,
+      generatedAt: Date.now(),
+      open: Boolean(options.open),
+      scopeLabel: data.scopeLabel,
+      scope: data.scope,
+      sessionCount: data.files.length,
+      dayCount: data.dayKeys.length,
+      activeDayCount: activeDays.length,
+      totals: data.totals,
+      promptEstimate: {
+        total: promptEstimate.total,
+        low: promptEstimate.low,
+        high: promptEstimate.high,
+        confidence: promptEstimate.confidence,
+        calibrationMultiplier: promptEstimate.calibrationMultiplier,
+        calibrationSamples: promptEstimate.calibrationSamples,
+        source: promptSnapshot.source,
+        settled: promptSnapshot.settled,
+        attempts: promptSnapshot.attempts,
+        warning: promptSnapshot.warning,
+        systemPromptChars: promptSnapshot.systemPrompt.length,
+        activeToolSchemas: promptSnapshot.tools.length,
+      },
+      summary: {
+        cacheHitRate,
+        nonCacheTokens,
+        calendarAvgCost,
+        activeAvgCost,
+        projected30DayCost: calendarAvgCost * 30,
+        highestDay,
+      },
+      daily,
+      models: aggregateModelUsage(data.records, data.dayKeys, 20),
+      expensiveSessions: aggregateExpensiveSessions(data.records, data.dayKeys, 20),
+      lines: {
+        graph: buildGraphLines(data.byDay, data.dayKeys, true),
+        promptInjection: formatPromptInjectionLines(systemPrompt, latestSystemPromptOptions, promptEstimate, {
+          source: promptSnapshot.source === "export-html" ? "temporary Pi /export HTML session data" : "live context fallback",
+          warning: promptSnapshot.warning,
+        }),
+        promptDetailed: formatInitialPromptDetailedLines(promptSnapshot, latestSystemPromptOptions),
+        costTrend: buildCostTrendLines(data.byDay, data.dayKeys),
+        cache: buildCacheEfficiencyLines(data.totals),
+        modelComparison: formatModelComparisonLines(data.records, data.dayKeys, data.totals),
+        expensiveSessions: formatExpensiveSessionLines(data.records, data.dayKeys),
+        tokenBreakdown: [...formatTokenBreakdownTable("Current context", contextSources, contextUsage?.tokens), contextUsageLine],
+      },
+    };
+  };
+
+  const publishWebuiStatsPayload = async (ctx: ExtensionCommandContext, args: string, options: { open?: boolean } = {}) => {
+    const parsedArgs = parseDaysArg(args);
+    if (!parsedArgs) {
+      ctx.ui.notify("Usage: /stats-webui [days|all]", "warning");
+      return false;
+    }
+
+    const data = loadStatsData(ctx, parsedArgs);
+    const payload = await buildWebuiStatsPayload(data, ctx, options);
+    ctx.ui.setStatus(WEBUI_STATS_STATUS_KEY, JSON.stringify(payload));
+    // Keep this WebUI transport status out of terminal footers after the browser receives it.
+    ctx.ui.setStatus(WEBUI_STATS_STATUS_KEY, undefined);
+    return true;
   };
 
   const registerScopedStatsCommand = (name: string, description: string, render: (data: ReturnType<typeof loadStatsData>, ctx: ExtensionCommandContext) => string[]) => {
@@ -1197,16 +1303,29 @@ export default function statsExtension(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("stats-webui", {
+    description: "Publish structured stats data for the Pi Web UI overlay. Usage: /stats-webui [days|all]",
+    handler: async (args, ctx) => {
+      await publishWebuiStatsPayload(ctx, args, { open: true });
+    },
+  });
+
   pi.registerCommand("stats", {
     description: "Show token usage dashboard. Usage: /stats, /stats 30, /stats all. Details: /stats-tokens, /stats-pi [detailed], /stats-last, /stats-most-expense, /stats-model-compare, /stats-cost-trend, /stats-cache",
     handler: async (args, ctx) => {
-      const trimmedArgs = args.trim().toLowerCase();
+      const webuiArgs = parseStatsWebuiArgs(args);
+      const trimmedArgs = webuiArgs.statsArgs.trim().toLowerCase();
       if (trimmedArgs === "tokens") {
         showCurrentContextTokens(ctx);
         return;
       }
 
-      const data = parseStatsCommandArgs(args, ctx);
+      if (webuiArgs.open) {
+        await publishWebuiStatsPayload(ctx, webuiArgs.statsArgs, { open: true });
+        return;
+      }
+
+      const data = parseStatsCommandArgs(webuiArgs.statsArgs, ctx);
       if (!data) return;
 
       const systemPrompt = ctx.getSystemPrompt();

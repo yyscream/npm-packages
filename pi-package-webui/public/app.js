@@ -86,7 +86,9 @@ const elements = {
   optionsExportButton: $("#optionsExportButton"),
   optionsForkButton: $("#optionsForkButton"),
   optionsTreeButton: $("#optionsTreeButton"),
+  optionsStatsButton: $("#optionsStatsButton"),
   gitWorkflowPanel: $("#gitWorkflowPanel"),
+  gitWorkflowKicker: $("#gitWorkflowKicker"),
   gitWorkflowTitle: $("#gitWorkflowTitle"),
   gitWorkflowHint: $("#gitWorkflowHint"),
   gitWorkflowSteps: $("#gitWorkflowSteps"),
@@ -194,6 +196,15 @@ const elements = {
   appRunnerInfoDialog: $("#appRunnerInfoDialog"),
   appRunnerInfoBody: $("#appRunnerInfoBody"),
   appRunnerInfoCloseButton: $("#appRunnerInfoCloseButton"),
+  statsOverlayDialog: $("#statsOverlayDialog"),
+  statsOverlaySubtitle: $("#statsOverlaySubtitle"),
+  statsOverlayScope: $("#statsOverlayScope"),
+  statsOverlayCustomDays: $("#statsOverlayCustomDays"),
+  statsOverlayRefreshButton: $("#statsOverlayRefreshButton"),
+  statsOverlayStatus: $("#statsOverlayStatus"),
+  statsOverlayTabs: $("#statsOverlayTabs"),
+  statsOverlayBody: $("#statsOverlayBody"),
+  statsOverlayCloseButton: $("#statsOverlayCloseButton"),
 };
 
 let currentState = null;
@@ -263,6 +274,13 @@ let pathSuggestActiveQuery = null;
 let pathSuggestRequestSerial = 0;
 let pathSuggestAbortController = null;
 let latestStats = null;
+let statsOverlayActiveTab = "overview";
+let statsOverlayLoading = false;
+let statsOverlayError = "";
+let statsOverlayLastScope = "14";
+let statsOverlayCalibrationMessage = "";
+let statsOverlayCalibrationBusy = "";
+let latestStatsOverlayPayload = null;
 let latestWorkspace = null;
 let latestNetwork = null;
 let webuiVersion = "";
@@ -362,6 +380,11 @@ const GIT_FOOTER_WEBUI_STATUS_KEY = "git-footer-webui";
 const GIT_FOOTER_WEBUI_PAYLOAD_TYPE = "firstpick.git-footer-status.footer";
 const GIT_FOOTER_WEBUI_PAYLOAD_VERSION = 1;
 const GIT_FOOTER_WEBUI_PAYLOAD_CACHE_KEY = "pi-webui-git-footer-webui-payload-cache";
+const GIT_FOOTER_STATUS_SETUP_STORAGE_KEY = "pi-webui-git-footer-status-setup";
+const GIT_INIT_STACK_STORAGE_KEY = "pi-webui-git-init-stack";
+const STATS_WEBUI_STATUS_KEY = "stats-webui";
+const STATS_WEBUI_PAYLOAD_TYPE = "firstpick.pi-extension-stats.overlay";
+const STATS_WEBUI_PAYLOAD_VERSION = 1;
 const GIT_CHANGES_RENDER_ROW_LIMIT = 4000;
 const LAST_USER_PROMPT_STORAGE_KEY = "pi-webui-last-user-prompts";
 const PROMPT_HISTORY_STORAGE_KEY = "pi-webui-prompt-history";
@@ -499,10 +522,10 @@ const OPTIONAL_FEATURES = [
   },
   {
     id: "statsCommand",
-    label: "Stats command",
+    label: "Stats dashboard",
     packageName: "@firstpick/pi-extension-stats",
     capabilityLabel: "/stats",
-    description: "Token and cost usage analytics commands.",
+    description: "Token and cost usage analytics commands plus the browser dashboard overlay.",
   },
   {
     id: "themeBundle",
@@ -527,6 +550,7 @@ const OPTIONAL_COMMAND_FEATURES = new Map([
   ["todo-progress-status", "todoProgressWidget"],
 ]);
 const HIDDEN_COMMAND_NAMES = new Set(["webui-tree-navigate", "webui-helper"]);
+HIDDEN_COMMAND_NAMES.add("stats-webui");
 const NATIVE_SELECTOR_COMMANDS = new Set(["model", "settings", "theme", "fork", "clone", "name", "resume", "tree", "login", "logout", "scoped-models", "tools", "skills"]);
 const SETTINGS_THINKING_OPTIONS = ["off", "minimal", "low", "medium", "high", "xhigh"];
 const SETTINGS_TRANSPORT_OPTIONS = ["sse", "websocket", "websocket-cached", "auto"];
@@ -551,9 +575,15 @@ const gitFooterPayloadRefreshInFlightByTab = new Set();
 
 function createGitWorkflowActionsDone(patch = {}) {
   return {
+    init: false,
+    stack: false,
+    readme: false,
+    gitignore: false,
     stage: false,
     message: false,
     commit: false,
+    branch: false,
+    remote: false,
     push: false,
     ...patch,
   };
@@ -570,12 +600,20 @@ function gitWorkflowActionDonePatch(workflow, process) {
 function createGitWorkflowState() {
   return {
     active: false,
+    mode: "standard",
     step: "idle",
     process: "stage",
     busy: false,
     runId: 0,
     output: "",
     error: "",
+    githubUsername: "",
+    repoName: "",
+    remoteUrl: "",
+    stack: "",
+    readmeRequestedAt: 0,
+    gitignoreRequestedAt: 0,
+    initFilesStatus: null,
     message: null,
     manualCommitMessage: "",
     messageRequestedAt: 0,
@@ -636,6 +674,16 @@ const GIT_WORKFLOW_PROCESSES = [
   { value: "push", label: "Push" },
 ];
 const GIT_WORKFLOW_PROCESS_VALUES = new Set(GIT_WORKFLOW_PROCESSES.map((process) => process.value));
+const GIT_INIT_WORKFLOW_PROCESSES = [
+  { value: "init", label: "Init" },
+  { value: "stack", label: "Stack" },
+  { value: "readme", label: "Files" },
+  { value: "commit", label: "Commit" },
+  { value: "branch", label: "Main" },
+  { value: "remote", label: "Remote" },
+  { value: "push", label: "Push" },
+];
+const GIT_INIT_WORKFLOW_PROCESS_VALUES = new Set(GIT_INIT_WORKFLOW_PROCESSES.map((process) => process.value));
 const ACTION_FEEDBACK_REACTIONS = {
   up: { icon: "👍", label: "Good job", title: "Good job!" },
   down: { icon: "👎", label: "Avoid this", title: "Avoid this" },
@@ -657,6 +705,25 @@ const GIT_WORKFLOW_ACTIVE_INDEX = {
   prCreating: 3,
   done: 4,
 };
+const GIT_INIT_WORKFLOW_ACTIVE_INDEX = {
+  initSetup: 0,
+  initRepo: 0,
+  initializingRepo: 0,
+  initStack: 1,
+  readme: 2,
+  readmeCreating: 2,
+  readmeGenerating: 2,
+  gitignoreGenerating: 2,
+  initialCommit: 3,
+  initialCommitting: 3,
+  mainBranch: 4,
+  mainBranching: 4,
+  remote: 5,
+  remoteAdding: 5,
+  initialPush: 6,
+  initialPushing: 6,
+  done: 7,
+};
 const GIT_WORKFLOW_CREATE_PR_TOOLTIP = [
   "Create PR branch:",
   "1. Ask Pi to generate a type/feature-name branch from staged changes.",
@@ -674,6 +741,37 @@ const GIT_WORKFLOW_MANUAL_BRANCH_TOOLTIP = [
   "4. Run git switch -c <branch>.",
   "5. Return here to commit short, long, or typed input on that branch.",
   "6. Push and Create PR will push upstream, run /pr, let you review, then run gh pr create.",
+].join("\n");
+const GIT_FOOTER_STATUS_SETUP_TOOLTIP = [
+  "git-footer-status-setup:",
+  "Store the GitHub username used when the Web UI initializes a no-repo directory.",
+  "The remote URL is https://github.com/USERNAME/REPO_NAME.git.",
+  "The repository name is asked per initialization and defaults to the current folder name.",
+].join("\n");
+const GIT_INIT_REMOTE_TOOLTIP = [
+  "Add origin remote:",
+  "1. Confirm the GitHub username from git-footer-status-setup.",
+  "2. Ask for the repository name if needed.",
+  "3. Run git remote add origin https://github.com/USERNAME/REPO_NAME.git.",
+].join("\n");
+const GIT_INIT_STACK_OPTIONS = [
+  { value: "", label: "Auto-detect from codebase" },
+  { value: "Node.js / TypeScript", label: "Node.js / TypeScript" },
+  { value: "React / Vite", label: "React / Vite" },
+  { value: "Next.js", label: "Next.js" },
+  { value: "Python", label: "Python" },
+  { value: "Django", label: "Django" },
+  { value: "FastAPI", label: "FastAPI" },
+  { value: "Rust", label: "Rust" },
+  { value: "Go", label: "Go" },
+  { value: "Java / Gradle", label: "Java / Gradle" },
+  { value: "Docker", label: "Docker" },
+  { value: "Custom", label: "Custom…" },
+];
+const GIT_INIT_STACK_TOOLTIP = [
+  "Repository stack:",
+  "Choose a known stack or type one. The value is saved in this browser.",
+  "If left blank, Pi will inspect the codebase and fall back to sane default .gitignore patterns.",
 ].join("\n");
 
 function make(tag, className, text) {
@@ -3668,6 +3766,7 @@ function resetActiveTabUi() {
   eventSource = null;
   currentState = null;
   latestStats = null;
+  latestStatsOverlayPayload = null;
   latestWorkspace = null;
   latestMessages = [];
   clearRunIndicatorActivity({ render: false });
@@ -5246,7 +5345,10 @@ function renderGitFooterPayloadMeta(chip, tab) {
   if (chip.key === "cwd" && tab) {
     options.onClick = changeActiveTabCwd;
     action = `Click to change the working directory for ${tab.title}.`;
-  } else if (chip.key === "git" && chip.value !== "no repo") {
+  } else if (chip.key === "git" && cleanFooterPayloadText(chip.value, "").toLowerCase() === "no repo") {
+    options.onClick = () => startGitInitWorkflow();
+    action = "No Git repository detected. Click to initialize a repo, create README.md, add origin, and push main.";
+  } else if (chip.key === "git") {
     options.onClick = () => setFooterBranchPickerOpen(!footerBranchPickerOpen);
     action = "Click to switch to another local branch.";
   } else if (chip.key === "changes") {
@@ -5264,7 +5366,7 @@ function renderGitFooterPayloadMeta(chip, tab) {
   options.tooltipAlign = gitFooterTooltipAlign(chip);
   const node = footerMeta(chip.label, chip.value, footerMetaClassForPayload(chip), options);
   applyFooterChangedFilesDropdown(node, chip);
-  if (chip.key === "git" && options.onClick) {
+  if (chip.key === "git" && options.onClick && cleanFooterPayloadText(chip.value, "").toLowerCase() !== "no repo") {
     node.setAttribute("aria-haspopup", "listbox");
     node.setAttribute("aria-expanded", footerBranchPickerOpen ? "true" : "false");
   }
@@ -7733,6 +7835,472 @@ function renderAppRunnerWidget() {
   return node;
 }
 
+const STATS_OVERLAY_TABS = [
+  { id: "overview", label: "Overview" },
+  { id: "daily", label: "Daily" },
+  { id: "models", label: "Models" },
+  { id: "sessions", label: "Sessions" },
+  { id: "cost-cache", label: "Cost & cache" },
+  { id: "prompt", label: "Prompt/context" },
+  { id: "raw", label: "Command outputs" },
+];
+
+function statsNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function formatStatsTokens(value) {
+  const number = statsNumber(value);
+  const abs = Math.abs(number);
+  const sign = number < 0 ? "-" : "";
+  if (abs >= 1_000_000_000) return `${sign}${(abs / 1_000_000_000).toFixed(2)}B`;
+  if (abs >= 1_000_000) return `${sign}${(abs / 1_000_000).toFixed(2)}M`;
+  if (abs >= 10_000) return `${sign}${Math.round(abs / 1000)}k`;
+  if (abs >= 1000) return `${sign}${(abs / 1000).toFixed(1)}k`;
+  return `${number.toLocaleString()}`;
+}
+
+function formatStatsCost(value) {
+  const cost = statsNumber(value);
+  if (cost <= 0) return "$0.000";
+  if (cost < 0.01) return `$${cost.toFixed(4)}`;
+  if (cost < 10) return `$${cost.toFixed(3)}`;
+  return `$${cost.toFixed(2)}`;
+}
+
+function formatStatsPercent(value) {
+  return `${statsNumber(value).toFixed(1)}%`;
+}
+
+function parseStatsWebuiPayloadRaw(raw) {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || parsed.type !== STATS_WEBUI_PAYLOAD_TYPE || parsed.version !== STATS_WEBUI_PAYLOAD_VERSION) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function currentStatsOverlayPayload() {
+  if (isOptionalFeatureDisabled("statsCommand")) return null;
+  return parseStatsWebuiPayloadRaw(statusEntries.get(STATS_WEBUI_STATUS_KEY)) || latestStatsOverlayPayload;
+}
+
+function statsScopeDaysFromPayload(payload) {
+  return payload?.scope?.mode === "range" && statsNumber(payload.scope.days) > 0 ? String(payload.scope.days) : "";
+}
+
+function statsScopeValueFromPayload(payload) {
+  if (payload?.scope?.mode === "all") return "all";
+  const days = statsScopeDaysFromPayload(payload);
+  if (!days) return statsOverlayLastScope;
+  return ["14", "30", "90"].includes(days) ? days : "custom";
+}
+
+function statsCustomDaysValue() {
+  const fromInput = Number.parseInt(elements.statsOverlayCustomDays?.value || "", 10);
+  if (Number.isFinite(fromInput) && fromInput > 0) return Math.max(1, Math.min(3650, fromInput));
+  const fromPayload = Number.parseInt(statsScopeDaysFromPayload(currentStatsOverlayPayload()), 10);
+  if (Number.isFinite(fromPayload) && fromPayload > 0) return Math.max(1, Math.min(3650, fromPayload));
+  return 14;
+}
+
+function statsScopeCommandArg() {
+  const value = elements.statsOverlayScope?.value || statsOverlayLastScope || "14";
+  if (value === "all") return "all";
+  const days = value === "custom" ? statsCustomDaysValue() : Math.max(1, Math.min(3650, Number.parseInt(value, 10) || 14));
+  return String(days);
+}
+
+function syncStatsScopeControls(payload = currentStatsOverlayPayload()) {
+  if (!elements.statsOverlayScope) return;
+  const nextValue = payload ? statsScopeValueFromPayload(payload) : statsOverlayLastScope;
+  elements.statsOverlayScope.value = ["14", "30", "90", "all", "custom"].includes(nextValue) ? nextValue : "custom";
+  const custom = elements.statsOverlayScope.value === "custom";
+  if (elements.statsOverlayCustomDays) {
+    const payloadDays = statsScopeDaysFromPayload(payload);
+    if (payloadDays && !["14", "30", "90"].includes(payloadDays)) elements.statsOverlayCustomDays.value = payloadDays;
+    else if (!elements.statsOverlayCustomDays.value) elements.statsOverlayCustomDays.value = "14";
+    elements.statsOverlayCustomDays.hidden = !custom;
+  }
+}
+
+function statsPromptEstimateSourceLabel(estimate = {}) {
+  if (estimate.source === "export-html") return "export-backed";
+  if (estimate.source === "fallback") return "live fallback";
+  return estimate.source || "estimate";
+}
+
+function statsMetricCard(label, value, detail = "", tone = "") {
+  const node = make("div", `stats-overlay-card ${tone}`.trim());
+  node.append(make("span", "stats-overlay-card-label", label), make("strong", undefined, value));
+  if (detail) node.append(make("span", "stats-overlay-card-detail", detail));
+  return node;
+}
+
+function statsLineBlock(lines = []) {
+  const pre = make("pre", "stats-overlay-lines");
+  pre.textContent = (Array.isArray(lines) ? lines : []).map(stripAnsi).join("\n") || "No data.";
+  return pre;
+}
+
+function renderStatsTable(headers, rows, emptyText = "No data.") {
+  if (!rows.length) return make("p", "stats-overlay-empty muted", emptyText);
+  const wrapper = make("div", "stats-overlay-table-wrap");
+  const table = make("table", "stats-overlay-table");
+  const thead = make("thead");
+  const headRow = make("tr");
+  for (const header of headers) headRow.append(make("th", undefined, header));
+  thead.append(headRow);
+  const tbody = make("tbody");
+  for (const row of rows) {
+    const tr = make("tr");
+    for (const cell of row) tr.append(make("td", undefined, cell));
+    tbody.append(tr);
+  }
+  table.append(thead, tbody);
+  wrapper.append(table);
+  return wrapper;
+}
+
+function renderStatsBarRows(daily = []) {
+  const rows = daily.filter((row) => statsNumber(row.total) > 0 || statsNumber(row.cost) > 0);
+  if (!rows.length) return make("p", "stats-overlay-empty muted", "No non-zero usage in this range.");
+  const maxTokens = Math.max(1, ...rows.map((row) => statsNumber(row.total)));
+  const list = make("div", "stats-overlay-bars");
+  for (const row of rows) {
+    const tokenRatio = Math.max(0.015, statsNumber(row.total) / maxTokens);
+    const item = make("div", "stats-overlay-bar-row");
+    const bar = make("span", "stats-overlay-bar");
+    const fill = make("span", "stats-overlay-bar-fill");
+    fill.style.width = `${Math.min(100, tokenRatio * 100)}%`;
+    bar.append(fill);
+    item.append(
+      make("span", "stats-overlay-bar-day", row.day || "—"),
+      bar,
+      make("span", "stats-overlay-bar-value", `${formatStatsTokens(row.total)} tok`),
+      make("span", "stats-overlay-bar-cost", formatStatsCost(row.cost)),
+    );
+    list.append(item);
+  }
+  return list;
+}
+
+function renderStatsOverview(payload) {
+  const node = make("div", "stats-overlay-pane stats-overlay-overview");
+  const totals = payload?.totals || {};
+  const summary = payload?.summary || {};
+  const highest = summary.highestDay;
+  const cards = make("div", "stats-overlay-cards");
+  cards.append(
+    statsMetricCard("Total tokens", formatStatsTokens(totals.total), `↑${formatStatsTokens(totals.input)} ↓${formatStatsTokens(totals.output)}`, "tone-blue"),
+    statsMetricCard("Cost", formatStatsCost(totals.cost), `projected 30d ${formatStatsCost(summary.projected30DayCost)}`, "tone-green"),
+    statsMetricCard("Messages", String(statsNumber(totals.messages)), `${payload?.sessionCount ?? 0} sessions`, "tone-mauve"),
+    statsMetricCard("PI initial prompt", `~${formatStatsTokens(payload?.promptEstimate?.total)} tok`, `${statsPromptEstimateSourceLabel(payload?.promptEstimate)} · ${payload?.promptEstimate?.confidence || "estimate"}`, "tone-yellow"),
+    statsMetricCard("Cache hit", formatStatsPercent(summary.cacheHitRate), `reads ${formatStatsTokens(totals.cacheRead)} · writes ${formatStatsTokens(totals.cacheWrite)}`, "tone-teal"),
+    statsMetricCard("Active days", `${payload?.activeDayCount ?? 0}/${payload?.dayCount ?? 0}`, highest ? `peak ${highest.day} · ${formatStatsCost(highest.cost)}` : "no peak yet", "tone-pink"),
+  );
+  node.append(cards, make("h3", undefined, "Daily usage"), renderStatsBarRows(payload?.daily || []));
+  return node;
+}
+
+function renderStatsDaily(payload) {
+  const node = make("div", "stats-overlay-pane");
+  node.append(make("h3", undefined, "Daily token and cost trend"), renderStatsBarRows(payload?.daily || []));
+  node.append(renderStatsTable(
+    ["Day", "Tokens", "Cost", "Input", "Output", "Cache R/W", "Msgs"],
+    (payload?.daily || []).map((row) => [
+      row.day || "—",
+      formatStatsTokens(row.total),
+      formatStatsCost(row.cost),
+      formatStatsTokens(row.input),
+      formatStatsTokens(row.output),
+      `${formatStatsTokens(row.cacheRead)} / ${formatStatsTokens(row.cacheWrite)}`,
+      String(statsNumber(row.messages)),
+    ]),
+  ));
+  return node;
+}
+
+function renderStatsModels(payload) {
+  return renderStatsTable(
+    ["Model", "Tokens", "Token %", "Cost", "Spend %", "$/1M", "Avg out", "Msgs"],
+    (payload?.models || []).map((model) => [
+      model.model || "unknown",
+      formatStatsTokens(model.tokens),
+      formatStatsPercent(model.percent),
+      formatStatsCost(model.cost),
+      formatStatsPercent(model.costPercent),
+      formatStatsCost(model.avgCostPerMillion),
+      formatStatsTokens(Math.round(statsNumber(model.avgOutputTokens))),
+      String(statsNumber(model.messages)),
+    ]),
+    "No model usage in this range.",
+  );
+}
+
+function renderStatsSessions(payload) {
+  return renderStatsTable(
+    ["Day", "Session", "Cost", "Tokens", "Model"],
+    (payload?.expensiveSessions || []).map((session) => [
+      session.day || "—",
+      session.displayName || session.sessionId || "unknown",
+      formatStatsCost(session.cost),
+      formatStatsTokens(session.tokens),
+      session.model || "unknown",
+    ]),
+    "No session usage in this range.",
+  );
+}
+
+function renderStatsCostCache(payload) {
+  const node = make("div", "stats-overlay-pane");
+  const totals = payload?.totals || {};
+  const summary = payload?.summary || {};
+  const cards = make("div", "stats-overlay-cards compact");
+  cards.append(
+    statsMetricCard("Avg/day", formatStatsCost(summary.calendarAvgCost), "calendar average", "tone-green"),
+    statsMetricCard("Active avg", formatStatsCost(summary.activeAvgCost), "per active day", "tone-teal"),
+    statsMetricCard("Non-cache", formatStatsTokens(summary.nonCacheTokens), `${formatStatsTokens(totals.total)} total`, "tone-blue"),
+    statsMetricCard("Cache hit", formatStatsPercent(summary.cacheHitRate), `${formatStatsTokens(totals.cacheRead)} read tokens`, "tone-yellow"),
+  );
+  node.append(cards, make("h3", undefined, "Cost trend"), statsLineBlock(payload?.lines?.costTrend), make("h3", undefined, "Cache efficiency"), statsLineBlock(payload?.lines?.cache));
+  return node;
+}
+
+function statsCalibrationButton(label, mode, className = "") {
+  const button = make("button", className, statsOverlayCalibrationBusy === mode ? "Running…" : label);
+  button.type = "button";
+  button.disabled = statsOverlayLoading || !!statsOverlayCalibrationBusy;
+  button.addEventListener("click", () => runStatsCalibration(mode));
+  return button;
+}
+
+function renderStatsCalibrationPanel(payload) {
+  const estimate = payload?.promptEstimate || {};
+  const panel = make("section", "stats-overlay-calibration-panel");
+  const text = make("div", "stats-overlay-calibration-copy");
+  text.append(
+    make("strong", undefined, "Calibration"),
+    make("span", undefined, `${statsNumber(estimate.calibrationSamples)} sample${statsNumber(estimate.calibrationSamples) === 1 ? "" : "s"} · scale ×${statsNumber(estimate.calibrationMultiplier, 1).toFixed(2)} · ${statsPromptEstimateSourceLabel(estimate)}`),
+  );
+  if (estimate.warning) text.append(make("span", "warning", estimate.warning));
+  if (statsOverlayCalibrationMessage) text.append(make("span", "muted", statsOverlayCalibrationMessage));
+  const actions = make("div", "stats-overlay-calibration-actions");
+  actions.append(
+    statsCalibrationButton("Calibrate current", "current"),
+    statsCalibrationButton("Start probe", "probe", "primary"),
+  );
+  panel.append(text, actions);
+  return panel;
+}
+
+function renderStatsPrompt(payload) {
+  const node = make("div", "stats-overlay-pane");
+  const cards = make("div", "stats-overlay-cards compact");
+  cards.append(
+    statsMetricCard("PI estimate", `~${formatStatsTokens(payload?.promptEstimate?.total)} tok`, `${statsPromptEstimateSourceLabel(payload?.promptEstimate)} · ${payload?.promptEstimate?.confidence || "estimate"}`, "tone-yellow"),
+    statsMetricCard("Prompt chars", statsNumber(payload?.promptEstimate?.systemPromptChars).toLocaleString(), `${statsNumber(payload?.promptEstimate?.activeToolSchemas)} active tool schemas`, "tone-blue"),
+    statsMetricCard("Calibration", `×${statsNumber(payload?.promptEstimate?.calibrationMultiplier, 1).toFixed(2)}`, `${statsNumber(payload?.promptEstimate?.calibrationSamples)} samples`, "tone-teal"),
+    statsMetricCard("Attempts", String(statsNumber(payload?.promptEstimate?.attempts)), payload?.promptEstimate?.settled ? "settled" : "live fallback", "tone-mauve"),
+  );
+  node.append(
+    cards,
+    renderStatsCalibrationPanel(payload),
+    make("h3", undefined, "PI prompt estimate"),
+    statsLineBlock(payload?.lines?.promptInjection),
+    make("h3", undefined, "Detailed prompt snapshot"),
+    statsLineBlock(payload?.lines?.promptDetailed),
+    make("h3", undefined, "Current context token breakdown"),
+    statsLineBlock(payload?.lines?.tokenBreakdown),
+  );
+  return node;
+}
+
+function statsCommandOutputSection(title, command, description, lines = []) {
+  const section = make("section", "stats-overlay-command-section");
+  const header = make("div", "stats-overlay-command-header");
+  const text = make("div", "stats-overlay-command-title");
+  text.append(make("h3", undefined, title), make("p", "muted", description));
+  header.append(text, make("code", "stats-overlay-command-pill", command));
+  section.append(header, statsLineBlock(lines));
+  return section;
+}
+
+function renderStatsRaw(payload) {
+  const node = make("div", "stats-overlay-pane");
+  node.append(
+    statsCommandOutputSection("Daily usage graph", "/stats-last [days|all]", "Non-zero daily token/cost graph for the selected range.", payload?.lines?.graph),
+    statsCommandOutputSection("Model comparison", "/stats-model-compare [days|all]", "Token share, spend share, average cost, and average output by model.", payload?.lines?.modelComparison),
+    statsCommandOutputSection("Most expensive sessions", "/stats-most-expense [days|all]", "Highest-cost sessions in the selected range.", payload?.lines?.expensiveSessions),
+    statsCommandOutputSection("Cost trend", "/stats-cost-trend [days|all]", "Daily averages, 30-day projection, highest day, and latest active day.", payload?.lines?.costTrend),
+    statsCommandOutputSection("Cache efficiency", "/stats-cache [days|all]", "Cache hit rate, cache read/write tokens, estimated savings, and token mix.", payload?.lines?.cache),
+    statsCommandOutputSection("PI prompt breakdown", "/stats-pi detailed", "Export-backed initial prompt estimate with detailed prompt snapshot sections.", [...(payload?.lines?.promptInjection || []), "", ...(payload?.lines?.promptDetailed || [])]),
+  );
+  return node;
+}
+
+function renderStatsOverlayPane(payload) {
+  if (!payload) return make("p", "stats-overlay-empty muted", statsOverlayLoading ? "Loading stats…" : "No stats payload loaded yet.");
+  switch (statsOverlayActiveTab) {
+    case "daily": return renderStatsDaily(payload);
+    case "models": return renderStatsModels(payload);
+    case "sessions": return renderStatsSessions(payload);
+    case "cost-cache": return renderStatsCostCache(payload);
+    case "prompt": return renderStatsPrompt(payload);
+    case "raw": return renderStatsRaw(payload);
+    default: return renderStatsOverview(payload);
+  }
+}
+
+function renderStatsOverlay() {
+  const payload = currentStatsOverlayPayload();
+  if (!elements.statsOverlayDialog) return;
+
+  if (payload) statsOverlayLastScope = statsScopeValueFromPayload(payload);
+  syncStatsScopeControls(statsOverlayLoading ? null : payload);
+
+  const generated = payload?.generatedAt ? new Date(payload.generatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "not loaded";
+  elements.statsOverlaySubtitle.textContent = payload
+    ? `${payload.scopeLabel || "stats"} · ${payload.sessionCount ?? 0} sessions · updated ${generated}`
+    : "Run stats to load the browser dashboard.";
+
+  elements.statsOverlayStatus.textContent = statsOverlayError || (statsOverlayLoading ? "Loading stats from the Pi stats extension…" : statsOverlayCalibrationMessage || (payload ? "" : "No stats payload loaded yet."));
+  elements.statsOverlayStatus.hidden = !elements.statsOverlayStatus.textContent;
+  elements.statsOverlayStatus.classList.toggle("error", !!statsOverlayError);
+
+  elements.statsOverlayTabs.replaceChildren();
+  for (const tab of STATS_OVERLAY_TABS) {
+    const button = make("button", tab.id === statsOverlayActiveTab ? "active" : "", tab.label);
+    button.type = "button";
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-selected", tab.id === statsOverlayActiveTab ? "true" : "false");
+    button.addEventListener("click", () => {
+      statsOverlayActiveTab = tab.id;
+      renderStatsOverlay();
+    });
+    elements.statsOverlayTabs.append(button);
+  }
+
+  elements.statsOverlayRefreshButton.disabled = statsOverlayLoading;
+  elements.statsOverlayBody.replaceChildren(renderStatsOverlayPane(payload));
+}
+
+function scheduleStatsRefreshAfterCalibration(tabContext, delays = [1200]) {
+  for (const delayMs of delays) {
+    setTimeout(() => {
+      if (!isCurrentTabContext(tabContext)) return;
+      requestStatsOverlayRefresh();
+    }, delayMs);
+  }
+}
+
+async function runStatsCalibration(mode) {
+  const tabContext = activeTabContext();
+  if (!tabContext.tabId) return;
+  const commandName = resolveAvailableCommandName("calibrate", { rpcOnly: true });
+  if (!commandName) {
+    statsOverlayError = "Calibration command unavailable: /calibrate is not loaded in this Pi tab.";
+    renderStatsOverlay();
+    return;
+  }
+  if (mode === "probe" && !confirm("Start an isolated calibration probe? This sends one tiny model request and may incur provider token usage.")) return;
+
+  const command = mode === "current" ? `/${commandName} current` : `/${commandName}`;
+  statsOverlayCalibrationBusy = mode;
+  statsOverlayCalibrationMessage = mode === "current"
+    ? "Calibrating from the current session…"
+    : "Starting isolated calibration probe…";
+  statsOverlayError = "";
+  renderStatsOverlay();
+  try {
+    await sendPrompt("prompt", command, { targetTabId: tabContext.tabId, throwOnError: true });
+    statsOverlayCalibrationMessage = mode === "current"
+      ? "Calibration command finished; refreshing stats…"
+      : "Probe started; stats will refresh after the probe response is recorded…";
+    statsOverlayCalibrationBusy = "";
+    renderStatsOverlay();
+    scheduleStatsRefreshAfterCalibration(tabContext, mode === "probe" ? [5000, 14000] : [1000]);
+  } catch (error) {
+    if (!isCurrentTabContext(tabContext)) return;
+    statsOverlayCalibrationBusy = "";
+    statsOverlayCalibrationMessage = "";
+    statsOverlayError = error.message || String(error);
+    renderStatsOverlay();
+  }
+}
+
+async function requestStatsOverlayRefresh() {
+  const tabContext = activeTabContext();
+  if (!tabContext.tabId) return;
+  const statsWebuiCommand = resolveAvailableCommandName("stats-webui", { rpcOnly: true });
+  const fallbackStatsCommand = resolveAvailableCommandName("stats", { rpcOnly: true });
+  const scopeArg = statsScopeCommandArg();
+  const command = statsWebuiCommand
+    ? `/${statsWebuiCommand}${scopeArg ? ` ${scopeArg}` : ""}`
+    : fallbackStatsCommand
+      ? `/${fallbackStatsCommand}${scopeArg ? ` ${scopeArg}` : ""} --webui`
+      : "";
+  if (!command) {
+    statsOverlayError = "Stats command unavailable: enable/install @firstpick/pi-extension-stats in Optional features.";
+    statsOverlayLoading = false;
+    renderStatsOverlay();
+    return;
+  }
+
+  statsOverlayLastScope = scopeArg;
+  statsOverlayLoading = true;
+  statsOverlayError = "";
+  renderStatsOverlay();
+  try {
+    await sendPrompt("prompt", command, { targetTabId: tabContext.tabId, throwOnError: true });
+    setTimeout(() => {
+      if (!isCurrentTabContext(tabContext) || !statsOverlayLoading) return;
+      statsOverlayLoading = false;
+      if (!currentStatsOverlayPayload()) statsOverlayError = "Stats command returned without a WebUI payload. Try /reload, then open Stats again.";
+      renderStatsOverlay();
+    }, 2500);
+  } catch (error) {
+    if (!isCurrentTabContext(tabContext)) return;
+    statsOverlayLoading = false;
+    statsOverlayError = error.message || String(error);
+    renderStatsOverlay();
+  }
+}
+
+function openStatsOverlay({ refresh = true } = {}) {
+  setComposerActionsOpen(false);
+  setPublishMenuOpen(false);
+  setNativeCommandMenuOpen(false);
+  setAppRunnerMenuOpen(false);
+  setOptionsMenuOpen(false);
+  statsOverlayError = "";
+  if (!elements.statsOverlayDialog.open) elements.statsOverlayDialog.showModal();
+  renderStatsOverlay();
+  if (refresh || !currentStatsOverlayPayload()) requestStatsOverlayRefresh();
+}
+
+function handleStatsWebuiStatus(statusText) {
+  const payload = parseStatsWebuiPayloadRaw(statusText);
+  if (!payload) {
+    if (elements.statsOverlayDialog?.open) {
+      statsOverlayLoading = false;
+      renderStatsOverlay();
+    }
+    return;
+  }
+  latestStatsOverlayPayload = payload;
+  statsOverlayLoading = false;
+  statsOverlayError = "";
+  statsOverlayCalibrationMessage = "";
+  statsOverlayLastScope = statsScopeValueFromPayload(payload);
+  if (payload.open && !elements.statsOverlayDialog?.open) elements.statsOverlayDialog?.showModal();
+  if (payload.open || elements.statsOverlayDialog?.open) renderStatsOverlay();
+}
+
 function renderWidgets() {
   elements.widgetArea.replaceChildren();
   const releaseOutput = renderReleaseNpmOutputWidget();
@@ -7838,6 +8406,148 @@ function formatGitPrPreview(pr) {
   return [...header, "", pr.body || "(empty)"].join("\n");
 }
 
+function readGitFooterStatusSetup() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(GIT_FOOTER_STATUS_SETUP_STORAGE_KEY) || "{}");
+    const githubUsername = typeof parsed?.githubUsername === "string" ? parsed.githubUsername.trim() : "";
+    return { githubUsername };
+  } catch {
+    return { githubUsername: "" };
+  }
+}
+
+function cleanGitHubUsernameInput(value) {
+  const username = String(value || "").trim().replace(/^@+/, "");
+  if (!username) throw new Error("GitHub username is required.");
+  if (username.length > 39 || !/^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/.test(username) || username.includes("--")) {
+    throw new Error("GitHub username must be 1-39 letters/numbers/hyphens, without leading/trailing or repeated hyphens.");
+  }
+  return username;
+}
+
+function cleanGitHubRepoNameInput(value) {
+  let repoName = String(value || "").trim();
+  const githubUrlMatch = repoName.match(/github\.com[:/][^/\s]+\/([^/\s]+?)(?:\.git)?\/?$/i);
+  if (githubUrlMatch) repoName = githubUrlMatch[1];
+  if (repoName.includes("/")) repoName = repoName.split("/").filter(Boolean).pop() || "";
+  repoName = repoName.replace(/\.git$/i, "");
+  if (!repoName) throw new Error("GitHub repository name is required.");
+  if (repoName.length > 100 || repoName === "." || repoName === ".." || !/^[A-Za-z0-9._-]+$/.test(repoName)) {
+    throw new Error("GitHub repository name may only contain letters, numbers, dots, underscores, and hyphens.");
+  }
+  return repoName;
+}
+
+function writeGitFooterStatusSetup(setup) {
+  try {
+    localStorage.setItem(GIT_FOOTER_STATUS_SETUP_STORAGE_KEY, JSON.stringify({ githubUsername: setup.githubUsername }));
+  } catch {
+    addEvent("Could not persist git-footer-status-setup in browser storage; it will be asked again next time.", "warn");
+  }
+}
+
+function cleanGitInitStack(value) {
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, 160);
+}
+
+function readStoredGitInitStack() {
+  try {
+    return cleanGitInitStack(localStorage.getItem(GIT_INIT_STACK_STORAGE_KEY) || "");
+  } catch {
+    return "";
+  }
+}
+
+function writeStoredGitInitStack(stack) {
+  const cleanStack = cleanGitInitStack(stack);
+  try {
+    if (cleanStack) localStorage.setItem(GIT_INIT_STACK_STORAGE_KEY, cleanStack);
+    else localStorage.removeItem(GIT_INIT_STACK_STORAGE_KEY);
+  } catch {
+    addEvent("Could not persist the repository stack in browser storage.", "warn");
+  }
+  return cleanStack;
+}
+
+function gitInitStackDisplay(stack = "") {
+  const cleanStack = cleanGitInitStack(stack);
+  return cleanStack || "Auto-detect from codebase";
+}
+
+function gitInitFilesStatusSummary(status) {
+  if (!status) return "README.md and .gitignore status: not checked yet.";
+  const readme = status.readmeExists ? "README.md exists; it will be staged without overwriting." : "README.md is missing; it will be created.";
+  const gitignore = status.gitignoreExists ? ".gitignore exists; it will be staged without overwriting." : ".gitignore is missing; Pi will be prompted to generate it.";
+  const detected = status.detectedStack ? `Detected stack hint: ${status.detectedStack}` : "Detected stack hint: none yet.";
+  return [readme, gitignore, detected].join("\n");
+}
+
+function configureGitFooterStatusSetup({ force = true } = {}) {
+  const current = readGitFooterStatusSetup();
+  if (current.githubUsername && !force) return current;
+  const value = window.prompt("git-footer-status-setup: GitHub username for origin remotes", current.githubUsername || "");
+  if (value === null) return null;
+  try {
+    const setup = { githubUsername: cleanGitHubUsernameInput(value) };
+    writeGitFooterStatusSetup(setup);
+    addEvent(`git-footer-status-setup saved GitHub username ${setup.githubUsername}`, "success");
+    return setup;
+  } catch (error) {
+    addEvent(error.message || String(error), "error");
+    return null;
+  }
+}
+
+function ensureGitFooterStatusSetup() {
+  const setup = readGitFooterStatusSetup();
+  if (setup.githubUsername) return setup;
+  return configureGitFooterStatusSetup({ force: true });
+}
+
+function defaultGitInitRepoName(tab = activeTab()) {
+  const cwd = latestWorkspace?.cwd || tab?.cwd || latestWorkspace?.displayCwd || "";
+  const lastPart = String(cwd).split(/[\\/]+/).filter(Boolean).pop() || "new-repo";
+  try {
+    return cleanGitHubRepoNameInput(lastPart);
+  } catch {
+    return "new-repo";
+  }
+}
+
+function gitInitRemoteUrl(username, repoName) {
+  return `https://github.com/${username}/${repoName}.git`;
+}
+
+function promptGitInitRepoName(workflow = gitWorkflow) {
+  const fallback = workflow?.repoName || defaultGitInitRepoName();
+  const value = window.prompt("GitHub repository name for origin remote", fallback);
+  if (value === null) return null;
+  try {
+    return cleanGitHubRepoNameInput(value);
+  } catch (error) {
+    addEvent(error.message || String(error), "error");
+    return null;
+  }
+}
+
+function ensureGitInitRemoteDetails(tabId = activeTabId) {
+  const workflow = gitWorkflowForTab(tabId, { create: false }) || gitWorkflow;
+  const setup = ensureGitFooterStatusSetup();
+  if (!setup?.githubUsername) return null;
+  const repoName = workflow.repoName ? cleanGitHubRepoNameInput(workflow.repoName) : promptGitInitRepoName(workflow);
+  if (!repoName) return null;
+  const remoteUrl = gitInitRemoteUrl(setup.githubUsername, repoName);
+  setGitWorkflow({ githubUsername: setup.githubUsername, repoName, remoteUrl }, { tabId });
+  return { username: setup.githubUsername, repoName, remoteUrl };
+}
+
+function gitInitWorkflowSetupSummary(workflow = gitWorkflow) {
+  const username = workflow.githubUsername || readGitFooterStatusSetup().githubUsername || "not set";
+  const repoName = workflow.repoName || defaultGitInitRepoName();
+  const remoteUrl = username !== "not set" ? gitInitRemoteUrl(username, repoName) : "not configured";
+  return [`GitHub username: ${username}`, `Repository name: ${repoName}`, `Stack: ${gitInitStackDisplay(workflow.stack)}`, `Origin URL: ${remoteUrl}`].join("\n");
+}
+
 function addGitWorkflowAction(label, handler, className = "", disabled = gitWorkflow.busy, tooltip = "") {
   const button = make("button", className, label);
   button.type = "button";
@@ -7850,6 +8560,66 @@ function addGitWorkflowAction(label, handler, className = "", disabled = gitWork
   button.addEventListener("click", handler);
   elements.gitWorkflowActions.append(button);
   return button;
+}
+
+function renderGitInitStackInput() {
+  const tabId = gitWorkflowActionTabId();
+  const workflow = gitWorkflowForTab(tabId, { create: false }) || gitWorkflow;
+  const storedStack = workflow?.stack || readStoredGitInitStack();
+  const row = make("div", "git-workflow-message-input-row git-workflow-stack-input-row");
+
+  const selectField = make("label", "git-workflow-message-input-field");
+  selectField.setAttribute("for", "gitWorkflowStackSelect");
+  selectField.append(make("span", "git-workflow-message-input-label", "Stack preset"));
+  const select = make("select", "git-workflow-message-input");
+  select.id = "gitWorkflowStackSelect";
+  for (const option of GIT_INIT_STACK_OPTIONS) {
+    const node = make("option", undefined, option.label);
+    node.value = option.value;
+    select.append(node);
+  }
+  const matching = GIT_INIT_STACK_OPTIONS.some((option) => option.value === storedStack);
+  select.value = matching ? storedStack : storedStack ? "Custom" : "";
+  selectField.append(select);
+
+  const inputField = make("label", "git-workflow-message-input-field");
+  inputField.setAttribute("for", "gitWorkflowStackInput");
+  inputField.append(make("span", "git-workflow-message-input-label", "Stack input"));
+  const input = make("input", "git-workflow-message-input");
+  input.id = "gitWorkflowStackInput";
+  input.type = "text";
+  input.value = storedStack;
+  input.placeholder = "e.g. Node.js + Vite + React, Python + FastAPI, Rust CLI";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  inputField.append(input);
+
+  const saveButton = make("button", "git-workflow-message-input-commit", "Save stack");
+  saveButton.type = "button";
+  saveButton.title = GIT_INIT_STACK_TOOLTIP;
+  saveButton.dataset.tooltip = GIT_INIT_STACK_TOOLTIP;
+  const saveStack = () => {
+    const stack = writeStoredGitInitStack(input.value);
+    const current = gitWorkflowForTab(tabId, { create: false });
+    if (!current) return;
+    setGitWorkflow({ step: "readme", stack, ...gitWorkflowActionDonePatch(current, "stack"), output: `Stack saved: ${gitInitStackDisplay(stack)}\n\nNext: check README.md and .gitignore before staging. ${stack ? "Pi will use this stack for .gitignore." : "Pi will inspect the codebase and fall back to sane defaults for .gitignore."}` }, { tabId });
+  };
+  select.addEventListener("change", () => {
+    if (select.value === "Custom") {
+      input.focus();
+      input.select();
+    } else {
+      input.value = select.value;
+    }
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    saveStack();
+  });
+  saveButton.addEventListener("click", saveStack);
+  row.append(selectField, inputField, saveButton);
+  elements.gitWorkflowActions.append(row);
 }
 
 function renderGitWorkflowManualCommitInput() {
@@ -7924,6 +8694,29 @@ function openGitPrReviewDialog(pr, { title = "" } = {}) {
 
 function gitWorkflowProcessForStep(step = gitWorkflow.step, fallback = gitWorkflow.process || "stage") {
   switch (step) {
+    case "initSetup":
+    case "initRepo":
+    case "initializingRepo":
+      return "init";
+    case "initStack":
+      return "stack";
+    case "readme":
+    case "readmeCreating":
+    case "readmeGenerating":
+    case "gitignoreGenerating":
+      return "readme";
+    case "initialCommit":
+    case "initialCommitting":
+      return "commit";
+    case "mainBranch":
+    case "mainBranching":
+      return "branch";
+    case "remote":
+    case "remoteAdding":
+      return "remote";
+    case "initialPush":
+    case "initialPushing":
+      return "push";
     case "generate":
     case "generating":
       return "message";
@@ -7944,19 +8737,81 @@ function gitWorkflowProcessForStep(step = gitWorkflow.step, fallback = gitWorkfl
       return "stage";
     case "cancelled":
     case "error":
-      return GIT_WORKFLOW_PROCESS_VALUES.has(fallback) ? fallback : "stage";
+      return GIT_WORKFLOW_PROCESS_VALUES.has(fallback) || GIT_INIT_WORKFLOW_PROCESS_VALUES.has(fallback) ? fallback : "stage";
     default:
       return "stage";
   }
 }
 
+function selectGitInitWorkflowProcess(processValue, tabId, workflow) {
+  const process = GIT_INIT_WORKFLOW_PROCESS_VALUES.has(processValue) ? processValue : "init";
+  workflow.runId += 1;
+  const username = workflow.githubUsername || readGitFooterStatusSetup().githubUsername || "";
+  const repoName = workflow.repoName || defaultGitInitRepoName();
+  const remoteUrl = username ? gitInitRemoteUrl(username, repoName) : "";
+  const stack = workflow.stack || readStoredGitInitStack();
+  const base = {
+    mode: "initRepo",
+    active: true,
+    process,
+    busy: false,
+    error: "",
+    githubUsername: username,
+    repoName,
+    remoteUrl,
+    stack,
+    readmeRequestedAt: 0,
+    gitignoreRequestedAt: 0,
+    initFilesStatus: null,
+    message: null,
+    manualCommitMessage: "",
+    messageRequestedAt: 0,
+    branchName: "",
+    branchNameRequestedAt: 0,
+    prMode: false,
+    prBranch: "",
+    pr: null,
+    prRequestedAt: 0,
+  };
+
+  if (process === "init") {
+    setGitWorkflow({ ...base, step: username ? "initRepo" : "initSetup", output: username ? `Ready to initialize a Git repository.\n\n${gitInitWorkflowSetupSummary(base)}` : "No GitHub username stored yet. Run git-footer-status-setup first." }, { tabId });
+    return;
+  }
+  if (process === "stack") {
+    setGitWorkflow({ ...base, step: "initStack", output: `Choose a repository stack before README/.gitignore preparation.\n\nCurrent stack: ${gitInitStackDisplay(stack)}` }, { tabId });
+    return;
+  }
+  if (process === "readme") {
+    setGitWorkflow({ ...base, step: "readme", output: "Ready to check README.md and .gitignore before staging them." }, { tabId });
+    return;
+  }
+  if (process === "commit") {
+    setGitWorkflow({ ...base, step: "initialCommit", output: "Ready to create the initial commit with message: Initial commit." }, { tabId });
+    return;
+  }
+  if (process === "branch") {
+    setGitWorkflow({ ...base, step: "mainBranch", output: "Ready to rename the current branch to main with git branch -M main." }, { tabId });
+    return;
+  }
+  if (process === "remote") {
+    setGitWorkflow({ ...base, step: "remote", output: `Ready to add origin.\n\n${gitInitWorkflowSetupSummary(base)}` }, { tabId });
+    return;
+  }
+  setGitWorkflow({ ...base, step: "initialPush", output: "Ready to run git push -u origin main." }, { tabId });
+}
+
 function selectGitWorkflowProcess(processValue, tabId = gitWorkflowActionTabId()) {
   const workflow = gitWorkflowForTab(tabId);
   if (!workflow) return;
+  if (workflow.mode === "initRepo") {
+    selectGitInitWorkflowProcess(processValue, tabId, workflow);
+    return;
+  }
   const process = GIT_WORKFLOW_PROCESS_VALUES.has(processValue) ? processValue : "stage";
   workflow.runId += 1;
   const runId = workflow.runId;
-  const base = { active: true, process, busy: false, error: "", manualCommitMessage: "", messageRequestedAt: 0, branchName: "", branchNameRequestedAt: 0, prMode: false, prBranch: "", pr: null, prRequestedAt: 0 };
+  const base = { mode: "standard", active: true, process, busy: false, error: "", githubUsername: "", repoName: "", remoteUrl: "", stack: "", readmeRequestedAt: 0, gitignoreRequestedAt: 0, initFilesStatus: null, manualCommitMessage: "", messageRequestedAt: 0, branchName: "", branchNameRequestedAt: 0, prMode: false, prBranch: "", pr: null, prRequestedAt: 0 };
 
   if (process === "stage") {
     setGitWorkflow({ ...base, step: "add", message: null, output: "Ready to stage all changes with git add ." }, { tabId });
@@ -7976,6 +8831,22 @@ function selectGitWorkflowProcess(processValue, tabId = gitWorkflowActionTabId()
 
 function gitWorkflowTitle() {
   switch (gitWorkflow.step) {
+    case "initSetup": return "Set up GitHub username";
+    case "initRepo": return "Initialize Git repository";
+    case "initializingRepo": return "Running git init";
+    case "initStack": return "Choose repository stack";
+    case "readme": return "Prepare README and .gitignore";
+    case "readmeCreating": return "Preparing README and .gitignore";
+    case "readmeGenerating": return "Waiting for README";
+    case "gitignoreGenerating": return "Waiting for .gitignore";
+    case "initialCommit": return "Create initial commit";
+    case "initialCommitting": return "Committing initial files";
+    case "mainBranch": return "Rename branch to main";
+    case "mainBranching": return "Running git branch -M main";
+    case "remote": return "Add origin remote";
+    case "remoteAdding": return "Adding origin remote";
+    case "initialPush": return "Push main upstream";
+    case "initialPushing": return "Pushing main";
     case "add": return "Stage all changes";
     case "generate": return "Generate staged commit message";
     case "generating": return "Waiting for /git-staged-msg";
@@ -7988,15 +8859,31 @@ function gitWorkflowTitle() {
     case "prGenerating": return "Waiting for /pr";
     case "prReview": return "Review PR description";
     case "prCreating": return "Creating pull request";
-    case "done": return "Git workflow complete";
-    case "cancelled": return "Git workflow cancelled";
-    case "error": return "Git workflow needs attention";
-    default: return "Git workflow";
+    case "done": return gitWorkflow.mode === "initRepo" ? "Git repository setup complete" : "Git workflow complete";
+    case "cancelled": return gitWorkflow.mode === "initRepo" ? "Git repository setup cancelled" : "Git workflow cancelled";
+    case "error": return gitWorkflow.mode === "initRepo" ? "Git repository setup needs attention" : "Git workflow needs attention";
+    default: return gitWorkflow.mode === "initRepo" ? "Git repository setup" : "Git workflow";
   }
 }
 
 function gitWorkflowHint() {
   switch (gitWorkflow.step) {
+    case "initSetup": return "First-time setup: save the GitHub username used in https://github.com/USERNAME/REPO_NAME.git.";
+    case "initRepo": return "Step 1: run git init in the current Pi working directory.";
+    case "initializingRepo": return "Running git init. Cancel will terminate the git command.";
+    case "initStack": return "Step 2: choose a stack preset or type one; leave blank to let Pi infer it from the codebase.";
+    case "readme": return "Step 3: check README.md and .gitignore, prompt Pi for missing files, then stage them.";
+    case "readmeCreating": return "Checking README.md/.gitignore, creating missing files if needed, and staging them.";
+    case "readmeGenerating": return "Pi is filling out README.md from the selected stack and repository contents.";
+    case "gitignoreGenerating": return "Pi is generating .gitignore from the selected stack or by inspecting the codebase.";
+    case "initialCommit": return "Step 4: run git commit -m \"Initial commit\".";
+    case "initialCommitting": return "Creating the initial commit.";
+    case "mainBranch": return "Step 5: run git branch -M main.";
+    case "mainBranching": return "Renaming the current branch to main.";
+    case "remote": return "Step 6: add origin as https://github.com/USERNAME/REPO_NAME.git.";
+    case "remoteAdding": return "Adding the GitHub origin remote.";
+    case "initialPush": return "Step 7: run git push -u origin main.";
+    case "initialPushing": return "Pushing main upstream. Authentication must already be available to git.";
     case "add": return "Step 1: run git add . in the current Pi working directory.";
     case "generate": return "Step 2: run /git-staged-msg, or type a commit message and use Commit input.";
     case "generating": return "Pi is generating dev/COMMIT/staged-commit-short.txt and staged-commit-long.txt.";
@@ -8009,10 +8896,70 @@ function gitWorkflowHint() {
     case "prGenerating": return "Pi is generating dev/PR/<current-branch>.md with /pr.";
     case "prReview": return "Review or edit the generated PR description before creating the pull request.";
     case "prCreating": return "Running gh pr create with the confirmed description.";
-    case "done": return gitWorkflow.prMode ? "PR workflow finished. Review the output below." : "Push finished. Review the output below.";
+    case "done": return gitWorkflow.mode === "initRepo" ? "Initial repository workflow finished. Review the output below." : gitWorkflow.prMode ? "PR workflow finished. Review the output below." : "Push finished. Review the output below.";
     case "cancelled": return "No further workflow steps will run.";
     case "error": return gitWorkflow.error || "Fix the issue, then retry or restart.";
-    default: return "Stage changes, generate a commit message, commit, and push.";
+    default: return gitWorkflow.mode === "initRepo" ? "Initialize a repository, create README.md, commit, add origin, and push main." : "Stage changes, generate a commit message, commit, and push.";
+  }
+}
+
+function renderGitInitWorkflowActions() {
+  if (gitWorkflow.step === "initSetup") {
+    addGitWorkflowAction("git-footer-status-setup", () => {
+      const setup = configureGitFooterStatusSetup({ force: true });
+      if (!setup?.githubUsername) return;
+      const repoName = gitWorkflow.repoName || defaultGitInitRepoName();
+      const stack = gitWorkflow.stack || readStoredGitInitStack();
+      setGitWorkflow({ step: "initRepo", githubUsername: setup.githubUsername, repoName, stack, remoteUrl: gitInitRemoteUrl(setup.githubUsername, repoName), output: `Ready to initialize a Git repository.\n\n${gitInitWorkflowSetupSummary({ githubUsername: setup.githubUsername, repoName, stack })}` });
+    }, "primary", false, GIT_FOOTER_STATUS_SETUP_TOOLTIP);
+  } else if (gitWorkflow.step === "initRepo") {
+    addGitWorkflowAction("Run git init", () => runGitInitRepository(), "primary", false, "Run git init in the current Pi working directory.");
+  } else if (gitWorkflow.step === "initializingRepo") {
+    addGitWorkflowAction("Running git init…", () => {}, "primary", true);
+  } else if (gitWorkflow.step === "initStack") {
+    renderGitInitStackInput();
+    addGitWorkflowAction("Skip / auto-detect", () => {
+      const workflow = gitWorkflowForTab(gitWorkflowActionTabId(), { create: false }) || gitWorkflow;
+      writeStoredGitInitStack("");
+      setGitWorkflow({ step: "readme", stack: "", ...gitWorkflowActionDonePatch(workflow, "stack"), output: "Stack left blank. Pi will inspect the codebase for .gitignore and fallback to sane defaults.\n\nNext: check README.md and .gitignore before staging." });
+    }, "", false, GIT_INIT_STACK_TOOLTIP);
+  } else if (gitWorkflow.step === "readme") {
+    addGitWorkflowAction("Check and prepare files", () => prepareGitInitFiles(), "primary", false, "Check README.md and .gitignore first; create missing README.md; prompt Pi to generate missing .gitignore.");
+  } else if (gitWorkflow.step === "readmeCreating") {
+    addGitWorkflowAction("Preparing files…", () => {}, "primary", true);
+  } else if (gitWorkflow.step === "readmeGenerating") {
+    addGitWorkflowAction("Waiting for Pi…", () => {}, "primary", true);
+  } else if (gitWorkflow.step === "gitignoreGenerating") {
+    addGitWorkflowAction("Waiting for Pi…", () => {}, "primary", true);
+  } else if (gitWorkflow.step === "initialCommit") {
+    addGitWorkflowAction("Commit initial files", () => commitGitInitialReadme(), "primary", false, "Run git commit -m \"Initial commit\".");
+  } else if (gitWorkflow.step === "initialCommitting") {
+    addGitWorkflowAction("Committing…", () => {}, "primary", true);
+  } else if (gitWorkflow.step === "mainBranch") {
+    addGitWorkflowAction("Run git branch -M main", () => branchGitInitMain(), "primary", false, "Rename the current branch to main.");
+  } else if (gitWorkflow.step === "mainBranching") {
+    addGitWorkflowAction("Renaming branch…", () => {}, "primary", true);
+  } else if (gitWorkflow.step === "remote") {
+    addGitWorkflowAction("Add origin remote", () => addGitInitRemote(), "primary", false, GIT_INIT_REMOTE_TOOLTIP);
+    addGitWorkflowAction("git-footer-status-setup", () => {
+      const setup = configureGitFooterStatusSetup({ force: true });
+      if (!setup?.githubUsername) return;
+      const repoName = gitWorkflow.repoName || defaultGitInitRepoName();
+      const stack = gitWorkflow.stack || readStoredGitInitStack();
+      setGitWorkflow({ githubUsername: setup.githubUsername, repoName, stack, remoteUrl: gitInitRemoteUrl(setup.githubUsername, repoName), output: `Ready to add origin.\n\n${gitInitWorkflowSetupSummary({ githubUsername: setup.githubUsername, repoName, stack })}` });
+    }, "", false, GIT_FOOTER_STATUS_SETUP_TOOLTIP);
+  } else if (gitWorkflow.step === "remoteAdding") {
+    addGitWorkflowAction("Adding origin…", () => {}, "primary", true);
+  } else if (gitWorkflow.step === "initialPush") {
+    addGitWorkflowAction("Run git push -u origin main", () => pushGitInitWorkflow(), "primary", false, "Push main to origin and set upstream tracking.");
+  } else if (gitWorkflow.step === "initialPushing") {
+    addGitWorkflowAction("Pushing main…", () => {}, "primary", true);
+  } else if (gitWorkflow.step === "done") {
+    addGitWorkflowAction("Close", () => setGitWorkflow({ active: false }), "primary", false);
+    addGitWorkflowAction("Initialize another", () => startGitInitWorkflow(), "", false);
+  } else if (["cancelled", "error"].includes(gitWorkflow.step)) {
+    addGitWorkflowAction("Close", () => setGitWorkflow({ active: false }), "primary", false);
+    addGitWorkflowAction("Restart setup", () => startGitInitWorkflow(), "", false);
   }
 }
 
@@ -8020,15 +8967,19 @@ function renderGitWorkflow() {
   elements.gitWorkflowPanel.hidden = !gitWorkflow.active;
   if (!gitWorkflow.active) return;
 
+  elements.gitWorkflowPanel.dataset.mode = gitWorkflow.mode || "standard";
+  if (elements.gitWorkflowKicker) elements.gitWorkflowKicker.textContent = gitWorkflow.mode === "initRepo" ? "Git repository setup" : "Git workflow";
   elements.gitWorkflowTitle.textContent = gitWorkflowTitle();
   elements.gitWorkflowHint.textContent = gitWorkflowHint();
   elements.gitWorkflowOutput.textContent = gitWorkflow.output || "Ready.";
   elements.gitWorkflowSteps.replaceChildren();
   elements.gitWorkflowActions.replaceChildren();
 
-  const activeIndex = GIT_WORKFLOW_ACTIVE_INDEX[gitWorkflow.step] ?? 0;
+  const processes = gitWorkflow.mode === "initRepo" ? GIT_INIT_WORKFLOW_PROCESSES : GIT_WORKFLOW_PROCESSES;
+  const activeIndexMap = gitWorkflow.mode === "initRepo" ? GIT_INIT_WORKFLOW_ACTIVE_INDEX : GIT_WORKFLOW_ACTIVE_INDEX;
+  const activeIndex = activeIndexMap[gitWorkflow.step] ?? 0;
   const activeProcess = gitWorkflowProcessForStep(gitWorkflow.step, gitWorkflow.process);
-  for (const [index, process] of GIT_WORKFLOW_PROCESSES.entries()) {
+  for (const [index, process] of processes.entries()) {
     const item = make("button", "git-workflow-step", process.label);
     item.type = "button";
     item.dataset.gitWorkflowProcess = process.value;
@@ -8041,6 +8992,11 @@ function renderGitWorkflow() {
 
   elements.gitWorkflowCancelButton.hidden = ["done", "cancelled"].includes(gitWorkflow.step);
   elements.gitWorkflowCancelButton.disabled = false;
+
+  if (gitWorkflow.mode === "initRepo") {
+    renderGitInitWorkflowActions();
+    return;
+  }
 
   if (gitWorkflow.step === "add") {
     addGitWorkflowAction("Run git add .", () => runGitAdd(), "primary", false);
@@ -8086,7 +9042,15 @@ function renderGitWorkflow() {
 async function gitWorkflowRequest(path, { method = "POST", body = {}, runId, tabId = activeTabId } = {}) {
   const workflow = gitWorkflowForTab(tabId, { create: false });
   const expectedRunId = runId ?? workflow?.runId;
-  const response = await api(path, method === "GET" ? { method, tabId } : { method, body, tabId });
+  let response;
+  try {
+    response = await api(path, method === "GET" ? { method, tabId } : { method, body, tabId });
+  } catch (error) {
+    if (error?.statusCode === 404 && path.startsWith("/api/git-workflow/")) {
+      throw new Error("Git workflow endpoint not found. Restart Pi Web UI so the browser and backend both load the latest git repository setup endpoints.");
+    }
+    throw error;
+  }
   if (expectedRunId !== undefined && !isCurrentGitWorkflowRun(expectedRunId, tabId)) return null;
   if (!response.ok) {
     const detail = response.data ? `\n\n${formatGitCommandResult(response.data)}` : "";
@@ -8122,11 +9086,19 @@ function startGitWorkflow(tabId = activeTabId) {
   workflow.runId += 1;
   setGitWorkflow({
     active: true,
+    mode: "standard",
     step: "add",
     process: "stage",
     busy: false,
     output: "Ready to stage all changes with git add .\n\nNative mode is used for g-msg/g-short/g-long: dev/COMMIT message files are read directly and git commit is run without fish. In the Message stage you can also type a commit message and use Commit input. After the message is generated, use Create PR to switch to a new branch before committing.",
     error: "",
+    githubUsername: "",
+    repoName: "",
+    remoteUrl: "",
+    stack: "",
+    readmeRequestedAt: 0,
+    gitignoreRequestedAt: 0,
+    initFilesStatus: null,
     message: null,
     manualCommitMessage: "",
     messageRequestedAt: 0,
@@ -8140,11 +9112,308 @@ function startGitWorkflow(tabId = activeTabId) {
   }, { tabId });
 }
 
+function startGitInitWorkflow(tabId = activeTabId) {
+  if (!tabId) return;
+  const workflow = gitWorkflowForTab(tabId);
+  if (workflow.active && !["done", "cancelled", "error"].includes(workflow.step) && !confirm("Restart the active git repository setup workflow?")) return;
+  const setup = readGitFooterStatusSetup().githubUsername ? readGitFooterStatusSetup() : configureGitFooterStatusSetup({ force: true });
+  const githubUsername = setup?.githubUsername || "";
+  const repoName = defaultGitInitRepoName(tabs.find((tab) => tab.id === tabId) || activeTab());
+  const stack = readStoredGitInitStack();
+  workflow.runId += 1;
+  setGitWorkflow({
+    active: true,
+    mode: "initRepo",
+    step: githubUsername ? "initRepo" : "initSetup",
+    process: "init",
+    busy: false,
+    output: githubUsername
+      ? `Ready to initialize a Git repository.\n\n${gitInitWorkflowSetupSummary({ githubUsername, repoName, stack })}`
+      : "No GitHub username stored yet. Run git-footer-status-setup to save the username for https://github.com/USERNAME/REPO_NAME.git.",
+    error: "",
+    githubUsername,
+    repoName,
+    remoteUrl: githubUsername ? gitInitRemoteUrl(githubUsername, repoName) : "",
+    stack,
+    readmeRequestedAt: 0,
+    gitignoreRequestedAt: 0,
+    initFilesStatus: null,
+    message: null,
+    manualCommitMessage: "",
+    messageRequestedAt: 0,
+    branchName: "",
+    branchNameRequestedAt: 0,
+    actionsDone: createGitWorkflowActionsDone(),
+    prMode: false,
+    prBranch: "",
+    pr: null,
+    prRequestedAt: 0,
+  }, { tabId });
+}
+
+async function runGitInitRepository(tabId = gitWorkflowActionTabId()) {
+  const tabContext = activeTabContext(tabId);
+  const workflow = gitWorkflowForTab(tabId, { create: false });
+  if (!workflow) return;
+  const runId = workflow.runId;
+  setGitWorkflow({ step: "initializingRepo", busy: true, error: "", output: "Running git init…" }, { tabId });
+  try {
+    const result = await gitWorkflowRequest("/api/git-workflow/init", { runId, tabId });
+    if (!result) return;
+    const stack = workflow.stack || readStoredGitInitStack();
+    setGitWorkflow({ step: "initStack", busy: false, stack, ...gitWorkflowActionDonePatch(workflow, "init"), output: `${formatGitCommandResult(result)}\n\nRepository initialized. Next: choose the stack used for .gitignore generation.\n\nCurrent stack: ${gitInitStackDisplay(stack)}` }, { tabId });
+    if (isCurrentTabContext(tabContext)) scheduleRefreshFooter();
+  } catch (error) {
+    if (isCurrentGitWorkflowRun(runId, tabId)) failGitWorkflow(error, "initRepo", { tabId });
+  }
+}
+
+function gitInitFilesResultSummary(result) {
+  const readme = result?.readme?.created
+    ? "Created README.md."
+    : result?.readme?.exists
+      ? "README.md already existed; staged without overwriting."
+      : "README.md was checked.";
+  const gitignore = result?.gitignore?.created
+    ? `Created .gitignore${result.gitignore.source ? ` (${result.gitignore.source})` : ""}.`
+    : result?.gitignore?.exists
+      ? ".gitignore already existed; staged without overwriting."
+      : ".gitignore was checked.";
+  return [readme, gitignore].join("\n");
+}
+
+function gitInitReadmePromptMessage({ stack = "", status = null, repoName = "" } = {}) {
+  const cleanStack = cleanGitInitStack(stack);
+  return [
+    "Create a useful README.md for this new repository.",
+    "Write or update only README.md in the current repository root. Do not commit, push, or run git add.",
+    repoName ? `Repository name: ${repoName}` : "",
+    cleanStack
+      ? `User-provided stack: ${cleanStack}`
+      : "No user stack was provided. Inspect the codebase (package manifests, lockfiles, framework configs, file extensions, build files) and infer the project purpose/stack.",
+    !cleanStack && status?.detectedStack ? `Web UI detected stack hint: ${status.detectedStack}` : "",
+    "Include a clear title, short description, basic setup/install instructions, common development commands, and usage notes that match the detected repository.",
+    "If the repository is mostly empty or unclear, create a concise README with placeholders/TODOs rather than inventing unsupported project details.",
+  ].filter(Boolean).join("\n");
+}
+
+function gitInitGitignorePromptMessage({ stack = "", status = null, repoName = "" } = {}) {
+  const cleanStack = cleanGitInitStack(stack);
+  return [
+    "Create a practical .gitignore file for this repository initialization.",
+    "Write or update only .gitignore in the current repository root. Do not commit, push, or run git add.",
+    repoName ? `Repository name: ${repoName}` : "",
+    cleanStack
+      ? `User-provided stack: ${cleanStack}`
+      : "No user stack was provided. Inspect the codebase (package manifests, lockfiles, framework configs, file extensions, build files) and infer the stack.",
+    !cleanStack && status?.detectedStack ? `Web UI detected stack hint: ${status.detectedStack}` : "",
+    "If the stack is still unclear, use sane defaults for OS/editor files, local env/secrets, dependency folders, build outputs, logs, caches, coverage, and temporary files.",
+    "Keep useful generated/project files trackable; do not ignore source files or lockfiles by default.",
+  ].filter(Boolean).join("\n");
+}
+
+async function promptGitInitReadme(status, { runId, tabId }) {
+  const tabContext = activeTabContext(tabId);
+  const targetTab = tabs.find((tab) => tab.id === tabId);
+  const targetBusy = tabId === activeTabId ? !!currentState?.isStreaming : activityForTab(targetTab).isWorking;
+  if (targetBusy) {
+    failGitWorkflow(new Error("Pi is currently running. Wait for it to finish or abort before filling out README.md."), "readme", { tabId });
+    return;
+  }
+  const workflow = gitWorkflowForTab(tabId, { create: false });
+  if (!workflow) return;
+  const requestedAt = Date.now();
+  const repoName = workflow.repoName || defaultGitInitRepoName();
+  const stack = workflow.stack || "";
+  setGitWorkflow({
+    step: "readmeGenerating",
+    busy: true,
+    error: "",
+    readmeRequestedAt: requestedAt,
+    initFilesStatus: status,
+    output: `${gitInitFilesStatusSummary(status)}\n\nSending README.md fill-out request to Pi.\n\nStack: ${gitInitStackDisplay(stack)}\nCancel will request Pi abort.`,
+  }, { tabId });
+  if (isCurrentTabContext(tabContext)) setRunIndicatorActivity("Sending README.md fill-out request to Pi…");
+  try {
+    await api("/api/prompt", { method: "POST", body: { message: gitInitReadmePromptMessage({ stack, status, repoName }) }, tabId });
+    if (!isCurrentGitWorkflowRun(runId, tabId)) return;
+    appendGitWorkflowOutput("README.md request accepted. Waiting for agent_end, then README.md/.gitignore will be checked and staged. If Pi does not create README.md, Web UI will use a minimal fallback README.", { tabId });
+    if (isCurrentTabContext(tabContext)) scheduleRefreshState(120, tabContext);
+    setTimeout(() => {
+      const currentWorkflow = gitWorkflowForTab(tabId, { create: false });
+      const targetStillBusy = tabId === activeTabId && currentState?.isStreaming;
+      if (isCurrentGitWorkflowRun(runId, tabId) && currentWorkflow?.step === "readmeGenerating" && !targetStillBusy) {
+        prepareGitInitFiles({ afterReadmePrompt: true, runId, tabId });
+      }
+    }, 2500);
+  } catch (error) {
+    if (isCurrentGitWorkflowRun(runId, tabId)) {
+      if (isCurrentTabContext(tabContext)) clearRunIndicatorActivity();
+      failGitWorkflow(error, "readme", { tabId });
+    }
+  }
+}
+
+async function promptGitInitGitignore(status, { runId, tabId }) {
+  const tabContext = activeTabContext(tabId);
+  const targetTab = tabs.find((tab) => tab.id === tabId);
+  const targetBusy = tabId === activeTabId ? !!currentState?.isStreaming : activityForTab(targetTab).isWorking;
+  if (targetBusy) {
+    failGitWorkflow(new Error("Pi is currently running. Wait for it to finish or abort before generating .gitignore."), "readme", { tabId });
+    return;
+  }
+  const workflow = gitWorkflowForTab(tabId, { create: false });
+  if (!workflow) return;
+  const requestedAt = Date.now();
+  const repoName = workflow.repoName || defaultGitInitRepoName();
+  const stack = workflow.stack || "";
+  setGitWorkflow({
+    step: "gitignoreGenerating",
+    busy: true,
+    error: "",
+    gitignoreRequestedAt: requestedAt,
+    initFilesStatus: status,
+    output: `${gitInitFilesStatusSummary(status)}\n\nSending .gitignore generation request to Pi.\n\nStack: ${gitInitStackDisplay(stack)}\nCancel will request Pi abort.`,
+  }, { tabId });
+  if (isCurrentTabContext(tabContext)) setRunIndicatorActivity("Sending .gitignore generation request to Pi…");
+  try {
+    await api("/api/prompt", { method: "POST", body: { message: gitInitGitignorePromptMessage({ stack, status, repoName }) }, tabId });
+    if (!isCurrentGitWorkflowRun(runId, tabId)) return;
+    appendGitWorkflowOutput(".gitignore request accepted. Waiting for agent_end, then README.md/.gitignore will be staged. If Pi does not create .gitignore, Web UI will use sane fallback patterns.", { tabId });
+    if (isCurrentTabContext(tabContext)) scheduleRefreshState(120, tabContext);
+    setTimeout(() => {
+      const currentWorkflow = gitWorkflowForTab(tabId, { create: false });
+      const targetStillBusy = tabId === activeTabId && currentState?.isStreaming;
+      if (isCurrentGitWorkflowRun(runId, tabId) && currentWorkflow?.step === "gitignoreGenerating" && !targetStillBusy) {
+        prepareGitInitFiles({ afterGitignorePrompt: true, runId, tabId });
+      }
+    }, 2500);
+  } catch (error) {
+    if (isCurrentGitWorkflowRun(runId, tabId)) {
+      if (isCurrentTabContext(tabContext)) clearRunIndicatorActivity();
+      failGitWorkflow(error, "readme", { tabId });
+    }
+  }
+}
+
+async function prepareGitInitFiles({ afterReadmePrompt = false, afterGitignorePrompt = false, runId, tabId = gitWorkflowActionTabId() } = {}) {
+  const tabContext = activeTabContext(tabId);
+  const workflow = gitWorkflowForTab(tabId, { create: false });
+  if (!workflow) return;
+  const expectedRunId = runId ?? workflow.runId;
+  const repoName = workflow.repoName || defaultGitInitRepoName();
+  const stack = cleanGitInitStack(workflow.stack || readStoredGitInitStack());
+  setGitWorkflow({ step: "readmeCreating", busy: true, error: "", output: afterReadmePrompt || afterGitignorePrompt ? "Checking generated files, preparing README.md/.gitignore, and staging files…" : "Checking whether README.md and .gitignore already exist…" }, { tabId });
+  try {
+    const status = await gitWorkflowRequest("/api/git-workflow/init-files-status", { method: "GET", runId: expectedRunId, tabId });
+    if (!status) return;
+    setGitWorkflow({ initFilesStatus: status, output: `${gitInitFilesStatusSummary(status)}\n\nStack: ${gitInitStackDisplay(stack)}` }, { tabId });
+    if (!status.readmeExists && !afterReadmePrompt) {
+      await promptGitInitReadme(status, { runId: expectedRunId, tabId });
+      return;
+    }
+    if (!status.gitignoreExists && !afterGitignorePrompt) {
+      await promptGitInitGitignore(status, { runId: expectedRunId, tabId });
+      return;
+    }
+    const result = await gitWorkflowRequest("/api/git-workflow/readme", { body: { repoName, stack }, runId: expectedRunId, tabId });
+    if (!result) return;
+    const current = gitWorkflowForTab(tabId, { create: false }) || workflow;
+    setGitWorkflow({
+      step: "initialCommit",
+      busy: false,
+      repoName,
+      stack,
+      initFilesStatus: status,
+      actionsDone: createGitWorkflowActionsDone({ ...current.actionsDone, readme: true, gitignore: true }),
+      output: `${gitInitFilesStatusSummary(status)}\n\n${formatGitCommandResult(result)}\n\n${gitInitFilesResultSummary(result)}\nNext: commit the initial files.`,
+    }, { tabId });
+    if (isCurrentTabContext(tabContext)) scheduleRefreshFooter();
+  } catch (error) {
+    if (isCurrentGitWorkflowRun(expectedRunId, tabId)) failGitWorkflow(error, "readme", { tabId });
+  }
+}
+
+async function commitGitInitialReadme(tabId = gitWorkflowActionTabId()) {
+  const tabContext = activeTabContext(tabId);
+  const workflow = gitWorkflowForTab(tabId, { create: false });
+  if (!workflow) return;
+  const runId = workflow.runId;
+  setGitWorkflow({ step: "initialCommitting", busy: true, error: "", output: "Running git commit -m \"Initial commit\"…" }, { tabId });
+  try {
+    const result = await gitWorkflowRequest("/api/git-workflow/initial-commit", { runId, tabId });
+    if (!result) return;
+    setGitWorkflow({ step: "mainBranch", busy: false, ...gitWorkflowActionDonePatch(workflow, "commit"), output: `${formatGitCommandResult(result)}\n\nInitial commit created. Next: rename the branch to main.` }, { tabId });
+    if (isCurrentTabContext(tabContext)) scheduleRefreshFooter();
+  } catch (error) {
+    if (isCurrentGitWorkflowRun(runId, tabId)) failGitWorkflow(error, "initialCommit", { tabId });
+  }
+}
+
+async function branchGitInitMain(tabId = gitWorkflowActionTabId()) {
+  const tabContext = activeTabContext(tabId);
+  const workflow = gitWorkflowForTab(tabId, { create: false });
+  if (!workflow) return;
+  const runId = workflow.runId;
+  setGitWorkflow({ step: "mainBranching", busy: true, error: "", output: "Running git branch -M main…" }, { tabId });
+  try {
+    const result = await gitWorkflowRequest("/api/git-workflow/main-branch", { runId, tabId });
+    if (!result) return;
+    setGitWorkflow({ step: "remote", busy: false, ...gitWorkflowActionDonePatch(workflow, "branch"), output: `${formatGitCommandResult(result)}\n\nBranch is main. Next: add origin.\n\n${gitInitWorkflowSetupSummary(gitWorkflowForTab(tabId, { create: false }) || workflow)}` }, { tabId });
+    if (isCurrentTabContext(tabContext)) scheduleRefreshFooter();
+  } catch (error) {
+    if (isCurrentGitWorkflowRun(runId, tabId)) failGitWorkflow(error, "mainBranch", { tabId });
+  }
+}
+
+async function addGitInitRemote(tabId = gitWorkflowActionTabId()) {
+  const tabContext = activeTabContext(tabId);
+  const workflow = gitWorkflowForTab(tabId, { create: false });
+  if (!workflow) return;
+  let details;
+  try {
+    details = ensureGitInitRemoteDetails(tabId);
+  } catch (error) {
+    addEvent(error.message || String(error), "error");
+    return;
+  }
+  if (!details) {
+    setGitWorkflow({ step: "remote", busy: false, output: `Origin setup cancelled.\n\n${gitInitWorkflowSetupSummary(workflow)}` }, { tabId });
+    return;
+  }
+  const runId = workflow.runId;
+  setGitWorkflow({ step: "remoteAdding", busy: true, error: "", githubUsername: details.username, repoName: details.repoName, remoteUrl: details.remoteUrl, output: `Running git remote add origin ${details.remoteUrl}…` }, { tabId });
+  try {
+    const result = await gitWorkflowRequest("/api/git-workflow/remote", { body: details, runId, tabId });
+    if (!result) return;
+    setGitWorkflow({ step: "initialPush", busy: false, ...gitWorkflowActionDonePatch(workflow, "remote"), output: `${formatGitCommandResult(result)}\n\nOrigin added: ${result.remoteUrl || details.remoteUrl}\nNext: git push -u origin main.` }, { tabId });
+    if (isCurrentTabContext(tabContext)) scheduleRefreshFooter();
+  } catch (error) {
+    if (isCurrentGitWorkflowRun(runId, tabId)) failGitWorkflow(error, "remote", { tabId });
+  }
+}
+
+async function pushGitInitWorkflow(tabId = gitWorkflowActionTabId()) {
+  const tabContext = activeTabContext(tabId);
+  const workflow = gitWorkflowForTab(tabId, { create: false });
+  if (!workflow) return;
+  const runId = workflow.runId;
+  setGitWorkflow({ step: "initialPushing", busy: true, error: "", output: "Running git push -u origin main…" }, { tabId });
+  try {
+    const result = await gitWorkflowRequest("/api/git-workflow/init-push", { runId, tabId });
+    if (!result) return;
+    setGitWorkflow({ step: "done", busy: false, ...gitWorkflowActionDonePatch(workflow, "push"), output: `${formatGitCommandResult(result)}\n\nInitial repository pushed to origin/main.` }, { tabId });
+    if (isCurrentTabContext(tabContext)) scheduleRefreshFooter();
+  } catch (error) {
+    if (isCurrentGitWorkflowRun(runId, tabId)) failGitWorkflow(error, "initialPush", { tabId });
+  }
+}
+
 async function cancelGitWorkflow(tabId = gitWorkflowActionTabId()) {
   const tabContext = activeTabContext(tabId);
   const workflow = gitWorkflowForTab(tabId, { create: false });
   if (!workflow?.active) return;
-  const shouldAbortPi = workflow.step === "generating" || workflow.step === "branchNaming" || workflow.step === "prGenerating";
+  const shouldAbortPi = workflow.step === "generating" || workflow.step === "branchNaming" || workflow.step === "prGenerating" || workflow.step === "readmeGenerating" || workflow.step === "gitignoreGenerating";
   if (activeGitPrDialogResolve) resolveGitPrDialog(null);
   workflow.runId += 1;
   setGitWorkflow({ step: "cancelled", busy: false, error: "", output: `${workflow.output || ""}${workflow.output ? "\n\n" : ""}Cancelled by user.` }, { tabId });
@@ -8555,6 +9824,22 @@ function resumeGitWorkflowForActiveTab(tabContext = activeTabContext()) {
       return;
     }
     loadGitWorkflowPr({ requireFresh: true, retries: 3, runId: gitWorkflow.runId, tabId: workflowTabId });
+  }
+  if (workflowTabId === tabContext.tabId && gitWorkflow.active && gitWorkflow.step === "readmeGenerating" && !currentState?.isStreaming) {
+    const retryDelayMs = Math.max(0, 2500 - (Date.now() - (gitWorkflow.readmeRequestedAt || 0)));
+    if (retryDelayMs > 0) {
+      setTimeout(() => resumeGitWorkflowForActiveTab(tabContext), retryDelayMs);
+      return;
+    }
+    prepareGitInitFiles({ afterReadmePrompt: true, runId: gitWorkflow.runId, tabId: workflowTabId });
+  }
+  if (workflowTabId === tabContext.tabId && gitWorkflow.active && gitWorkflow.step === "gitignoreGenerating" && !currentState?.isStreaming) {
+    const retryDelayMs = Math.max(0, 2500 - (Date.now() - (gitWorkflow.gitignoreRequestedAt || 0)));
+    if (retryDelayMs > 0) {
+      setTimeout(() => resumeGitWorkflowForActiveTab(tabContext), retryDelayMs);
+      return;
+    }
+    prepareGitInitFiles({ afterGitignorePrompt: true, runId: gitWorkflow.runId, tabId: workflowTabId });
   }
 }
 
@@ -11601,6 +12886,17 @@ function renderOptionalFeaturePanel() {
     const packageLine = make("code", "optional-feature-package", feature.packageName);
     main.append(title, detail, description, packageLine);
 
+    const actions = make("div", "optional-feature-actions");
+    if (feature.id === "gitFooterStatus") {
+      const setup = make("button", "optional-feature-action setup", "git-footer-status-setup");
+      setup.type = "button";
+      setup.title = GIT_FOOTER_STATUS_SETUP_TOOLTIP;
+      setup.dataset.tooltip = GIT_FOOTER_STATUS_SETUP_TOOLTIP;
+      setup.disabled = installing;
+      setup.addEventListener("click", () => configureGitFooterStatusSetup({ force: true }));
+      actions.append(setup);
+    }
+
     const action = make("button", "optional-feature-action");
     action.type = "button";
     action.disabled = installing;
@@ -11614,8 +12910,9 @@ function renderOptionalFeaturePanel() {
       action.classList.add("install");
       action.addEventListener("click", () => installOptionalFeature(feature.id));
     }
+    actions.append(action);
 
-    row.append(main, action);
+    row.append(main, actions);
     elements.optionalFeaturesBox.append(row);
   }
 }
@@ -11654,6 +12951,16 @@ function renderOptionalFeatureControls() {
     "Slash command menu unavailable: enable/install TUI Skills command and/or TUI Tools command in Optional features.",
   );
   if (!hasNativeCommandMenu && nativeCommandMenuOpen) setNativeCommandMenuOpen(false);
+
+  const hasStatsCommand = isOptionalFeatureEnabled("statsCommand");
+  if (elements.optionsStatsButton) {
+    elements.optionsStatsButton.hidden = !hasStatsCommand;
+    setOptionalControlState(
+      elements.optionsStatsButton,
+      hasStatsCommand,
+      optionalFeatureUnavailableMessage("statsCommand"),
+    );
+  }
 
   renderOptionalFeaturePanel();
 }
@@ -14196,6 +15503,7 @@ function handleExtensionUiRequest(request) {
       } else {
         statusEntries.delete(statusKey);
       }
+      if (statusKey === STATS_WEBUI_STATUS_KEY) handleStatsWebuiStatus(request.statusText);
       updateOptionalFeatureAvailability();
       renderStatus();
       return;
@@ -14891,6 +16199,25 @@ elements.optionsSettingsButton.addEventListener("click", () => runNativeCommandM
 elements.optionsExportButton.addEventListener("click", () => runNativeCommandMenu("/export"));
 elements.optionsForkButton.addEventListener("click", () => runNativeCommandMenu("/fork"));
 elements.optionsTreeButton.addEventListener("click", () => runNativeCommandMenu("/tree"));
+elements.optionsStatsButton?.addEventListener("click", () => openStatsOverlay({ refresh: true }));
+elements.statsOverlayRefreshButton?.addEventListener("click", () => requestStatsOverlayRefresh());
+elements.statsOverlayScope?.addEventListener("change", () => {
+  const custom = elements.statsOverlayScope?.value === "custom";
+  if (elements.statsOverlayCustomDays) elements.statsOverlayCustomDays.hidden = !custom;
+  if (custom) {
+    elements.statsOverlayCustomDays?.focus();
+    return;
+  }
+  requestStatsOverlayRefresh();
+});
+elements.statsOverlayCustomDays?.addEventListener("change", () => requestStatsOverlayRefresh());
+elements.statsOverlayCustomDays?.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  requestStatsOverlayRefresh();
+});
+elements.statsOverlayCloseButton?.addEventListener("click", () => elements.statsOverlayDialog?.close());
+elements.statsOverlayDialog?.querySelector("form")?.addEventListener("submit", (event) => event.preventDefault());
 elements.gitWorkflowSteps.addEventListener("click", (event) => {
   const target = event.target instanceof Element ? event.target : null;
   const button = target?.closest("[data-git-workflow-process]");

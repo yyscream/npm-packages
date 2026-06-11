@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { chmod, mkdtemp, rm, stat } from "node:fs/promises";
 import { networkInterfaces, tmpdir } from "node:os";
 import path from "node:path";
@@ -42,6 +42,13 @@ await chmod(fakePi, 0o755);
 
 const child = spawn(process.execPath, [serverScript, "--cwd", cwd, "--host", "0.0.0.0", "--port", String(port), "--pi", fakePi], {
   stdio: ["ignore", "pipe", "pipe"],
+  env: {
+    ...process.env,
+    GIT_AUTHOR_NAME: "Pi WebUI Test",
+    GIT_AUTHOR_EMAIL: "pi-webui-test@example.invalid",
+    GIT_COMMITTER_NAME: "Pi WebUI Test",
+    GIT_COMMITTER_EMAIL: "pi-webui-test@example.invalid",
+  },
 });
 let serverOutput = "";
 child.stdout.on("data", (chunk) => {
@@ -110,6 +117,46 @@ try {
   const state = await request("127.0.0.1", `/api/state?tab=${encodeURIComponent(tabId)}`);
   assert.equal(state.status, 200);
   assert.equal(state.body?.data?.model?.provider, "fake", "state should come from the fake pi RPC");
+
+  const gitAvailable = spawnSync("git", ["--version"], { encoding: "utf8" }).status === 0;
+  if (gitAvailable) {
+    const gitInit = await request("127.0.0.1", "/api/git-workflow/init", { method: "POST", body: { tab: tabId } });
+    assert.equal(gitInit.status, 200);
+    assert.equal(gitInit.body?.ok, true, "git init endpoint should initialize a temp repository");
+
+    const initFileStatus = await request("127.0.0.1", `/api/git-workflow/init-files-status?tab=${encodeURIComponent(tabId)}`);
+    assert.equal(initFileStatus.status, 200);
+    assert.equal(initFileStatus.body?.ok, true, "init files status endpoint should check README.md and .gitignore");
+    assert.equal(initFileStatus.body?.data?.readmeExists, false);
+    assert.equal(initFileStatus.body?.data?.gitignoreExists, false);
+
+    const gitReadme = await request("127.0.0.1", "/api/git-workflow/readme", { method: "POST", body: { repoName: "pi-webui-http-harness", stack: "Node.js / TypeScript", tab: tabId } });
+    assert.equal(gitReadme.status, 200);
+    assert.equal(gitReadme.body?.ok, true, "README endpoint should create/stage README.md and .gitignore");
+    assert.equal(gitReadme.body?.data?.readme?.created, true);
+    assert.equal(gitReadme.body?.data?.gitignore?.created, true);
+
+    const gitReadmeAgain = await request("127.0.0.1", "/api/git-workflow/readme", { method: "POST", body: { repoName: "pi-webui-http-harness", stack: "Node.js / TypeScript", tab: tabId } });
+    assert.equal(gitReadmeAgain.status, 200);
+    assert.equal(gitReadmeAgain.body?.ok, true, "README endpoint should re-check existing files without overwriting");
+    assert.equal(gitReadmeAgain.body?.data?.readme?.created, false);
+    assert.equal(gitReadmeAgain.body?.data?.gitignore?.created, false);
+
+    const gitCommit = await request("127.0.0.1", "/api/git-workflow/initial-commit", { method: "POST", body: { tab: tabId } });
+    assert.equal(gitCommit.status, 200);
+    assert.equal(gitCommit.body?.ok, true, "initial commit endpoint should commit the staged README.md");
+
+    const gitMain = await request("127.0.0.1", "/api/git-workflow/main-branch", { method: "POST", body: { tab: tabId } });
+    assert.equal(gitMain.status, 200);
+    assert.equal(gitMain.body?.ok, true, "main branch endpoint should rename the branch");
+
+    const gitRemote = await request("127.0.0.1", "/api/git-workflow/remote", { method: "POST", body: { username: "Firstp1ck", repoName: "pi-webui-http-harness", tab: tabId } });
+    assert.equal(gitRemote.status, 200);
+    assert.equal(gitRemote.body?.ok, true, "remote endpoint should add origin without pushing");
+    assert.equal(gitRemote.body?.data?.remoteUrl, "https://github.com/Firstp1ck/pi-webui-http-harness.git");
+  } else {
+    console.log("http-endpoints-harness: git not available; skipping git init workflow endpoint checks");
+  }
 
   // Delta transcript endpoint (P1-1): ?since= returns only the tail plus merge metadata.
   const fullMessages = await request("127.0.0.1", `/api/messages?tab=${encodeURIComponent(tabId)}`);

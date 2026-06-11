@@ -12,7 +12,7 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <link rel="stylesheet" href="/styles.css?v=44" />
+    <link rel="stylesheet" href="/styles.css?v=50" />
   </head>
   <body>
     <button id="sidePanelExpandButton" class="side-panel-expand-button" type="button" aria-controls="sidePanel" aria-expanded="false" aria-label="Expand side panel" title="Expand side panel">
@@ -93,7 +93,7 @@
         <section id="gitWorkflowPanel" class="git-workflow-panel" aria-live="polite" hidden>
           <div class="git-workflow-header">
             <div>
-              <span class="git-workflow-kicker">Git workflow</span>
+              <span id="gitWorkflowKicker" class="git-workflow-kicker">Git workflow</span>
               <strong id="gitWorkflowTitle">Ready</strong>
               <p id="gitWorkflowHint" class="muted">Stage changes, generate a commit message, commit, and push.</p>
             </div>
@@ -211,6 +211,9 @@
                 <div id="optionsMenu" class="composer-publish-menu-panel composer-options-menu-panel" role="menu" aria-label="Common Pi options">
                   <button id="optionsTreeButton" class="composer-publish-menu-item composer-options-menu-item" type="button" role="menuitem" data-command="/tree">
                     <span>Tree</span>
+                  </button>
+                  <button id="optionsStatsButton" class="composer-publish-menu-item composer-options-menu-item" type="button" role="menuitem" data-command="/stats-webui" hidden>
+                    <span>Stats Dashboard</span>
                   </button>
                   <button id="optionsForkButton" class="composer-publish-menu-item composer-options-menu-item" type="button" role="menuitem" data-command="/fork">
                     <span>Fork</span>
@@ -520,6 +523,34 @@
       </form>
     </dialog>
 
+    <dialog id="statsOverlayDialog" class="extension-dialog stats-overlay-dialog">
+      <form method="dialog">
+        <div class="stats-overlay-header">
+          <div>
+            <span class="stats-overlay-kicker">Pi stats</span>
+            <h2>Usage dashboard</h2>
+            <p id="statsOverlaySubtitle" class="muted">Run stats to load the browser dashboard.</p>
+          </div>
+          <div class="stats-overlay-controls">
+            <label for="statsOverlayScope">Range</label>
+            <select id="statsOverlayScope" title="Stats range" aria-label="Stats range">
+              <option value="14">14 days</option>
+              <option value="30">30 days</option>
+              <option value="90">90 days</option>
+              <option value="custom">Custom…</option>
+              <option value="all">All</option>
+            </select>
+            <input id="statsOverlayCustomDays" class="stats-overlay-custom-days" type="number" min="1" max="3650" step="1" value="14" aria-label="Custom stats range in days" hidden />
+            <button id="statsOverlayRefreshButton" type="button">Refresh</button>
+            <button id="statsOverlayCloseButton" class="stats-overlay-close-button" type="button" aria-label="Close stats dashboard">Close</button>
+          </div>
+        </div>
+        <p id="statsOverlayStatus" class="stats-overlay-status muted" role="status" aria-live="polite" hidden></p>
+        <div id="statsOverlayTabs" class="stats-overlay-tabs" role="tablist" aria-label="Stats dashboard views"></div>
+        <div id="statsOverlayBody" class="stats-overlay-body"></div>
+      </form>
+    </dialog>
+
     <dialog id="pathPickerDialog" class="extension-dialog path-picker-dialog">
       <form method="dialog">
         <h2 id="pathPickerTitle">Choose working directory</h2>
@@ -623,6 +654,6 @@
       </form>
     </dialog>
 
-    <script type="module" src="/app.js?v=44"></script>
+    <script type="module" src="/app.js?v=50"></script>
   </body>
 </html>
