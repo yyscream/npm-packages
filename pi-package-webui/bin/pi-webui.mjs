@@ -3572,8 +3572,19 @@ function buildPiArgsForTab(tabIndex, title) {
   return args;
 }
 
+function isNodeScriptCommand(command) {
+  return [".cjs", ".js", ".mjs"].includes(path.extname(String(command || "")).toLowerCase());
+}
+
 async function resolvePiCommand(piArgs) {
   if (options.piBinExplicit) {
+    if (isNodeScriptCommand(options.piBin)) {
+      return {
+        command: process.execPath,
+        args: [options.piBin, ...piArgs],
+        displayCommand: `${process.execPath} ${options.piBin} ${piArgs.join(" ")}`,
+      };
+    }
     return { command: options.piBin, args: piArgs, displayCommand: `${options.piBin} ${piArgs.join(" ")}` };
   }
 
