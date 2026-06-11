@@ -130,7 +130,7 @@ Environment variables:
 - Per-tab cwd changes, a clickable footer cwd picker, saved path fast picks, server-persisted fast picks, and restart-safe restoration of open tabs.
 - Detected app runner dropdown for the active tab cwd, including Cargo, Bun, npm/npx/pnpm, Python/uv, Go/Golang, Zig, C/C++, Docker Compose, root/dev/scripts shell scripts, and other common project runners with live output pinned at the top of the terminal. Projects can add browseable custom runners in `.pi-webui-runners.json` with a command (default `./`) plus a relative path to the file to run.
 - Browser support for Pi extension UI prompts, widgets, status updates, browser notifications when a tab needs an extension UI response and an optional side-panel toggle for agent-done notifications.
-- Localhost-only Pi update checks with a top-right update notification and a confirmed **Update & restart** action that runs `pi update`, then restarts the Web UI server.
+- Localhost-only Pi/Web UI update checks with a top-right update notification and a confirmed **Update & restart** action that runs `pi update` plus all detected local/global Web UI and Pi package-manager updates, then restarts the Web UI server.
 - Feedback reactions (`👍`, `👎`, `?`) on final assistant output plus tool/bash action cards, which can ask Pi to create or update a LEARNING.
 - Mobile-friendly layout and PWA install support where the browser allows it.
 
@@ -139,7 +139,7 @@ Useful browser endpoints exposed by the local server include:
 - `GET /api/path-suggestions?tab=<tabId>&query=<path>` for `@` file/path references with live suggestions.
 - `POST /api/action-feedback?tab=<tabId>` for feedback on final assistant output and action cards.
 - `POST /api/optional-feature-install` for installing known optional companion packages from the side panel.
-- `GET /api/update-status` and localhost-only `POST /api/update` for checking Pi/Web UI updates and running `pi update` followed by a Web UI server restart.
+- `GET /api/update-status` and localhost-only `POST /api/update` for checking Pi/Web UI updates and running `pi update` plus all detected local/global Web UI and Pi package-manager updates followed by a Web UI server restart.
 
 For local development, run the checkout helper directly, for example:
 
@@ -147,9 +147,11 @@ For local development, run the checkout helper directly, for example:
 ./start-webui.sh --dev --cwd /path/to/project
 ```
 
+Run `../dev/scripts/sync-pi-package-symlinks.sh` first when developing companion packages from this workspace. The Web UI manifest loads companions through `node_modules/` paths, and the sync script links those paths to the top-level dev packages so only one copy is loaded.
+
 ## Optional companion packages
 
-A normal Pi/npm install includes the optional companion packages unless optional dependencies are disabled. Startup checks loaded Pi capabilities directly through RPC-visible commands and live widget events, then the side panel shows each optional feature as enabled, disabled, or install-needed. Installing a missing feature is an explicit, warned action; it is localhost-only, limited to known packages, and requires reloading the active Pi tab after installation.
+A normal Pi/npm install includes the optional companion packages unless optional dependencies are disabled. Each Web UI tab curates Pi resources from the Web UI package that started the server, while preserving unrelated user/project resources; separately installed Web UI companion packages are ignored to avoid loading two copies. Startup checks loaded Pi capabilities directly through RPC-visible commands and live widget events, then the side panel shows each optional feature as enabled, disabled, or install-needed. Installing a missing feature is an explicit, warned action; it is localhost-only, limited to known packages, and requires reloading the active Pi tab after installation.
 
 When the standalone global `pi-webui` launcher is used, optional companion installs should target the Pi agent npm root instead of the global npm prefix. Override the target explicitly with `PI_WEBUI_OPTIONAL_FEATURE_INSTALL_ROOT=/path/to/package-root` when needed.
 
@@ -173,12 +175,12 @@ The Git workflow button runs local git commands in the active Pi working directo
 1. `git add .`
 2. Send `/git-staged-msg` to Pi
 3. Read the generated commit message files from `dev/COMMIT/`
-4. Commit with the selected message
+4. Commit with the selected generated message, or type a manual message in the Message stage and use **Commit input**
 5. Run `git push`
 
-After the message is generated, **Create PR** asks Pi to generate `dev/COMMIT/staged-branch-name.txt`, lets you confirm or edit the `type/feature-name` branch, then switches with `git switch -c` before committing. In PR mode, choose **Commit short** or **Commit long**, then **Push and Create PR** pushes the branch, sends `/pr`, shows the generated `dev/PR/<branch>.md` description for editing/confirmation, and creates the pull request with `gh pr create`. Use **Manual branch** to skip agent branch-name generation and type the branch directly.
+After the message is generated, **Create PR** asks Pi to generate `dev/COMMIT/staged-branch-name.txt`, lets you confirm or edit the `type/feature-name` branch, then switches with `git switch -c` before committing. In PR mode, choose **Commit short**, **Commit long**, or type a message and use **Commit input**, then **Push and Create PR** pushes the branch, sends `/pr`, shows the generated `dev/PR/<branch>.md` description for editing/confirmation, and creates the pull request with `gh pr create`. Use **Manual branch** to skip agent branch-name generation and type the branch directly.
 
-Use the workflow process buttons to jump directly to **Stage**, **Message**, **Commit**, or **Push** when earlier work was already completed manually. Selecting **Commit** loads the current generated files from `dev/COMMIT/` before enabling the commit choices. A yellow dot means that process was selected or is available but its action has not completed in this workflow; green means the process action completed.
+Use the workflow process buttons to jump directly to **Stage**, **Message**, **Commit**, or **Push** when earlier work was already completed manually. Selecting **Message** lets you either run `/git-staged-msg` or type a commit message and use **Commit input** directly. Selecting **Commit** loads the current generated files from `dev/COMMIT/` before enabling the commit choices. A yellow dot means that process was selected or is available but its action has not completed in this workflow; green means the process action completed.
 
 This requires `/git-staged-msg` and `/pr` from `@firstpick/pi-prompts-git-pr`; branch-name generation uses `/git-branch-name` when available and otherwise sends an equivalent inline prompt. Creating the PR also requires an authenticated GitHub CLI (`gh`). Review the generated commit message, branch name, and PR description before committing, pushing, or creating a PR.
 
@@ -194,7 +196,7 @@ This requires `/git-staged-msg` and `/pr` from `@firstpick/pi-prompts-git-pr`; b
 - The side-panel **Open to network** button rebinds the server to `0.0.0.0`, shows LAN URLs when available, and toggles to "Close for network".
 - `--host 0.0.0.0` also exposes the Web UI to the local network.
 - Any connected browser client can control Pi and run Web UI bash actions as the Web UI process user.
-- The Web UI update endpoint is restricted to localhost, because it runs `pi update` and restarts the server.
+- The Web UI update endpoint is restricted to localhost, because it runs package update commands and restarts the server.
 - Treat Pi Web UI as a local companion, not a hardened multi-user web service.
 
 ## Troubleshooting

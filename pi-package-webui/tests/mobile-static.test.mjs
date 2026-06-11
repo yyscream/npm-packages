@@ -24,16 +24,16 @@ const [pkgRaw, html, css, app, server, extension, readme, startScript, manifestR
 const pkg = JSON.parse(pkgRaw);
 const manifest = JSON.parse(manifestRaw);
 const companionDependencies = {
-  "@firstpick/pi-extension-git-footer-status": "^0.2.1",
-  "@firstpick/pi-extension-release-aur": "^0.1.3",
-  "@firstpick/pi-extension-release-npm": "^0.3.3",
+  "@firstpick/pi-extension-git-footer-status": "^0.3.3",
+  "@firstpick/pi-extension-release-aur": "^0.1.6",
+  "@firstpick/pi-extension-release-npm": "^0.4.0",
   "@firstpick/pi-extension-safety-guard": "^0.2.3",
-  "@firstpick/pi-extension-setup-skills": "^0.1.5",
-  "@firstpick/pi-extension-stats": "^0.2.0",
-  "@firstpick/pi-extension-todo-progress": "^0.1.7",
-  "@firstpick/pi-extension-tools": "^0.1.4",
-  "@firstpick/pi-prompts-git-pr": "^0.1.0",
-  "@firstpick/pi-themes-bundle": "^0.1.1",
+  "@firstpick/pi-extension-setup-skills": "^0.1.8",
+  "@firstpick/pi-extension-stats": "^0.2.6",
+  "@firstpick/pi-extension-todo-progress": "^0.2.4",
+  "@firstpick/pi-extension-tools": "^0.1.6",
+  "@firstpick/pi-prompts-git-pr": "^0.1.2",
+  "@firstpick/pi-themes-bundle": "^0.1.4",
 };
 
 assert.match(html, /viewport-fit=cover/, "viewport should opt into safe-area-aware full-screen layout");
@@ -421,6 +421,10 @@ assert.match(app, /api\("\/api\/shutdown", \{ method: "POST", scoped: false \}\)
 assert.match(server, /url\.pathname === "\/api\/restart" && req\.method === "POST"/, "server should expose restart endpoint");
 assert.match(server, /PI_WEBUI_RESTORE_TABS: JSON\.stringify\(restorableTabs \|\| \[\]\)/, "server restart should preserve restorable tab metadata");
 assert.match(server, /if \(webuiDevServer\) env\.PI_WEBUI_DEV = "1";/, "server restart should explicitly preserve dev mode");
+assert.match(server, /async function resolveUpdateTasks\(\)[\s\S]*currentWebuiPackageUpdateTask\(\)[\s\S]*agentPackageRootUpdateTask\(\)[\s\S]*npmGlobalPackageRootUpdateTask\(\)[\s\S]*bunGlobalPackageRootUpdateTask\(\)/, "server update should include current, Pi-agent, npm-global, and Bun-global Web UI/Pi package roots");
+assert.match(server, /function packageInstallSpecs\(packageNames\)[\s\S]*`\$\{packageName\}@latest`/, "server package update tasks should force latest Web UI/Pi package specs instead of staying inside stale semver ranges");
+assert.match(app, /Run Pi\/Web UI package updates now\?/, "frontend update confirmation should describe the broader package update set");
+assert.match(readme, /detected local\/global Web UI and Pi package-manager updates/, "README should document that update refreshes local and global Web UI\/Pi package roots");
 assert.match(server, /async function closeNetworkAccess\(\)/, "server should expose a local-only rebind helper for closing network access");
 assert.match(server, /url\.pathname === "\/api\/network\/close" && req\.method === "POST"/, "server should route network close requests");
 assert.match(server, /server\.closeAllConnections\?\.\(\)/, "network rebind should force-close long-lived clients so close-to-localhost can complete");
@@ -589,6 +593,13 @@ assert.match(app, /addGitWorkflowAction\("Create PR", \(\) => createGitPrBranch\
 assert.match(app, /const GIT_WORKFLOW_CREATE_PR_TOOLTIP = \[[\s\S]*"Create PR branch:"[\s\S]*"1\. Ask Pi to generate a type\/feature-name branch from staged changes\."[\s\S]*"6\. Push and Create PR will push upstream, run \/pr, let you review, then run gh pr create\."/, "Create PR should have an up-to-date step-by-step tooltip");
 assert.match(app, /const GIT_WORKFLOW_MANUAL_BRANCH_TOOLTIP = \[[\s\S]*"Manual PR branch:"[\s\S]*"1\. Skip agent branch-name generation\."[\s\S]*"6\. Push and Create PR will push upstream, run \/pr, let you review, then run gh pr create\."/, "Manual branch should have an up-to-date step-by-step tooltip");
 assert.match(app, /addGitWorkflowAction\("Manual branch", \(\) => createGitPrBranchManually\(\), "", false, GIT_WORKFLOW_MANUAL_BRANCH_TOOLTIP\)/, "Manual branch should render with its tooltip");
+assert.match(app, /function renderGitWorkflowManualCommitInput\(\)[\s\S]*git-workflow-message-input[\s\S]*Commit input[\s\S]*commitGitWorkflow\("input", tabId\)/, "Message stage should render a manual commit message input with a Commit input action");
+assert.match(app, /gitWorkflow\.step === "generate"\) \{\n\s+renderGitWorkflowManualCommitInput\(\);\n\s+addGitWorkflowAction\("Run \/git-staged-msg"/, "Message process stage should show manual input before generated-message actions");
+assert.match(app, /renderGitWorkflowManualCommitInput\(\);[\s\S]*addGitWorkflowAction\("Commit short"/, "Commit choice stage should keep manual commit input before generated commit choices");
+assert.match(app, /async function commitGitWorkflow\(variant[\s\S]*variant === "input"[\s\S]*message: inputMessage/, "Commit input should send the typed message to the git workflow commit API");
+assert.match(app, /const donePatch = variant === "input"[\s\S]*message: true, commit: true/, "Commit input should mark both message and commit workflow processes done");
+assert.match(server, /\["short", "long", "input"\][\s\S]*cleanGitCommitMessageInput\(body\.message\)[\s\S]*git commit -m <input message>/, "server should accept typed git workflow commit messages");
+assert.match(css, /\.git-workflow-message-input-row \{[\s\S]*flex:\s*1 1 100%/, "manual git workflow commit input should span the Message stage actions row");
 assert.match(css, /\.git-workflow-actions button\[data-tooltip\]::after \{[\s\S]*content:\s*attr\(data-tooltip\)[\s\S]*white-space:\s*pre-line/, "guided git workflow action tooltips should render multiline step lists");
 assert.match(app, /function gitBranchNamePromptMessage\(\)[\s\S]*hasAvailableCommand\("git-branch-name"\)[\s\S]*return "\/git-branch-name"/, "guided git workflow should ask the agent to generate PR branch names when the prompt is available");
 assert.match(app, /async function loadGitWorkflowBranchName\([\s\S]*gitWorkflowRequest\("\/api\/git-workflow\/branch-name"/, "guided git workflow should load generated agent branch names before branch creation");
@@ -940,6 +951,12 @@ assert.ok(matrixBackground.length > 100000, "Matrix background image should be p
 assert.ok(mochaBackground.length > 8000, "Catppuccin Mocha background image should be present as a compact PNG asset");
 
 assert.match(server, /AuthStorage, SessionManager/, "server should import AuthStorage for safe OAuth token refresh");
+assert.match(server, /DefaultPackageManager/, "server should use Pi's package resolver when controlling Web UI tab extension loading");
+assert.match(server, /WEBUI_CONTROLLED_PACKAGES = new Set\(\[WEBUI_PACKAGE, \.\.\.OPTIONAL_FEATURE_PACKAGES\.values\(\)\]\)/, "server should identify Web UI-controlled packages for de-duplicated feature loading");
+assert.match(server, /const args = \["--mode", "rpc", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes"\]/, "Web UI tabs should disable implicit resource loading before adding curated resource paths");
+assert.match(server, /normalPiResourcePathsForTab[\s\S]*WEBUI_CONTROLLED_PACKAGES\.has\(packageName\)[\s\S]*continue/, "Web UI tab resource resolution should exclude separately installed Web UI feature packages");
+assert.match(server, /startedWebuiResourcePaths\(resourceType\)/, "Web UI tabs should load feature resources from the started Web UI package");
+assert.match(server, /workspacePackageRootForName\(nodeModulesRef\.packageName\)/, "dev Web UI should prefer top-level workspace packages for node_modules manifest entries");
 assert.match(server, /const CODEX_TOKEN_REFRESH_SKEW_MS = 5 \* 60 \* 1000/, "server should refresh Codex OAuth tokens before they expire");
 assert.match(server, /url\.pathname === "\/api\/codex-usage" && req\.method === "GET"/, "server should expose a sanitized Codex usage endpoint");
 assert.match(server, /OPENAI_CODEX_USAGE_ENDPOINT/, "server should query Codex usage from the backend, not the browser");
@@ -1091,10 +1108,13 @@ assert.match(readme, /browser notifications when a tab needs an extension UI res
 assert.match(readme, /blocked-tab browser notifications, and optional agent-done notifications require browser service-worker\/notification support/, "README should document notification requirements");
 assert.match(readme, /Side-panel theme picker backed by optional `@firstpick\/pi-themes-bundle` themes when loaded/, "README should describe optional theme selection");
 assert.match(readme, /## Optional companion packages/, "README should document optional Web UI companion packages");
+assert.match(readme, /curates Pi resources from the Web UI package that started the server/, "README should document started-package-based Web UI feature loading");
+assert.match(readme, /separately installed Web UI companion packages are ignored to avoid loading two copies/, "README should document duplicate companion suppression");
 assert.match(readme, /checks loaded Pi capabilities directly through RPC-visible commands and live widget events/, "README should document capability-based startup checks");
 assert.match(readme, /side panel shows each optional feature as enabled, disabled, or install-needed/, "README should document optional feature side-panel controls");
 assert.match(readme, /Installing a missing feature is an explicit, warned action/, "README should document optional feature install warning behavior");
 assert.match(readme, /\.\/start-webui\.sh --dev --cwd \/path\/to\/project/, "README should document the dev helper launcher");
+assert.match(readme, /sync-pi-package-symlinks\.sh[\s\S]*only one copy is loaded/, "README should document dev companion symlink setup");
 assert.match(startScript, /--dev\)/, "start-webui.sh should accept a --dev flag");
 assert.match(startScript, /local_pi_webui_bin\(\)/, "start-webui.sh should resolve this checkout's local server entrypoint");
 assert.match(startScript, /webui_cmd=\(node "\$local_webui_bin"\)/, "start-webui.sh --dev should run the local bin with node");
@@ -1109,15 +1129,8 @@ for (const [name, range] of Object.entries(companionDependencies)) {
   assert.equal(pkg.dependencies?.[name], undefined, `webui package should not require optional companion ${name}`);
 }
 assert.equal(pkg.bundledDependencies, undefined, "webui optional companion packages should not be bundled into the tarball");
+assert.ok(pkg.pi?.extensions?.includes("./index.ts"), "webui Pi manifest should load its own extension");
 for (const extensionPath of [
-  "../pi-extension-git-footer-status/index.ts",
-  "../pi-extension-release-aur/index.ts",
-  "../pi-extension-release-npm/index.ts",
-  "../pi-extension-safety-guard/index.ts",
-  "../pi-extension-setup-skills/index.ts",
-  "../pi-extension-stats/index.ts",
-  "../pi-extension-todo-progress/index.ts",
-  "../pi-extension-tools/index.ts",
   "node_modules/@firstpick/pi-extension-git-footer-status/index.ts",
   "node_modules/@firstpick/pi-extension-release-aur/index.ts",
   "node_modules/@firstpick/pi-extension-release-npm/index.ts",
@@ -1129,12 +1142,24 @@ for (const extensionPath of [
 ]) {
   assert.ok(pkg.pi?.extensions?.includes(extensionPath), `webui Pi manifest should load ${extensionPath} when present`);
 }
-assert.ok(pkg.pi?.skills?.includes("../pi-extension-release-aur/skills"), "webui Pi manifest should load release-aur sibling skills when present");
+for (const siblingExtensionPath of [
+  "../pi-extension-git-footer-status/index.ts",
+  "../pi-extension-release-aur/index.ts",
+  "../pi-extension-release-npm/index.ts",
+  "../pi-extension-safety-guard/index.ts",
+  "../pi-extension-setup-skills/index.ts",
+  "../pi-extension-stats/index.ts",
+  "../pi-extension-todo-progress/index.ts",
+  "../pi-extension-tools/index.ts",
+]) {
+  assert.ok(!pkg.pi?.extensions?.includes(siblingExtensionPath), `webui Pi manifest should avoid duplicate sibling load path ${siblingExtensionPath}`);
+}
 assert.ok(pkg.pi?.skills?.includes("node_modules/@firstpick/pi-extension-release-aur/skills"), "webui Pi manifest should load release-aur nested skills when present");
-assert.ok(pkg.pi?.prompts?.includes("../pi-package-prompts-git-pr/prompts"), "webui Pi manifest should load guided-git sibling prompts when present");
+assert.ok(!pkg.pi?.skills?.includes("../pi-extension-release-aur/skills"), "webui Pi manifest should avoid duplicate release-aur sibling skills");
 assert.ok(pkg.pi?.prompts?.includes("node_modules/@firstpick/pi-prompts-git-pr/prompts"), "webui Pi manifest should load guided-git nested prompts when present");
-assert.ok(pkg.pi?.themes?.includes("../pi-package-themes-bundle/themes"), "webui Pi manifest should load sibling bundled themes when present");
+assert.ok(!pkg.pi?.prompts?.includes("../pi-package-prompts-git-pr/prompts"), "webui Pi manifest should avoid duplicate guided-git sibling prompts");
 assert.ok(pkg.pi?.themes?.includes("node_modules/@firstpick/pi-themes-bundle/themes"), "webui Pi manifest should load nested bundled themes when present");
+assert.ok(!pkg.pi?.themes?.includes("../pi-package-themes-bundle/themes"), "webui Pi manifest should avoid duplicate sibling bundled themes");
 assert.ok(pkg.scripts?.check?.includes("node --check public/app.js"), "check script should syntax-check app.js");
 assert.ok(pkg.scripts?.check?.includes("node tests/run-all.mjs"), "check script should run the shared test runner");
 

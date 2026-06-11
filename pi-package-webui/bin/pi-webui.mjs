@@ -4,12 +4,12 @@ import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
-import { access, copyFile, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, readFile, readdir, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { homedir, networkInterfaces, tmpdir } from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { AuthStorage, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { AuthStorage, SessionManager, SettingsManager, DefaultPackageManager } from "@earendil-works/pi-coding-agent";
 import { authProvidersPayload, createAuthContext, logoutStoredProvider } from "../lib/auth-actions.mjs";
 import {
   collectOpenSessionFiles,
@@ -66,6 +66,9 @@ const UPDATE_STATUS_CACHE_MS = 10 * 60 * 1000;
 const UPDATE_STATUS_TIMEOUT_MS = 10 * 1000;
 const PI_UPDATE_TIMEOUT_MS = 15 * 60 * 1000;
 const PI_UPDATE_OUTPUT_MAX_CHARS = 120_000;
+const UPDATE_PACKAGE_NAMES = [PI_CODING_AGENT_PACKAGE, WEBUI_PACKAGE];
+const PACKAGE_UPDATE_TIMEOUT_MS = 15 * 60 * 1000;
+const PACKAGE_UPDATE_OUTPUT_MAX_CHARS = 120_000;
 const CODEX_USAGE_TIMEOUT_MS = 15 * 1000;
 const CODEX_TOKEN_REFRESH_SKEW_MS = 5 * 60 * 1000;
 const OPENAI_CODEX_PROVIDER_ID = "openai-codex";
@@ -226,6 +229,8 @@ const OPTIONAL_FEATURE_PACKAGES = new Map([
   ["statsCommand", "@firstpick/pi-extension-stats"],
   ["themeBundle", "@firstpick/pi-themes-bundle"],
 ]);
+const WEBUI_CONTROLLED_PACKAGES = new Set([WEBUI_PACKAGE, ...OPTIONAL_FEATURE_PACKAGES.values()]);
+const PACKAGE_NAME_CACHE = new Map();
 
 function usage() {
   console.log(`pi-webui ${packageJson.version}
@@ -2940,6 +2945,14 @@ function cleanGitBranchName(value) {
   return branch;
 }
 
+function cleanGitCommitMessageInput(value) {
+  const message = String(value || "").replace(/\r\n?/g, "\n").trim();
+  if (!message) throw new Error("commit message is required");
+  if (message.includes("\0")) throw new Error("commit message contains a NUL byte");
+  if (message.length > 10000) throw new Error("commit message is too long");
+  return message;
+}
+
 async function validateGitBranchName(root, branch) {
   const result = await runGitWorkflowCommand(["check-ref-format", "--branch", branch], { cwd: root, timeoutMs: 5000 });
   if (result.exitCode !== 0 || result.timedOut || result.cancelled || result.error) {
@@ -3149,7 +3162,12 @@ async function handleGitWorkflowRequest(pathname, body = {}, cwd = options.cwd) 
       }
       case "/api/git-workflow/commit": {
         const variant = String(body.variant || "").trim();
-        if (!["short", "long"].includes(variant)) throw new Error("variant must be 'short' or 'long'");
+        if (!["short", "long", "input"].includes(variant)) throw new Error("variant must be 'short', 'long', or 'input'");
+        if (variant === "input") {
+          const root = await getGitRoot(cwd);
+          const message = cleanGitCommitMessageInput(body.message);
+          return gitWorkflowCommandPayload(await runGitWorkflowCommand(["commit", "-m", message], { cwd: root, label: "git commit -m <input message>" }));
+        }
         const messages = await readGitWorkflowMessages(cwd);
         if (variant === "short") {
           const message = messages.short.trim();
@@ -3556,9 +3574,160 @@ function readRestoreTabsFromEnv() {
   }
 }
 
-function buildPiArgsForTab(tabIndex, title) {
-  const args = ["--mode", "rpc"];
+async function packageNameForResourcePath(resourcePath) {
+  let current = path.dirname(resourcePath);
+  while (current && current !== path.dirname(current)) {
+    if (PACKAGE_NAME_CACHE.has(current)) return PACKAGE_NAME_CACHE.get(current) || undefined;
+    try {
+      const pkg = JSON.parse(await readFile(path.join(current, "package.json"), "utf8"));
+      const name = typeof pkg.name === "string" ? pkg.name : "";
+      PACKAGE_NAME_CACHE.set(current, name);
+      return name || undefined;
+    } catch {
+      current = path.dirname(current);
+    }
+  }
+  return undefined;
+}
+
+async function packageRootRealpath() {
+  try {
+    return await realpath(packageRoot);
+  } catch {
+    return packageRoot;
+  }
+}
+
+async function devWorkspaceRoot() {
+  if (!webuiDevServer) return null;
+  const envRoot = process.env.PI_NPM_PACKAGES_ROOT ? path.resolve(expandUserPath(process.env.PI_NPM_PACKAGES_ROOT)) : "";
+  const candidates = [envRoot, path.dirname(packageRoot), path.dirname(await packageRootRealpath())].filter(Boolean);
+  for (const candidate of candidates) {
+    try {
+      const entries = await readdir(candidate, { withFileTypes: true });
+      if (entries.some((entry) => entry.isDirectory() && entry.name === "pi-package-webui")) return candidate;
+    } catch {
+      // Try the next candidate.
+    }
+  }
+  return null;
+}
+
+async function workspacePackageRootForName(packageName) {
+  const root = await devWorkspaceRoot();
+  if (!root) return null;
+  let entries;
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith("pi-")) continue;
+    const candidate = path.join(root, entry.name);
+    if ((await packageNameForResourcePath(path.join(candidate, "index.ts"))) === packageName) return candidate;
+  }
+  return null;
+}
+
+function parseNodeModulesPackageRef(manifestEntry) {
+  const normalized = String(manifestEntry || "").replace(/\\/g, "/").replace(/^\.\//, "");
+  if (!normalized.startsWith("node_modules/")) return null;
+  const parts = normalized.slice("node_modules/".length).split("/").filter(Boolean);
+  if (!parts.length) return null;
+  const scoped = parts[0].startsWith("@");
+  const packageName = scoped ? `${parts[0]}/${parts[1] || ""}` : parts[0];
+  if (!packageName || packageName.endsWith("/")) return null;
+  const subpath = parts.slice(scoped ? 2 : 1).join("/");
+  return { packageName, subpath };
+}
+
+async function resolveStartedWebuiManifestResource(manifestEntry) {
+  const nodeModulesRef = parseNodeModulesPackageRef(manifestEntry);
+  if (nodeModulesRef && WEBUI_CONTROLLED_PACKAGES.has(nodeModulesRef.packageName)) {
+    const workspaceRoot = await workspacePackageRootForName(nodeModulesRef.packageName);
+    if (workspaceRoot) {
+      const devCandidate = path.join(workspaceRoot, nodeModulesRef.subpath);
+      try {
+        await access(devCandidate);
+        return devCandidate;
+      } catch {
+        // Fall back to the started package's node_modules copy below.
+      }
+    }
+  }
+
+  const candidate = path.resolve(packageRoot, manifestEntry);
+  try {
+    await access(candidate);
+    return candidate;
+  } catch {
+    return null;
+  }
+}
+
+async function startedWebuiResourcePaths(resourceType) {
+  const entries = Array.isArray(packageJson.pi?.[resourceType]) ? packageJson.pi[resourceType] : [];
+  const resolved = [];
+  for (const entry of entries) {
+    if (typeof entry !== "string") continue;
+    const resourcePath = await resolveStartedWebuiManifestResource(entry);
+    if (resourcePath) resolved.push(resourcePath);
+  }
+  return resolved;
+}
+
+function piArgsDisableResourceDiscovery(resourceType) {
+  const flags = {
+    extensions: new Set(["--no-extensions", "-ne"]),
+    skills: new Set(["--no-skills", "-ns"]),
+    prompts: new Set(["--no-prompt-templates", "-np"]),
+    themes: new Set(["--no-themes"]),
+  }[resourceType];
+  return !!flags && options.piArgs.some((arg) => flags.has(arg));
+}
+
+async function resolvedNormalPiResourcesForTab(cwd) {
+  try {
+    const settingsManager = SettingsManager.create(cwd, agentDir);
+    const packageManager = new DefaultPackageManager({ cwd, agentDir, settingsManager });
+    return await packageManager.resolve(async () => "skip");
+  } catch (error) {
+    console.warn(`failed to resolve configured Pi resources for Web UI tab: ${sanitizeError(error)}`);
+    return { extensions: [], skills: [], prompts: [], themes: [] };
+  }
+}
+
+async function normalPiResourcePathsForTab(resolved, resourceType) {
+  if (piArgsDisableResourceDiscovery(resourceType)) return [];
+  const resourcePaths = [];
+  for (const resource of resolved[resourceType] || []) {
+    if (!resource.enabled) continue;
+    const packageName = await packageNameForResourcePath(resource.path);
+    if (packageName && WEBUI_CONTROLLED_PACKAGES.has(packageName)) continue;
+    resourcePaths.push(resource.path);
+  }
+  return resourcePaths;
+}
+
+function appendResourceArgs(args, flag, resourcePaths) {
+  for (const resourcePath of resourcePaths) args.push(flag, resourcePath);
+}
+
+async function appendCuratedResourceArgs(args, normalResources, resourceType, flag) {
+  appendResourceArgs(args, flag, await normalPiResourcePathsForTab(normalResources, resourceType));
+  appendResourceArgs(args, flag, await startedWebuiResourcePaths(resourceType));
+}
+
+async function buildPiArgsForTab(tabIndex, title, tabCwd = options.cwd) {
+  const args = ["--mode", "rpc", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes"];
   if (options.noSession) args.push("--no-session");
+
+  const normalResources = await resolvedNormalPiResourcesForTab(tabCwd);
+  await appendCuratedResourceArgs(args, normalResources, "extensions", "--extension");
+  await appendCuratedResourceArgs(args, normalResources, "skills", "--skill");
+  await appendCuratedResourceArgs(args, normalResources, "prompts", "--prompt-template");
+  await appendCuratedResourceArgs(args, normalResources, "themes", "--theme");
 
   // Load a browser-safe RPC helper into every Web UI tab. It exposes hidden
   // extension commands for Web UI-native /tools and /skills selectors without
@@ -4028,7 +4197,7 @@ async function createTab({ id: requestedId, index, title, titleSource, conversat
   const resolvedTitleSource = ["explicit", "auto", "default"].includes(titleSource) ? titleSource : titleIsExplicit ? "explicit" : "default";
   const tabCwd = cwd ? await resolveCwd(cwd, options.cwd) : options.cwd;
   const id = requestedId && !tabs.has(requestedId) ? requestedId : randomUUID();
-  const piArgs = buildPiArgsForTab(tabIndex, tabTitle);
+  const piArgs = await buildPiArgsForTab(tabIndex, tabTitle, tabCwd);
   if (sessionFile && !options.noSession) piArgs.push("--session", sessionFile);
   const piCommand = await resolvePiCommand(piArgs);
   const rpc = new PiRpcProcess({ ...piCommand, cwd: tabCwd });
@@ -4271,13 +4440,13 @@ async function getUpdateStatus({ force = false } = {}) {
     checkedAt: new Date(now).toISOString(),
     updateAvailable,
     restartRequired: true,
-    command: "pi update",
+    command: "pi update + Web UI/Pi package-manager updates",
     webuiDev: webuiDevServer,
     pi: piStatus,
     webui: webuiStatus,
     packages: {
       checked: false,
-      note: "pi update will also update configured unpinned Pi packages.",
+      note: "Update runs pi update plus all detected local, Pi-agent, npm-global, and Bun-global Web UI/Pi package roots."
     },
   };
   updateStatusCacheAt = now;
@@ -4286,15 +4455,235 @@ async function getUpdateStatus({ force = false } = {}) {
 
 async function resolvePiUpdateCommand() {
   if (options.piBinExplicit) {
-    return { command: options.piBin, args: ["update"], displayCommand: formatCommandForDisplay(options.piBin, ["update"]) };
+    return { label: "Pi CLI and configured packages", command: options.piBin, args: ["update"], displayCommand: formatCommandForDisplay(options.piBin, ["update"]) };
   }
 
   const pathPi = await runCommand(options.piBin, ["--version"], { timeoutMs: 3000, maxOutputLength: 4000 });
   if (pathPi.exitCode === 0 && !pathPi.timedOut && !pathPi.error) {
-    return { command: options.piBin, args: ["update"], displayCommand: formatCommandForDisplay(options.piBin, ["update"]) };
+    return { label: "Pi CLI and configured packages", command: options.piBin, args: ["update"], displayCommand: formatCommandForDisplay(options.piBin, ["update"]) };
   }
 
-  return resolvePiCommand(["update"]);
+  const fallback = await resolvePiCommand(["update"]);
+  return { ...fallback, label: "bundled Pi CLI and configured packages" };
+}
+
+function packageNodeModulesPath(nodeModulesRoot, packageName) {
+  return path.join(nodeModulesRoot, ...String(packageName || "").split("/").filter(Boolean));
+}
+
+function isWebuiOrPiPackageName(packageName) {
+  const name = String(packageName || "").trim();
+  return UPDATE_PACKAGE_NAMES.includes(name)
+    || /^@firstpick\/pi(?:-|$)/.test(name)
+    || /^@earendil-works\/pi(?:-|$)/.test(name)
+    || /^@firstpick\/.*webui/i.test(name);
+}
+
+function declaredWebuiPiPackageNames(manifest) {
+  const names = new Set();
+  for (const section of [manifest?.dependencies, manifest?.optionalDependencies, manifest?.devDependencies]) {
+    for (const packageName of Object.keys(section || {})) {
+      if (isWebuiOrPiPackageName(packageName)) names.add(packageName);
+    }
+  }
+  return [...names].sort();
+}
+
+async function packagesPresentInNodeModulesRoot(nodeModulesRoot, packageNames = UPDATE_PACKAGE_NAMES) {
+  const found = new Set();
+  if (!nodeModulesRoot || !await directoryExists(nodeModulesRoot)) return [];
+  for (const packageName of packageNames) {
+    if (await directoryExists(packageNodeModulesPath(nodeModulesRoot, packageName))) found.add(packageName);
+  }
+
+  let entries = [];
+  try {
+    entries = await readdir(nodeModulesRoot, { withFileTypes: true });
+  } catch {
+    return [...found].sort();
+  }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (entry.name.startsWith("@")) {
+      let scopedEntries = [];
+      try {
+        scopedEntries = await readdir(path.join(nodeModulesRoot, entry.name), { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const scopedEntry of scopedEntries) {
+        if (!scopedEntry.isDirectory()) continue;
+        const packageName = `${entry.name}/${scopedEntry.name}`;
+        if (isWebuiOrPiPackageName(packageName)) found.add(packageName);
+      }
+      continue;
+    }
+    if (isWebuiOrPiPackageName(entry.name)) found.add(entry.name);
+  }
+  return [...found].sort();
+}
+
+async function packagesPresentInInstallPrefix(installRoot, packageNames = UPDATE_PACKAGE_NAMES) {
+  const found = new Set();
+  if (!installRoot || !await directoryExists(installRoot)) return [];
+  const manifest = await readJsonFileIfExists(path.join(installRoot, "package.json"));
+  for (const packageName of packageNames) {
+    if (declaredDependencySpec(manifest, packageName) !== undefined) found.add(packageName);
+  }
+  for (const packageName of declaredWebuiPiPackageNames(manifest)) found.add(packageName);
+  for (const packageName of await packagesPresentInNodeModulesRoot(path.join(installRoot, "node_modules"), packageNames)) {
+    found.add(packageName);
+  }
+  return [...found].sort();
+}
+
+function packageInstallSpecs(packageNames) {
+  return packageNames.map((packageName) => `${packageName}@latest`);
+}
+
+function npmCommandName() {
+  return process.env.PI_WEBUI_NPM_BIN || "npm";
+}
+
+function npmPrefixUpdateTask(label, installRoot, packageNames) {
+  if (!packageNames.length) return null;
+  const npmCommand = npmCommandName();
+  return {
+    label,
+    command: npmCommand,
+    args: ["install", "--prefix", installRoot, "--ignore-scripts", "--min-release-age=0", ...packageInstallSpecs(packageNames)],
+    cwd: installRoot,
+  };
+}
+
+async function currentWebuiPackageUpdateTask() {
+  const sourceCheckout = webuiDevServer || !String(packageRoot).split(path.sep).includes("node_modules");
+  if (sourceCheckout) {
+    const manifest = await readJsonFileIfExists(path.join(packageRoot, "package.json"));
+    const packages = Object.keys(manifest?.dependencies || {}).filter(isWebuiOrPiPackageName).sort();
+    return npmPrefixUpdateTask("current Web UI checkout package dependencies", packageRoot, packages);
+  }
+
+  const installRoot = nodeModulesParentForPackageRoot(packageRoot);
+  const packages = await packagesPresentInInstallPrefix(installRoot);
+  return npmPrefixUpdateTask("current Web UI install root", installRoot, packages);
+}
+
+async function agentPackageRootUpdateTask() {
+  const installRoot = configuredAgentNpmRoot();
+  const packages = await packagesPresentInInstallPrefix(installRoot);
+  return npmPrefixUpdateTask("Pi agent npm package root", installRoot, packages);
+}
+
+async function npmGlobalNodeModulesRoot() {
+  const npmCommand = npmCommandName();
+  const result = await runCommand(npmCommand, ["root", "-g"], { timeoutMs: 5000, maxOutputLength: 8000 });
+  if (result.exitCode !== 0 || result.timedOut || result.error) return null;
+  return result.stdout.trim().split(/\r?\n/).filter(Boolean).at(-1) || null;
+}
+
+async function npmGlobalPackageRootUpdateTask() {
+  const nodeModulesRoot = await npmGlobalNodeModulesRoot();
+  const packages = await packagesPresentInNodeModulesRoot(nodeModulesRoot);
+  if (!packages.length) return null;
+  const npmCommand = npmCommandName();
+  return {
+    label: "global npm package root",
+    command: npmCommand,
+    args: ["install", "-g", "--ignore-scripts", "--min-release-age=0", ...packageInstallSpecs(packages)],
+    cwd: nodeModulesRoot ? path.dirname(nodeModulesRoot) : process.cwd(),
+  };
+}
+
+async function bunGlobalNodeModulesRoots() {
+  const available = await runCommand("bun", ["--version"], { timeoutMs: 3000, maxOutputLength: 2000 });
+  if (available.exitCode !== 0 || available.timedOut || available.error) return [];
+
+  const roots = new Set([path.join(homedir(), ".bun", "install", "global", "node_modules")]);
+  const binResult = await runCommand("bun", ["pm", "bin", "-g"], { timeoutMs: 3000, maxOutputLength: 8000 });
+  if (binResult.exitCode === 0 && !binResult.timedOut && !binResult.error) {
+    const binDir = binResult.stdout.trim().split(/\r?\n/).filter(Boolean).at(-1);
+    if (binDir) roots.add(path.join(path.dirname(binDir), "install", "global", "node_modules"));
+  }
+  return [...roots];
+}
+
+async function bunGlobalPackageRootUpdateTask() {
+  const packages = new Set();
+  for (const nodeModulesRoot of await bunGlobalNodeModulesRoots()) {
+    for (const packageName of await packagesPresentInNodeModulesRoot(nodeModulesRoot)) packages.add(packageName);
+  }
+  if (!packages.size) return null;
+  return {
+    label: "global Bun package root",
+    command: "bun",
+    args: ["install", "-g", "--ignore-scripts", "--minimum-release-age=0", ...packageInstallSpecs([...packages])],
+    cwd: homedir(),
+  };
+}
+
+function updateTaskDisplay(task) {
+  return task.displayCommand || formatCommandForDisplay(task.command, task.args || []);
+}
+
+function uniqueUpdateTasks(tasks) {
+  const unique = [];
+  const seen = new Set();
+  for (const task of tasks.filter(Boolean)) {
+    const key = [task.command, JSON.stringify(task.args || []), task.cwd || ""].join("\u0000");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(task);
+  }
+  return unique;
+}
+
+async function resolveUpdateTasks() {
+  return uniqueUpdateTasks([
+    await resolvePiUpdateCommand(),
+    await currentWebuiPackageUpdateTask(),
+    await agentPackageRootUpdateTask(),
+    await npmGlobalPackageRootUpdateTask(),
+    await bunGlobalPackageRootUpdateTask(),
+  ]);
+}
+
+function updateFailureDetails(result) {
+  return [result.error, result.timedOut ? "timed out" : undefined, result.stderr?.trim(), result.stdout?.trim()].filter(Boolean).join("\n");
+}
+
+async function runUpdateTask(task) {
+  const command = updateTaskDisplay(task);
+  recordEvent({ type: "webui_update_step_started", command });
+  const result = await runCommand(task.command, task.args || [], {
+    cwd: task.cwd || process.cwd(),
+    timeoutMs: task.timeoutMs || PACKAGE_UPDATE_TIMEOUT_MS,
+    maxOutputLength: task.maxOutputLength || PACKAGE_UPDATE_OUTPUT_MAX_CHARS,
+  });
+  const ok = result.exitCode === 0 && !result.timedOut && !result.error;
+  if (!ok) {
+    const details = updateFailureDetails(result);
+    recordEvent({ type: "webui_update_step_failed", command, error: truncateStatusText(details || `exit code ${result.exitCode ?? "unknown"}`) });
+    throw makeHttpError(500, truncateLongText(`Update step failed (${task.label || "package update"}): ${command}${details ? `\n${details}` : ""}`));
+  }
+  recordEvent({ type: "webui_update_step_completed", command });
+  return {
+    label: task.label || "package update",
+    command,
+    stdout: result.stdout,
+    stderr: result.stderr,
+  };
+}
+
+function combinedUpdateOutput(results, field) {
+  return results
+    .map((result) => {
+      const output = String(result?.[field] || "").trim();
+      return output ? `# ${result.label}\n${output}` : "";
+    })
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 async function runPiUpdateAndPrepareRestart() {
@@ -4303,20 +4692,12 @@ async function runPiUpdateAndPrepareRestart() {
   let restartPrepared = false;
   try {
     const restorableTabs = await restorableTabsForRestart();
-    const piCommand = await resolvePiUpdateCommand();
-    const command = piCommand.displayCommand || formatCommandForDisplay(piCommand.command, piCommand.args || []);
+    const updateTasks = await resolveUpdateTasks();
+    if (!updateTasks.length) throw makeHttpError(500, "No Pi/Web UI update commands could be resolved.");
+    const command = updateTasks.map(updateTaskDisplay).join(" && ");
     recordEvent({ type: "webui_update_started", command, restorableTabCount: restorableTabs.length });
-    const result = await runCommand(piCommand.command, piCommand.args || [], {
-      cwd: process.cwd(),
-      timeoutMs: PI_UPDATE_TIMEOUT_MS,
-      maxOutputLength: PI_UPDATE_OUTPUT_MAX_CHARS,
-    });
-    const ok = result.exitCode === 0 && !result.timedOut && !result.error;
-    if (!ok) {
-      const details = [result.error, result.timedOut ? "timed out" : undefined, result.stderr?.trim(), result.stdout?.trim()].filter(Boolean).join("\n");
-      recordEvent({ type: "webui_update_failed", command, error: truncateStatusText(details || `exit code ${result.exitCode ?? "unknown"}`) });
-      throw makeHttpError(500, truncateLongText(`Pi update failed: ${command}${details ? `\n${details}` : ""}`));
-    }
+    const results = [];
+    for (const task of updateTasks) results.push(await runUpdateTask(task));
 
     updateStatusCache = null;
     updateStatusCacheAt = 0;
@@ -4324,10 +4705,11 @@ async function runPiUpdateAndPrepareRestart() {
     restartPrepared = true;
     recordEvent({ type: "webui_update_restarting", command, nextWebuiPid: child.pid, restorableTabCount: restorableTabs.length });
     return {
-      message: "Pi update completed. Pi Web UI is restarting.",
+      message: "Pi/Web UI package updates completed. Pi Web UI is restarting.",
       command,
-      stdout: result.stdout,
-      stderr: result.stderr,
+      commands: results.map((result) => ({ label: result.label, command: result.command })),
+      stdout: combinedUpdateOutput(results, "stdout"),
+      stderr: combinedUpdateOutput(results, "stderr"),
       webuiPid: process.pid,
       nextWebuiPid: child.pid,
       restorableTabCount: restorableTabs.length,
@@ -4400,7 +4782,7 @@ async function updateTabCwd(id, cwd) {
   if (tab.rpc?.isRunning()) await safeRpcData(tab, { type: "get_state" }, STATUS_RPC_TIMEOUT_MS);
   const sessionFile = tabRestorableSessionFile(tab);
 
-  const piArgs = buildPiArgsForTab(tab.index, tab.title);
+  const piArgs = await buildPiArgsForTab(tab.index, tab.title, nextCwd);
   if (sessionFile && !options.noSession) piArgs.push("--session", sessionFile);
   const piCommand = await resolvePiCommand(piArgs);
   const restartingEvent = { type: "webui_tab_restarting", tabId: tab.id, tabTitle: tab.title, cwd: nextCwd, sessionFile };
@@ -4441,7 +4823,7 @@ async function restartTabRpc(tab, reason = "reload") {
   if (state.data?.isStreaming) throw makeHttpError(409, "Wait for the current response to finish before reloading.");
   if (state.data?.isCompacting) throw makeHttpError(409, "Wait for compaction to finish before reloading.");
 
-  const piArgs = buildPiArgsForTab(tab.index, tab.title);
+  const piArgs = await buildPiArgsForTab(tab.index, tab.title, tab.cwd);
   if (state.data?.sessionFile && !options.noSession) piArgs.push("--session", state.data.sessionFile);
   const piCommand = await resolvePiCommand(piArgs);
   const reloadingEvent = { type: "webui_tab_reloading", tabId: tab.id, tabTitle: tab.title, cwd: tab.cwd, reason, sessionFile: state.data?.sessionFile };

@@ -571,6 +571,7 @@ function createGitWorkflowState() {
     output: "",
     error: "",
     message: null,
+    manualCommitMessage: "",
     messageRequestedAt: 0,
     branchName: "",
     branchNameRequestedAt: 0,
@@ -656,7 +657,7 @@ const GIT_WORKFLOW_CREATE_PR_TOOLTIP = [
   "2. Read dev/COMMIT/staged-branch-name.txt.",
   "3. Let you confirm or edit the generated branch name.",
   "4. Run git switch -c <branch>.",
-  "5. Return here to commit short or long on that branch.",
+  "5. Return here to commit short, long, or typed input on that branch.",
   "6. Push and Create PR will push upstream, run /pr, let you review, then run gh pr create.",
 ].join("\n");
 const GIT_WORKFLOW_MANUAL_BRANCH_TOOLTIP = [
@@ -665,7 +666,7 @@ const GIT_WORKFLOW_MANUAL_BRANCH_TOOLTIP = [
   "2. Prefill a branch from the commit message if possible.",
   "3. Let you type or edit the type/feature-name branch name.",
   "4. Run git switch -c <branch>.",
-  "5. Return here to commit short or long on that branch.",
+  "5. Return here to commit short, long, or typed input on that branch.",
   "6. Push and Create PR will push upstream, run /pr, let you review, then run gh pr create.",
 ].join("\n");
 
@@ -2072,12 +2073,12 @@ function renderUpdateNotification(status = latestUpdateStatus, { force = false }
   if (elements.updateNotificationTitle) elements.updateNotificationTitle.textContent = items.length === 1 ? `${items[0]} available` : "Pi updates available";
   if (elements.updateNotificationMessage) {
     elements.updateNotificationMessage.textContent = canRunUpdate
-      ? "Run pi update now, then restart this Web UI server automatically."
+      ? "Run Pi and Web UI package updates now, then restart this Web UI server automatically."
       : "Updates are available. Direct Web UI updates are only enabled from localhost on the host machine.";
   }
   const details = [
     items.join(" · "),
-    latestUpdateStatus.webuiDev && latestUpdateStatus.webui?.updateAvailable ? "The current Web UI is a dev checkout; pi update updates installed Pi packages, not this checkout." : "",
+    latestUpdateStatus.webuiDev && latestUpdateStatus.webui?.updateAvailable ? "The current Web UI is a dev checkout; update also refreshes this checkout's Web UI/Pi package dependencies when possible." : "",
     latestUpdateStatus.packages?.note || "",
   ].filter(Boolean).join(" ");
   if (elements.updateNotificationDetail) elements.updateNotificationDetail.textContent = details;
@@ -2103,14 +2104,14 @@ function scheduleUpdateStatusRefresh() {
   clearTimeout(updateStatusRefreshTimer);
   updateStatusRefreshTimer = setTimeout(() => {
     updateStatusRefreshTimer = null;
-    refreshUpdateStatus({ force: true }).catch((error) => addEvent(`Pi update check failed: ${error.message || String(error)}`, "warn"));
+    refreshUpdateStatus({ force: true }).catch((error) => addEvent(`Pi/Web UI update check failed: ${error.message || String(error)}`, "warn"));
     scheduleUpdateStatusRefresh();
   }, UPDATE_STATUS_REFRESH_MS);
 }
 
 function initializeUpdateNotifications() {
   setTimeout(() => {
-    refreshUpdateStatus().catch((error) => addEvent(`Pi update check failed: ${error.message || String(error)}`, "warn"));
+    refreshUpdateStatus().catch((error) => addEvent(`Pi/Web UI update check failed: ${error.message || String(error)}`, "warn"));
     scheduleUpdateStatusRefresh();
   }, UPDATE_STATUS_INITIAL_DELAY_MS);
 }
@@ -2119,13 +2120,13 @@ function piUpdateConfirmationText() {
   const items = updateNotificationItems();
   const workingWarning = hasWorkingTab() ? "\n\nOne or more Pi tabs look busy or blocked. Finish or abort in-flight work before updating if you need to preserve it." : "";
   const versionText = items.length ? `\n\nDetected update: ${items.join(" · ")}.` : "";
-  return `Run pi update now?${versionText}\n\nThis will run \"pi update\" on the Web UI host. After it finishes, Pi Web UI will restart itself. Browser clients will briefly disconnect, and managed Pi tabs/RPC processes will be restarted from saved session state when possible.${workingWarning}`;
+  return `Run Pi/Web UI package updates now?${versionText}\n\nThis will run \"pi update\" plus detected local and global Web UI/Pi package-manager updates on the Web UI host. After it finishes, Pi Web UI will restart itself. Browser clients will briefly disconnect, and managed Pi tabs/RPC processes will be restarted from saved session state when possible.${workingWarning}`;
 }
 
 async function runPiUpdateAndRestart() {
   if (updateRequestInProgress) return;
   if (latestUpdateStatus?.canRunUpdate === false) {
-    addEvent("Pi update can only be started from localhost on the Web UI host", "warn");
+    addEvent("Pi/Web UI package updates can only be started from localhost on the Web UI host", "warn");
     renderUpdateNotification(latestUpdateStatus, { force: true });
     return;
   }
@@ -2134,11 +2135,11 @@ async function runPiUpdateAndRestart() {
   updateRequestInProgress = true;
   hideUpdateNotification();
   setServerActionBusy("Updating…");
-  setServerActionStatus("Running pi update. The server will restart after the update completes…", "warn");
-  setServerRestartOverlay(true, "Running pi update. The server will restart after the update completes…");
+  setServerActionStatus("Running Pi/Web UI package updates. The server will restart after the update completes…", "warn");
+  setServerRestartOverlay(true, "Running Pi/Web UI package updates. The server will restart after the update completes…");
   try {
     await api("/api/update", { method: "POST", scoped: false });
-    addEvent("Pi update completed; Pi Web UI server restart requested", "warn");
+    addEvent("Pi/Web UI package updates completed; Pi Web UI server restart requested", "warn");
   } catch (error) {
     if (!error?.backendOffline) {
       updateRequestInProgress = false;
@@ -7798,6 +7799,10 @@ function formatCommitMessagePreview(message) {
   return [`=== SHORT ===`, message.short || "(empty)", "", "=== LONG ===", message.long || "(empty)"].join("\n");
 }
 
+function formatInputCommitMessagePreview(message) {
+  return [`=== INPUT ===`, String(message || "").trim() || "(empty)"].join("\n");
+}
+
 function gitWorkflowMessageTitle(message) {
   return String(message?.short || message?.long || "").split("\n").find((line) => line.trim())?.trim() || "Pull request";
 }
@@ -7839,6 +7844,50 @@ function addGitWorkflowAction(label, handler, className = "", disabled = gitWork
   button.addEventListener("click", handler);
   elements.gitWorkflowActions.append(button);
   return button;
+}
+
+function renderGitWorkflowManualCommitInput() {
+  const tabId = gitWorkflowActionTabId();
+  const workflow = gitWorkflowForTab(tabId, { create: false }) || gitWorkflow;
+  const row = make("div", "git-workflow-message-input-row");
+  const field = make("label", "git-workflow-message-input-field");
+  field.setAttribute("for", "gitWorkflowManualCommitMessage");
+  field.append(make("span", "git-workflow-message-input-label", "Input commit message"));
+
+  const input = make("input", "git-workflow-message-input");
+  input.id = "gitWorkflowManualCommitMessage";
+  input.type = "text";
+  input.value = workflow?.manualCommitMessage || "";
+  input.placeholder = "Type a commit message to use instead of short/long";
+  input.autocomplete = "off";
+  input.spellcheck = true;
+
+  const commitButton = make("button", "git-workflow-message-input-commit", "Commit input");
+  commitButton.type = "button";
+  const updateCommitState = () => {
+    const currentWorkflow = gitWorkflowForTab(tabId, { create: false });
+    commitButton.disabled = !currentWorkflow || !!currentWorkflow.busy || !input.value.trim();
+  };
+  input.addEventListener("input", () => {
+    const currentWorkflow = gitWorkflowForTab(tabId, { create: false });
+    if (currentWorkflow) currentWorkflow.manualCommitMessage = input.value;
+    updateCommitState();
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    if (!commitButton.disabled) commitGitWorkflow("input", tabId);
+  });
+  commitButton.addEventListener("click", () => {
+    const currentWorkflow = gitWorkflowForTab(tabId, { create: false });
+    if (currentWorkflow) currentWorkflow.manualCommitMessage = input.value;
+    commitGitWorkflow("input", tabId);
+  });
+  updateCommitState();
+
+  field.append(input);
+  row.append(field, commitButton);
+  elements.gitWorkflowActions.append(row);
 }
 
 function setGitPrDialogStatus(message = "", level = "muted") {
@@ -7901,14 +7950,14 @@ function selectGitWorkflowProcess(processValue, tabId = gitWorkflowActionTabId()
   const process = GIT_WORKFLOW_PROCESS_VALUES.has(processValue) ? processValue : "stage";
   workflow.runId += 1;
   const runId = workflow.runId;
-  const base = { active: true, process, busy: false, error: "", messageRequestedAt: 0, branchName: "", branchNameRequestedAt: 0, prMode: false, prBranch: "", pr: null, prRequestedAt: 0 };
+  const base = { active: true, process, busy: false, error: "", manualCommitMessage: "", messageRequestedAt: 0, branchName: "", branchNameRequestedAt: 0, prMode: false, prBranch: "", pr: null, prRequestedAt: 0 };
 
   if (process === "stage") {
     setGitWorkflow({ ...base, step: "add", message: null, output: "Ready to stage all changes with git add ." }, { tabId });
     return;
   }
   if (process === "message") {
-    setGitWorkflow({ ...base, step: "generate", message: null, output: "Ready to generate a commit message from the currently staged changes." }, { tabId });
+    setGitWorkflow({ ...base, step: "generate", message: null, output: "Ready to generate a commit message from the currently staged changes, or type one and commit it directly." }, { tabId });
     return;
   }
   if (process === "commit") {
@@ -7943,12 +7992,12 @@ function gitWorkflowTitle() {
 function gitWorkflowHint() {
   switch (gitWorkflow.step) {
     case "add": return "Step 1: run git add . in the current Pi working directory.";
-    case "generate": return "Step 2: run /git-staged-msg, then preview the generated files.";
+    case "generate": return "Step 2: run /git-staged-msg, or type a commit message and use Commit input.";
     case "generating": return "Pi is generating dev/COMMIT/staged-commit-short.txt and staged-commit-long.txt.";
-    case "message": return gitWorkflow.prMode ? `Branch ${gitWorkflow.prBranch || "created"}: choose short or long commit before opening a PR.` : "Step 3/4: preview the native g-msg output, commit here, or create a PR branch first.";
+    case "message": return gitWorkflow.prMode ? `Branch ${gitWorkflow.prBranch || "created"}: choose short, long, or typed input before opening a PR.` : "Step 3/4: preview the native g-msg output, type a commit message if needed, commit here, or create a PR branch first.";
     case "branchNaming": return "Pi is generating dev/COMMIT/staged-branch-name.txt. Cancel will request Pi abort.";
     case "branching": return "Creating a new branch with git switch -c before committing.";
-    case "committing": return "Running native git commit from the generated message file.";
+    case "committing": return "Running native git commit with the selected message.";
     case "push": return gitWorkflow.prMode ? "Push the PR branch, generate /pr, review the description, then create the pull request." : "Step 5: push the new commit to the configured remote.";
     case "pushing": return "Running git push. Cancel will request process termination.";
     case "prGenerating": return "Pi is generating dev/PR/<current-branch>.md with /pr.";
@@ -7990,6 +8039,7 @@ function renderGitWorkflow() {
   if (gitWorkflow.step === "add") {
     addGitWorkflowAction("Run git add .", () => runGitAdd(), "primary", false);
   } else if (gitWorkflow.step === "generate") {
+    renderGitWorkflowManualCommitInput();
     addGitWorkflowAction("Run /git-staged-msg", () => runGitMessagePrompt(), "primary", false);
     addGitWorkflowAction("Preview current message files", () => loadGitWorkflowMessage({ requireFresh: false }), "", false);
   } else if (gitWorkflow.step === "generating") {
@@ -7999,6 +8049,7 @@ function renderGitWorkflow() {
       addGitWorkflowAction("Create PR", () => createGitPrBranch(), "primary", false, GIT_WORKFLOW_CREATE_PR_TOOLTIP);
       addGitWorkflowAction("Manual branch", () => createGitPrBranchManually(), "", false, GIT_WORKFLOW_MANUAL_BRANCH_TOOLTIP);
     }
+    renderGitWorkflowManualCommitInput();
     addGitWorkflowAction("Commit short", () => commitGitWorkflow("short"), gitWorkflow.prMode ? "primary" : "", false);
     addGitWorkflowAction("Commit long", () => commitGitWorkflow("long"), gitWorkflow.prMode ? "primary" : "", false);
     addGitWorkflowAction("Regenerate", () => runGitMessagePrompt(), "", false);
@@ -8068,9 +8119,10 @@ function startGitWorkflow(tabId = activeTabId) {
     step: "add",
     process: "stage",
     busy: false,
-    output: "Ready to stage all changes with git add .\n\nNative mode is used for g-msg/g-short/g-long: dev/COMMIT message files are read directly and git commit is run without fish. After the message is generated, use Create PR to switch to a new branch before committing.",
+    output: "Ready to stage all changes with git add .\n\nNative mode is used for g-msg/g-short/g-long: dev/COMMIT message files are read directly and git commit is run without fish. In the Message stage you can also type a commit message and use Commit input. After the message is generated, use Create PR to switch to a new branch before committing.",
     error: "",
     message: null,
+    manualCommitMessage: "",
     messageRequestedAt: 0,
     branchName: "",
     branchNameRequestedAt: 0,
@@ -8300,7 +8352,7 @@ async function createGitPrBranchWithSuggestion(suggestion, tabId = gitWorkflowAc
   try {
     const result = await gitWorkflowRequest("/api/git-workflow/branch", { body: { branch }, runId, tabId });
     if (!result) return;
-    setGitWorkflow({ step: "message", prMode: true, prBranch: result.branch || branch, branchName: result.branch || branch, busy: false, output: `${formatGitCommandResult(result)}\n\nCreated PR branch ${result.branch || branch}. Choose Commit short or Commit long to commit on this branch.` }, { tabId });
+    setGitWorkflow({ step: "message", prMode: true, prBranch: result.branch || branch, branchName: result.branch || branch, busy: false, output: `${formatGitCommandResult(result)}\n\nCreated PR branch ${result.branch || branch}. Choose Commit short, Commit long, or Commit input to commit on this branch.` }, { tabId });
   } catch (error) {
     if (isCurrentGitWorkflowRun(runId, tabId)) {
       setGitWorkflow({ prMode: false, prBranch: "" }, { tabId });
@@ -8314,15 +8366,26 @@ async function commitGitWorkflow(variant, tabId = gitWorkflowActionTabId()) {
   const workflow = gitWorkflowForTab(tabId, { create: false });
   if (!workflow) return;
   const runId = workflow.runId;
-  setGitWorkflow({ step: "committing", busy: true, error: "", output: `${formatCommitMessagePreview(workflow.message)}\n\nRunning native ${variant} commit…` }, { tabId });
+  const failureStep = variant === "input" && workflow.step === "generate" ? "generate" : "message";
+  const inputMessage = variant === "input" ? String(workflow.manualCommitMessage || "").trim() : "";
+  if (variant === "input" && !inputMessage) {
+    failGitWorkflow(new Error("Type a commit message before using Commit input."), failureStep, { tabId });
+    return;
+  }
+  const preview = variant === "input" ? formatInputCommitMessagePreview(inputMessage) : formatCommitMessagePreview(workflow.message);
+  setGitWorkflow({ step: "committing", busy: true, error: "", output: `${preview}\n\nRunning native ${variant} commit…` }, { tabId });
   try {
-    const result = await gitWorkflowRequest("/api/git-workflow/commit", { body: { variant }, runId, tabId });
+    const body = variant === "input" ? { variant, message: inputMessage } : { variant };
+    const result = await gitWorkflowRequest("/api/git-workflow/commit", { body, runId, tabId });
     if (!result) return;
     const nextAction = workflow.prMode ? "Push and Create PR." : "git push.";
-    setGitWorkflow({ step: "push", busy: false, ...gitWorkflowActionDonePatch(workflow, "commit"), output: `${formatGitCommandResult(result)}\n\nCommit created. Next: ${nextAction}` }, { tabId });
+    const donePatch = variant === "input"
+      ? { actionsDone: createGitWorkflowActionsDone({ ...workflow.actionsDone, message: true, commit: true }) }
+      : gitWorkflowActionDonePatch(workflow, "commit");
+    setGitWorkflow({ step: "push", busy: false, ...donePatch, output: `${formatGitCommandResult(result)}\n\nCommit created. Next: ${nextAction}` }, { tabId });
     if (isCurrentTabContext(tabContext)) scheduleRefreshFooter();
   } catch (error) {
-    if (isCurrentGitWorkflowRun(runId, tabId)) failGitWorkflow(error, "message", { tabId });
+    if (isCurrentGitWorkflowRun(runId, tabId)) failGitWorkflow(error, failureStep, { tabId });
   }
 }
 

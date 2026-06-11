@@ -2609,6 +2609,31 @@ button.git-workflow-step:hover:not(:disabled) {
   line-height: 1.45;
   white-space: pre-wrap;
 }
+.git-workflow-message-input-row {
+  flex: 1 1 100%;
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-end;
+  min-width: min(100%, 22rem);
+}
+.git-workflow-message-input-field {
+  flex: 1 1 18rem;
+  display: grid;
+  gap: 0.28rem;
+  min-width: min(100%, 15rem);
+}
+.git-workflow-message-input-label {
+  color: rgba(var(--ctp-subtext-rgb), 0.82);
+  font-size: 0.72rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.git-workflow-message-input {
+  width: 100%;
+  min-height: 2.15rem;
+  padding: 0.45rem 0.72rem;
+}
 .git-workflow-actions button {
   min-height: 2.15rem;
   padding: 0.45rem 0.72rem;
@@ -6561,6 +6586,11 @@ button.composer-skill-tag:focus-visible {
   .composer-row button[data-tooltip].tooltip-open::after { display: block; }
   .git-workflow-actions button,
   #gitWorkflowCancelButton { min-height: 44px; }
+  .git-workflow-message-input-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .git-workflow-message-input-commit { width: 100%; }
   .native-command-body { max-height: min(28rem, 54dvh); }
   .native-settings-grid,
   .native-tree-options { grid-template-columns: 1fr; }

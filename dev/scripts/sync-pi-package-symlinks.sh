@@ -53,6 +53,9 @@ Ensures local npm-packages Pi resources are live-linked for development:
 - broken symlinks in those target directories, plus stale symlinks that point
   back into this npm-packages tree but no longer match a current resource, are
   removed
+- package-local node_modules entries referenced by pi manifests are linked to
+  top-level workspace packages before resource discovery, so local development
+  packages win over stale installed optional dependencies
 - every workspace package gets a matching node_modules symlink by package name
   for local bare-import resolution
 
@@ -496,6 +499,59 @@ package_json_name() {
   ' "$pkg_dir"
 }
 
+workspace_package_dir_for_name() {
+  local wanted_name="$1"
+  local pkg_dir workspace_name
+  for pkg_dir in "$ROOT_DIR"/pi-*; do
+    [[ -d "$pkg_dir" && -f "$pkg_dir/package.json" ]] || continue
+    workspace_name="$(package_json_name "$pkg_dir")"
+    [[ "$workspace_name" == "$wanted_name" ]] || continue
+    printf '%s' "$pkg_dir"
+    return 0
+  done
+  return 1
+}
+
+pi_manifest_node_module_packages() {
+  local pkg_dir="$1"
+  node -e '
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const pkg = JSON.parse(fs.readFileSync(path.join(process.argv[1], "package.json"), "utf8"));
+    const seen = new Set();
+    for (const type of ["extensions", "skills", "prompts", "themes"]) {
+      const entries = Array.isArray(pkg.pi?.[type]) ? pkg.pi[type] : [];
+      for (const entry of entries) {
+        if (typeof entry !== "string") continue;
+        const normalized = entry.replace(/\\/g, "/");
+        if (!normalized.startsWith("node_modules/")) continue;
+        const parts = normalized.slice("node_modules/".length).split("/").filter(Boolean);
+        const moduleName = parts[0]?.startsWith("@") ? `${parts[0]}/${parts[1] || ""}` : parts[0];
+        if (moduleName) seen.add(moduleName);
+      }
+    }
+    for (const moduleName of [...seen].sort()) console.log(moduleName);
+  ' "$pkg_dir"
+}
+
+ensure_workspace_manifest_deps() {
+  local pkg_dir module_name source_dir
+  for pkg_dir in "$ROOT_DIR"/pi-*; do
+    [[ -d "$pkg_dir" && -f "$pkg_dir/package.json" ]] || continue
+    while IFS= read -r module_name; do
+      [[ -n "$module_name" ]] || continue
+      source_dir="$(workspace_package_dir_for_name "$module_name" || true)"
+      if [[ -z "$source_dir" || ! -d "$source_dir" ]]; then
+        printf '%s %s manifest node_modules reference has no workspace package: %s\n' "$(label_skip)" "$pkg_dir" "$module_name"
+        DEP_TOTAL=$((DEP_TOTAL+1))
+        DEP_SKIPPED=$((DEP_SKIPPED+1))
+        continue
+      fi
+      ensure_node_module_symlink "$module_name" "$source_dir" "$pkg_dir"
+    done < <(pi_manifest_node_module_packages "$pkg_dir")
+  done
+}
+
 resource_name_from_dir() {
   local pkg_name="$1"
   case "$pkg_name" in
@@ -693,6 +749,7 @@ sync_theme_symlinks() {
   add_summary "$(format_summary_line "Themes:" "$count_total" "$count_ok" "$count_linked" "$count_relinked" "$count_renamed" "$count_skipped")"
 }
 
+ensure_workspace_manifest_deps
 ensure_resource_cache
 sync_extension_symlinks
 sync_skill_symlinks

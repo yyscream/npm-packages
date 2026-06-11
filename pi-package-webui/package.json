@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-package-webui",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "description": "Pi Web UI companion package with a local browser UI CLI plus /webui-start and /webui-status commands.",
   "license": "MIT",
   "homepage": "https://github.com/Firstp1ck/npm-packages/tree/main/pi-package-webui#readme",
@@ -23,14 +23,6 @@
     "image": "https://unpkg.com/@firstpick/pi-package-webui/images/WebUI_v0.3.7.png",
     "extensions": [
       "./index.ts",
-      "../pi-extension-git-footer-status/index.ts",
-      "../pi-extension-release-aur/index.ts",
-      "../pi-extension-release-npm/index.ts",
-      "../pi-extension-safety-guard/index.ts",
-      "../pi-extension-setup-skills/index.ts",
-      "../pi-extension-stats/index.ts",
-      "../pi-extension-todo-progress/index.ts",
-      "../pi-extension-tools/index.ts",
       "node_modules/@firstpick/pi-extension-git-footer-status/index.ts",
       "node_modules/@firstpick/pi-extension-release-aur/index.ts",
       "node_modules/@firstpick/pi-extension-release-npm/index.ts",
@@ -41,15 +33,12 @@
       "node_modules/@firstpick/pi-extension-tools/index.ts"
     ],
     "skills": [
-      "../pi-extension-release-aur/skills",
       "node_modules/@firstpick/pi-extension-release-aur/skills"
     ],
     "prompts": [
-      "../pi-package-prompts-git-pr/prompts",
       "node_modules/@firstpick/pi-prompts-git-pr/prompts"
     ],
     "themes": [
-      "../pi-package-themes-bundle/themes",
       "node_modules/@firstpick/pi-themes-bundle/themes"
     ]
   },
@@ -61,19 +50,19 @@
     "test": "node tests/run-all.mjs"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "^0.78.0"
+    "@earendil-works/pi-coding-agent": "^0.79.1"
   },
   "optionalDependencies": {
-    "@firstpick/pi-extension-git-footer-status": "^0.2.1",
-    "@firstpick/pi-extension-release-aur": "^0.1.3",
-    "@firstpick/pi-extension-release-npm": "^0.3.3",
+    "@firstpick/pi-extension-git-footer-status": "^0.3.3",
+    "@firstpick/pi-extension-release-aur": "^0.1.6",
+    "@firstpick/pi-extension-release-npm": "^0.4.0",
     "@firstpick/pi-extension-safety-guard": "^0.2.3",
-    "@firstpick/pi-extension-setup-skills": "^0.1.5",
-    "@firstpick/pi-extension-stats": "^0.2.0",
-    "@firstpick/pi-extension-todo-progress": "^0.1.7",
-    "@firstpick/pi-extension-tools": "^0.1.4",
-    "@firstpick/pi-prompts-git-pr": "^0.1.0",
-    "@firstpick/pi-themes-bundle": "^0.1.1"
+    "@firstpick/pi-extension-setup-skills": "^0.1.8",
+    "@firstpick/pi-extension-stats": "^0.2.6",
+    "@firstpick/pi-extension-todo-progress": "^0.2.4",
+    "@firstpick/pi-extension-tools": "^0.1.6",
+    "@firstpick/pi-prompts-git-pr": "^0.1.2",
+    "@firstpick/pi-themes-bundle": "^0.1.4"
   },
   "files": [
     "index.ts",
