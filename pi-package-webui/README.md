@@ -120,12 +120,14 @@ Environment variables:
 ## Main features
 
 - Pathless `pi-webui` startup: the server opens first, then the browser prompts for the first terminal CWD.
-- Multi-tab Pi sessions with isolated processes, working directories, prompt drafts, and activity state.
+- Multi-tab Pi sessions with isolated processes, working directories, prompt drafts, activity state, and a workspace dashboard for common actions.
+- Unified command palette (`Ctrl/Cmd+K`) for commands, tabs, models, sessions, settings, and frequent Web UI actions.
 - Automatic tab naming from the first prompt, with `--name <name>` still available for an explicit initial tab name.
-- Streaming chat transcript with Markdown, thinking output, tool/bash cards, queue and compaction events, and abort controls.
+- Streaming chat transcript with Markdown, thinking output, tool/bash cards, queue and compaction events, edit-and-retry from user prompts, and abort controls.
 - Prompt composer with uploads, drag/drop/paste, inline image support, slash-command autocomplete, and `@` file/path references with live suggestions.
 - Browser dialogs for common Pi selectors such as `/model`, `/settings`, `/theme`, `/fork`, `/clone`, `/resume`, `/tree`, `/scoped-models`, `/tools`, and `/skills`.
 - Model, thinking, session, workspace, theme, optional-feature, Codex usage, network, update/restart, event, and notification controls in the side panel.
+- Persistent context-window meter with manual compact and auto-compaction controls near the composer.
 - Side-panel theme picker backed by optional `@firstpick/pi-themes-bundle` themes when loaded.
 - Per-tab cwd changes, a clickable footer cwd picker, saved path fast picks, server-persisted fast picks, and restart-safe restoration of open tabs.
 - Detected app runner dropdown for the active tab cwd, including Cargo, Bun, npm/npx/pnpm, Python/uv, Go/Golang, Zig, C/C++, Docker Compose, root/dev/scripts shell scripts, and other common project runners with live output pinned at the top of the terminal. Projects can add browseable custom runners in `.pi-webui-runners.json` with a command (default `./`) plus a relative path to the file to run.

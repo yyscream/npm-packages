@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmod, mkdtemp, rm, stat } from "node:fs/promises";
+import { chmod, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { networkInterfaces, tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -154,6 +154,47 @@ try {
     assert.equal(gitRemote.status, 200);
     assert.equal(gitRemote.body?.ok, true, "remote endpoint should add origin without pushing");
     assert.equal(gitRemote.body?.data?.remoteUrl, "https://github.com/Firstp1ck/pi-webui-http-harness.git");
+
+    await writeFile(path.join(cwd, "single.txt"), "created\n");
+    const gitAddCreated = await request("127.0.0.1", "/api/git-workflow/add", { method: "POST", body: { tab: tabId } });
+    assert.equal(gitAddCreated.status, 200);
+    assert.equal(gitAddCreated.body?.ok, true, "git add endpoint should stage a new single file");
+    const createdDefault = await request("127.0.0.1", `/api/git-workflow/default-commit-message?tab=${encodeURIComponent(tabId)}`);
+    assert.equal(createdDefault.status, 200);
+    assert.equal(createdDefault.body?.ok, true, "default commit message endpoint should return ok for a staged single file");
+    assert.equal(createdDefault.body?.data?.message, "created single.txt");
+    const createdCommit = await request("127.0.0.1", "/api/git-workflow/commit", { method: "POST", body: { variant: "input", message: createdDefault.body?.data?.message, tab: tabId } });
+    assert.equal(createdCommit.status, 200);
+    assert.equal(createdCommit.body?.ok, true, "input commit endpoint should accept the generated single-file default");
+
+    await writeFile(path.join(cwd, "single.txt"), "updated\n");
+    const gitAddUpdated = await request("127.0.0.1", "/api/git-workflow/add", { method: "POST", body: { tab: tabId } });
+    assert.equal(gitAddUpdated.status, 200);
+    assert.equal(gitAddUpdated.body?.ok, true, "git add endpoint should stage a single-file update");
+    const updatedDefault = await request("127.0.0.1", `/api/git-workflow/default-commit-message?tab=${encodeURIComponent(tabId)}`);
+    assert.equal(updatedDefault.status, 200);
+    assert.equal(updatedDefault.body?.data?.message, "updated single.txt");
+    const updatedCommit = await request("127.0.0.1", "/api/git-workflow/commit", { method: "POST", body: { variant: "input", message: updatedDefault.body?.data?.message, tab: tabId } });
+    assert.equal(updatedCommit.status, 200);
+    assert.equal(updatedCommit.body?.ok, true, "input commit endpoint should accept the update default");
+
+    await rm(path.join(cwd, "single.txt"));
+    const gitAddDeleted = await request("127.0.0.1", "/api/git-workflow/add", { method: "POST", body: { tab: tabId } });
+    assert.equal(gitAddDeleted.status, 200);
+    assert.equal(gitAddDeleted.body?.ok, true, "git add endpoint should stage a single-file deletion");
+    const deletedDefault = await request("127.0.0.1", `/api/git-workflow/default-commit-message?tab=${encodeURIComponent(tabId)}`);
+    assert.equal(deletedDefault.status, 200);
+    assert.equal(deletedDefault.body?.data?.message, "deleted single.txt");
+
+    await writeFile(path.join(cwd, "multi-a.txt"), "a\n");
+    await writeFile(path.join(cwd, "multi-b.txt"), "b\n");
+    const gitAddMultiple = await request("127.0.0.1", "/api/git-workflow/add", { method: "POST", body: { tab: tabId } });
+    assert.equal(gitAddMultiple.status, 200);
+    assert.equal(gitAddMultiple.body?.ok, true, "git add endpoint should stage multiple files");
+    const multipleDefault = await request("127.0.0.1", `/api/git-workflow/default-commit-message?tab=${encodeURIComponent(tabId)}`);
+    assert.equal(multipleDefault.status, 200);
+    assert.equal(multipleDefault.body?.ok, true, "default commit message endpoint should still return ok when no default is available");
+    assert.equal(multipleDefault.body?.data?.message, "", "multiple staged files should not get a default commit message");
   } else {
     console.log("http-endpoints-harness: git not available; skipping git init workflow endpoint checks");
   }

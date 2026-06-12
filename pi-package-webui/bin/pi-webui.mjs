@@ -3051,6 +3051,58 @@ function cleanGitCommitMessageInput(value) {
   return message;
 }
 
+function parseGitPorcelainZEntries(text) {
+  const fields = String(text || "").split("\0").filter(Boolean);
+  const entries = [];
+  for (let index = 0; index < fields.length; index++) {
+    const field = fields[index];
+    if (field.length < 4) {
+      entries.push({ x: "", y: "", path: field, unsupported: true });
+      continue;
+    }
+    const x = field[0] || " ";
+    const y = field[1] || " ";
+    const filePath = field.slice(3);
+    const entry = { x, y, path: filePath };
+    if ((x === "R" || x === "C") && index + 1 < fields.length) entry.oldPath = fields[++index];
+    entries.push(entry);
+  }
+  return entries;
+}
+
+function gitWorkflowDefaultCommitAction(entry) {
+  if (!entry || entry.y !== " ") return "";
+  if (entry.x === "A") return "created";
+  if (entry.x === "M" || entry.x === "T") return "updated";
+  if (entry.x === "D") return "deleted";
+  return "";
+}
+
+function formatGitWorkflowDefaultCommitPath(filePath) {
+  return String(filePath || "").replace(/[\0\r\n\t]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 4000);
+}
+
+async function readGitWorkflowDefaultCommitMessage(cwd) {
+  const root = await getGitRoot(cwd);
+  const statusText = await runGitReadCommand(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], { maxOutputLength: 120_000 });
+  const entries = parseGitPorcelainZEntries(statusText);
+  const empty = (reason, extra = {}) => ({ root, message: "", reason, ...extra });
+  if (entries.length === 0) return empty("No changed files are ready for a default commit message.");
+  if (entries.length !== 1) return empty(`Expected exactly one changed file for a default commit message; found ${entries.length}.`);
+  const [entry] = entries;
+  const action = gitWorkflowDefaultCommitAction(entry);
+  const displayPath = formatGitWorkflowDefaultCommitPath(entry.path);
+  if (!action || !displayPath) {
+    return empty("The only changed file is not a staged created, updated, or deleted file.", { path: entry.path || "" });
+  }
+  return {
+    root,
+    message: `${action} ${displayPath}`,
+    action,
+    path: entry.path,
+  };
+}
+
 function cleanGitHubUsername(value) {
   const username = String(value || "").trim().replace(/^@+/, "");
   if (!username) throw new Error("GitHub username is required");
@@ -3396,6 +3448,8 @@ async function handleGitWorkflowRequest(pathname, body = {}, cwd = options.cwd) 
     switch (pathname) {
       case "/api/git-workflow/message":
         return { ok: true, data: await readGitWorkflowMessages(cwd) };
+      case "/api/git-workflow/default-commit-message":
+        return { ok: true, data: await readGitWorkflowDefaultCommitMessage(cwd) };
       case "/api/git-workflow/branch-name":
         return { ok: true, data: await readGitWorkflowBranchName(cwd) };
       case "/api/git-workflow/pr-description":

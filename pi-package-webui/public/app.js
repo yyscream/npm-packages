@@ -11,7 +11,11 @@ const elements = {
   newTabCurrentDirectoryButton: $("#newTabCurrentDirectoryButton"),
   newTabChooseDirectoryButton: $("#newTabChooseDirectoryButton"),
   closeAllTabsButton: $("#closeAllTabsButton"),
+  commandPaletteButton: $("#commandPaletteButton"),
+  workspaceDashboardToggleButton: $("#workspaceDashboardToggleButton"),
+  workspaceDashboard: $("#workspaceDashboard"),
   statusBar: $("#statusBar"),
+  contextMeterBar: $("#contextMeterBar"),
   serverOfflinePanel: $("#serverOfflinePanel"),
   serverRestartPanel: $("#serverRestartPanel"),
   serverRestartMessage: $("#serverRestartMessage"),
@@ -78,6 +82,7 @@ const elements = {
   appRunnerMenuPanel: $("#appRunnerMenuPanel"),
   optionsMenuButton: $("#optionsMenuButton"),
   optionsMenu: $("#optionsMenu"),
+  optionsCommandPaletteButton: $("#optionsCommandPaletteButton"),
   optionsResumeButton: $("#optionsResumeButton"),
   optionsReloadButton: $("#optionsReloadButton"),
   optionsNameButton: $("#optionsNameButton"),
@@ -186,6 +191,17 @@ const elements = {
   pathPickerError: $("#pathPickerError"),
   pathPickerCancelButton: $("#pathPickerCancelButton"),
   pathPickerChooseButton: $("#pathPickerChooseButton"),
+  commandPaletteDialog: $("#commandPaletteDialog"),
+  commandPaletteInput: $("#commandPaletteInput"),
+  commandPaletteList: $("#commandPaletteList"),
+  commandPaletteHint: $("#commandPaletteHint"),
+  editRetryDialog: $("#editRetryDialog"),
+  editRetryMessage: $("#editRetryMessage"),
+  editRetryText: $("#editRetryText"),
+  editRetryStatus: $("#editRetryStatus"),
+  editRetryCancelButton: $("#editRetryCancelButton"),
+  editRetryForkButton: $("#editRetryForkButton"),
+  editRetrySendButton: $("#editRetrySendButton"),
   nativeCommandDialog: $("#nativeCommandDialog"),
   nativeCommandTitle: $("#nativeCommandTitle"),
   nativeCommandMessage: $("#nativeCommandMessage"),
@@ -352,6 +368,10 @@ let userBashQueuesByTab = new Map();
 let latestQueuedMessagesByTab = new Map();
 let loadedPromptList = null;
 let promptListRunning = false;
+let workspaceDashboardCollapsed = false;
+let commandPaletteIndex = 0;
+let commandPaletteItems = [];
+let activeEditRetry = null;
 let abortLongPressTimer = null;
 let abortLongPressHandled = false;
 const dialogQueue = [];
@@ -389,6 +409,7 @@ const GIT_CHANGES_RENDER_ROW_LIMIT = 4000;
 const LAST_USER_PROMPT_STORAGE_KEY = "pi-webui-last-user-prompts";
 const PROMPT_HISTORY_STORAGE_KEY = "pi-webui-prompt-history";
 const PROMPT_LIST_STORAGE_KEY = "pi-webui-prompt-lists";
+const WORKSPACE_DASHBOARD_STORAGE_KEY = "pi-webui-workspace-dashboard-collapsed";
 const PROMPT_HISTORY_LIMIT_PER_TAB = 50;
 const ATTACHMENT_MAX_FILES = 12;
 const ATTACHMENT_MAX_FILE_BYTES = 64 * 1024 * 1024;
@@ -599,6 +620,21 @@ function gitWorkflowActionDonePatch(workflow, process) {
   return { actionsDone: createGitWorkflowActionsDone({ ...workflow?.actionsDone, [process]: true }) };
 }
 
+function resetGitWorkflowManualCommitDefaultPatch() {
+  return {
+    manualCommitMessageDefault: "",
+    manualCommitMessageDefaultReason: "",
+    manualCommitMessageDefaultPath: "",
+    manualCommitMessageDefaultAction: "",
+    manualCommitMessageDefaultRequestedAt: 0,
+    manualCommitMessageDefaultLoading: false,
+  };
+}
+
+function gitWorkflowManualCommitInputMessage(workflow) {
+  return String(workflow?.manualCommitMessage || "").trim() || String(workflow?.manualCommitMessageDefault || "").trim();
+}
+
 function createGitWorkflowState() {
   return {
     active: false,
@@ -618,6 +654,7 @@ function createGitWorkflowState() {
     initFilesStatus: null,
     message: null,
     manualCommitMessage: "",
+    ...resetGitWorkflowManualCommitDefaultPatch(),
     messageRequestedAt: 0,
     branchName: "",
     branchNameRequestedAt: 0,
@@ -1724,6 +1761,41 @@ function restoreSidePanelState() {
   setSidePanelCollapsed(stored ?? false, { persist: stored !== null });
 }
 
+function readStoredWorkspaceDashboardCollapsed() {
+  try {
+    const stored = localStorage.getItem(WORKSPACE_DASHBOARD_STORAGE_KEY);
+    return stored === null ? true : stored === "1";
+  } catch {
+    return true;
+  }
+}
+
+function persistWorkspaceDashboardCollapsed(collapsed) {
+  try {
+    localStorage.setItem(WORKSPACE_DASHBOARD_STORAGE_KEY, collapsed ? "1" : "0");
+  } catch {
+    // Ignore storage failures; this is only a browser preference.
+  }
+}
+
+function setWorkspaceDashboardCollapsed(collapsed, { persist = true } = {}) {
+  workspaceDashboardCollapsed = !!collapsed;
+  if (elements.workspaceDashboard) elements.workspaceDashboard.hidden = workspaceDashboardCollapsed;
+  if (elements.workspaceDashboardToggleButton) {
+    elements.workspaceDashboardToggleButton.setAttribute("aria-expanded", workspaceDashboardCollapsed ? "false" : "true");
+    const tooltip = workspaceDashboardCollapsed ? "Show workspace overview" : "Hide workspace overview";
+    const tooltipDetail = `${tooltip}:\n• Shows current tab, cwd, model, context, session, and queue.\n• Opens common workspace/session actions from one place.`;
+    elements.workspaceDashboardToggleButton.title = tooltip;
+    elements.workspaceDashboardToggleButton.setAttribute("aria-label", tooltip);
+    elements.workspaceDashboardToggleButton.setAttribute("data-tooltip", tooltipDetail);
+  }
+  if (persist) persistWorkspaceDashboardCollapsed(workspaceDashboardCollapsed);
+}
+
+function restoreWorkspaceDashboardState() {
+  setWorkspaceDashboardCollapsed(readStoredWorkspaceDashboardCollapsed(), { persist: false });
+}
+
 function bindMobileViewChanges() {
   if (!mobileViewMedia) return;
   const syncForViewport = (event) => {
@@ -1969,6 +2041,142 @@ function attachMessageCopyButton(bubble, message, body) {
     copyMessageBubble(button);
   });
   bubble.classList.add("has-copy-action");
+  bubble.append(button);
+  return button;
+}
+
+function userMessageEditText(message) {
+  return textFromContent(message?.content).trim();
+}
+
+function messageEntryId(message) {
+  for (const key of ["entryId", "id", "sessionEntryId", "messageId"]) {
+    const value = message?.[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function userMessageOrdinalAtIndex(messageIndex) {
+  if (!Number.isInteger(messageIndex) || messageIndex < 0) return -1;
+  let ordinal = -1;
+  for (let index = 0; index <= messageIndex && index < latestMessages.length; index += 1) {
+    if (latestMessages[index]?.role === "user") ordinal += 1;
+  }
+  return ordinal;
+}
+
+async function resolveForkMessageForEdit(message, messageIndex, tabId = activeTabId) {
+  const directEntryId = messageEntryId(message);
+  const text = userMessageEditText(message);
+  if (directEntryId) return { entryId: directEntryId, text };
+  const response = await api("/api/fork-messages", { tabId });
+  const forkMessages = Array.isArray(response.data?.messages) ? response.data.messages : [];
+  const ordinal = userMessageOrdinalAtIndex(messageIndex);
+  const ordinalMatch = ordinal >= 0 ? forkMessages[ordinal] : null;
+  if (ordinalMatch?.entryId && userMessageEditText({ content: ordinalMatch.text }) === text) return ordinalMatch;
+  const exactMatches = forkMessages.filter((item) => item?.entryId && String(item.text || "").trim() === text);
+  if (exactMatches.length === 1) return exactMatches[0];
+  if (exactMatches.length > 1 && ordinalMatch?.entryId) return ordinalMatch;
+  throw new Error("Could not map this transcript message to a fork point. Use /fork for the full selector.");
+}
+
+function setEditRetryStatus(message = "", level = "info") {
+  if (!elements.editRetryStatus) return;
+  elements.editRetryStatus.textContent = message;
+  elements.editRetryStatus.hidden = !message;
+  elements.editRetryStatus.className = `edit-retry-status ${level} ${message ? "" : "muted"}`.trim();
+}
+
+function setEditRetryBusy(busy, label = "Working…") {
+  for (const button of [elements.editRetryForkButton, elements.editRetrySendButton, elements.editRetryCancelButton].filter(Boolean)) button.disabled = !!busy;
+  if (elements.editRetrySendButton) elements.editRetrySendButton.textContent = busy ? label : "Fork & run";
+  if (elements.editRetryForkButton) elements.editRetryForkButton.textContent = busy ? "Forking…" : "Fork only";
+}
+
+function openEditRetryDialog(message, messageIndex = -1) {
+  const text = userMessageEditText(message);
+  if (!text) {
+    addEvent("user message has no editable text", "warn");
+    return;
+  }
+  activeEditRetry = { message, messageIndex, tabId: activeTabId };
+  if (elements.editRetryMessage) elements.editRetryMessage.textContent = `Fork from user message #${messageIndex >= 0 ? messageIndex + 1 : "?"}, edit it, then run or leave the edited prompt in the composer.`;
+  if (elements.editRetryText) {
+    elements.editRetryText.value = text;
+    elements.editRetryText.style.height = "auto";
+  }
+  setEditRetryStatus();
+  setEditRetryBusy(false);
+  if (!elements.editRetryDialog.open) elements.editRetryDialog.showModal();
+  queueMicrotask(() => {
+    elements.editRetryText?.focus();
+    elements.editRetryText?.select();
+  });
+}
+
+function closeEditRetryDialog() {
+  activeEditRetry = null;
+  if (elements.editRetryDialog?.open) elements.editRetryDialog.close();
+}
+
+async function submitEditRetry({ send = false } = {}) {
+  if (!activeEditRetry) return;
+  const editedText = String(elements.editRetryText?.value || "").trim();
+  if (!editedText) {
+    setEditRetryStatus("Prompt cannot be empty.", "error");
+    elements.editRetryText?.focus();
+    return;
+  }
+  const { message, messageIndex, tabId } = activeEditRetry;
+  const tabContext = activeTabContext(tabId || activeTabId);
+  setEditRetryBusy(true, "Forking…");
+  setEditRetryStatus("Resolving fork point…");
+  try {
+    const forkMessage = await resolveForkMessageForEdit(message, messageIndex, tabContext.tabId);
+    setEditRetryStatus("Forking session…");
+    const result = await api("/api/fork", { method: "POST", body: { entryId: forkMessage.entryId }, tabId: tabContext.tabId });
+    applyResponseTab(result);
+    if (!isCurrentTabContext(tabContext)) return;
+    closeEditRetryDialog();
+    await refreshAll(tabContext);
+    if (!isCurrentTabContext(tabContext)) return;
+    if (send) {
+      addEvent("forked session; sending edited prompt", "info");
+      await sendPrompt("prompt", editedText, { targetTabId: tabContext.tabId, throwOnError: true });
+    } else {
+      elements.promptInput.value = editedText;
+      resizePromptInput();
+      focusPromptInput({ defer: true });
+      addEvent("forked session; edited prompt restored in composer", "info");
+    }
+  } catch (error) {
+    setEditRetryStatus(error.message || String(error), "error");
+    if (send) {
+      elements.promptInput.value = editedText;
+      resizePromptInput();
+    }
+  } finally {
+    setEditRetryBusy(false);
+  }
+}
+
+function attachMessageEditRetryButton(bubble, message, messageIndex, { streaming = false, transient = false } = {}) {
+  if (!bubble || streaming || transient || message?.role !== "user") return null;
+  const text = userMessageEditText(message);
+  if (!text) return null;
+  const existing = bubble.querySelector(":scope > .message-edit-retry-button");
+  if (existing) return existing;
+  const button = make("button", "message-edit-retry-button", "↺");
+  button.type = "button";
+  button.title = "Edit this prompt and retry from here";
+  button.setAttribute("aria-label", button.title);
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openEditRetryDialog(message, messageIndex);
+  });
+  bubble.classList.add("has-edit-retry-action");
   bubble.append(button);
   return button;
 }
@@ -3724,7 +3932,7 @@ function restoreActiveDraft() {
 
 function focusPromptInput({ defer = false } = {}) {
   const focus = () => {
-    if (!elements.promptInput || elements.dialog.open || elements.pathPickerDialog.open || elements.gitChangesDialog?.open || elements.nativeCommandDialog.open || elements.appRunnerInfoDialog?.open || elements.promptListDialog?.open || elements.attachmentTextDialog?.open || elements.skillEditorDialog?.open || document.visibilityState === "hidden") return;
+    if (!elements.promptInput || elements.dialog.open || elements.pathPickerDialog.open || elements.gitChangesDialog?.open || elements.commandPaletteDialog?.open || elements.editRetryDialog?.open || elements.nativeCommandDialog.open || elements.appRunnerInfoDialog?.open || elements.promptListDialog?.open || elements.attachmentTextDialog?.open || elements.skillEditorDialog?.open || document.visibilityState === "hidden") return;
     try {
       elements.promptInput.focus({ preventScroll: true });
     } catch {
@@ -4064,6 +4272,9 @@ function renderTabs() {
   updateTerminalTabGroupOpenState();
   setMobileTabsExpanded(mobileTabsExpanded);
   updateDocumentTitle();
+  renderWorkspaceDashboard();
+  renderContextMeter();
+  if (elements.commandPaletteDialog?.open) renderCommandPalette();
   syncTabPolling();
 }
 
@@ -5881,6 +6092,194 @@ function renderMinimalFooter() {
   updateFooterModelPickerPosition();
 }
 
+function contextUsageSnapshot() {
+  const usage = latestStats?.contextUsage || currentState?.contextUsage || null;
+  const contextWindow = contextWindowFromSources(usage, currentState?.model?.contextWindow);
+  if (!contextWindow) return null;
+  const rawPercent = Number(usage?.percent);
+  const unknown = contextUsageUnknownAfterCompaction() || !Number.isFinite(rawPercent);
+  const rawTokens = Number(usage?.tokens);
+  return {
+    tokens: Number.isFinite(rawTokens) && rawTokens >= 0 ? rawTokens : null,
+    contextWindow,
+    percent: unknown ? null : Math.max(0, Math.min(100, rawPercent)),
+    unknown,
+    autoCompactionEnabled: footerAutoCompactionEnabled(),
+  };
+}
+
+function contextUsageDisplay(snapshot = contextUsageSnapshot()) {
+  if (!snapshot) return "Context unknown";
+  const windowText = formatFooterTokenCount(snapshot.contextWindow);
+  if (typeof snapshot.percent === "number") return `${snapshot.percent.toFixed(1)}% of ${windowText}`;
+  return `?/${windowText}`;
+}
+
+function contextUsageDetail(snapshot = contextUsageSnapshot()) {
+  if (!snapshot) return "Waiting for model context-window data.";
+  const tokenText = snapshot.tokens === null ? "tokens unknown" : `${formatFooterTokenCount(snapshot.tokens)} tokens`;
+  const autoText = snapshot.autoCompactionEnabled ? "auto-compaction on" : "auto-compaction off";
+  return `${tokenText} · ${formatFooterTokenCount(snapshot.contextWindow)} window · ${autoText}`;
+}
+
+function appendContextMeterFill(meter, snapshot) {
+  const fill = make("span", "context-meter-fill");
+  const percent = typeof snapshot?.percent === "number" ? snapshot.percent : 0;
+  fill.style.width = `${Math.max(0, Math.min(100, percent)).toFixed(1)}%`;
+  if (typeof snapshot?.percent === "number") {
+    const activeColor = contextUsageActiveColor(snapshot.percent);
+    fill.style.setProperty("--context-active-color", activeColor.color);
+    fill.style.setProperty("--context-active-glow", activeColor.glow);
+  }
+  meter.append(fill);
+}
+
+async function requestManualCompaction({ triggerButton = null } = {}) {
+  const tabContext = activeTabContext();
+  if (!tabContext.tabId) return;
+  const buttons = [...new Set([elements.compactButton, triggerButton].filter(Boolean))];
+  try {
+    for (const button of buttons) {
+      button.disabled = true;
+      button.textContent = "Compacting…";
+    }
+    setRunIndicatorActivity("Requesting context compaction…");
+    scrollChatToBottom({ force: true });
+    markContextUsageUnknownAfterCompaction(tabContext.tabId);
+    renderFooter();
+    renderContextMeter();
+    renderWorkspaceDashboard();
+    addEvent("manual compaction requested");
+    await api("/api/compact", { method: "POST", body: {}, tabId: tabContext.tabId });
+    if (!isCurrentTabContext(tabContext)) return;
+    scheduleRefreshState(120, tabContext);
+    scheduleRefreshMessages(600, tabContext);
+    scheduleRefreshFooter(600, tabContext);
+  } catch (error) {
+    if (isCurrentTabContext(tabContext)) {
+      clearContextUsageUnknownAfterCompaction(tabContext.tabId);
+      clearRunIndicatorActivity();
+      renderFooter();
+      renderContextMeter();
+      renderWorkspaceDashboard();
+      addEvent(error.message, "error");
+    }
+  } finally {
+    if (isCurrentTabContext(tabContext)) {
+      for (const button of buttons) {
+        button.disabled = !!currentState?.isCompacting;
+        button.textContent = button === elements.compactButton && currentState?.isCompacting ? "Compacting…" : button === elements.compactButton ? "Compact" : "Compact now";
+      }
+      renderContextMeter();
+      renderWorkspaceDashboard();
+    }
+  }
+}
+
+function renderContextMeter() {
+  const root = elements.contextMeterBar;
+  if (!root) return;
+  const tab = activeTab();
+  if (!tab) {
+    root.hidden = true;
+    root.replaceChildren();
+    return;
+  }
+  root.hidden = false;
+  const snapshot = contextUsageSnapshot();
+  if (!snapshot || typeof snapshot.percent !== "number" || snapshot.percent <= 50) {
+    root.hidden = true;
+    root.replaceChildren();
+    return;
+  }
+  const meter = make("div", `context-meter${snapshot?.unknown ? " unknown" : ""}`);
+  appendContextMeterFill(meter, snapshot);
+
+  const summary = make("div", "context-meter-summary");
+  summary.append(
+    make("strong", undefined, contextUsageDisplay(snapshot)),
+    make("span", "muted", contextUsageDetail(snapshot)),
+  );
+
+  const actions = make("div", "context-meter-actions");
+  const compact = make("button", "context-meter-compact", currentState?.isCompacting ? "Compacting…" : "Compact now");
+  compact.type = "button";
+  compact.disabled = !!currentState?.isCompacting;
+  compact.title = "Manually compact this tab's conversation context";
+  compact.addEventListener("click", () => requestManualCompaction({ triggerButton: compact }));
+  const auto = make("button", "context-meter-auto", footerAutoCompactionEnabled() ? "Auto on" : "Auto off");
+  auto.type = "button";
+  auto.setAttribute("aria-pressed", footerAutoCompactionEnabled() ? "true" : "false");
+  auto.disabled = footerAutoCompactionToggleInFlight;
+  auto.title = footerAutoCompactionToggleInFlight ? "Updating auto-compaction…" : footerAutoCompactionToggleAction();
+  auto.addEventListener("click", () => toggleFooterAutoCompaction());
+  actions.append(compact, auto);
+
+  root.replaceChildren(summary, meter, actions);
+}
+
+function dashboardMetric(label, value, detail = "") {
+  const item = make("div", "workspace-dashboard-metric");
+  item.append(make("span", "workspace-dashboard-metric-label", label), make("strong", undefined, value || "—"));
+  if (detail) item.append(make("span", "workspace-dashboard-metric-detail", detail));
+  return item;
+}
+
+function dashboardAction(label, handler, className = "") {
+  const button = make("button", `workspace-dashboard-action ${className}`.trim(), label);
+  button.type = "button";
+  button.addEventListener("click", handler);
+  return button;
+}
+
+function renderWorkspaceDashboard() {
+  const root = elements.workspaceDashboard;
+  if (!root) return;
+  const tab = activeTab();
+  const snapshot = contextUsageSnapshot();
+  const workspaceLabel = latestWorkspace?.displayCwd || (tab?.cwd ? normalizeDisplayPath(tab.cwd) : "Choose or create a tab to start");
+  const queueCount = Number(currentState?.pendingMessageCount || 0) || 0;
+  root.replaceChildren();
+
+  const header = make("div", "workspace-dashboard-header");
+  const title = make("div", "workspace-dashboard-title");
+  title.append(make("span", "workspace-dashboard-kicker", "Workspace"), make("h2", undefined, tab?.title || "Pi Web UI"), make("p", "muted", workspaceLabel));
+  const actions = make("div", "workspace-dashboard-actions");
+  actions.append(
+    dashboardAction("Command palette", () => openCommandPalette(), "primary"),
+    dashboardAction("New tab", () => createTerminalTab()),
+    dashboardAction("Resume", () => runNativeCommandMenu("/resume")),
+    dashboardAction("Model", () => runNativeCommandMenu("/model")),
+    dashboardAction("Settings", () => runNativeCommandMenu("/settings")),
+  );
+  header.append(title, actions);
+
+  const metrics = make("div", "workspace-dashboard-metrics");
+  metrics.append(
+    dashboardMetric("Model", currentState?.model ? shortModelLabel(currentState.model) : "loading…", currentState?.thinkingLevel ? `thinking ${currentState.thinkingLevel}` : ""),
+    dashboardMetric("Context", contextUsageDisplay(snapshot), contextUsageDetail(snapshot)),
+    dashboardMetric("Session", currentState?.sessionName || currentState?.sessionId || "loading…", currentState?.sessionFile || "in-memory"),
+    dashboardMetric("Queue", `${queueCount}`, queueCount === 1 ? "pending message" : "pending messages"),
+  );
+
+  const tabsPanel = make("div", "workspace-dashboard-tabs");
+  tabsPanel.append(make("span", "workspace-dashboard-tabs-title", `Open tabs (${tabs.length})`));
+  const tabList = make("div", "workspace-dashboard-tab-list");
+  for (const item of tabs.slice(0, 8)) {
+    const indicator = tabIndicator(item);
+    const button = make("button", `workspace-dashboard-tab activity-${indicator.state}${item.id === activeTabId ? " active" : ""}`);
+    button.type = "button";
+    button.title = `${item.title} · ${indicator.label}`;
+    button.append(make("span", "workspace-dashboard-tab-dot", indicator.glyph), make("span", undefined, item.title));
+    button.addEventListener("click", () => switchTab(item.id));
+    tabList.append(button);
+  }
+  if (tabs.length > 8) tabList.append(make("span", "workspace-dashboard-tab-more", `+${tabs.length - 8} more`));
+  tabsPanel.append(tabList);
+
+  root.append(header, metrics, tabsPanel);
+}
+
 function setFooterModelPickerOpen(open) {
   footerModelPickerOpen = !!open;
   if (footerModelPickerOpen) {
@@ -6894,6 +7293,8 @@ function renderStatus() {
   elements.compactButton.textContent = state?.isCompacting ? "Compacting…" : "Compact";
   syncModelSelectToState();
   renderFooter();
+  renderContextMeter();
+  renderWorkspaceDashboard();
   renderFeedbackTray();
 }
 
@@ -8627,6 +9028,7 @@ function renderGitInitStackInput() {
 function renderGitWorkflowManualCommitInput() {
   const tabId = gitWorkflowActionTabId();
   const workflow = gitWorkflowForTab(tabId, { create: false }) || gitWorkflow;
+  const defaultCommitMessage = String(workflow?.manualCommitMessageDefault || "").trim();
   const row = make("div", "git-workflow-message-input-row");
   const field = make("label", "git-workflow-message-input-field");
   field.setAttribute("for", "gitWorkflowManualCommitMessage");
@@ -8636,7 +9038,7 @@ function renderGitWorkflowManualCommitInput() {
   input.id = "gitWorkflowManualCommitMessage";
   input.type = "text";
   input.value = workflow?.manualCommitMessage || "";
-  input.placeholder = "Type a commit message to use instead of short/long";
+  input.placeholder = defaultCommitMessage || "Type a commit message to use instead of short/long";
   input.autocomplete = "off";
   input.spellcheck = true;
 
@@ -8644,7 +9046,10 @@ function renderGitWorkflowManualCommitInput() {
   commitButton.type = "button";
   const updateCommitState = () => {
     const currentWorkflow = gitWorkflowForTab(tabId, { create: false });
-    commitButton.disabled = !currentWorkflow || !!currentWorkflow.busy || !input.value.trim();
+    const message = String(input.value || "").trim() || String(currentWorkflow?.manualCommitMessageDefault || "").trim();
+    commitButton.disabled = !currentWorkflow || !!currentWorkflow.busy || !message;
+    if (message && !String(input.value || "").trim()) commitButton.title = `Use default commit message: ${message}`;
+    else commitButton.removeAttribute("title");
   };
   input.addEventListener("input", () => {
     const currentWorkflow = gitWorkflowForTab(tabId, { create: false });
@@ -8662,6 +9067,7 @@ function renderGitWorkflowManualCommitInput() {
     commitGitWorkflow("input", tabId);
   });
   updateCommitState();
+  loadGitWorkflowDefaultCommitMessage({ runId: workflow?.runId, tabId });
 
   field.append(input);
   row.append(field, commitButton);
@@ -8767,6 +9173,7 @@ function selectGitInitWorkflowProcess(processValue, tabId, workflow) {
     initFilesStatus: null,
     message: null,
     manualCommitMessage: "",
+    ...resetGitWorkflowManualCommitDefaultPatch(),
     messageRequestedAt: 0,
     branchName: "",
     branchNameRequestedAt: 0,
@@ -8813,7 +9220,7 @@ function selectGitWorkflowProcess(processValue, tabId = gitWorkflowActionTabId()
   const process = GIT_WORKFLOW_PROCESS_VALUES.has(processValue) ? processValue : "stage";
   workflow.runId += 1;
   const runId = workflow.runId;
-  const base = { mode: "standard", active: true, process, busy: false, error: "", githubUsername: "", repoName: "", remoteUrl: "", stack: "", readmeRequestedAt: 0, gitignoreRequestedAt: 0, initFilesStatus: null, manualCommitMessage: "", messageRequestedAt: 0, branchName: "", branchNameRequestedAt: 0, prMode: false, prBranch: "", pr: null, prRequestedAt: 0 };
+  const base = { mode: "standard", active: true, process, busy: false, error: "", githubUsername: "", repoName: "", remoteUrl: "", stack: "", readmeRequestedAt: 0, gitignoreRequestedAt: 0, initFilesStatus: null, manualCommitMessage: "", ...resetGitWorkflowManualCommitDefaultPatch(), messageRequestedAt: 0, branchName: "", branchNameRequestedAt: 0, prMode: false, prBranch: "", pr: null, prRequestedAt: 0 };
 
   if (process === "stage") {
     setGitWorkflow({ ...base, step: "add", message: null, output: "Ready to stage all changes with git add ." }, { tabId });
@@ -9103,6 +9510,7 @@ function startGitWorkflow(tabId = activeTabId) {
     initFilesStatus: null,
     message: null,
     manualCommitMessage: "",
+    ...resetGitWorkflowManualCommitDefaultPatch(),
     messageRequestedAt: 0,
     branchName: "",
     branchNameRequestedAt: 0,
@@ -9142,6 +9550,7 @@ function startGitInitWorkflow(tabId = activeTabId) {
     initFilesStatus: null,
     message: null,
     manualCommitMessage: "",
+    ...resetGitWorkflowManualCommitDefaultPatch(),
     messageRequestedAt: 0,
     branchName: "",
     branchNameRequestedAt: 0,
@@ -9432,14 +9841,44 @@ async function runGitAdd(tabId = gitWorkflowActionTabId()) {
   const workflow = gitWorkflowForTab(tabId, { create: false });
   if (!workflow) return;
   const runId = workflow.runId;
-  setGitWorkflow({ step: "add", busy: true, error: "", output: "Running git add ." }, { tabId });
+  setGitWorkflow({ step: "add", busy: true, error: "", ...resetGitWorkflowManualCommitDefaultPatch(), output: "Running git add ." }, { tabId });
   try {
     const result = await gitWorkflowRequest("/api/git-workflow/add", { runId, tabId });
     if (!result) return;
-    setGitWorkflow({ step: "generate", busy: false, ...gitWorkflowActionDonePatch(workflow, "stage"), output: `${formatGitCommandResult(result)}\n\nStaged. Next: run /git-staged-msg.` }, { tabId });
+    setGitWorkflow({ step: "generate", busy: false, ...resetGitWorkflowManualCommitDefaultPatch(), ...gitWorkflowActionDonePatch(workflow, "stage"), output: `${formatGitCommandResult(result)}\n\nStaged. Next: run /git-staged-msg.` }, { tabId });
     if (isCurrentTabContext(tabContext)) scheduleRefreshFooter();
   } catch (error) {
     if (isCurrentGitWorkflowRun(runId, tabId)) failGitWorkflow(error, "add", { tabId });
+  }
+}
+
+async function loadGitWorkflowDefaultCommitMessage({ runId, tabId = activeTabId } = {}) {
+  const workflow = gitWorkflowForTab(tabId, { create: false });
+  const expectedRunId = runId ?? workflow?.runId;
+  if (!workflow || workflow.manualCommitMessageDefaultLoading || workflow.manualCommitMessageDefaultRequestedAt) return;
+  workflow.manualCommitMessageDefaultLoading = true;
+  workflow.manualCommitMessageDefaultRequestedAt = Date.now();
+  try {
+    const data = await gitWorkflowRequest("/api/git-workflow/default-commit-message", { method: "GET", runId: expectedRunId, tabId });
+    const currentWorkflow = gitWorkflowForTab(tabId, { create: false });
+    if (!data || !currentWorkflow || !isCurrentGitWorkflowRun(expectedRunId, tabId)) return;
+    setGitWorkflow({
+      manualCommitMessageDefault: String(data.message || "").trim(),
+      manualCommitMessageDefaultReason: String(data.reason || ""),
+      manualCommitMessageDefaultPath: String(data.path || ""),
+      manualCommitMessageDefaultAction: String(data.action || ""),
+      manualCommitMessageDefaultLoading: false,
+    }, { tabId });
+  } catch (error) {
+    const currentWorkflow = gitWorkflowForTab(tabId, { create: false });
+    if (!currentWorkflow || !isCurrentGitWorkflowRun(expectedRunId, tabId)) return;
+    setGitWorkflow({
+      manualCommitMessageDefault: "",
+      manualCommitMessageDefaultReason: error?.message || String(error),
+      manualCommitMessageDefaultPath: "",
+      manualCommitMessageDefaultAction: "",
+      manualCommitMessageDefaultLoading: false,
+    }, { tabId });
   }
 }
 
@@ -9644,9 +10083,9 @@ async function commitGitWorkflow(variant, tabId = gitWorkflowActionTabId()) {
   if (!workflow) return;
   const runId = workflow.runId;
   const failureStep = variant === "input" && workflow.step === "generate" ? "generate" : "message";
-  const inputMessage = variant === "input" ? String(workflow.manualCommitMessage || "").trim() : "";
+  const inputMessage = variant === "input" ? gitWorkflowManualCommitInputMessage(workflow) : "";
   if (variant === "input" && !inputMessage) {
-    failGitWorkflow(new Error("Type a commit message before using Commit input."), failureStep, { tabId });
+    failGitWorkflow(new Error("Type a commit message, or stage exactly one created/updated/deleted file to use the default."), failureStep, { tabId });
     return;
   }
   const preview = variant === "input" ? formatInputCommitMessagePreview(inputMessage) : formatCommitMessagePreview(workflow.message);
@@ -12012,6 +12451,7 @@ function appendMessage(message, { streaming = false, messageIndex = -1, transien
     bubble.append(header, body);
   }
   attachMessageCopyButton(bubble, message, body);
+  attachMessageEditRetryButton(bubble, message, messageIndex, { streaming, transient });
   if (!streaming && !transient) renderActionFeedbackControls(bubble, message, messageIndex);
   appendChatMessageBubble(bubble);
   return { bubble, body };
@@ -14318,6 +14758,8 @@ async function refreshStats(tabContext = activeTabContext()) {
   if (!isCurrentTabContext(tabContext)) return;
   latestStats = response.data || null;
   renderFooter();
+  renderContextMeter();
+  renderWorkspaceDashboard();
 }
 
 async function refreshWorkspace(tabContext = activeTabContext()) {
@@ -14343,6 +14785,7 @@ async function refreshWorkspace(tabContext = activeTabContext()) {
   latestWorkspace = nextWorkspace;
   rememberServerStartCwd(nextWorkspace?.cwd);
   renderFooter();
+  renderWorkspaceDashboard();
 }
 
 function renderNetworkStatus() {
@@ -14503,6 +14946,7 @@ async function refreshModels(tabContext = activeTabContext()) {
   syncModelSelectToState();
   renderFooter();
   renderFeedbackTray();
+  if (elements.commandPaletteDialog?.open) renderCommandPalette();
 }
 
 function syncModelSelectToState() {
@@ -14979,6 +15423,162 @@ async function refreshCommands(tabContext = activeTabContext()) {
   availableCommands = normalizeCommands(response.data?.commands || []);
   updateOptionalFeatureAvailability();
   renderCommands();
+  if (elements.commandPaletteDialog?.open) renderCommandPalette();
+}
+
+function paletteText(value) {
+  return String(value || "").toLowerCase();
+}
+
+function paletteItemMatches(item, query) {
+  const text = [item.label, item.description, item.kind, item.keywords].map(paletteText).join(" ");
+  return query.split(/\s+/).filter(Boolean).every((token) => text.includes(token));
+}
+
+function commandPaletteCoreItems() {
+  const items = [
+    { kind: "Action", label: "New tab", description: "Start an isolated Pi terminal in the current directory", keywords: "workspace session", run: () => createTerminalTab() },
+    { kind: "Action", label: "Choose directory for new tab", description: "Pick a cwd before starting a tab", keywords: "cwd folder workspace", run: () => createTerminalTabFromChosenDirectory({ triggerButton: elements.commandPaletteButton }) },
+    { kind: "Action", label: "New session", description: "Start a fresh session in the active tab", keywords: "/new clear", run: () => elements.newSessionButton.click() },
+    { kind: "Action", label: "Compact context", description: contextUsageDetail(), keywords: "/compact context window tokens", run: () => requestManualCompaction() },
+    { kind: "Action", label: footerAutoCompactionEnabled() ? "Disable auto-compaction" : "Enable auto-compaction", description: footerAutoCompactionToggleAction(), keywords: "context automatic", run: () => toggleFooterAutoCompaction() },
+    { kind: "Action", label: workspaceDashboardCollapsed ? "Show workspace dashboard" : "Hide workspace dashboard", description: "Toggle the launch/workspace overview", keywords: "home overview", run: () => setWorkspaceDashboardCollapsed(!workspaceDashboardCollapsed) },
+    { kind: "Action", label: document.body.classList.contains("side-panel-collapsed") ? "Show side panel" : "Hide side panel", description: "Toggle the Control Deck", keywords: "controls settings", run: () => setSidePanelCollapsed(!document.body.classList.contains("side-panel-collapsed"), { focusPanel: true }) },
+    { kind: "Action", label: "Change working directory", description: "Restart active tab in another cwd", keywords: "cwd folder workspace", run: () => changeActiveTabCwd() },
+    { kind: "Action", label: "Search transcript", description: "Open transcript search", keywords: "find", run: () => openChatSearch() },
+    { kind: "Pi", label: "/model", description: "Select the active model", keywords: "provider llm", run: () => runNativeCommandMenu("/model") },
+    { kind: "Pi", label: "/resume", description: "Resume a previous session", keywords: "sessions history", run: () => runNativeCommandMenu("/resume") },
+    { kind: "Pi", label: "/fork", description: "Fork from a previous user message", keywords: "branch edit retry", run: () => runNativeCommandMenu("/fork") },
+    { kind: "Pi", label: "/tree", description: "Navigate the session tree", keywords: "branch history", run: () => runNativeCommandMenu("/tree") },
+    { kind: "Pi", label: "/settings", description: "Open settings", keywords: "configuration", run: () => runNativeCommandMenu("/settings") },
+    { kind: "Pi", label: "/scoped-models", description: "Manage model cycling scope", keywords: "models cycle ctrl p", run: () => runNativeCommandMenu("/scoped-models") },
+    { kind: "Pi", label: "/tools", description: "Manage active tools", keywords: "capabilities", run: () => runNativeCommandMenu("/tools") },
+    { kind: "Pi", label: "/skills", description: "Manage active skills", keywords: "system prompt", run: () => runNativeCommandMenu("/skills") },
+  ];
+  if (isOptionalFeatureEnabled("statsCommand")) items.push({ kind: "Pi", label: "/stats-webui", description: "Open usage dashboard", keywords: "tokens cost budget", run: () => openStatsOverlay({ refresh: true }) });
+  return items;
+}
+
+function commandPaletteTabItems() {
+  return tabs.map((tab) => {
+    const indicator = tabIndicator(tab);
+    return {
+      kind: "Tab",
+      label: tab.id === activeTabId ? `Current tab: ${tab.title}` : `Switch to tab: ${tab.title}`,
+      description: `${indicator.label} · ${normalizeDisplayPath(tab.cwd || "")}`,
+      keywords: `${tab.id} ${tab.cwd || ""}`,
+      run: () => switchTab(tab.id),
+    };
+  });
+}
+
+function commandPaletteModelItems() {
+  return availableModels.map((model) => ({
+    kind: "Model",
+    label: `${model.provider}/${model.id}`,
+    description: model.name || (model.contextWindow ? `context ${formatFooterTokenCount(model.contextWindow)}` : "Set active model"),
+    keywords: `${model.provider} ${model.id} ${model.name || ""}`,
+    run: async () => {
+      const tabContext = activeTabContext();
+      const response = await api("/api/model", { method: "POST", body: { provider: model.provider, modelId: model.id }, tabId: tabContext.tabId });
+      if (!isCurrentTabContext(tabContext)) return;
+      applyOptimisticModelSelection(response.data || model, tabContext);
+      await refreshState(tabContext);
+      await refreshModels(tabContext);
+    },
+  }));
+}
+
+function commandPaletteSlashItems() {
+  return visibleCommands().slice(0, 140).map((command) => ({
+    kind: command.source || "Command",
+    label: `/${command.name}`,
+    description: command.description || "Run slash command",
+    keywords: `${command.location || ""} ${command.path || ""}`,
+    run: () => sendPrompt("prompt", `/${command.name}`),
+  }));
+}
+
+function buildCommandPaletteItems() {
+  return [
+    ...commandPaletteCoreItems(),
+    ...commandPaletteTabItems(),
+    ...commandPaletteModelItems(),
+    ...commandPaletteSlashItems(),
+  ];
+}
+
+function filteredCommandPaletteItems() {
+  const query = paletteText(elements.commandPaletteInput?.value || "").trim();
+  const items = buildCommandPaletteItems();
+  return (query ? items.filter((item) => paletteItemMatches(item, query)) : items).slice(0, 80);
+}
+
+function setCommandPaletteIndex(index) {
+  const count = commandPaletteItems.length;
+  commandPaletteIndex = count ? (index + count) % count : 0;
+  renderCommandPaletteList();
+}
+
+function renderCommandPaletteList() {
+  const list = elements.commandPaletteList;
+  if (!list) return;
+  list.replaceChildren();
+  if (!commandPaletteItems.length) {
+    list.append(make("div", "command-palette-empty muted", "No matching actions."));
+    return;
+  }
+  commandPaletteItems.forEach((item, index) => {
+    const button = make("button", `command-palette-item${index === commandPaletteIndex ? " active" : ""}`);
+    button.type = "button";
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", index === commandPaletteIndex ? "true" : "false");
+    button.addEventListener("click", () => executeCommandPaletteItem(item));
+    button.append(
+      make("span", "command-palette-item-kind", item.kind || "Action"),
+      make("span", "command-palette-item-label", item.label || "Untitled action"),
+      make("span", "command-palette-item-description", item.description || ""),
+    );
+    list.append(button);
+  });
+  const active = list.children[commandPaletteIndex];
+  active?.scrollIntoView({ block: "nearest" });
+}
+
+function renderCommandPalette() {
+  commandPaletteItems = filteredCommandPaletteItems();
+  if (commandPaletteIndex >= commandPaletteItems.length) commandPaletteIndex = 0;
+  renderCommandPaletteList();
+}
+
+function openCommandPalette(initialQuery = "") {
+  setComposerActionsOpen(false);
+  setPublishMenuOpen(false);
+  setNativeCommandMenuOpen(false);
+  setAppRunnerMenuOpen(false);
+  setOptionsMenuOpen(false);
+  if (elements.commandPaletteInput) elements.commandPaletteInput.value = initialQuery;
+  commandPaletteIndex = 0;
+  renderCommandPalette();
+  if (!elements.commandPaletteDialog.open) elements.commandPaletteDialog.showModal();
+  queueMicrotask(() => {
+    elements.commandPaletteInput?.focus();
+    elements.commandPaletteInput?.select();
+  });
+}
+
+function closeCommandPalette() {
+  if (elements.commandPaletteDialog?.open) elements.commandPaletteDialog.close();
+}
+
+async function executeCommandPaletteItem(item = commandPaletteItems[commandPaletteIndex]) {
+  if (!item) return;
+  closeCommandPalette();
+  try {
+    await item.run?.();
+  } catch (error) {
+    addEvent(error.message || String(error), "error");
+  }
 }
 
 async function refreshAll(tabContext = activeTabContext()) {
@@ -16116,6 +16716,8 @@ elements.newTabMenu?.addEventListener("focusout", () => {
 elements.newTabCurrentDirectoryButton?.addEventListener("click", () => createTerminalTab(currentDirectoryForNewTab(), { triggerButton: elements.newTabCurrentDirectoryButton }));
 elements.newTabChooseDirectoryButton?.addEventListener("click", () => createTerminalTabFromChosenDirectory({ triggerButton: elements.newTabChooseDirectoryButton }));
 elements.closeAllTabsButton.addEventListener("click", () => closeAllTerminalTabs());
+elements.commandPaletteButton?.addEventListener("click", () => openCommandPalette());
+elements.workspaceDashboardToggleButton?.addEventListener("click", () => setWorkspaceDashboardCollapsed(!workspaceDashboardCollapsed));
 elements.gitWorkflowButton.addEventListener("click", () => {
   setComposerActionsOpen(false);
   startGitWorkflow();
@@ -16241,6 +16843,7 @@ elements.releaseNpmButton.addEventListener("click", () => runPublishWorkflow("/r
 elements.releaseAurButton.addEventListener("click", () => runPublishWorkflow("/release-aur"));
 elements.nativeSkillsButton.addEventListener("click", () => runNativeCommandMenu("/skills"));
 elements.nativeToolsButton.addEventListener("click", () => runNativeCommandMenu("/tools"));
+elements.optionsCommandPaletteButton.addEventListener("click", () => openCommandPalette());
 elements.optionsResumeButton.addEventListener("click", () => runNativeCommandMenu("/resume"));
 elements.optionsReloadButton.addEventListener("click", () => runNativeCommandMenu("/reload"));
 elements.optionsNameButton.addEventListener("click", () => runNativeCommandMenu("/name"));
@@ -16298,6 +16901,42 @@ elements.nativeCommandDialog.addEventListener("close", () => {
   elements.nativeCommandSearch.oninput = null;
   nativeCommandTabId = null;
 });
+elements.commandPaletteDialog?.querySelector("form")?.addEventListener("submit", (event) => event.preventDefault());
+elements.commandPaletteDialog?.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeCommandPalette();
+});
+elements.commandPaletteInput?.addEventListener("input", () => {
+  commandPaletteIndex = 0;
+  renderCommandPalette();
+});
+elements.commandPaletteInput?.addEventListener("keydown", (event) => {
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    setCommandPaletteIndex(commandPaletteIndex + 1);
+  } else if (event.key === "ArrowUp") {
+    event.preventDefault();
+    setCommandPaletteIndex(commandPaletteIndex - 1);
+  } else if (event.key === "Enter") {
+    event.preventDefault();
+    executeCommandPaletteItem();
+  } else if (event.key === "Escape") {
+    event.preventDefault();
+    closeCommandPalette();
+  }
+});
+elements.editRetryDialog?.querySelector("form")?.addEventListener("submit", (event) => event.preventDefault());
+elements.editRetryDialog?.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeEditRetryDialog();
+});
+elements.editRetryDialog?.addEventListener("close", () => {
+  activeEditRetry = null;
+  setEditRetryBusy(false);
+});
+elements.editRetryCancelButton?.addEventListener("click", closeEditRetryDialog);
+elements.editRetryForkButton?.addEventListener("click", () => submitEditRetry({ send: false }));
+elements.editRetrySendButton?.addEventListener("click", () => submitEditRetry({ send: true }));
 
 function resetAbortLongPressAffordance() {
   clearTimeout(abortLongPressTimer);
@@ -16383,33 +17022,7 @@ elements.newSessionButton.addEventListener("click", async () => {
 });
 elements.compactButton.addEventListener("click", async () => {
   setComposerActionsOpen(false);
-  const tabContext = activeTabContext();
-  try {
-    elements.compactButton.disabled = true;
-    elements.compactButton.textContent = "Compacting…";
-    setRunIndicatorActivity("Requesting context compaction…");
-    scrollChatToBottom({ force: true });
-    markContextUsageUnknownAfterCompaction(tabContext.tabId);
-    renderFooter();
-    addEvent("manual compaction requested");
-    await api("/api/compact", { method: "POST", body: {}, tabId: tabContext.tabId });
-    if (!isCurrentTabContext(tabContext)) return;
-    scheduleRefreshState(120, tabContext);
-    scheduleRefreshMessages(600, tabContext);
-    scheduleRefreshFooter(600, tabContext);
-  } catch (error) {
-    if (isCurrentTabContext(tabContext)) {
-      clearContextUsageUnknownAfterCompaction(tabContext.tabId);
-      clearRunIndicatorActivity();
-      renderFooter();
-      addEvent(error.message, "error");
-    }
-  } finally {
-    if (isCurrentTabContext(tabContext)) {
-      elements.compactButton.disabled = !!currentState?.isCompacting;
-      elements.compactButton.textContent = currentState?.isCompacting ? "Compacting…" : "Compact";
-    }
-  }
+  await requestManualCompaction({ triggerButton: elements.compactButton });
 });
 elements.setModelButton.addEventListener("click", async () => {
   if (!elements.modelSelect.value) return;
@@ -16554,7 +17167,7 @@ function isTextEntryTarget(target) {
 
 function shouldHandleNativeAppShortcut(event) {
   if (event.defaultPrevented) return false;
-  if (elements.dialog?.open || elements.pathPickerDialog?.open || elements.gitChangesDialog?.open || elements.nativeCommandDialog?.open || elements.appRunnerInfoDialog?.open) return false;
+  if (elements.dialog?.open || elements.pathPickerDialog?.open || elements.gitChangesDialog?.open || elements.commandPaletteDialog?.open || elements.editRetryDialog?.open || elements.nativeCommandDialog?.open || elements.appRunnerInfoDialog?.open) return false;
   return event.target === elements.promptInput || !isTextEntryTarget(event.target);
 }
 
@@ -16564,6 +17177,11 @@ function handleNativeAppShortcut(event) {
   const lowerKey = String(key || "").toLowerCase();
   const ctrlOrMeta = event.ctrlKey || event.metaKey;
 
+  if (ctrlOrMeta && !event.altKey && !event.shiftKey && lowerKey === "k") {
+    event.preventDefault();
+    openCommandPalette();
+    return;
+  }
   if (ctrlOrMeta && !event.altKey && lowerKey === "l") {
     event.preventDefault();
     openNativeModelSelector();
@@ -16725,7 +17343,7 @@ window.addEventListener("focus", () => scheduleForegroundReconcile("window focus
 window.addEventListener("online", () => scheduleForegroundReconcile("network online", 0));
 window.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
-  if (elements.dialog?.open || elements.pathPickerDialog?.open || elements.gitChangesDialog?.open) return;
+  if (elements.dialog?.open || elements.pathPickerDialog?.open || elements.gitChangesDialog?.open || elements.commandPaletteDialog?.open || elements.editRetryDialog?.open) return;
   if (publishMenuOpen) {
     setPublishMenuOpen(false);
     return;
@@ -16933,6 +17551,7 @@ restoreAgentDoneNotificationsSetting();
 restoreThinkingVisibilitySetting();
 restoreTerminalTabsLayoutSetting();
 restoreToolOutputExpansionSetting();
+restoreWorkspaceDashboardState();
 restoreSidePanelSectionState();
 bindSidePanelSectionToggles();
 restoreSidePanelState();
