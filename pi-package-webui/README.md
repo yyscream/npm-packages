@@ -138,7 +138,8 @@ Useful browser endpoints exposed by the local server include:
 
 - `GET /api/path-suggestions?tab=<tabId>&query=<path>` for `@` file/path references with live suggestions.
 - `POST /api/action-feedback?tab=<tabId>` for feedback on final assistant output and action cards.
-- `POST /api/optional-feature-install` for installing known optional companion packages from the side panel.
+- `GET /api/optional-features` for optional companion package install/update status.
+- `POST /api/optional-feature-install` for installing or updating known optional companion packages from the side panel.
 - `GET /api/update-status` and localhost-only `POST /api/update` for checking Pi/Web UI updates and running `pi update` plus all detected local/global Web UI and Pi package-manager updates followed by a Web UI server restart.
 
 For local development, run the checkout helper directly, for example:
@@ -151,9 +152,9 @@ Run `../dev/scripts/sync-pi-package-symlinks.sh` first when developing companion
 
 ## Optional companion packages
 
-A normal Pi/npm install includes the optional companion packages unless optional dependencies are disabled. Each Web UI tab curates Pi resources from the Web UI package that started the server, while preserving unrelated user/project resources; separately installed Web UI companion packages are ignored to avoid loading two copies. Startup checks loaded Pi capabilities directly through RPC-visible commands and live widget events, then the side panel shows each optional feature as enabled, disabled, or install-needed. Installing a missing feature is an explicit, warned action; it is localhost-only, limited to known packages, and requires reloading the active Pi tab after installation.
+A normal Pi/npm install includes the optional companion packages unless optional dependencies are disabled. Each Web UI tab curates Pi resources from the Web UI package that started the server, while preserving unrelated user/project resources. Companion packages installed as global/npm-prefix siblings of the started Web UI package are reused when the Web UI package does not have its own nested optional dependency copy, avoiding duplicate loads while keeping global `pi-webui` launches working. Startup checks loaded Pi capabilities directly through RPC-visible commands and live widget events, then the side panel shows each optional feature as enabled, disabled, installed-but-not-loaded, update-available, or install-needed. Installing or updating a feature is an explicit, warned action with running/failure feedback in the row and activity log; it is localhost-only, limited to known packages, and requires reloading the active Pi tab after installation.
 
-When the standalone global `pi-webui` launcher is used, optional companion installs should target the Pi agent npm root instead of the global npm prefix. Override the target explicitly with `PI_WEBUI_OPTIONAL_FEATURE_INSTALL_ROOT=/path/to/package-root` when needed.
+When the standalone global `pi-webui` launcher is used, optional companion installs target the npm prefix containing the Web UI package when that prefix is safe, otherwise the Pi agent npm root if it contains Web UI. Override the target explicitly with `PI_WEBUI_OPTIONAL_FEATURE_INSTALL_ROOT=/path/to/package-root` when needed.
 
 Optional companions:
 

@@ -933,6 +933,10 @@ async function installRootDeclaresPackage(root, packageName) {
   return declaredDependencySpec(pkg, packageName) !== undefined;
 }
 
+async function installRootContainsPackage(root, packageName) {
+  return directoryExists(packageNodeModulesPath(path.join(root, "node_modules"), packageName));
+}
+
 function configuredAgentNpmRoot() {
   const root = process.env.PI_CODING_AGENT_DIR ? path.resolve(expandUserPath(process.env.PI_CODING_AGENT_DIR)) : agentDir;
   return path.join(root, "npm");
@@ -943,10 +947,10 @@ async function optionalDependencyInstallRoot() {
   if (configuredRoot) return path.resolve(expandUserPath(configuredRoot));
 
   const installRoot = nodeModulesParentForPackageRoot(packageRoot);
-  if (await installRootDeclaresPackage(installRoot, "@firstpick/pi-package-webui")) return installRoot;
+  if (await installRootDeclaresPackage(installRoot, "@firstpick/pi-package-webui") || await installRootContainsPackage(installRoot, "@firstpick/pi-package-webui")) return installRoot;
 
   const agentNpmRoot = configuredAgentNpmRoot();
-  if (installRoot !== agentNpmRoot && await installRootDeclaresPackage(agentNpmRoot, "@firstpick/pi-package-webui")) return agentNpmRoot;
+  if (installRoot !== agentNpmRoot && (await installRootDeclaresPackage(agentNpmRoot, "@firstpick/pi-package-webui") || await installRootContainsPackage(agentNpmRoot, "@firstpick/pi-package-webui"))) return agentNpmRoot;
 
   if (webuiDevServer) return installRoot;
 
@@ -956,13 +960,102 @@ async function optionalDependencyInstallRoot() {
   );
 }
 
+function minimumPackageVersionFromSpec(spec) {
+  const match = String(spec || "").match(/\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?/);
+  return match?.[0] || "";
+}
+
+function packageVersionBelowSpec(currentVersion, spec) {
+  const minimum = minimumPackageVersionFromSpec(spec);
+  return !!(currentVersion && minimum && isNewerPackageVersion(minimum, currentVersion));
+}
+
 function formatCommandForDisplay(command, args) {
   return [command, ...args].map((part) => (/\s/.test(part) ? JSON.stringify(part) : part)).join(" ");
 }
 
-async function installOptionalFeaturePackage(featureId) {
+let optionalPackageNodeModulesRootsCache = null;
+async function optionalPackageNodeModulesRoots() {
+  if (optionalPackageNodeModulesRootsCache) return optionalPackageNodeModulesRootsCache;
+  const roots = [];
+  const seen = new Set();
+  const add = (root) => {
+    if (!root) return;
+    const normalized = path.resolve(root);
+    if (seen.has(normalized)) return;
+    seen.add(normalized);
+    roots.push(normalized);
+  };
+  const configuredRoot = process.env[OPTIONAL_FEATURE_INSTALL_ROOT_ENV];
+  if (configuredRoot) add(path.join(path.resolve(expandUserPath(configuredRoot)), "node_modules"));
+  add(path.join(packageRoot, "node_modules"));
+  add(path.join(nodeModulesParentForPackageRoot(packageRoot), "node_modules"));
+  add(path.join(configuredAgentNpmRoot(), "node_modules"));
+  const npmGlobalRoot = await npmGlobalNodeModulesRoot();
+  if (npmGlobalRoot) add(npmGlobalRoot);
+  for (const bunRoot of await bunGlobalNodeModulesRoots()) add(bunRoot);
+  optionalPackageNodeModulesRootsCache = roots;
+  return roots;
+}
+
+async function optionalPackageCandidateRoots(packageName) {
+  return (await optionalPackageNodeModulesRoots()).map((root) => packageNodeModulesPath(root, packageName));
+}
+
+async function resolveInstalledPackageRoot(packageName) {
+  const workspaceRoot = await workspacePackageRootForName(packageName);
+  if (workspaceRoot) return workspaceRoot;
+  for (const candidate of await optionalPackageCandidateRoots(packageName)) {
+    if (await directoryExists(candidate)) return candidate;
+  }
+  return null;
+}
+
+async function resolveInstalledPackageSubpath(packageName, subpath = "") {
+  const root = await resolveInstalledPackageRoot(packageName);
+  if (!root) return null;
+  const candidate = path.join(root, subpath || "");
+  try {
+    await access(candidate);
+    return candidate;
+  } catch {
+    return null;
+  }
+}
+
+function optionalFeatureDeclaredSpec(packageName) {
+  return declaredDependencySpec(packageJson, packageName) || "";
+}
+
+async function optionalFeaturePackageStatus(featureId) {
   const packageName = OPTIONAL_FEATURE_PACKAGES.get(featureId);
   if (!packageName) throw makeHttpError(400, `Unknown optional feature: ${featureId}`);
+  const declaredSpec = optionalFeatureDeclaredSpec(packageName);
+  const installedRoot = await resolveInstalledPackageRoot(packageName);
+  const manifest = installedRoot ? await readJsonFileIfExists(path.join(installedRoot, "package.json")) : null;
+  const installedVersion = typeof manifest?.version === "string" ? manifest.version : "";
+  const updateAvailable = !!(installedVersion && packageVersionBelowSpec(installedVersion, declaredSpec));
+  return {
+    featureId,
+    packageName,
+    declaredSpec,
+    installed: !!installedRoot,
+    installedVersion,
+    installedRoot,
+    updateAvailable,
+    updateReason: updateAvailable ? `installed ${installedVersion} is older than Web UI expects (${declaredSpec})` : "",
+  };
+}
+
+async function optionalFeaturePackageStatuses() {
+  const features = [];
+  for (const featureId of OPTIONAL_FEATURE_PACKAGES.keys()) features.push(await optionalFeaturePackageStatus(featureId));
+  return { features };
+}
+
+async function installOptionalFeaturePackage(featureId) {
+  const beforeStatus = await optionalFeaturePackageStatus(featureId);
+  const packageName = beforeStatus.packageName;
 
   const installRoot = await optionalDependencyInstallRoot();
   const npmCommand = process.env.PI_WEBUI_NPM_BIN || "npm";
@@ -978,6 +1071,8 @@ async function installOptionalFeaturePackage(featureId) {
     const details = [result.error, result.timedOut ? "timed out" : undefined, result.stderr?.trim(), result.stdout?.trim()].filter(Boolean).join("\n");
     throw makeHttpError(500, `Optional feature install failed: ${command}${details ? `\n${details}` : ""}`);
   }
+  const afterStatus = await optionalFeaturePackageStatus(featureId);
+  const operation = beforeStatus.installed ? "Updated" : "Installed";
   return {
     featureId,
     packageName,
@@ -985,7 +1080,8 @@ async function installOptionalFeaturePackage(featureId) {
     command,
     stdout: result.stdout,
     stderr: result.stderr,
-    message: `Installed optional feature package ${packageName}. Reload the active Pi tab to load new resources.`,
+    status: afterStatus,
+    message: `${operation} optional feature package ${packageName}${afterStatus.installedVersion ? ` to ${afterStatus.installedVersion}` : ""}. Reload the active Pi tab to load new resources.`,
   };
 }
 
@@ -3917,16 +4013,8 @@ function parseNodeModulesPackageRef(manifestEntry) {
 async function resolveStartedWebuiManifestResource(manifestEntry) {
   const nodeModulesRef = parseNodeModulesPackageRef(manifestEntry);
   if (nodeModulesRef && WEBUI_CONTROLLED_PACKAGES.has(nodeModulesRef.packageName)) {
-    const workspaceRoot = await workspacePackageRootForName(nodeModulesRef.packageName);
-    if (workspaceRoot) {
-      const devCandidate = path.join(workspaceRoot, nodeModulesRef.subpath);
-      try {
-        await access(devCandidate);
-        return devCandidate;
-      } catch {
-        // Fall back to the started package's node_modules copy below.
-      }
-    }
+    const installedCandidate = await resolveInstalledPackageSubpath(nodeModulesRef.packageName, nodeModulesRef.subpath);
+    if (installedCandidate) return installedCandidate;
   }
 
   const candidate = path.resolve(packageRoot, manifestEntry);
@@ -6961,6 +7049,11 @@ const server = createServer(async (req, res) => {
       const tab = getRequestedTab(req, url, body);
       const response = await navigateSessionTree(tab, body);
       sendJson(res, response.success === false ? 400 : 200, responseWithTab(response, tab));
+      return;
+    }
+
+    if (url.pathname === "/api/optional-features" && req.method === "GET") {
+      sendJson(res, 200, { ok: true, data: await optionalFeaturePackageStatuses() });
       return;
     }
 
