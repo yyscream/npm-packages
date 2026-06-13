@@ -221,6 +221,7 @@ function parseSlashCommand(message) {
   return parseNativeSlashCommand(message, NATIVE_SLASH_COMMAND_NAMES);
 }
 const OPTIONAL_FEATURE_PACKAGES = new Map([
+  ["btwCommand", "@firstpick/pi-extension-btw"],
   ["gitWorkflow", "@firstpick/pi-prompts-git-pr"],
   ["releaseNpm", "@firstpick/pi-extension-release-npm"],
   ["releaseAur", "@firstpick/pi-extension-release-aur"],

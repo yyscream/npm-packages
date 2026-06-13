@@ -225,6 +225,13 @@ const elements = {
   statsOverlayTabs: $("#statsOverlayTabs"),
   statsOverlayBody: $("#statsOverlayBody"),
   statsOverlayCloseButton: $("#statsOverlayCloseButton"),
+  btwOverlayDialog: $("#btwOverlayDialog"),
+  btwOverlaySubtitle: $("#btwOverlaySubtitle"),
+  btwOverlayQuestion: $("#btwOverlayQuestion"),
+  btwOverlayAnswer: $("#btwOverlayAnswer"),
+  btwOverlayStatus: $("#btwOverlayStatus"),
+  btwOverlayCopyButton: $("#btwOverlayCopyButton"),
+  btwOverlayCloseButton: $("#btwOverlayCloseButton"),
 };
 
 let currentState = null;
@@ -301,6 +308,8 @@ let statsOverlayLastScope = "14";
 let statsOverlayCalibrationMessage = "";
 let statsOverlayCalibrationBusy = "";
 let latestStatsOverlayPayload = null;
+let latestBtwOverlayPayload = null;
+let btwOverlayDismissedId = "";
 let latestWorkspace = null;
 let latestNetwork = null;
 let webuiVersion = "";
@@ -423,6 +432,9 @@ const GIT_INIT_STACK_STORAGE_KEY = "pi-webui-git-init-stack";
 const STATS_WEBUI_STATUS_KEY = "stats-webui";
 const STATS_WEBUI_PAYLOAD_TYPE = "firstpick.pi-extension-stats.overlay";
 const STATS_WEBUI_PAYLOAD_VERSION = 1;
+const BTW_WEBUI_STATUS_KEY = "btw-webui";
+const BTW_WEBUI_PAYLOAD_TYPE = "firstpick.pi-extension-btw.overlay";
+const BTW_WEBUI_PAYLOAD_VERSION = 1;
 const GIT_CHANGES_RENDER_ROW_LIMIT = 4000;
 const LAST_USER_PROMPT_STORAGE_KEY = "pi-webui-last-user-prompts";
 const PROMPT_HISTORY_STORAGE_KEY = "pi-webui-prompt-history";
@@ -496,6 +508,7 @@ let liveToolRenderTimer = null;
 // commands and live widget events), not npm package folders. This keeps local dev
 // symlinks and independently installed packages working.
 const optionalFeatureAvailability = {
+  btwCommand: false,
   gitWorkflow: false,
   releaseNpm: false,
   releaseAur: false,
@@ -509,6 +522,13 @@ const optionalFeatureAvailability = {
   themeBundle: false,
 };
 const OPTIONAL_FEATURES = [
+  {
+    id: "btwCommand",
+    label: "/btw side questions",
+    packageName: "@firstpick/pi-extension-btw",
+    capabilityLabel: "/btw or btw-webui status event",
+    description: "Ephemeral side-question command with TUI and browser overlay rendering.",
+  },
   {
     id: "gitWorkflow",
     label: "Guided Git workflow",
@@ -589,6 +609,8 @@ const OPTIONAL_FEATURES = [
 ];
 const OPTIONAL_FEATURE_BY_ID = new Map(OPTIONAL_FEATURES.map((feature) => [feature.id, feature]));
 const OPTIONAL_COMMAND_FEATURES = new Map([
+  ["btw", "btwCommand"],
+  ["btw-status", "btwCommand"],
   ["git-staged-msg", "gitWorkflow"],
   ["git-branch-name", "gitWorkflow"],
   ["pr", "gitWorkflow"],
@@ -604,6 +626,7 @@ const OPTIONAL_COMMAND_FEATURES = new Map([
 ]);
 const HIDDEN_COMMAND_NAMES = new Set(["webui-tree-navigate", "webui-helper"]);
 HIDDEN_COMMAND_NAMES.add("stats-webui");
+HIDDEN_COMMAND_NAMES.add("btw-status");
 const NATIVE_SELECTOR_COMMANDS = new Set(["model", "settings", "theme", "fork", "clone", "name", "resume", "tree", "login", "logout", "scoped-models", "tools", "skills"]);
 const SETTINGS_THINKING_OPTIONS = ["off", "minimal", "low", "medium", "high", "xhigh"];
 const SETTINGS_TRANSPORT_OPTIONS = ["sse", "websocket", "websocket-cached", "auto"];
@@ -3493,6 +3516,7 @@ function renderOptionalFeatureDependentDisplays() {
   renderWidgets();
   renderStatus();
   renderCommands();
+  renderBtwOverlay();
   cancelStreamingAssistantTextRender();
   cancelStreamBubbleHide();
   streamBubble?.remove();
@@ -3510,6 +3534,11 @@ function setOptionalFeatureDisabled(featureId, disabled) {
   if (featureId === "gitFooterStatus") {
     statusEntries.delete(GIT_FOOTER_WEBUI_STATUS_KEY);
     clearGitFooterWebuiPayloadCache();
+  }
+  if (featureId === "btwCommand") {
+    statusEntries.delete(BTW_WEBUI_STATUS_KEY);
+    latestBtwOverlayPayload = null;
+    closeBtwOverlay();
   }
   storeDisabledOptionalFeatures();
   renderOptionalFeatureDependentDisplays();
@@ -4145,6 +4174,8 @@ function resetActiveTabUi() {
   currentState = null;
   latestStats = null;
   latestStatsOverlayPayload = null;
+  latestBtwOverlayPayload = null;
+  btwOverlayDismissedId = "";
   latestWorkspace = null;
   latestMessages = [];
   latestMessagesSessionKey = "";
@@ -8914,6 +8945,96 @@ function handleStatsWebuiStatus(statusText) {
   if (payload.open || elements.statsOverlayDialog?.open) renderStatsOverlay();
 }
 
+function parseBtwWebuiPayloadRaw(raw) {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed?.type !== BTW_WEBUI_PAYLOAD_TYPE || parsed.version !== BTW_WEBUI_PAYLOAD_VERSION) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function currentBtwOverlayPayload() {
+  if (isOptionalFeatureDisabled("btwCommand")) return null;
+  return parseBtwWebuiPayloadRaw(statusEntries.get(BTW_WEBUI_STATUS_KEY)) || latestBtwOverlayPayload;
+}
+
+function btwStatusLabel(payload) {
+  switch (payload?.status) {
+    case "done": return "Done";
+    case "error": return "Error";
+    case "aborted": return "Aborted";
+    case "streaming": return "Answering…";
+    default: return "Starting…";
+  }
+}
+
+function renderBtwOverlay() {
+  if (!elements.btwOverlayDialog) return;
+  const payload = currentBtwOverlayPayload();
+  if (!payload) {
+    if (elements.btwOverlayDialog.open) elements.btwOverlayDialog.close();
+    return;
+  }
+
+  const updated = payload.updatedAt ? new Date(payload.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "now";
+  elements.btwOverlaySubtitle.textContent = `${btwStatusLabel(payload)}${payload.model ? ` · ${payload.model}` : ""} · ${updated}`;
+  elements.btwOverlayQuestion.textContent = payload.question || "(no question)";
+  elements.btwOverlayAnswer.textContent = payload.error || payload.answer || (payload.status === "loading" ? "Starting side request…" : "Waiting for model output…");
+  elements.btwOverlayStatus.textContent = payload.status === "error"
+    ? "The side request failed. The main conversation was not changed."
+    : payload.status === "aborted"
+      ? "The side request was aborted. The main conversation was not changed."
+      : "Ephemeral answer: this /btw exchange is not appended to the main Pi transcript.";
+  elements.btwOverlayStatus.classList.toggle("error", payload.status === "error");
+  elements.btwOverlayStatus.classList.toggle("warn", payload.status === "aborted");
+  elements.btwOverlayDialog.classList.toggle("loading", payload.status === "loading" || payload.status === "streaming");
+}
+
+function openBtwOverlay(payload = currentBtwOverlayPayload()) {
+  if (!payload || !elements.btwOverlayDialog) return;
+  setComposerActionsOpen(false);
+  setPublishMenuOpen(false);
+  setNativeCommandMenuOpen(false);
+  setAppRunnerMenuOpen(false);
+  setOptionsMenuOpen(false);
+  if (!elements.btwOverlayDialog.open) elements.btwOverlayDialog.showModal();
+  renderBtwOverlay();
+}
+
+function closeBtwOverlay() {
+  const payload = currentBtwOverlayPayload();
+  if (payload?.id) btwOverlayDismissedId = payload.id;
+  elements.btwOverlayDialog?.close();
+}
+
+async function copyBtwOverlayAnswer() {
+  const payload = currentBtwOverlayPayload();
+  const answer = String(payload?.answer || payload?.error || "").trim();
+  if (!answer) return;
+  try {
+    await navigator.clipboard.writeText(answer);
+    elements.btwOverlayStatus.textContent = "Copied answer to clipboard.";
+    elements.btwOverlayStatus.classList.remove("error", "warn");
+  } catch (error) {
+    elements.btwOverlayStatus.textContent = `Copy failed: ${error.message || String(error)}`;
+    elements.btwOverlayStatus.classList.add("error");
+  }
+}
+
+function handleBtwWebuiStatus(statusText) {
+  const payload = parseBtwWebuiPayloadRaw(statusText);
+  if (!payload) {
+    if (elements.btwOverlayDialog?.open) renderBtwOverlay();
+    return;
+  }
+  latestBtwOverlayPayload = payload;
+  if (payload.id && payload.id !== btwOverlayDismissedId && payload.open !== false) openBtwOverlay(payload);
+  else if (elements.btwOverlayDialog?.open) renderBtwOverlay();
+}
+
 function remoteWebuiWidgetLines(lines = []) {
   return (Array.isArray(lines) ? lines : [])
     .map(stripAnsi)
@@ -13538,6 +13659,7 @@ function requestGitFooterWebuiPayload(tabContext = activeTabContext(), { force =
 }
 
 function updateOptionalFeatureAvailability() {
+  optionalFeatureAvailability.btwCommand = hasAvailableCommand("btw") || optionalFeatureAvailability.btwCommand || statusEntries.has(BTW_WEBUI_STATUS_KEY);
   optionalFeatureAvailability.gitWorkflow = hasAvailableCommand("git-staged-msg");
   optionalFeatureAvailability.releaseNpm = hasAvailableCommand("release-npm");
   optionalFeatureAvailability.releaseAur = hasAvailableCommand("release-aur");
@@ -16480,6 +16602,7 @@ function handleExtensionUiRequest(request) {
         statusEntries.delete(statusKey);
       }
       if (statusKey === STATS_WEBUI_STATUS_KEY) handleStatsWebuiStatus(request.statusText);
+      if (statusKey === BTW_WEBUI_STATUS_KEY) handleBtwWebuiStatus(request.statusText);
       updateOptionalFeatureAvailability();
       renderStatus();
       return;
@@ -16669,9 +16792,12 @@ function handleEvent(event) {
       clearContextUsageUnknownAfterCompaction(event.tabId || activeTabId);
       statusEntries.clear();
       widgets.clear();
+      latestBtwOverlayPayload = null;
+      btwOverlayDismissedId = "";
       resetOptionalFeatureAvailability();
       renderStatus();
       renderWidgets();
+      renderBtwOverlay();
       refreshTabs().catch((error) => addEvent(error.message, "error"));
       setTimeout(() => {
         if (!isCurrentTabContext(tabContext)) return;
@@ -17222,6 +17348,10 @@ elements.statsOverlayCustomDays?.addEventListener("keydown", (event) => {
 });
 elements.statsOverlayCloseButton?.addEventListener("click", () => elements.statsOverlayDialog?.close());
 elements.statsOverlayDialog?.querySelector("form")?.addEventListener("submit", (event) => event.preventDefault());
+elements.btwOverlayCloseButton?.addEventListener("click", () => closeBtwOverlay());
+elements.btwOverlayCopyButton?.addEventListener("click", () => copyBtwOverlayAnswer());
+elements.btwOverlayDialog?.querySelector("form")?.addEventListener("submit", (event) => event.preventDefault());
+elements.btwOverlayDialog?.addEventListener("cancel", () => closeBtwOverlay());
 elements.gitWorkflowSteps.addEventListener("click", (event) => {
   const target = event.target instanceof Element ? event.target : null;
   const button = target?.closest("[data-git-workflow-process]");

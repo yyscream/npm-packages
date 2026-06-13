@@ -24,6 +24,7 @@ const [pkgRaw, html, css, app, server, extension, readme, startScript, manifestR
 const pkg = JSON.parse(pkgRaw);
 const manifest = JSON.parse(manifestRaw);
 const companionDependencies = {
+  "@firstpick/pi-extension-btw": "^0.1.0",
   "@firstpick/pi-extension-git-footer-status": "^0.3.3",
   "@firstpick/pi-extension-release-aur": "^0.1.6",
   "@firstpick/pi-extension-release-npm": "^0.4.0",
@@ -72,6 +73,7 @@ assert.match(html, /id="pathPickerCreateButton"[^>]*>Create directory<\/button>/
 assert.match(html, /id="pathPickerSearchInput"[^>]*type="search"[^>]*placeholder="Search current directory…"/, "cwd picker should expose a current-directory search box");
 assert.match(html, /id="pathPickerClearSearchButton"[^>]*hidden[^>]*>Clear<\/button>/, "cwd picker should expose a clear-search action");
 assert.match(html, /id="optionalFeaturesBox"/, "side panel should expose optional feature status and controls");
+assert.match(html, /id="btwOverlayDialog"[\s\S]*id="btwOverlayAnswer"/, "/btw should expose a Web UI side-question overlay");
 assert.match(html, /id="codexUsageBox"/, "side panel should expose Codex subscription usage status");
 assert.match(html, /data-side-panel-section="codex-usage"/, "Codex usage should live in a collapsible side-panel section");
 assert.match(html, /data-side-panel-section="queue"[\s\S]*id="createPromptListButton"[\s\S]*>Create prompt list<\/button>/, "Queue section should expose prompt-list creation");
@@ -224,6 +226,7 @@ assert.match(css, /\.message\.toolResult \.message-collapse\[open\] > \.message-
 assert.match(css, /\.tool-output-details\[open\] > \.tool-output-code \{[\s\S]*?max-height:\s*min\(34rem, 52dvh\);[\s\S]*?overflow:\s*auto/, "expanded live tool output should get an internal scrollbar");
 assert.match(css, /\.run-indicator-pulse \{[\s\S]*?animation:\s*run-indicator-pulse/, "active agent run indicator should have an animated pulse");
 assert.match(css, /\.optional-features-box \{[\s\S]*?display:\s*grid/, "optional features should render as a side-panel feature list");
+assert.match(css, /\.extension-dialog\.btw-overlay-dialog \{[\s\S]*?\.btw-overlay-answer \{[\s\S]*?white-space:\s*pre-wrap/, "/btw overlay should render answer text in a scrollable readable panel");
 assert.match(css, /\.prompt-list-controls \{[\s\S]*?display:\s*grid/, "Queue prompt-list controls should render as a side-panel control group");
 assert.match(css, /\.prompt-list-dialog \{[\s\S]*?width:\s*min\(58rem/, "prompt-list editor dialog should have a wider prompt-friendly layout");
 assert.match(css, /\.prompt-list-editor-rows \{[\s\S]*?max-height:/, "prompt-list dialog should scroll long follow-up lists inside the editor");
@@ -602,6 +605,9 @@ assert.match(app, /api\("\/api\/optional-features"/, "optional feature panel sho
 assert.match(app, /packageStatus\?\.updateAvailable[\s\S]*action\.textContent = "Update…"/, "optional feature package drift should turn the install action into an update action");
 assert.match(app, /optionalFeatureInstallMessages\.set\(featureId[\s\S]*waiting for package-manager output/, "optional feature installs should show running feedback while npm is active");
 assert.match(app, /api\("\/api\/optional-feature-install"/, "optional feature install action should call the backend installer endpoint");
+assert.match(app, /id: "btwCommand"[\s\S]*?@firstpick\/pi-extension-btw/, "optional features should include the /btw companion");
+assert.match(app, /BTW_WEBUI_STATUS_KEY = "btw-webui"[\s\S]*function handleBtwWebuiStatus/, "Web UI should consume structured /btw status payloads");
+assert.match(app, /statusKey === BTW_WEBUI_STATUS_KEY\) handleBtwWebuiStatus/, "extension status bridge should route /btw payloads to the overlay");
 assert.match(app, /id: "safetyGuard"[\s\S]*?@firstpick\/pi-extension-safety-guard/, "optional features should include the safety guard companion");
 assert.match(app, /id: "tuiSkillsCommand"[\s\S]*?@firstpick\/pi-extension-setup-skills/, "optional features should include the TUI skills command companion");
 assert.match(app, /id: "tuiToolsCommand"[\s\S]*?@firstpick\/pi-extension-tools/, "optional features should include the TUI tools command companion");
@@ -1123,6 +1129,7 @@ assert.match(server, /type: "set_follow_up_mode"/, "server should expose follow-
 assert.match(server, /type: "set_auto_compaction"/, "server should expose auto-compaction changes for native /settings");
 assert.match(server, /@firstpick\/pi-themes-bundle/, "server should discover themes from the optional theme package");
 assert.match(server, /const OPTIONAL_FEATURE_PACKAGES = new Map/, "server should whitelist optional feature packages for install actions");
+assert.match(server, /\["btwCommand", "@firstpick\/pi-extension-btw"\]/, "server should allow installing the /btw optional feature");
 assert.match(server, /\["safetyGuard", "@firstpick\/pi-extension-safety-guard"\]/, "server should allow installing the safety guard optional feature");
 assert.match(server, /\["tuiSkillsCommand", "@firstpick\/pi-extension-setup-skills"\]/, "server should allow installing the TUI skills optional feature");
 assert.match(server, /\["tuiToolsCommand", "@firstpick\/pi-extension-tools"\]/, "server should allow installing the TUI tools optional feature");
@@ -1163,7 +1170,7 @@ assert.match(readme, /GET \/api\/path-suggestions\?tab=<tabId>&query=<path>/, "R
 assert.match(readme, /GET \/api\/optional-features/, "README should document optional feature status endpoint");
 assert.match(readme, /POST \/api\/optional-feature-install/, "README should document optional feature install endpoint");
 assert.match(readme, /server-persisted fast picks/, "README should describe server-persisted fast picks");
-assert.match(readme, /browser notifications when a tab needs an extension UI response and an optional side-panel toggle for agent-done notifications/, "README should describe blocked-tab and agent-done notifications");
+assert.match(readme, /`\/btw` side-question overlays, browser notifications when a tab needs an extension UI response, and an optional side-panel toggle for agent-done notifications/, "README should describe /btw, blocked-tab, and agent-done notifications");
 assert.match(readme, /blocked-tab browser notifications, and optional agent-done notifications require browser service-worker\/notification support/, "README should document notification requirements");
 assert.match(readme, /Side-panel theme picker backed by optional `@firstpick\/pi-themes-bundle` themes when loaded/, "README should describe optional theme selection");
 assert.match(readme, /## Optional companion packages/, "README should document optional Web UI companion packages");

@@ -568,6 +568,28 @@
       </form>
     </dialog>
 
+    <dialog id="btwOverlayDialog" class="extension-dialog btw-overlay-dialog">
+      <form method="dialog">
+        <div class="btw-overlay-header">
+          <div>
+            <span class="btw-overlay-kicker">/btw</span>
+            <h2>Side question</h2>
+            <p id="btwOverlaySubtitle" class="muted">Waiting for side-question output.</p>
+          </div>
+          <div class="btw-overlay-controls">
+            <button id="btwOverlayCopyButton" type="button">Copy</button>
+            <button id="btwOverlayCloseButton" class="btw-overlay-close-button" type="button" aria-label="Close side-question answer">Close</button>
+          </div>
+        </div>
+        <section class="btw-overlay-question-panel" aria-label="Side question">
+          <strong>Question</strong>
+          <p id="btwOverlayQuestion"></p>
+        </section>
+        <pre id="btwOverlayAnswer" class="btw-overlay-answer" aria-label="Side-question answer"></pre>
+        <p id="btwOverlayStatus" class="btw-overlay-status muted" role="status" aria-live="polite"></p>
+      </form>
+    </dialog>
+
     <dialog id="pathPickerDialog" class="extension-dialog path-picker-dialog">
       <form method="dialog">
         <h2 id="pathPickerTitle">Choose working directory</h2>
@@ -703,6 +725,6 @@
       </form>
     </dialog>
 
-    <script type="module" src="/app.js?v=50"></script>
+    <script type="module" src="/app.js?v=51"></script>
   </body>
 </html>

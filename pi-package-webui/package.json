@@ -23,6 +23,7 @@
     "image": "https://unpkg.com/@firstpick/pi-package-webui/images/WebUI_v0.3.7.png",
     "extensions": [
       "./index.ts",
+      "node_modules/@firstpick/pi-extension-btw/index.ts",
       "node_modules/@firstpick/pi-extension-git-footer-status/index.ts",
       "node_modules/@firstpick/pi-extension-release-aur/index.ts",
       "node_modules/@firstpick/pi-extension-release-npm/index.ts",
@@ -54,6 +55,7 @@
     "@earendil-works/pi-coding-agent": "^0.79.3"
   },
   "optionalDependencies": {
+    "@firstpick/pi-extension-btw": "^0.1.0",
     "@firstpick/pi-extension-git-footer-status": "^0.3.3",
     "@firstpick/pi-extension-release-aur": "^0.1.6",
     "@firstpick/pi-extension-release-npm": "^0.4.0",

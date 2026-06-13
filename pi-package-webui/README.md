@@ -139,7 +139,7 @@ Environment variables:
 - Side-panel theme picker backed by optional `@firstpick/pi-themes-bundle` themes when loaded.
 - Per-tab cwd changes, a clickable footer cwd picker, saved path fast picks, server-persisted fast picks, and restart-safe restoration of open tabs.
 - Detected app runner dropdown for the active tab cwd, including Cargo, Bun, npm/npx/pnpm, Python/uv, Go/Golang, Zig, C/C++, Docker Compose, root/dev/scripts shell scripts, and other common project runners with live output pinned at the top of the terminal. Projects can add browseable custom runners in `.pi-webui-runners.json` with a command (default `./`) plus a relative path to the file to run.
-- Browser support for Pi extension UI prompts, widgets, status updates, browser notifications when a tab needs an extension UI response and an optional side-panel toggle for agent-done notifications.
+- Browser support for Pi extension UI prompts, widgets, status updates, `/btw` side-question overlays, browser notifications when a tab needs an extension UI response, and an optional side-panel toggle for agent-done notifications.
 - Localhost-only Pi/Web UI update checks with a top-right update notification and a confirmed **Update & restart** action that runs `pi update` plus all detected local/global Web UI and Pi package-manager updates, then restarts the Web UI server.
 - Feedback reactions (`👍`, `👎`, `?`) on final assistant output plus tool/bash action cards, which can ask Pi to create or update a LEARNING.
 - Mobile-friendly layout and PWA install support where the browser allows it.
@@ -169,6 +169,7 @@ When the standalone global `pi-webui` launcher is used, optional companion insta
 
 Optional companions:
 
+- `@firstpick/pi-extension-btw` — ephemeral `/btw` side-question command with TUI and Web UI overlays.
 - `@firstpick/pi-prompts-git-pr` — guided Git commit/push workflow.
 - `@firstpick/pi-extension-release-npm` — NPM publish menu and release widgets.
 - `@firstpick/pi-extension-release-aur` — AUR publish menu and release widgets.
