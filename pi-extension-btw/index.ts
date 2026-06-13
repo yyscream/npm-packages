@@ -10,14 +10,28 @@ import {
 import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 const WEBUI_STATUS_KEY = "btw-webui";
-const WEBUI_PAYLOAD_TYPE = "firstpick.pi-extension-btw.overlay";
-const WEBUI_PAYLOAD_VERSION = 1;
+const WEBUI_OUTPUT_WIDGET_KEY = "btw:output";
+const WEBUI_FOOTER_WIDGET_KEY = "btw:footer";
+const WEBUI_WIDGET_PAYLOAD_PREFIX = "BTW_WEBUI_PAYLOAD ";
+const WEBUI_PAYLOAD_TYPE = "firstpick.pi-extension-btw.output";
+const WEBUI_PAYLOAD_VERSION = 2;
 const SIDE_SYSTEM_PROMPT = `\n\n[/btw SIDE QUESTION MODE]\nAnswer the user's /btw side question using only the session transcript included in the request.\nDo not call tools, ask to inspect files, run commands, or search. You have no tool access in this side request.\nKeep the answer concise unless the question explicitly asks for detail.\nThis question and answer are ephemeral and must not assume they will be remembered in the main conversation.`;
 const MAX_TOOL_ARGS_CHARS = 2000;
 const WEBUI_UPDATE_INTERVAL_MS = 90;
 
 type BtwStatus = "loading" | "streaming" | "done" | "error" | "aborted";
 type BtwOverlayResult = "dismiss" | "abort";
+
+type BtwTransferPayload = {
+  question?: string;
+  answer?: string;
+  status?: BtwStatus;
+  model?: string;
+  generatedAt?: number;
+  updatedAt?: number;
+};
+
+let activeWebuiBtwId = "";
 
 type WebuiPayload = {
   type: typeof WEBUI_PAYLOAD_TYPE;
@@ -109,6 +123,43 @@ function truncatePlain(value: string, max = 180): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
+function decodeTransferPayload(args: string): BtwTransferPayload {
+  const encoded = args.trim();
+  if (!encoded) throw new Error("Missing transfer payload.");
+  try {
+    return JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+  } catch (error) {
+    throw new Error(`Invalid transfer payload: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function formatTransferredContext(payload: BtwTransferPayload): string {
+  const question = String(payload.question || "").trim();
+  const answer = String(payload.answer || "").trim();
+  return [
+    "[/btw transferred context]",
+    "The following side-question context was explicitly transferred into the main conversation.",
+    payload.model ? `Model: ${payload.model}` : "",
+    payload.status ? `Status: ${payload.status}` : "",
+    "",
+    "Side question:",
+    question || "(empty)",
+    "",
+    "Side answer:",
+    answer || "(empty)",
+  ].filter((line, index, lines) => line || lines[index - 1] !== "").join("\n");
+}
+
+function webuiStatusLabel(status: BtwStatus): string {
+  switch (status) {
+    case "done": return "done";
+    case "error": return "error";
+    case "aborted": return "aborted";
+    case "streaming": return "answering";
+    default: return "starting";
+  }
+}
+
 function createWebuiPublisher(ctx: ExtensionCommandContext, id: string, question: string) {
   let answer = "";
   let status: BtwStatus = "loading";
@@ -116,8 +167,10 @@ function createWebuiPublisher(ctx: ExtensionCommandContext, id: string, question
   let lastEmitAt = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const generatedAt = Date.now();
+  if (ctx.mode === "rpc") activeWebuiBtwId = id;
 
   const emit = () => {
+    if (ctx.mode === "rpc" && activeWebuiBtwId !== id) return;
     lastEmitAt = Date.now();
     const payload: WebuiPayload = {
       type: WEBUI_PAYLOAD_TYPE,
@@ -132,7 +185,17 @@ function createWebuiPublisher(ctx: ExtensionCommandContext, id: string, question
       updatedAt: Date.now(),
       open: true,
     };
-    ctx.ui.setStatus(WEBUI_STATUS_KEY, JSON.stringify(payload));
+    const outputText = error || answer || (status === "loading" ? "Starting side request…" : "Waiting for model output…");
+    const outputLines = String(outputText || "").replace(/\r\n?/g, "\n").split("\n");
+    ctx.ui.setStatus(WEBUI_STATUS_KEY, undefined);
+    ctx.ui.setWidget(WEBUI_OUTPUT_WIDGET_KEY, [
+      `${WEBUI_WIDGET_PAYLOAD_PREFIX}${JSON.stringify(payload)}`,
+      ...outputLines,
+    ], { placement: "aboveEditor" });
+    ctx.ui.setWidget(WEBUI_FOOTER_WIDGET_KEY, [
+      `btw: ${webuiStatusLabel(status)} · ${truncatePlain(question, 90)}${modelLabel(ctx) ? ` · ${modelLabel(ctx)}` : ""}`,
+      "Ephemeral side answer · not appended to main transcript · continue chatting while it streams",
+    ], { placement: "belowEditor" });
   };
 
   const schedule = (force = false) => {
@@ -404,15 +467,27 @@ async function handleBtw(args: string, ctx: ExtensionCommandContext) {
     return;
   }
 
+  if (ctx.mode === "rpc") {
+    publish("loading", "", "", true);
+    void runSideQuestion(ctx, question, controller.signal, publish)
+      .then((answer) => publish("done", answer || "(no text answer)", "", true))
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        publish("error", "", message, true);
+      })
+      .finally(() => webuiPublisher.dispose());
+    return;
+  }
+
   publish("loading", "", "", true);
   try {
     const answer = await runSideQuestion(ctx, question, controller.signal, publish);
     publish("done", answer || "(no text answer)", "", true);
-    if (ctx.mode !== "rpc") ctx.ui.notify(answer || "(no text answer)", "info");
+    ctx.ui.notify(answer || "(no text answer)", "info");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     publish("error", "", message, true);
-    if (ctx.mode !== "rpc") ctx.ui.notify(`/btw failed: ${message}`, "error");
+    ctx.ui.notify(`/btw failed: ${message}`, "error");
   } finally {
     webuiPublisher.dispose();
   }
@@ -422,6 +497,24 @@ export default function btwExtension(pi: ExtensionAPI) {
   pi.registerCommand("btw", {
     description: "Ask an ephemeral side question without adding it to the main conversation. Usage: /btw <question>",
     handler: handleBtw,
+  });
+
+  pi.registerCommand("btw-transfer", {
+    description: "Transfer a /btw side answer into the main conversation context.",
+    handler: async (args, ctx) => {
+      const payload = decodeTransferPayload(args);
+      const content = formatTransferredContext(payload);
+      const isIdle = ctx.isIdle();
+      pi.sendMessage({
+        customType: "btw-transfer",
+        content,
+        display: true,
+        details: payload,
+      }, isIdle ? undefined : { deliverAs: "steer" });
+      ctx.ui.notify(isIdle
+        ? "/btw context transferred into the main conversation."
+        : "/btw context sent as live steering; it will be injected after the next agent action.", "info");
+    },
   });
 
   pi.registerCommand("btw-status", {

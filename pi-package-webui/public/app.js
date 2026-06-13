@@ -58,6 +58,7 @@ const elements = {
   skillEditorCancelButton: $("#skillEditorCancelButton"),
   skillEditorSaveButton: $("#skillEditorSaveButton"),
   sendButton: $("#sendButton"),
+  btwButton: $("#btwButton"),
   commandSuggest: $("#commandSuggest"),
   attachmentTray: $("#attachmentTray"),
   attachButton: $("#attachButton"),
@@ -225,13 +226,6 @@ const elements = {
   statsOverlayTabs: $("#statsOverlayTabs"),
   statsOverlayBody: $("#statsOverlayBody"),
   statsOverlayCloseButton: $("#statsOverlayCloseButton"),
-  btwOverlayDialog: $("#btwOverlayDialog"),
-  btwOverlaySubtitle: $("#btwOverlaySubtitle"),
-  btwOverlayQuestion: $("#btwOverlayQuestion"),
-  btwOverlayAnswer: $("#btwOverlayAnswer"),
-  btwOverlayStatus: $("#btwOverlayStatus"),
-  btwOverlayCopyButton: $("#btwOverlayCopyButton"),
-  btwOverlayCloseButton: $("#btwOverlayCloseButton"),
 };
 
 let currentState = null;
@@ -308,8 +302,11 @@ let statsOverlayLastScope = "14";
 let statsOverlayCalibrationMessage = "";
 let statsOverlayCalibrationBusy = "";
 let latestStatsOverlayPayload = null;
-let latestBtwOverlayPayload = null;
-let btwOverlayDismissedId = "";
+let latestBtwWidgetPayload = null;
+let btwWidgetDismissedId = "";
+let btwWidgetComposerOpen = false;
+let btwWidgetInputDraft = "";
+let btwWidgetFocusAfterRender = false;
 let latestWorkspace = null;
 let latestNetwork = null;
 let webuiVersion = "";
@@ -433,8 +430,10 @@ const STATS_WEBUI_STATUS_KEY = "stats-webui";
 const STATS_WEBUI_PAYLOAD_TYPE = "firstpick.pi-extension-stats.overlay";
 const STATS_WEBUI_PAYLOAD_VERSION = 1;
 const BTW_WEBUI_STATUS_KEY = "btw-webui";
-const BTW_WEBUI_PAYLOAD_TYPE = "firstpick.pi-extension-btw.overlay";
-const BTW_WEBUI_PAYLOAD_VERSION = 1;
+const BTW_OUTPUT_WIDGET_KEY = "btw:output";
+const BTW_FOOTER_WIDGET_KEY = "btw:footer";
+const BTW_WIDGET_PAYLOAD_PREFIX = "BTW_WEBUI_PAYLOAD ";
+const BTW_WEBUI_PAYLOAD_TYPES = new Set(["firstpick.pi-extension-btw.overlay", "firstpick.pi-extension-btw.output"]);
 const GIT_CHANGES_RENDER_ROW_LIMIT = 4000;
 const LAST_USER_PROMPT_STORAGE_KEY = "pi-webui-last-user-prompts";
 const PROMPT_HISTORY_STORAGE_KEY = "pi-webui-prompt-history";
@@ -526,8 +525,8 @@ const OPTIONAL_FEATURES = [
     id: "btwCommand",
     label: "/btw side questions",
     packageName: "@firstpick/pi-extension-btw",
-    capabilityLabel: "/btw or btw-webui status event",
-    description: "Ephemeral side-question command with TUI and browser overlay rendering.",
+    capabilityLabel: "/btw or btw:output widget event",
+    description: "Ephemeral side-question command with TUI overlay and browser output-widget rendering.",
   },
   {
     id: "gitWorkflow",
@@ -610,6 +609,7 @@ const OPTIONAL_FEATURES = [
 const OPTIONAL_FEATURE_BY_ID = new Map(OPTIONAL_FEATURES.map((feature) => [feature.id, feature]));
 const OPTIONAL_COMMAND_FEATURES = new Map([
   ["btw", "btwCommand"],
+  ["btw-transfer", "btwCommand"],
   ["btw-status", "btwCommand"],
   ["git-staged-msg", "gitWorkflow"],
   ["git-branch-name", "gitWorkflow"],
@@ -627,6 +627,7 @@ const OPTIONAL_COMMAND_FEATURES = new Map([
 const HIDDEN_COMMAND_NAMES = new Set(["webui-tree-navigate", "webui-helper"]);
 HIDDEN_COMMAND_NAMES.add("stats-webui");
 HIDDEN_COMMAND_NAMES.add("btw-status");
+HIDDEN_COMMAND_NAMES.add("btw-transfer");
 const NATIVE_SELECTOR_COMMANDS = new Set(["model", "settings", "theme", "fork", "clone", "name", "resume", "tree", "login", "logout", "scoped-models", "tools", "skills"]);
 const SETTINGS_THINKING_OPTIONS = ["off", "minimal", "low", "medium", "high", "xhigh"];
 const SETTINGS_TRANSPORT_OPTIONS = ["sse", "websocket", "websocket-cached", "auto"];
@@ -650,6 +651,7 @@ const optionalFeatureInstallInProgress = new Set();
 const optionalFeaturePackageStatuses = new Map();
 const optionalFeatureInstallMessages = new Map();
 const gitFooterPayloadRefreshInFlightByTab = new Set();
+const gitFooterPiCalibrationInFlightByTab = new Set();
 
 function createGitWorkflowActionsDone(patch = {}) {
   return {
@@ -3516,7 +3518,6 @@ function renderOptionalFeatureDependentDisplays() {
   renderWidgets();
   renderStatus();
   renderCommands();
-  renderBtwOverlay();
   cancelStreamingAssistantTextRender();
   cancelStreamBubbleHide();
   streamBubble?.remove();
@@ -3537,8 +3538,12 @@ function setOptionalFeatureDisabled(featureId, disabled) {
   }
   if (featureId === "btwCommand") {
     statusEntries.delete(BTW_WEBUI_STATUS_KEY);
-    latestBtwOverlayPayload = null;
-    closeBtwOverlay();
+    widgets.delete(BTW_OUTPUT_WIDGET_KEY);
+    widgets.delete(BTW_FOOTER_WIDGET_KEY);
+    latestBtwWidgetPayload = null;
+    btwWidgetDismissedId = "";
+    btwWidgetComposerOpen = false;
+    btwWidgetInputDraft = "";
   }
   storeDisabledOptionalFeatures();
   renderOptionalFeatureDependentDisplays();
@@ -4174,8 +4179,10 @@ function resetActiveTabUi() {
   currentState = null;
   latestStats = null;
   latestStatsOverlayPayload = null;
-  latestBtwOverlayPayload = null;
-  btwOverlayDismissedId = "";
+  latestBtwWidgetPayload = null;
+  btwWidgetDismissedId = "";
+  btwWidgetComposerOpen = false;
+  btwWidgetInputDraft = "";
   latestWorkspace = null;
   latestMessages = [];
   latestMessagesSessionKey = "";
@@ -5299,6 +5306,58 @@ async function toggleFooterAutoCompaction(tabContext = activeTabContext()) {
   }
 }
 
+function scheduleGitFooterPiCalibrationRefresh(tabContext, delays = [600, 1600]) {
+  for (const delayMs of delays) {
+    setTimeout(() => {
+      if (isCurrentTabContext(tabContext)) requestGitFooterWebuiPayload(tabContext, { force: true });
+    }, delayMs);
+  }
+}
+
+async function runGitFooterPiCalibration(mode = "current", tabContext = activeTabContext()) {
+  if (!tabContext.tabId) return;
+  if (gitFooterPiCalibrationInFlightByTab.has(tabContext.tabId)) return;
+  if (currentState?.isStreaming || currentState?.isCompacting) {
+    addEvent("PI calibration can run after the active agent work finishes.", "warn");
+    return;
+  }
+
+  const commandName = resolveAvailableCommandName("calibrate", { rpcOnly: true });
+  if (!commandName) {
+    addEvent("PI calibration unavailable: /calibrate is not loaded in this Pi tab.", "warn");
+    return;
+  }
+  if (mode === "probe" && !confirm("Start an isolated PI calibration probe? This sends one tiny model request and may incur provider token usage.")) return;
+
+  const command = mode === "probe" ? `/${commandName}` : `/${commandName} current`;
+  gitFooterPiCalibrationInFlightByTab.add(tabContext.tabId);
+  renderFooter();
+  try {
+    await sendPrompt("prompt", command, { targetTabId: tabContext.tabId, throwOnError: true });
+    if (!isCurrentTabContext(tabContext)) return;
+    addEvent(mode === "probe" ? "PI calibration probe started; refreshing git footer value after it records…" : "PI calibration requested; refreshing git footer value…", "info");
+    scheduleGitFooterPiCalibrationRefresh(tabContext, mode === "probe" ? [5000, 14000] : [600, 1600]);
+  } catch (error) {
+    if (isCurrentTabContext(tabContext)) addEvent(error.message || String(error), "error");
+  } finally {
+    gitFooterPiCalibrationInFlightByTab.delete(tabContext.tabId);
+    if (isCurrentTabContext(tabContext)) renderFooter();
+  }
+}
+
+function applyGitFooterPiCalibrationOptions(chip, options) {
+  if (chip?.key !== "pi" || !FOOTER_PAYLOAD_ACTIONS.has(chip?.action)) return "";
+  const tabContext = activeTabContext();
+  const busy = !!tabContext.tabId && gitFooterPiCalibrationInFlightByTab.has(tabContext.tabId);
+  const mode = chip.action === "calibrate-probe" ? "probe" : "current";
+  options.onClick = () => runGitFooterPiCalibration(mode);
+  if (busy) options.ariaBusy = true;
+  if (busy) return "Calibrating PI estimate and refreshing this value…";
+  return mode === "probe"
+    ? "Click to start an isolated PI calibration probe, then refresh this value."
+    : "Click to calibrate this uncalibrated PI estimate from the current session, then refresh this value.";
+}
+
 function applyGitFooterContextToggleOptions(chip, options) {
   if (chip?.key !== "context") return "";
   options.onClick = () => toggleFooterAutoCompaction();
@@ -5480,6 +5539,7 @@ function footerMeta(label, value, className = "", options = {}) {
 }
 
 const FOOTER_PAYLOAD_TONES = new Set(["pink", "blue", "mauve", "yellow", "green", "teal"]);
+const FOOTER_PAYLOAD_ACTIONS = new Set(["calibrate-current", "calibrate-probe"]);
 const FOOTER_CHANGED_FILE_KINDS = new Set(["modified", "staged", "untracked", "conflicted"]);
 const FOOTER_CHANGED_FILE_KIND_ORDER = ["modified", "staged", "untracked", "conflicted"];
 const FOOTER_CHANGED_FILE_KIND_LABELS = {
@@ -5549,6 +5609,7 @@ function normalizeFooterPayloadChip(value, index) {
     tone: FOOTER_PAYLOAD_TONES.has(value.tone) ? value.tone : "",
     title: cleanFooterPayloadText(value.title, "", 4000),
   };
+  if (FOOTER_PAYLOAD_ACTIONS.has(value.action)) chip.action = value.action;
   if (Array.isArray(value.files)) {
     const files = value.files.map(normalizeFooterPayloadChangedFile).filter(Boolean).slice(0, 80);
     if (files.length) chip.files = files;
@@ -5783,7 +5844,7 @@ function applyFooterChangedFilesDropdown(node, chip) {
 
 function renderGitFooterPayloadMetric(chip) {
   const options = { tooltipAlign: gitFooterTooltipAlign(chip) };
-  const action = applyGitFooterContextToggleOptions(chip, options);
+  const action = applyGitFooterPiCalibrationOptions(chip, options) || applyGitFooterContextToggleOptions(chip, options);
   options.title = gitFooterPayloadTooltip(chip, { action });
   const node = footerMetric(chip.icon || "•", chip.label, chip.value, chip.tone ? `tone-${chip.tone}` : "", options);
   return chip.contextUsage ? applyFooterContextUsage(node, chip.contextUsage) : node;
@@ -8947,18 +9008,28 @@ function handleStatsWebuiStatus(statusText) {
 
 function parseBtwWebuiPayloadRaw(raw) {
   if (!raw) return null;
+  const text = String(raw || "");
+  const json = text.startsWith(BTW_WIDGET_PAYLOAD_PREFIX) ? text.slice(BTW_WIDGET_PAYLOAD_PREFIX.length) : text;
   try {
-    const parsed = JSON.parse(raw);
-    if (parsed?.type !== BTW_WEBUI_PAYLOAD_TYPE || parsed.version !== BTW_WEBUI_PAYLOAD_VERSION) return null;
+    const parsed = JSON.parse(json);
+    if (!BTW_WEBUI_PAYLOAD_TYPES.has(parsed?.type)) return null;
     return parsed;
   } catch {
     return null;
   }
 }
 
-function currentBtwOverlayPayload() {
+function parseBtwWidgetPayload(lines = []) {
+  const first = Array.isArray(lines) ? lines[0] : "";
+  return parseBtwWebuiPayloadRaw(first);
+}
+
+function currentBtwWidgetPayload() {
   if (isOptionalFeatureDisabled("btwCommand")) return null;
-  return parseBtwWebuiPayloadRaw(statusEntries.get(BTW_WEBUI_STATUS_KEY)) || latestBtwOverlayPayload;
+  const outputLines = widgets.get(BTW_OUTPUT_WIDGET_KEY)?.widgetLines || [];
+  const payload = parseBtwWidgetPayload(outputLines) || parseBtwWebuiPayloadRaw(statusEntries.get(BTW_WEBUI_STATUS_KEY)) || latestBtwWidgetPayload;
+  if (payload?.id && payload.id === btwWidgetDismissedId) return null;
+  return payload;
 }
 
 function btwStatusLabel(payload) {
@@ -8971,68 +9042,236 @@ function btwStatusLabel(payload) {
   }
 }
 
-function renderBtwOverlay() {
-  if (!elements.btwOverlayDialog) return;
-  const payload = currentBtwOverlayPayload();
-  if (!payload) {
-    if (elements.btwOverlayDialog.open) elements.btwOverlayDialog.close();
-    return;
-  }
-
-  const updated = payload.updatedAt ? new Date(payload.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "now";
-  elements.btwOverlaySubtitle.textContent = `${btwStatusLabel(payload)}${payload.model ? ` · ${payload.model}` : ""} · ${updated}`;
-  elements.btwOverlayQuestion.textContent = payload.question || "(no question)";
-  elements.btwOverlayAnswer.textContent = payload.error || payload.answer || (payload.status === "loading" ? "Starting side request…" : "Waiting for model output…");
-  elements.btwOverlayStatus.textContent = payload.status === "error"
-    ? "The side request failed. The main conversation was not changed."
-    : payload.status === "aborted"
-      ? "The side request was aborted. The main conversation was not changed."
-      : "Ephemeral answer: this /btw exchange is not appended to the main Pi transcript.";
-  elements.btwOverlayStatus.classList.toggle("error", payload.status === "error");
-  elements.btwOverlayStatus.classList.toggle("warn", payload.status === "aborted");
-  elements.btwOverlayDialog.classList.toggle("loading", payload.status === "loading" || payload.status === "streaming");
+function btwAnswerLines(payload) {
+  const text = payload?.error || payload?.answer || (payload?.status === "loading" ? "Starting side request…" : "Waiting for model output…");
+  return String(text || "").replace(/\r\n?/g, "\n").split("\n");
 }
 
-function openBtwOverlay(payload = currentBtwOverlayPayload()) {
-  if (!payload || !elements.btwOverlayDialog) return;
+function focusBtwWidgetInput() {
+  const input = document.querySelector(".btw-widget-input");
+  if (!input) return;
+  try {
+    input.focus({ preventScroll: true });
+  } catch {
+    input.focus();
+  }
+}
+
+function openBtwComposerWidget() {
+  btwWidgetComposerOpen = true;
+  btwWidgetDismissedId = "";
+  btwWidgetFocusAfterRender = true;
   setComposerActionsOpen(false);
   setPublishMenuOpen(false);
   setNativeCommandMenuOpen(false);
   setAppRunnerMenuOpen(false);
   setOptionsMenuOpen(false);
-  if (!elements.btwOverlayDialog.open) elements.btwOverlayDialog.showModal();
-  renderBtwOverlay();
+  renderWidgets();
 }
 
-function closeBtwOverlay() {
-  const payload = currentBtwOverlayPayload();
-  if (payload?.id) btwOverlayDismissedId = payload.id;
-  elements.btwOverlayDialog?.close();
+function closeBtwOutputWidget() {
+  const payload = currentBtwWidgetPayload();
+  if (payload?.id) btwWidgetDismissedId = payload.id;
+  widgets.delete(BTW_OUTPUT_WIDGET_KEY);
+  widgets.delete(BTW_FOOTER_WIDGET_KEY);
+  statusEntries.delete(BTW_WEBUI_STATUS_KEY);
+  latestBtwWidgetPayload = null;
+  btwWidgetComposerOpen = false;
+  btwWidgetInputDraft = "";
+  renderWidgets();
+  renderStatus();
 }
 
-async function copyBtwOverlayAnswer() {
-  const payload = currentBtwOverlayPayload();
+async function copyBtwWidgetAnswer(button) {
+  const payload = currentBtwWidgetPayload();
   const answer = String(payload?.answer || payload?.error || "").trim();
   if (!answer) return;
+  const original = button?.textContent || "Copy";
   try {
     await navigator.clipboard.writeText(answer);
-    elements.btwOverlayStatus.textContent = "Copied answer to clipboard.";
-    elements.btwOverlayStatus.classList.remove("error", "warn");
+    if (button) button.textContent = "Copied";
+    setTimeout(() => { if (button) button.textContent = original; }, 1600);
   } catch (error) {
-    elements.btwOverlayStatus.textContent = `Copy failed: ${error.message || String(error)}`;
-    elements.btwOverlayStatus.classList.add("error");
+    addEvent(`copy /btw answer failed: ${error.message || String(error)}`, "error");
   }
+}
+
+function base64UrlEncodeUtf8(value) {
+  const bytes = new TextEncoder().encode(String(value || ""));
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.slice(offset, offset + 0x8000));
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function btwTransferPayload(payload) {
+  return {
+    question: payload?.question || "",
+    answer: payload?.answer || payload?.error || "",
+    status: payload?.status || "done",
+    model: payload?.model || "",
+    generatedAt: payload?.generatedAt || 0,
+    updatedAt: payload?.updatedAt || Date.now(),
+  };
+}
+
+function makeBtwTransferIcon() {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("class", "btw-transfer-icon");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  const bubble = document.createElementNS(ns, "path");
+  bubble.setAttribute("d", "M4.5 5.75h8.75a2 2 0 0 1 2 2v3.5a2 2 0 0 1-2 2H9.8L6.5 15.6v-2.35h-2a2 2 0 0 1-2-2v-3.5a2 2 0 0 1 2-2Z");
+  bubble.setAttribute("fill", "none");
+  bubble.setAttribute("stroke", "currentColor");
+  bubble.setAttribute("stroke-width", "1.9");
+  bubble.setAttribute("stroke-linecap", "round");
+  bubble.setAttribute("stroke-linejoin", "round");
+  const arrow = document.createElementNS(ns, "path");
+  arrow.setAttribute("d", "M13 17h7m0 0-2.8-2.8M20 17l-2.8 2.8");
+  arrow.setAttribute("fill", "none");
+  arrow.setAttribute("stroke", "currentColor");
+  arrow.setAttribute("stroke-width", "2.15");
+  arrow.setAttribute("stroke-linecap", "round");
+  arrow.setAttribute("stroke-linejoin", "round");
+  const line = document.createElementNS(ns, "path");
+  line.setAttribute("d", "M6 9.4h5.6");
+  line.setAttribute("fill", "none");
+  line.setAttribute("stroke", "currentColor");
+  line.setAttribute("stroke-width", "1.9");
+  line.setAttribute("stroke-linecap", "round");
+  svg.append(bubble, line, arrow);
+  return svg;
+}
+
+async function transferBtwContextToMain(button) {
+  const payload = currentBtwWidgetPayload();
+  const transferPayload = btwTransferPayload(payload);
+  if (!transferPayload.question && !transferPayload.answer) return;
+  const targetTabId = activeTabId;
+  const liveSteer = !!currentState?.isStreaming;
+  const original = button?.querySelector("span")?.textContent || "Transfer Context";
+  const encoded = base64UrlEncodeUtf8(JSON.stringify(transferPayload));
+  try {
+    await sendPrompt("prompt", `/btw-transfer ${encoded}`, { targetTabId, throwOnError: true, streamingBehavior: liveSteer ? "steer" : undefined });
+    const label = button?.querySelector("span");
+    if (label) label.textContent = liveSteer ? "Steered" : "Transferred";
+    addEvent(liveSteer
+      ? "/btw context sent as live steering; it will be injected after the next agent action"
+      : "/btw context transferred into the main conversation", "info");
+    setTimeout(() => { if (label) label.textContent = original; }, 1800);
+  } catch {
+    // sendPrompt already reports the error.
+  }
+}
+
+function btwWidgetActionButton(label, handler, className = "") {
+  const button = make("button", `release-npm-action ${className}`.trim(), label);
+  button.type = "button";
+  button.addEventListener("click", () => handler(button));
+  return button;
+}
+
+function renderBtwComposerForm() {
+  const form = make("form", "btw-widget-composer");
+  const input = make("textarea", "btw-widget-input");
+  input.rows = 1;
+  input.placeholder = "Ask a /btw side question…";
+  input.value = btwWidgetInputDraft;
+  input.setAttribute("aria-label", "Ask a /btw side question");
+  input.addEventListener("input", () => { btwWidgetInputDraft = input.value; });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      form.requestSubmit();
+    }
+  });
+
+  const submit = make("button", "release-npm-action btw-widget-send", "Ask /btw");
+  submit.type = "submit";
+  form.append(input, submit);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const question = input.value.trim();
+    if (!question) {
+      input.focus();
+      return;
+    }
+    submit.disabled = true;
+    const sent = await sendBtwQuestion(question);
+    submit.disabled = false;
+    if (!sent) return;
+    btwWidgetInputDraft = "";
+    input.value = "";
+    input.focus({ preventScroll: true });
+  });
+  return form;
+}
+
+function renderBtwOutputWidget() {
+  const payload = currentBtwWidgetPayload();
+  if (!payload && !btwWidgetComposerOpen) return null;
+
+  if (payload) latestBtwWidgetPayload = payload;
+  const running = payload?.status === "loading" || payload?.status === "streaming";
+  const lineCount = payload ? btwAnswerLines(payload).length : 0;
+  const node = make("section", `widget release-npm-widget btw-widget${running ? " btw-live-widget" : " btw-done-widget"}`);
+  node.setAttribute("aria-label", "/btw side-question output");
+
+  const header = make("div", "release-npm-header");
+  const titleWrap = make("div", "release-npm-title-wrap");
+  titleWrap.append(make("span", "release-npm-kicker", "/btw"), make("strong", "release-npm-title", payload ? btwStatusLabel(payload) : "Ready"));
+
+  const meta = make("div", "release-npm-meta");
+  meta.append(make("span", `release-npm-pill btw-status ${payload?.status || "ready"}`.trim(), payload?.status || "ready"));
+  if (payload?.model) meta.append(make("span", "release-npm-pill", payload.model));
+
+  const actions = make("div", "release-npm-actions");
+  const transferButton = btwWidgetActionButton("", transferBtwContextToMain, "btw-transfer-action");
+  transferButton.title = currentState?.isStreaming
+    ? "Transfer this /btw question and answer as live steering after the next agent action"
+    : "Transfer this /btw question and answer into the main conversation context";
+  transferButton.append(makeBtwTransferIcon(), make("span", undefined, "Transfer Context"));
+  transferButton.disabled = !payload || !(payload.answer || payload.error || payload.question);
+  actions.append(
+    transferButton,
+    btwWidgetActionButton("Copy", copyBtwWidgetAnswer),
+    btwWidgetActionButton("Close", closeBtwOutputWidget),
+  );
+  header.append(titleWrap, meta, actions);
+
+  const question = make("div", "btw-widget-question");
+  question.append(make("span", "btw-widget-question-label", "Question"), make("span", "btw-widget-question-text", payload?.question || "Start or continue with the /btw input below."));
+
+  const streamHeader = releaseNpmStreamHeader(running ? "Live side answer" : "Side answer", lineCount, { live: running });
+  const terminal = make("div", "release-npm-terminal btw-terminal");
+  terminal.setAttribute("role", "log");
+  terminal.setAttribute("aria-live", running ? "polite" : "off");
+  for (const line of (payload ? btwAnswerLines(payload) : ["Type a side question below and press Enter to run it as /btw."])) appendReleaseNpmTerminalLine(terminal, line);
+
+  const note = payload?.status === "error"
+    ? "The side request failed. The main conversation was not changed."
+    : "Ephemeral answer · every message in this input is sent as /btw · not appended to the main transcript.";
+  const controls = make("div", "release-npm-controls btw-controls", note);
+  const outputDetails = renderReleaseNpmOutputDetails(`btw:${payload?.id || "composer"}`, streamHeader, terminal, controls);
+  node.append(header, question, outputDetails, renderBtwComposerForm());
+  requestAnimationFrame(() => {
+    if (outputDetails.open) terminal.scrollTop = terminal.scrollHeight;
+    if (btwWidgetFocusAfterRender) {
+      btwWidgetFocusAfterRender = false;
+      focusBtwWidgetInput();
+    }
+  });
+  return node;
 }
 
 function handleBtwWebuiStatus(statusText) {
   const payload = parseBtwWebuiPayloadRaw(statusText);
-  if (!payload) {
-    if (elements.btwOverlayDialog?.open) renderBtwOverlay();
-    return;
-  }
-  latestBtwOverlayPayload = payload;
-  if (payload.id && payload.id !== btwOverlayDismissedId && payload.open !== false) openBtwOverlay(payload);
-  else if (elements.btwOverlayDialog?.open) renderBtwOverlay();
+  if (payload) latestBtwWidgetPayload = payload;
+  renderWidgets();
 }
 
 function remoteWebuiWidgetLines(lines = []) {
@@ -9062,6 +9301,8 @@ function renderWidgets() {
   if (releaseAurLog) elements.widgetArea.append(releaseAurLog);
   const appRunnerWidget = renderAppRunnerWidget();
   if (appRunnerWidget) elements.widgetArea.append(appRunnerWidget);
+  const btwWidget = renderBtwOutputWidget();
+  if (btwWidget) elements.widgetArea.append(btwWidget);
 
   for (const [key, value] of widgets) {
     const widgetFeatureId = optionalFeatureWidgetFeatureId(key);
@@ -13474,6 +13715,41 @@ function sendPromptFromModeButton(kind, button) {
   sendPrompt(kind);
 }
 
+async function sendBtwQuestion(question, { clearComposerDraft = false } = {}) {
+  const cleanQuestion = String(question || "").trim();
+  if (!cleanQuestion) return false;
+  const message = /^\/btw(?:\s|$)/.test(cleanQuestion) ? cleanQuestion : `/btw ${cleanQuestion}`;
+  const targetTabId = activeTabId;
+  btwWidgetComposerOpen = true;
+  btwWidgetDismissedId = "";
+  try {
+    await sendPrompt("prompt", message, { targetTabId, throwOnError: true });
+  } catch {
+    return false;
+  }
+  if (!targetTabId) return true;
+  if (clearComposerDraft) {
+    if (targetTabId === activeTabId) {
+      elements.promptInput.value = "";
+      resizePromptInput();
+      hideCommandSuggestions();
+      saveActiveDraft();
+    } else {
+      tabDrafts.set(targetTabId, "");
+    }
+  }
+  return true;
+}
+
+async function sendBtwPromptFromButton() {
+  const question = String(elements.promptInput.value || "").trim();
+  if (!question) {
+    openBtwComposerWidget();
+    return;
+  }
+  await sendBtwQuestion(question, { clearComposerDraft: true });
+}
+
 function setPublishMenuOpen(open) {
   publishMenuOpen = !!open;
   elements.publishButton.setAttribute("aria-expanded", publishMenuOpen ? "true" : "false");
@@ -13659,7 +13935,7 @@ function requestGitFooterWebuiPayload(tabContext = activeTabContext(), { force =
 }
 
 function updateOptionalFeatureAvailability() {
-  optionalFeatureAvailability.btwCommand = hasAvailableCommand("btw") || optionalFeatureAvailability.btwCommand || statusEntries.has(BTW_WEBUI_STATUS_KEY);
+  optionalFeatureAvailability.btwCommand = hasAvailableCommand("btw") || optionalFeatureAvailability.btwCommand || statusEntries.has(BTW_WEBUI_STATUS_KEY) || widgets.has(BTW_OUTPUT_WIDGET_KEY);
   optionalFeatureAvailability.gitWorkflow = hasAvailableCommand("git-staged-msg");
   optionalFeatureAvailability.releaseNpm = hasAvailableCommand("release-npm");
   optionalFeatureAvailability.releaseAur = hasAvailableCommand("release-aur");
@@ -13691,6 +13967,7 @@ function optionalFeatureStatus(featureId) {
 }
 
 function optionalFeatureWidgetFeatureId(key) {
+  if (key.startsWith("btw:")) return "btwCommand";
   if (key.startsWith("release-npm:")) return "releaseNpm";
   if (key.startsWith("release-aur:")) return "releaseAur";
   if (key === "todo-progress") return "todoProgressWidget";
@@ -13699,7 +13976,7 @@ function optionalFeatureWidgetFeatureId(key) {
 }
 
 function optionalFeatureWidgetHasSpecializedRenderer(key) {
-  return key.startsWith("release-npm:") || key.startsWith("release-aur:");
+  return key.startsWith("btw:") || key.startsWith("release-npm:") || key.startsWith("release-aur:");
 }
 
 function renderOptionalFeaturePanel() {
@@ -13762,6 +14039,16 @@ function renderOptionalFeaturePanel() {
 }
 
 function renderOptionalFeatureControls() {
+  const hasBtwCommand = isOptionalFeatureEnabled("btwCommand");
+  if (elements.btwButton) {
+    elements.btwButton.hidden = !hasBtwCommand;
+    setOptionalControlState(
+      elements.btwButton,
+      hasBtwCommand,
+      optionalFeatureUnavailableMessage("btwCommand"),
+    );
+  }
+
   const hasGitWorkflow = isOptionalFeatureEnabled("gitWorkflow");
   elements.gitWorkflowButton.hidden = !hasGitWorkflow;
   setOptionalControlState(
@@ -16471,7 +16758,7 @@ async function sendUserBashCommand(parsed, { usesPromptInput = false, targetTabI
   await runUserBashCommand(parsed, { usesPromptInput, targetTabId });
 }
 
-async function sendPrompt(kind = "prompt", explicitMessage, { targetTabId = activeTabId, throwOnError = false } = {}) {
+async function sendPrompt(kind = "prompt", explicitMessage, { targetTabId = activeTabId, throwOnError = false, streamingBehavior } = {}) {
   const usesPromptInput = explicitMessage === undefined;
   const rawMessage = usesPromptInput ? elements.promptInput.value : explicitMessage;
   const originalMessage = String(rawMessage || "").trim();
@@ -16517,7 +16804,7 @@ async function sendPrompt(kind = "prompt", explicitMessage, { targetTabId = acti
       response = await api("/api/follow-up", { method: "POST", body: bodyBase, tabId: targetTabId });
     } else {
       const body = { ...bodyBase };
-      if (targetWasStreaming) body.streamingBehavior = busyBehavior;
+      if (targetWasStreaming) body.streamingBehavior = streamingBehavior || busyBehavior;
       response = await api("/api/prompt", { method: "POST", body, tabId: targetTabId });
     }
     applyResponseTab(response);
@@ -16792,12 +17079,13 @@ function handleEvent(event) {
       clearContextUsageUnknownAfterCompaction(event.tabId || activeTabId);
       statusEntries.clear();
       widgets.clear();
-      latestBtwOverlayPayload = null;
-      btwOverlayDismissedId = "";
+      latestBtwWidgetPayload = null;
+      btwWidgetDismissedId = "";
+      btwWidgetComposerOpen = false;
+      btwWidgetInputDraft = "";
       resetOptionalFeatureAvailability();
       renderStatus();
       renderWidgets();
-      renderBtwOverlay();
       refreshTabs().catch((error) => addEvent(error.message, "error"));
       setTimeout(() => {
         if (!isCurrentTabContext(tabContext)) return;
@@ -17147,6 +17435,7 @@ elements.busyPromptBehaviorMenu?.addEventListener("keydown", (event) => {
 });
 elements.steerButton.addEventListener("click", () => sendPromptFromModeButton("steer", elements.steerButton));
 elements.followUpButton.addEventListener("click", () => sendPromptFromModeButton("follow-up", elements.followUpButton));
+elements.btwButton?.addEventListener("click", () => sendBtwPromptFromButton());
 elements.terminalTabsToggleButton.addEventListener("click", () => {
   setMobileTabsExpanded(!document.body.classList.contains("mobile-tabs-expanded"));
 });
@@ -17348,10 +17637,6 @@ elements.statsOverlayCustomDays?.addEventListener("keydown", (event) => {
 });
 elements.statsOverlayCloseButton?.addEventListener("click", () => elements.statsOverlayDialog?.close());
 elements.statsOverlayDialog?.querySelector("form")?.addEventListener("submit", (event) => event.preventDefault());
-elements.btwOverlayCloseButton?.addEventListener("click", () => closeBtwOverlay());
-elements.btwOverlayCopyButton?.addEventListener("click", () => copyBtwOverlayAnswer());
-elements.btwOverlayDialog?.querySelector("form")?.addEventListener("submit", (event) => event.preventDefault());
-elements.btwOverlayDialog?.addEventListener("cancel", () => closeBtwOverlay());
 elements.gitWorkflowSteps.addEventListener("click", (event) => {
   const target = event.target instanceof Element ? event.target : null;
   const button = target?.closest("[data-git-workflow-process]");

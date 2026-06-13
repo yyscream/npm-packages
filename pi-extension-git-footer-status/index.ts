@@ -10,6 +10,7 @@ import {
   estimateTokensFromCharCount,
   formatTokens,
   type InitialPromptEstimateSnapshot,
+  type InitialPromptInputEstimate,
 } from "@firstpick/pi-utils";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
@@ -109,6 +110,8 @@ type FooterTelemetry = {
   liveOutputTokens: number;
   latestTokenSpeed: number | null;
   promptInjectionTokens: number | null;
+  promptInjectionCalibrationSamples: number;
+  promptInjectionCanCalibrateCurrent: boolean;
   contextWindow: number;
   contextPercent: number | null;
   contextDisplay: string;
@@ -128,6 +131,7 @@ type WebuiFooterChip = {
   icon?: string;
   tone?: "pink" | "blue" | "mauve" | "yellow" | "green" | "teal";
   title?: string;
+  action?: "calibrate-current" | "calibrate-probe";
   files?: WebuiFooterChangedFile[];
   contextUsage?: {
     percent: number | null;
@@ -702,6 +706,22 @@ function formatPromptEstimateDebugSnapshot(label: string, snapshot: InitialPromp
   ];
 }
 
+function canCalibrateCurrentPromptEstimate(ctx: ExtensionContext): boolean {
+  try {
+    let sawFirstUser = false;
+    for (const entry of ctx.sessionManager.getEntries()) {
+      const record = (entry && typeof entry === "object" ? entry : {}) as Record<string, unknown>;
+      if (record.type !== "message") continue;
+      const message = (record.message && typeof record.message === "object" ? record.message : {}) as Record<string, unknown>;
+      if (message.role === "user" && !sawFirstUser) sawFirstUser = true;
+      if (message.role === "assistant" && message.usage) return sawFirstUser;
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
 function buildWebuiFooterPayload(ctx: ExtensionContext, snapshot: GitSnapshot | null, telemetry: FooterTelemetry, fetchState: GitFetchState): WebuiFooterPayload {
   const speed = telemetry.latestTokenSpeed;
   const speedPrefix = telemetry.liveOutputTokens > 0 ? `${footerMetricValue(telemetry.liveOutputTokens)} tok @ ` : "";
@@ -711,6 +731,20 @@ function buildWebuiFooterPayload(ctx: ExtensionContext, snapshot: GitSnapshot | 
       ? " • thinking off"
       : ` • ${telemetry.thinkingLevel}`
     : "";
+  const piIsUncalibrated = telemetry.promptInjectionTokens !== null && telemetry.promptInjectionCalibrationSamples <= 0;
+  const piCanCalibrateCurrent = piIsUncalibrated && telemetry.promptInjectionCanCalibrateCurrent;
+  const piAction: WebuiFooterChip["action"] | undefined = piIsUncalibrated
+    ? piCanCalibrateCurrent
+      ? "calibrate-current"
+      : "calibrate-probe"
+    : undefined;
+  const piTitle = telemetry.promptInjectionTokens === null
+    ? "PI initial prompt estimate pending"
+    : piAction === "calibrate-current"
+      ? "PI initial prompt estimate is uncalibrated. Click to calibrate from this new session and refresh the value."
+      : piAction === "calibrate-probe"
+        ? "PI initial prompt estimate is uncalibrated. Click to start an isolated calibration probe and refresh the value."
+        : `PI initial prompt estimate calibrated from ${telemetry.promptInjectionCalibrationSamples} sample${telemetry.promptInjectionCalibrationSamples === 1 ? "" : "s"}.`;
 
   const main: WebuiFooterChip[] = [];
   if (telemetry.totalInput || telemetry.totalOutput) {
@@ -736,7 +770,8 @@ function buildWebuiFooterPayload(ctx: ExtensionContext, snapshot: GitSnapshot | 
     icon: "π",
     label: "pi",
     value: footerPromptInjectionValue(telemetry.promptInjectionTokens),
-    title: telemetry.promptInjectionTokens === null ? "PI initial prompt estimate pending" : undefined,
+    title: piTitle,
+    action: piAction,
     tone: "mauve",
   });
   if (speed !== null) {
@@ -892,7 +927,7 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
     await queuePromptInjectionEstimateRefresh(ctx);
   };
 
-  const getFooterPromptInjectionTokens = (ctx: ExtensionContext): number | null => {
+  const getFooterPromptInjectionEstimate = (ctx: ExtensionContext): InitialPromptInputEstimate | null => {
     const snapshot = promptEstimateService.getSnapshot();
     if (!snapshot) {
       void queuePromptInjectionEstimateRefresh(ctx);
@@ -905,7 +940,7 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
       return null;
     }
 
-    return snapshot.estimate.total;
+    return snapshot.estimate;
   };
 
   const buildFooterTelemetry = (ctx: ExtensionContext): FooterTelemetry => {
@@ -924,6 +959,7 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
       latestTokenSpeed = historicalTokenSpeed;
     }
 
+    const promptInjectionEstimate = getFooterPromptInjectionEstimate(ctx);
     const contextUsage = ctx.getContextUsage();
     const contextWindow = contextUsage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
     const rawContextPercent = typeof contextUsage?.percent === "number" ? contextUsage.percent : null;
@@ -939,7 +975,9 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
       totalCost,
       liveOutputTokens,
       latestTokenSpeed,
-      promptInjectionTokens: getFooterPromptInjectionTokens(ctx),
+      promptInjectionTokens: promptInjectionEstimate?.total ?? null,
+      promptInjectionCalibrationSamples: promptInjectionEstimate?.calibrationSamples ?? 0,
+      promptInjectionCanCalibrateCurrent: canCalibrateCurrentPromptEstimate(ctx),
       contextWindow,
       contextPercent: rawContextPercent,
       contextDisplay,

@@ -8,7 +8,7 @@ Ephemeral `/btw` side questions for Pi.
 - Answers from the current session transcript without appending the question or answer to the main conversation.
 - Does not expose tools to the side request.
 - In the TUI, shows the answer in a centered overlay with scrolling and dismiss keys.
-- In Pi Web UI RPC mode, emits a structured status payload consumed by the Web UI optional overlay.
+- In Pi Web UI RPC mode, starts the side request in the background and streams into a non-blocking live output widget.
 
 ## Install
 
@@ -31,7 +31,9 @@ TUI keys while the overlay is open:
 
 ## Web UI integration
 
-When loaded inside `@firstpick/pi-package-webui`, `/btw` publishes structured updates through the extension UI `setStatus` bridge using the `btw-webui` status key. The Web UI renders those updates as an optional browser overlay.
+When loaded inside `@firstpick/pi-package-webui`, `/btw` publishes structured updates through extension UI widgets using the `btw:output` and `btw:footer` widget keys. The Web UI renders the answer as a release-style live output card, so the composer remains usable while the side answer streams.
+
+The Web UI card includes **Transfer Context**, which calls `/btw-transfer` to append the selected side question and answer as a displayed custom message in the main session. Transferred context is included in later main-chat model context. If the main agent is actively running, the transfer is delivered as live steering and injected after the next agent action.
 
 ## Notes
 

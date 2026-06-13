@@ -73,7 +73,7 @@ assert.match(html, /id="pathPickerCreateButton"[^>]*>Create directory<\/button>/
 assert.match(html, /id="pathPickerSearchInput"[^>]*type="search"[^>]*placeholder="Search current directory…"/, "cwd picker should expose a current-directory search box");
 assert.match(html, /id="pathPickerClearSearchButton"[^>]*hidden[^>]*>Clear<\/button>/, "cwd picker should expose a clear-search action");
 assert.match(html, /id="optionalFeaturesBox"/, "side panel should expose optional feature status and controls");
-assert.match(html, /id="btwOverlayDialog"[\s\S]*id="btwOverlayAnswer"/, "/btw should expose a Web UI side-question overlay");
+assert.doesNotMatch(html, /id="btwOverlayDialog"/, "/btw should not use a blocking modal overlay");
 assert.match(html, /id="codexUsageBox"/, "side panel should expose Codex subscription usage status");
 assert.match(html, /data-side-panel-section="codex-usage"/, "Codex usage should live in a collapsible side-panel section");
 assert.match(html, /data-side-panel-section="queue"[\s\S]*id="createPromptListButton"[\s\S]*>Create prompt list<\/button>/, "Queue section should expose prompt-list creation");
@@ -127,7 +127,9 @@ assert.match(app, /attachmentTextDialog\?\.addEventListener\("keydown"[\s\S]*eve
 assert.match(css, /\.attachment-text-dialog[\s\S]*\.attachment-text-editor/, "text attachment editor should have dedicated dialog styling");
 assert.match(html, /id="composerActionsButton"/, "mobile composer should expose a compact actions trigger");
 assert.match(html, /id="composerActionsPanel"/, "secondary composer controls should live in a mobile actions panel");
-assert.match(html, /<div class="composer-row">[\s\S]*id="abortButton"[\s\S]*id="sendButton"/, "Abort should live in the bottom composer row beside Send");
+assert.match(html, /<div class="composer-row">[\s\S]*id="abortButton"[\s\S]*id="btwButton"[\s\S]*id="sendButton"/, "Abort and /btw should live in the bottom composer row beside Send");
+assert.match(html, /id="btwButton"[\s\S]*class="composer-icon-button composer-btw-button"[\s\S]*?<svg class="composer-icon"/, "composer should expose an icon-only /btw side-question button");
+assert.doesNotMatch(html, /id="btwButton"[\s\S]*?<span>\/btw<\/span>[\s\S]*?id="sendButton"/, "/btw composer button should not show a text label");
 assert.match(html, /id="abortButton"[^>]*Hold Esc or the Abort button for 3 seconds/, "Abort should advertise guarded Esc and long-press affordances");
 assert.doesNotMatch(html, /class="side-panel-controls"[\s\S]*id="abortButton"/, "Abort should not be buried in the side-panel controls");
 assert.match(html, /id="publishButton"[\s\S]*?aria-controls="publishMenu"/, "composer should expose a Publish workflow menu button");
@@ -190,7 +192,7 @@ assert.match(css, /\.composer-row button \{\n\s+width:\s*100%;\n\s+min-height:\s
 assert.match(css, /\.composer-abort-button,\n\.composer-row button\.primary \{[\s\S]*?min-width:/, "Abort and Send should share stable bottom-row sizing");
 assert.match(css, /\.composer-abort-button\.long-pressing::after[\s\S]*?animation:\s*abort-long-press-fill var\(--abort-long-press-duration, 3000ms\) linear forwards/, "Abort should expose a visible 3-second long-press progress affordance");
 assert.match(css, /body\.pi-run-active:not\(\.mobile-keyboard-open\) \.composer-abort-button:not\(\[hidden\]\) \{\n\s+order:\s*1;\n\s+grid-column:\s*span 2;/, "active mobile runs should move Abort to the top row");
-assert.match(css, /body\.pi-run-active:not\(\.mobile-keyboard-open\) \.composer-actions-button \{ order:\s*4; \}[\s\S]*?body\.pi-run-active:not\(\.mobile-keyboard-open\) \.composer-row button\.primary \{\n\s+order:\s*5;\n\s+grid-column:\s*span 4;/, "active mobile runs should keep Actions beside Send on the bottom row");
+assert.match(css, /body\.pi-run-active:not\(\.mobile-keyboard-open\) \.composer-actions-button \{ order:\s*4; \}[\s\S]*?body\.pi-run-active:not\(\.mobile-keyboard-open\) \.composer-btw-button:not\(\[hidden\]\) \{\n\s+order:\s*5;\n\s+grid-column:\s*span 2;[\s\S]*?body\.pi-run-active:not\(\.mobile-keyboard-open\) \.composer-row button\.primary \{\n\s+order:\s*6;\n\s+grid-column:\s*span 2;/, "active mobile runs should keep Actions, /btw, and Send on the bottom row");
 assert.match(css, /#promptInput \{[\s\S]*?min-height:\s*calc\(1\.5em \+ 1\.8rem\)/, "prompt input should default to a compact single-line height");
 assert.match(css, /#promptInput \{[\s\S]*?overflow-y:\s*hidden/, "prompt input should be JS-resized instead of showing a scrollbar by default");
 assert.match(css, /\.composer-context-tags \{[\s\S]*?top:\s*-0\.48rem;[\s\S]*?left:\s*0\.75rem;/, "busy prompt behavior and skill tags should sit at the top-left of the input frame");
@@ -226,7 +228,7 @@ assert.match(css, /\.message\.toolResult \.message-collapse\[open\] > \.message-
 assert.match(css, /\.tool-output-details\[open\] > \.tool-output-code \{[\s\S]*?max-height:\s*min\(34rem, 52dvh\);[\s\S]*?overflow:\s*auto/, "expanded live tool output should get an internal scrollbar");
 assert.match(css, /\.run-indicator-pulse \{[\s\S]*?animation:\s*run-indicator-pulse/, "active agent run indicator should have an animated pulse");
 assert.match(css, /\.optional-features-box \{[\s\S]*?display:\s*grid/, "optional features should render as a side-panel feature list");
-assert.match(css, /\.extension-dialog\.btw-overlay-dialog \{[\s\S]*?\.btw-overlay-answer \{[\s\S]*?white-space:\s*pre-wrap/, "/btw overlay should render answer text in a scrollable readable panel");
+assert.match(css, /\.btw-widget \{[\s\S]*?\.btw-widget-composer \{[\s\S]*?\.btw-transfer-action \{[\s\S]*?\.btw-live-widget \.release-npm-output-details\[open\] \.release-npm-terminal \{[\s\S]*?height:\s*clamp/, "/btw should render as a non-blocking release-style output widget with its own input and transfer action");
 assert.match(css, /\.prompt-list-controls \{[\s\S]*?display:\s*grid/, "Queue prompt-list controls should render as a side-panel control group");
 assert.match(css, /\.prompt-list-dialog \{[\s\S]*?width:\s*min\(58rem/, "prompt-list editor dialog should have a wider prompt-friendly layout");
 assert.match(css, /\.prompt-list-editor-rows \{[\s\S]*?max-height:/, "prompt-list dialog should scroll long follow-up lists inside the editor");
@@ -325,7 +327,7 @@ assert.match(css, /\.terminal-tabs[\s\S]*?position:\s*absolute/, "expanded mobil
 assert.match(css, /body\.mobile-keyboard-open \.terminal-tabs-shell,[\s\S]*?body\.mobile-keyboard-open \.widget-area,[\s\S]*?body\.mobile-keyboard-open \.statusbar/, "mobile keyboard mode should hide header, widgets, and footer");
 assert.match(css, /body\.mobile-keyboard-open \.composer-actions-button,[\s\S]*?body\.mobile-keyboard-open \.composer-actions-panel/, "mobile keyboard mode should hide the secondary actions sheet while keeping active-run controls available");
 assert.match(css, /\.server-offline-panel/, "PWA/offline shell should style a backend-offline recovery panel");
-assert.match(css, /body:not\(\.pi-run-active\):not\(\.mobile-keyboard-open\) \.composer-row button\.primary \{ grid-column: span 4; \}/, "idle mobile composer should keep Actions and Send on one compact row");
+assert.match(css, /body:not\(\.pi-run-active\):not\(\.mobile-keyboard-open\) \.composer-row button\.primary \{ grid-column: span 2; \}[\s\S]*?body:not\(\.pi-run-active\):not\(\.mobile-keyboard-open\) \.composer-btw-button\[hidden\] \+ button\.primary \{ grid-column: span 4; \}/, "idle mobile composer should keep Actions, /btw, and Send on one compact row with a hidden-button fallback");
 assert.match(css, /button\[hidden\] \{ display: none !important; \}/, "hidden bottom-row controls should not occupy layout space");
 assert.match(css, /\.statusbar-tui-footer \{[\s\S]*?gap:\s*0/, "default TUI-like footer should reduce statusbar chrome around the compact line");
 assert.match(css, /\.statusbar-git-footer \{[\s\S]*?--footer-chip-min-width:\s*7\.6rem;[\s\S]*?gap:\s*0\.58rem/, "enabled git-footer extension should keep styled spacing and one shared minimal chip width token");
@@ -541,6 +543,8 @@ assert.match(app, /GIT_FOOTER_WEBUI_STATUS_KEY = "git-footer-webui"/, "git foote
 assert.match(app, /function parseGitFooterWebuiPayloadRaw\(raw\)[\s\S]*GIT_FOOTER_WEBUI_PAYLOAD_TYPE[\s\S]*GIT_FOOTER_WEBUI_PAYLOAD_VERSION/, "Web UI footer should parse the structured payload emitted by git-footer-status");
 assert.match(app, /function normalizeFooterPayloadChangedFile\(value\)[\s\S]*FOOTER_CHANGED_FILE_KINDS\.has\(value\.kind\)[\s\S]*oldPath/, "git footer payload parsing should preserve changed-file details for changes popovers");
 assert.match(app, /const files = value\.files\.map\(normalizeFooterPayloadChangedFile\)\.filter\(Boolean\)\.slice\(0, 80\);[\s\S]*chip\.files = files;/, "git footer payload chips should retain bounded changed-file lists");
+assert.match(app, /FOOTER_PAYLOAD_ACTIONS = new Set\(\["calibrate-current", "calibrate-probe"\]\)[\s\S]*chip\.action = value\.action;/, "git footer payload chips should preserve allowlisted actions such as PI calibration");
+assert.match(app, /async function runGitFooterPiCalibration\(mode = "current", tabContext = activeTabContext\(\)\)[\s\S]*resolveAvailableCommandName\("calibrate", \{ rpcOnly: true \}\)[\s\S]*mode === "probe" \? `\/\$\{commandName\}` : `\/\$\{commandName\} current`[\s\S]*scheduleGitFooterPiCalibrationRefresh\(tabContext, mode === "probe" \? \[5000, 14000\] : \[600, 1600\]\)/, "clicking an uncalibrated PI footer chip should run current/probe calibration and refresh the git footer value");
 assert.match(app, /title: cleanFooterPayloadText\(value\.title, "", 4000\)/, "git footer tooltip titles should preserve long cwd paths instead of truncating at chip display length");
 assert.match(app, /const sourceTitle = cleanFooterPayloadText\(chip\?\.title, "", 4000\)/, "git footer tooltip rendering should keep full source titles for long cwd paths");
 assert.match(app, /function renderFooter\(\)[\s\S]*parseGitFooterWebuiPayload\(\)[\s\S]*renderGitFooterPayload\(footerPayloadWithLiveModel\(gitFooterPayload\)\)/, "detailed footer rendering should prefer the git-footer-status extension payload");
@@ -606,8 +610,8 @@ assert.match(app, /packageStatus\?\.updateAvailable[\s\S]*action\.textContent = 
 assert.match(app, /optionalFeatureInstallMessages\.set\(featureId[\s\S]*waiting for package-manager output/, "optional feature installs should show running feedback while npm is active");
 assert.match(app, /api\("\/api\/optional-feature-install"/, "optional feature install action should call the backend installer endpoint");
 assert.match(app, /id: "btwCommand"[\s\S]*?@firstpick\/pi-extension-btw/, "optional features should include the /btw companion");
-assert.match(app, /BTW_WEBUI_STATUS_KEY = "btw-webui"[\s\S]*function handleBtwWebuiStatus/, "Web UI should consume structured /btw status payloads");
-assert.match(app, /statusKey === BTW_WEBUI_STATUS_KEY\) handleBtwWebuiStatus/, "extension status bridge should route /btw payloads to the overlay");
+assert.match(app, /BTW_OUTPUT_WIDGET_KEY = "btw:output"[\s\S]*function renderBtwOutputWidget/, "Web UI should render structured /btw output widgets");
+assert.match(app, /if \(key\.startsWith\("btw:"\)\) return "btwCommand"/, "extension widget routing should associate /btw widgets with the optional feature");
 assert.match(app, /id: "safetyGuard"[\s\S]*?@firstpick\/pi-extension-safety-guard/, "optional features should include the safety guard companion");
 assert.match(app, /id: "tuiSkillsCommand"[\s\S]*?@firstpick\/pi-extension-setup-skills/, "optional features should include the TUI skills command companion");
 assert.match(app, /id: "tuiToolsCommand"[\s\S]*?@firstpick\/pi-extension-tools/, "optional features should include the TUI tools command companion");
@@ -833,6 +837,11 @@ assert.match(app, /busyPromptBehaviorMenu\?\.addEventListener\("click"[\s\S]*cho
 assert.match(app, /setBusyPromptBehavior\(controls\.busyBehavior\.select\.value\)/, "native settings should update the busy prompt behavior tag immediately");
 assert.match(app, /sendPromptFromModeButton\("steer", elements\.steerButton\)/, "Steer should show tooltip instead of silently doing nothing when input is empty");
 assert.match(app, /sendPromptFromModeButton\("follow-up", elements\.followUpButton\)/, "Follow-up should show tooltip instead of silently doing nothing when input is empty");
+assert.match(app, /async function sendBtwQuestion\(question,[\s\S]*?`\/btw \$\{cleanQuestion\}`[\s\S]*?await sendPrompt\("prompt", message, \{ targetTabId, throwOnError: true \}\)/, "/btw helper should send text as an ephemeral slash command");
+assert.match(app, /async function sendBtwPromptFromButton\(\)[\s\S]*?if \(!question\) \{\n\s+openBtwComposerWidget\(\);/, "empty /btw button should open the side-question widget input");
+assert.match(app, /function renderBtwComposerForm\(\)[\s\S]*?form\.requestSubmit\(\)[\s\S]*?sendBtwQuestion\(question\)/, "/btw widget input should submit each message as a /btw trigger");
+assert.match(app, /function makeBtwTransferIcon\(\)[\s\S]*?class", "btw-transfer-icon"[\s\S]*?function transferBtwContextToMain\(button\)[\s\S]*?`\/btw-transfer \$\{encoded\}`[\s\S]*?streamingBehavior: liveSteer \? "steer" : undefined/, "/btw widget should expose an iconified transfer-context action that steers during active runs");
+assert.match(app, /async function sendPrompt\(kind = "prompt", explicitMessage, \{ targetTabId = activeTabId, throwOnError = false, streamingBehavior \} = \{\}\)[\s\S]*?if \(targetWasStreaming\) body\.streamingBehavior = streamingBehavior \|\| busyBehavior/, "prompt sending should support a per-call streaming behavior override");
 assert.match(app, /function runPublishWorkflow\(command\)[\s\S]*?sendPrompt\("prompt", `\/\$\{resolvedCommandName\}\$\{commandRest\}`\)/, "Publish workflows should send resolved slash commands directly without replacing the draft");
 assert.match(app, /async function runNativeCommandMenu\(command\)[\s\S]*?await handleNativeSlashSelectorCommand\(command\)/, "skills/tools command menu should open native selector dialogs directly");
 assert.match(app, /async function runNativeCommandMenu\(command\)[\s\S]*?sendPrompt\("prompt", command\)/, "generic native command menu should fall back to slash-command prompt execution");
@@ -854,7 +863,7 @@ for (const command of ["resume", "reload", "remote", "name", "clone", "settings"
   const id = command.replace(/^./, (letter) => letter.toUpperCase());
   assert.match(app, new RegExp(`options${id}Button\\.addEventListener\\("click", \\(\\) => runNativeCommandMenu\\("\\/${command}"\\)\\)`), `Options menu should launch /${command}`);
 }
-assert.match(app, /async function sendPrompt\(kind = "prompt", explicitMessage, \{ targetTabId = activeTabId, throwOnError = false \} = \{\}\)/, "prompt sending should accept direct messages that bypass the input field and optional target tab");
+assert.match(app, /async function sendPrompt\(kind = "prompt", explicitMessage, \{ targetTabId = activeTabId, throwOnError = false, streamingBehavior \} = \{\}\)/, "prompt sending should accept direct messages that bypass the input field and optional target tab");
 assert.match(app, /const rawMessage = usesPromptInput \? elements\.promptInput\.value : explicitMessage/, "direct prompt sends should not read the input textarea");
 assert.match(app, /if \(usesPromptInput\) \{[\s\S]*?if \(targetStillActive\) \{[\s\S]*?elements\.promptInput\.value = "";/, "direct prompt sends should preserve the input textarea draft");
 assert.match(app, /make\("button", "command-item"\)[\s\S]*?sendPrompt\("prompt", `\/\$\{command\.name\}`\)/, "side-panel command clicks should send the slash command directly");
@@ -872,6 +881,7 @@ assert.match(app, /function openNativeTreeSelector\(\)[\s\S]*?\/api\/session-tre
 assert.match(app, /async function openNativeAuthSelector\(mode\)[\s\S]*?\/api\/auth-providers[\s\S]*?Browser login is not implemented yet/, "native /login should list provider status without browser credential entry");
 assert.match(app, /\/api\/auth-logout[\s\S]*?confirmed: true/, "native /logout should remove stored credentials through a confirmed localhost-only endpoint");
 assert.match(app, /const HIDDEN_COMMAND_NAMES = new Set\(\["webui-tree-navigate", "webui-helper"\]\)/, "internal Web UI helper commands should stay out of command pickers");
+assert.match(app, /HIDDEN_COMMAND_NAMES\.add\("btw-transfer"\)/, "/btw transfer helper command should stay out of command pickers");
 assert.match(app, /function shouldSendPromptFromEnter\(event\)/, "prompt keyboard handling should be centralized");
 assert.match(app, /const PROMPT_HISTORY_STORAGE_KEY = "pi-webui-prompt-history"/, "prompt history should be persisted per browser for keyboard recall");
 assert.match(app, /function recallPreviousPromptFromHistory\(\)/, "prompt history should support recalling older prompts from the textarea");
@@ -1170,7 +1180,7 @@ assert.match(readme, /GET \/api\/path-suggestions\?tab=<tabId>&query=<path>/, "R
 assert.match(readme, /GET \/api\/optional-features/, "README should document optional feature status endpoint");
 assert.match(readme, /POST \/api\/optional-feature-install/, "README should document optional feature install endpoint");
 assert.match(readme, /server-persisted fast picks/, "README should describe server-persisted fast picks");
-assert.match(readme, /`\/btw` side-question overlays, browser notifications when a tab needs an extension UI response, and an optional side-panel toggle for agent-done notifications/, "README should describe /btw, blocked-tab, and agent-done notifications");
+assert.match(readme, /`\/btw` side-question output widgets with optional context transfer\/live steering, browser notifications when a tab needs an extension UI response, and an optional side-panel toggle for agent-done notifications/, "README should describe /btw, blocked-tab, and agent-done notifications");
 assert.match(readme, /blocked-tab browser notifications, and optional agent-done notifications require browser service-worker\/notification support/, "README should document notification requirements");
 assert.match(readme, /Side-panel theme picker backed by optional `@firstpick\/pi-themes-bundle` themes when loaded/, "README should describe optional theme selection");
 assert.match(readme, /## Optional companion packages/, "README should document optional Web UI companion packages");
