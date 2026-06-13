@@ -4228,8 +4228,10 @@ button.composer-skill-tag:focus-visible {
   min-width: 5.8rem;
 }
 .composer-abort-button {
+  min-width: 8.2rem;
   position: relative;
   overflow: hidden;
+  white-space: nowrap;
   box-shadow: 0 0 1rem rgba(243, 139, 168, 0.30), inset 0 1px 0 rgba(255,255,255,0.05);
 }
 .composer-abort-button.long-pressing {
@@ -4244,7 +4246,7 @@ button.composer-skill-tag:focus-visible {
   background: linear-gradient(90deg, rgba(255,255,255,0.28), rgba(255,255,255,0.08));
   transform: scaleX(0);
   transform-origin: left center;
-  animation: abort-long-press-fill 700ms linear forwards;
+  animation: abort-long-press-fill var(--abort-long-press-duration, 3000ms) linear forwards;
 }
 @keyframes abort-long-press-fill {
   to { transform: scaleX(1); }
@@ -4432,6 +4434,9 @@ button.composer-skill-tag:focus-visible {
   max-height: min(60vh, 24rem);
   padding-bottom: 0.38rem;
   overflow: auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   scrollbar-width: thin;
 }
 .composer-publish-menu:hover .composer-publish-menu-panel,
@@ -6264,7 +6269,10 @@ button.composer-skill-tag:focus-visible {
   body.side-panel-collapsed .terminal-tabs-shell { padding-right: calc(44px + 0.8rem); }
   .terminal-tabs-toggle-button {
     display: block;
-    width: min(14rem, calc(100vw - 8.8rem));
+    flex: 1 1 auto;
+    width: auto;
+    min-width: 0;
+    max-width: min(14rem, calc(100vw - 11.4rem));
     min-height: 28px;
     padding: 0.16rem 0.58rem;
     overflow: hidden;
@@ -6301,6 +6309,7 @@ button.composer-skill-tag:focus-visible {
     line-height: 1.1;
   }
   .terminal-tabs {
+    position: absolute;
     left: 0.55rem;
     right: 0.55rem;
     top: calc(100% + 0.35rem);
@@ -6310,6 +6319,8 @@ button.composer-skill-tag:focus-visible {
     gap: 0.34rem;
     max-height: min(42dvh, 20rem);
     overflow: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
     padding: 0.55rem;
     border: 1px solid rgba(148, 226, 213, 0.26);
     border-radius: 0.95rem;
@@ -6486,19 +6497,34 @@ button.composer-skill-tag:focus-visible {
   }
   .sticky-user-prompt-button {
     grid-template-columns: minmax(0, 1fr) auto;
-    margin: 0 0 0.5rem;
-    padding: 0.48rem 0.58rem;
-    gap: 0.48rem;
+    min-height: 36px;
+    margin: 0 0 0.32rem;
+    padding: 0.32rem 0.46rem;
+    gap: 0.32rem;
+    border-radius: 0.72rem;
   }
   .sticky-user-prompt-label { display: none; }
-  .sticky-user-prompt-text { font-size: 0.78rem; }
+  .sticky-user-prompt-text {
+    font-size: 0.72rem;
+    line-height: 1.2;
+  }
+  .sticky-user-prompt-meta {
+    font-size: 0.64rem;
+    line-height: 1.1;
+  }
   .sticky-user-follow-up-prompt {
     grid-template-columns: minmax(0, 1fr);
-    gap: 0.2rem;
-    padding-top: 0.38rem;
+    gap: 0.14rem;
+    padding-top: 0.22rem;
   }
-  .sticky-user-follow-up-label { font-size: 0.62rem; }
-  .sticky-user-follow-up-text { font-size: 0.74rem; }
+  .sticky-user-follow-up-label {
+    font-size: 0.56rem;
+    line-height: 1.1;
+  }
+  .sticky-user-follow-up-text {
+    font-size: 0.66rem;
+    line-height: 1.15;
+  }
   .jump-to-latest-button {
     min-height: 44px;
     margin: 0.35rem auto;
@@ -6548,9 +6574,10 @@ button.composer-skill-tag:focus-visible {
   .statusbar {
     max-height: none;
     overflow: visible;
-    padding: 0.42rem 0.55rem;
-    font-size: 0.68rem;
+    padding: 0.28rem 0.42rem;
+    font-size: 0.64rem;
   }
+  .context-meter-bar { display: none !important; }
   body.footer-details-expanded .statusbar {
     max-height: min(42dvh, 20rem);
     overflow: auto;
@@ -6578,7 +6605,7 @@ button.composer-skill-tag:focus-visible {
     position: fixed;
     left: max(0.55rem, env(safe-area-inset-left));
     right: max(0.55rem, env(safe-area-inset-right));
-    bottom: var(--footer-model-picker-bottom, calc(8.5rem + env(safe-area-inset-bottom)));
+    bottom: var(--footer-model-picker-bottom, calc(7.2rem + env(safe-area-inset-bottom)));
     width: auto;
     max-height: min(52dvh, 24rem);
     z-index: 60;
@@ -6586,15 +6613,15 @@ button.composer-skill-tag:focus-visible {
   .footer-line-main {
     display: none;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0.35rem;
-    margin-bottom: 0.35rem;
+    gap: 0.26rem;
+    margin-bottom: 0.26rem;
   }
   body.footer-details-expanded .footer-line-main { display: grid; }
   body.footer-details-expanded .footer-line-main .footer-metric { display: inline-grid; }
   .footer-line-meta {
     display: grid;
     grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr) auto;
-    gap: 0.35rem;
+    gap: 0.26rem;
     align-items: stretch;
   }
   .footer-line-meta .footer-meta { display: none; }
@@ -6616,38 +6643,51 @@ button.composer-skill-tag:focus-visible {
     width: 100%;
     min-width: 0;
   }
-  .footer-metric { padding: 0.35rem 0.45rem; }
+  .footer-metric,
+  .footer-meta {
+    min-height: 0;
+    padding: 0.24rem 0.38rem;
+  }
   .footer-details-toggle {
     display: block;
-    min-height: 44px;
-    padding: 0.35rem 0.62rem;
+    min-height: 36px;
+    padding: 0.24rem 0.5rem;
     color: var(--ctp-yellow);
     border-color: rgba(249, 226, 175, 0.34);
-    font-size: 0.72rem;
+    font-size: 0.68rem;
     font-weight: 900;
+    line-height: 1.1;
   }
   .composer {
     position: sticky;
     bottom: 0;
     z-index: 50;
-    padding: 0.55rem 0.55rem calc(0.55rem + env(safe-area-inset-bottom));
+    padding: 0.38rem 0.42rem calc(0.38rem + env(safe-area-inset-bottom));
     background: linear-gradient(180deg, rgba(var(--ctp-crust-rgb), 0.92), rgba(var(--ctp-crust-rgb), 0.98));
     box-shadow: 0 -0.85rem 1.8rem rgba(var(--ctp-crust-rgb), 0.56), inset 0 1px 0 rgba(255,255,255,0.04);
   }
+  .composer-input-row { gap: 0.36rem; }
+  .composer-attach-button {
+    width: 2.55rem;
+    min-width: 2.55rem;
+    min-height: 38px;
+    padding: 0.44rem;
+    border-radius: 0.72rem;
+  }
   #promptInput {
-    min-height: calc(1.45em + 1.5rem);
-    max-height: min(28dvh, 12rem);
-    padding: 0.75rem;
+    min-height: calc(1.35em + 1.05rem);
+    max-height: min(24dvh, 10rem);
+    padding: 0.52rem 0.62rem;
     resize: none;
-    font-size: 1rem;
-    line-height: 1.45;
+    font-size: 0.95rem;
+    line-height: 1.35;
   }
   .composer-row {
     display: grid;
     grid-template-columns: repeat(6, minmax(0, 1fr));
-    gap: 0.42rem;
+    gap: 0.3rem;
     align-items: stretch;
-    margin-top: 0.55rem;
+    margin-top: 0.38rem;
   }
   .composer-actions-button {
     display: block;
@@ -6669,15 +6709,15 @@ button.composer-skill-tag:focus-visible {
     scroll-padding-bottom: calc(7.5rem + var(--keyboard-inset-bottom, 0px));
   }
   body.mobile-keyboard-open .composer {
-    padding: 0.42rem 0.5rem calc(0.42rem + env(safe-area-inset-bottom));
+    padding: 0.32rem 0.4rem calc(0.32rem + env(safe-area-inset-bottom));
   }
   body.mobile-keyboard-open #promptInput {
-    min-height: calc(1.45em + 1.5rem);
-    max-height: min(24dvh, 9rem);
+    min-height: calc(1.35em + 1.05rem);
+    max-height: min(22dvh, 8rem);
   }
   body.mobile-keyboard-open .composer-row {
     grid-template-columns: 1fr;
-    margin-top: 0.35rem;
+    margin-top: 0.28rem;
   }
   body.mobile-keyboard-open .composer-actions-button,
   body.mobile-keyboard-open .composer-actions-panel {
@@ -6686,7 +6726,7 @@ button.composer-skill-tag:focus-visible {
   body.mobile-keyboard-open .composer-row button.primary,
   body.mobile-keyboard-open .composer-abort-button:not([hidden]) {
     grid-column: 1 / -1;
-    min-height: 44px;
+    min-height: 40px;
   }
   .composer-actions-panel {
     position: absolute;
@@ -6720,15 +6760,15 @@ button.composer-skill-tag:focus-visible {
   .spacer { display: none; }
   .composer-row button {
     width: 100%;
-    min-height: 44px;
+    min-height: 40px;
     margin-right: 0;
-    padding: 0.48rem 0.5rem;
-    font-size: 0.82rem;
+    padding: 0.34rem 0.44rem;
+    font-size: 0.78rem;
   }
   .composer-row button.primary {
     grid-column: 1 / -1;
-    min-height: 48px;
-    font-size: 0.92rem;
+    min-height: 40px;
+    font-size: 0.86rem;
   }
   body:not(.pi-run-active):not(.mobile-keyboard-open) .composer-row button.primary { grid-column: span 4; }
   body.pi-run-active:not(.mobile-keyboard-open) .composer-abort-button:not([hidden]) {
@@ -6783,18 +6823,17 @@ button.composer-skill-tag:focus-visible {
     width: 100%;
     min-width: 0;
     max-width: 100%;
-    max-height: min(34dvh, 18rem);
+    max-height: min(var(--mobile-dropdown-max-height, 34dvh), calc(var(--visual-viewport-height, 100dvh) - 2rem));
     margin: 0;
     padding-bottom: 0;
     overflow: auto;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
   }
-  .composer-actions-panel > .composer-options-menu .composer-publish-menu-panel {
-    inset-inline: auto 0;
-    max-height: min(calc(var(--visual-viewport-height, 100dvh) - 2rem), 44rem);
-  }
+  .composer-actions-panel > .composer-options-menu .composer-publish-menu-panel,
   .composer-actions-panel > .composer-app-runner-menu .composer-publish-menu-panel {
     inset-inline: auto 0;
-    max-height: min(calc(var(--visual-viewport-height, 100dvh) - 2rem), 44rem);
   }
   .composer-actions-panel > .composer-publish-menu .composer-publish-menu-item {
     width: 100%;
@@ -7329,6 +7368,39 @@ button.composer-skill-tag:focus-visible {
 .command-palette-header > div {
   min-width: 0;
 }
+.command-palette-header-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  min-width: 0;
+}
+.command-palette-close-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0.42rem 0.74rem;
+  border: 1px solid rgba(180, 190, 254, 0.22);
+  border-radius: 999px;
+  color: rgba(var(--ctp-subtext-rgb), 0.88);
+  font-weight: 850;
+  background:
+    linear-gradient(180deg, rgba(var(--ctp-surface-rgb), 0.42), rgba(var(--ctp-crust-rgb), 0.58)),
+    rgba(var(--ctp-crust-rgb), 0.58);
+  box-shadow: 0 0 0 1px rgba(203, 166, 247, 0.04), 0 0.45rem 1rem rgba(var(--ctp-crust-rgb), 0.18);
+}
+.command-palette-close-button:hover,
+.command-palette-close-button:focus-visible {
+  color: var(--ctp-text);
+  border-color: rgba(148, 226, 213, 0.58);
+  background:
+    linear-gradient(120deg, rgba(148, 226, 213, 0.16), rgba(137, 180, 250, 0.12)),
+    rgba(var(--ctp-surface-rgb), 0.62);
+  box-shadow: 0 0 0 1px rgba(148, 226, 213, 0.16), 0 0 1rem rgba(148, 226, 213, 0.14);
+}
 .command-palette-shortcut {
   flex: 0 0 auto;
   max-width: 9rem;
@@ -7481,24 +7553,73 @@ button.composer-skill-tag:focus-visible {
   .context-meter-actions button { flex: 1 1 auto; }
 }
 @media (max-width: 720px) {
-  .terminal-command-palette-button { display: none; }
+  .terminal-command-palette-button,
+  .terminal-dashboard-button {
+    display: inline-grid;
+    width: 32px;
+    min-width: 32px;
+    min-height: 28px;
+    border-radius: 0.58rem;
+  }
+  .terminal-command-palette-button .command-palette-launcher-icon,
+  .terminal-dashboard-button .workspace-overview-icon {
+    width: 1rem;
+    height: 1rem;
+  }
   .workspace-dashboard { padding: 0.62rem 0.7rem; }
   .workspace-dashboard-metrics { grid-template-columns: 1fr; }
   .command-palette-dialog {
-    inset: calc(0.5rem + env(safe-area-inset-top)) 0 auto 0;
-    width: min(100vw - 1rem, 42rem);
-    max-height: calc(var(--visual-viewport-height, 100dvh) - 1rem - env(safe-area-inset-top));
+    inset: calc(0.38rem + env(safe-area-inset-top)) 0 auto 0;
+    width: min(100vw - 0.5rem, 42rem);
+    max-height: calc(var(--visual-viewport-height, 100dvh) - 0.76rem - env(safe-area-inset-top));
     margin-inline: auto;
-    border-radius: 1rem;
+    border-radius: 0.9rem;
   }
-  .command-palette-header { padding: 0.85rem 0.85rem 0.62rem; }
+  .command-palette-header {
+    gap: 0.52rem;
+    padding: 0.62rem 0.58rem 0.42rem;
+  }
+  .command-palette-header h2 { font-size: 0.92rem; }
+  .command-palette-header-actions { gap: 0.38rem; }
+  .command-palette-kicker,
+  .command-palette-shortcut { font-size: 0.58rem; }
+  .command-palette-shortcut {
+    max-width: 5.8rem;
+    padding: 0.12rem 0.38rem;
+  }
+  .command-palette-close-button {
+    min-width: 54px;
+    min-height: 44px;
+    padding: 0.42rem 0.58rem;
+    font-size: 0.72rem;
+  }
   .command-palette-input {
-    width: calc(100% - 1.7rem);
-    margin-inline: 0.85rem;
+    width: calc(100% - 1.16rem);
+    min-height: 38px;
+    margin: 0 0.58rem 0.46rem;
+    padding: 0.62rem 0.68rem;
+    font-size: 0.92rem;
   }
-  .command-palette-list { padding-inline: 0.85rem; }
-  .command-palette-item { grid-template-columns: 1fr; }
-  .command-palette-item-kind { grid-row: auto; }
+  .command-palette-list {
+    gap: 0.3rem;
+    padding: 0 0.46rem 0.52rem;
+    scrollbar-gutter: auto;
+  }
+  .command-palette-item {
+    grid-template-columns: minmax(3.4rem, 0.26fr) minmax(0, 1fr);
+    gap: 0.04rem 0.46rem;
+    min-height: 2.72rem;
+    padding: 0.42rem 0.5rem;
+    border-radius: 0.68rem;
+    line-height: 1.18;
+  }
+  .command-palette-item-kind {
+    grid-row: 1 / span 2;
+    font-size: 0.56rem;
+    letter-spacing: 0.055em;
+  }
+  .command-palette-item-label { font-size: 0.82rem; }
+  .command-palette-item-description { font-size: 0.6rem; }
   .message-edit-retry-button {
     top: 0.38rem;
     right: 2.8rem;

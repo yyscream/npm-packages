@@ -201,6 +201,16 @@ export class RemoteWebuiController {
     throw new Error(result.body?.error || "Failed to close Pi Web UI network access");
   }
 
+  async setRemoteAuth(port, enabled, timeoutMs = 1_500) {
+    const result = await fetchJsonWithTimeout(endpointUrl(port, "/api/remote-auth/settings"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabled: enabled === true }),
+    }, timeoutMs, this.fetchImpl);
+    if (result.ok && result.body?.ok === true) return result.body.data;
+    throw new Error(result.body?.error || "Failed to update Pi Web UI Remote PIN auth");
+  }
+
   async waitForNetworkOpen(port, { timeoutMs = DEFAULT_NETWORK_TIMEOUT_MS, pollMs = DEFAULT_POLL_MS } = {}) {
     const deadline = Date.now() + timeoutMs;
     let last;
@@ -235,7 +245,31 @@ export function selectLanUrl(network) {
   return urls.find((url) => typeof url === "string" && /^https?:\/\//i.test(url)) || undefined;
 }
 
-export async function openRemoteWebui(options, { controller, startWebui }) {
+function safeQrReturnPath(value = "/") {
+  const text = String(value || "/").trim();
+  if (!text.startsWith("/") || text.startsWith("//")) return "/";
+  return text;
+}
+
+export function remoteAuthQrUrl(url, network = {}) {
+  if (typeof url !== "string" || !url) return url;
+  const pin = String(network?.auth?.pin || "").trim();
+  if (!network?.auth?.enabled || !/^\d{4}$/.test(pin)) return url;
+
+  try {
+    const parsed = new URL(url);
+    const returnPath = safeQrReturnPath(`${parsed.pathname || "/"}${parsed.search || ""}`);
+    parsed.pathname = "/remote-auth";
+    parsed.search = "";
+    parsed.searchParams.set("return", returnPath);
+    parsed.hash = new URLSearchParams({ pin }).toString();
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
+export async function openRemoteWebui(options, { controller, startWebui, prepareNetwork } = {}) {
   if (!controller) throw new Error("RemoteWebuiController is required");
   let health = await controller.probeHealth(options.port);
   let started = false;
@@ -252,6 +286,10 @@ export async function openRemoteWebui(options, { controller, startWebui }) {
     network = await controller.getNetwork(options.port);
   } catch {
     network = health.data?.network;
+  }
+
+  if (typeof prepareNetwork === "function") {
+    network = (await prepareNetwork(network, { health, started })) || network;
   }
 
   if (!network?.open || network?.closing) {
@@ -299,25 +337,32 @@ export function formatStatus(status) {
     `Bind:     ${network.host || "unknown"}:${network.port || "?"}`,
   ];
   if (networkUrls.length) lines.push(`LAN URLs: ${networkUrls.join(", ")}`);
+  const auth = network.auth || {};
+  lines.push(auth.enabled ? `Remote PIN auth: on${auth.pin ? ` · PIN ${auth.pin}` : ""}` : "Remote PIN auth: off");
   if (status.health?.data?.webuiVersion) lines.push(`Version:  ${status.health.data.webuiVersion}`);
   if (status.error) lines.push(`Warning:  ${status.error}`);
   return lines.join("\n");
 }
 
-export function buildRemoteWidgetLines({ url, qrLines = [], network = {}, started = false } = {}) {
+export function buildRemoteWidgetLines({ url, qrUrl, qrLines = [], network = {}, started = false } = {}) {
   const auth = network?.auth || {};
+  const displayUrl = url || selectLanUrl(network) || network.localUrl || "(no URL)";
+  const qrTarget = qrUrl || remoteAuthQrUrl(displayUrl, network);
+  const hasAutoAuthQr = auth.enabled && !!auth.pin && qrTarget !== displayUrl;
   const authLine = auth.enabled ? `Remote PIN auth: on${auth.pin ? ` · PIN ${auth.pin}` : ""}` : "Remote PIN auth: off";
-  const warningLine = auth.enabled
-    ? "Trusted LAN only. Anyone with this URL and PIN can control Pi/WebUI."
-    : "Trusted LAN only. Remote PIN auth is off; anyone with this URL can control Pi/WebUI.";
+  const warningLine = hasAutoAuthQr
+    ? "Trusted LAN only. The QR signs in with the embedded PIN; keep it private."
+    : auth.enabled
+      ? "Trusted LAN only. Anyone with this URL and PIN can control Pi/WebUI."
+      : "Trusted LAN only. Remote PIN auth is off; anyone with this URL can control Pi/WebUI.";
   const lines = [
     "Pi Remote WebUI",
     "",
-    "Scan with your phone:",
+    hasAutoAuthQr ? "Scan with your phone (auto-auth QR):" : "Scan with your phone:",
     "",
     ...qrLines,
     "",
-    url || selectLanUrl(network) || network.localUrl || "(no URL)",
+    displayUrl,
     authLine,
     "",
     warningLine,

@@ -75,6 +75,77 @@ test("openRemoteWebui starts when offline, opens network, and returns a LAN URL"
   });
 });
 
+test("openRemoteWebui can prepare network settings before opening LAN access", async () => {
+  const calls = [];
+  let networkOpen = false;
+  let authEnabled = false;
+
+  await withMockWebui((req, res) => {
+    calls.push(`${req.method} ${req.url}`);
+    if (req.url === "/api/health" && req.method === "GET") return sendJson(res, 200, { ok: true, webuiVersion: "0.3.8" });
+    if (req.url === "/api/network" && req.method === "GET") {
+      return sendJson(res, 200, {
+        ok: true,
+        data: {
+          open: networkOpen,
+          opening: false,
+          closing: false,
+          host: networkOpen ? "0.0.0.0" : "127.0.0.1",
+          port: 0,
+          localUrl: "http://127.0.0.1/",
+          networkUrls: networkOpen ? ["http://10.0.0.8:31415/"] : [],
+          auth: authEnabled ? { enabled: true, pin: "1234" } : { enabled: false },
+        },
+      });
+    }
+    if (req.url === "/api/remote-auth/settings" && req.method === "POST") {
+      authEnabled = true;
+      return sendJson(res, 200, {
+        ok: true,
+        data: {
+          network: {
+            open: networkOpen,
+            opening: false,
+            closing: false,
+            host: networkOpen ? "0.0.0.0" : "127.0.0.1",
+            port: 0,
+            localUrl: "http://127.0.0.1/",
+            networkUrls: networkOpen ? ["http://10.0.0.8:31415/"] : [],
+            auth: { enabled: true, pin: "1234" },
+          },
+        },
+      });
+    }
+    if (req.url === "/api/network/open" && req.method === "POST") {
+      networkOpen = true;
+      return sendJson(res, 202, { ok: true, data: { opening: true } });
+    }
+    sendJson(res, 404, { ok: false });
+  }, async (port) => {
+    const controller = new RemoteWebuiController({ sleepImpl: () => Promise.resolve() });
+    const result = await openRemoteWebui({ port }, {
+      controller,
+      startWebui: async () => {},
+      prepareNetwork: async (network) => {
+        calls.push(`prepare auth=${network.auth.enabled}`);
+        const data = await controller.setRemoteAuth(port, true);
+        return data.network;
+      },
+    });
+
+    assert.equal(result.url, "http://10.0.0.8:31415/");
+    assert.equal(result.network.auth.pin, "1234");
+    assert.deepEqual(calls, [
+      "GET /api/health",
+      "GET /api/network",
+      "prepare auth=false",
+      "POST /api/remote-auth/settings",
+      "POST /api/network/open",
+      "GET /api/network",
+    ]);
+  });
+});
+
 test("openRemoteWebui reuses an already open WebUI", async () => {
   let startCalled = false;
 

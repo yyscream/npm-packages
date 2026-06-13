@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-package-webui",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Pi Web UI companion package with a local browser UI CLI plus /webui-start and /webui-status commands.",
   "license": "MIT",
   "homepage": "https://github.com/Firstp1ck/npm-packages/tree/main/pi-package-webui#readme",
@@ -30,7 +30,8 @@
       "node_modules/@firstpick/pi-extension-setup-skills/index.ts",
       "node_modules/@firstpick/pi-extension-stats/index.ts",
       "node_modules/@firstpick/pi-extension-todo-progress/index.ts",
-      "node_modules/@firstpick/pi-extension-tools/index.ts"
+      "node_modules/@firstpick/pi-extension-tools/index.ts",
+      "node_modules/@firstpick/pi-package-remote-webui/index.ts"
     ],
     "skills": [
       "node_modules/@firstpick/pi-extension-release-aur/skills"
@@ -50,7 +51,7 @@
     "test": "node tests/run-all.mjs"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "^0.79.1"
+    "@earendil-works/pi-coding-agent": "^0.79.3"
   },
   "optionalDependencies": {
     "@firstpick/pi-extension-git-footer-status": "^0.3.3",
@@ -61,6 +62,7 @@
     "@firstpick/pi-extension-stats": "^0.2.6",
     "@firstpick/pi-extension-todo-progress": "^0.2.4",
     "@firstpick/pi-extension-tools": "^0.1.6",
+    "@firstpick/pi-package-remote-webui": "^0.1.0",
     "@firstpick/pi-prompts-git-pr": "^0.1.2",
     "@firstpick/pi-themes-bundle": "^0.1.4"
   },

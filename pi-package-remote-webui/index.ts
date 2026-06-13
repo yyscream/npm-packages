@@ -14,6 +14,7 @@ import {
   generateQrLines,
   openRemoteWebui,
   parseRemoteArgs,
+  remoteAuthQrUrl,
   requiresOpenConfirmation,
   usage,
 } from "./lib/remote-core.mjs";
@@ -25,11 +26,19 @@ const LOCAL_HOST = "127.0.0.1";
 
 const OPEN_WARNING = [
   "Pi Web UI can control Pi/WebUI and run allowed tools from connected browsers.",
-  "Remote PIN auth is off by default; enable it in Web UI Controls if you want a 4-digit PIN for non-local clients.",
+  "You will be asked whether to activate Remote PIN auth before the QR code is shown.",
   "",
   "Only open this on a trusted local network.",
   "",
   "Open to local network?",
+].join("\n");
+
+const AUTH_WARNING = [
+  "Remote PIN auth is currently off.",
+  "",
+  "Activate it now? /remote will embed the generated PIN in the QR code so your phone can sign in without typing it.",
+  "",
+  "Choose No only on a trusted LAN where anyone with the URL may control Pi/WebUI.",
 ].join("\n");
 
 type WebuiChild = ChildProcessByStdio<null, Readable, Readable>;
@@ -39,6 +48,11 @@ type RemoteOptions = {
   port: number;
   name?: string;
   yes: boolean;
+};
+
+type RemoteNetworkStatus = {
+  auth?: { enabled?: boolean; pin?: string };
+  [key: string]: unknown;
 };
 
 function resolveExistingPath(candidate: string | undefined): string | undefined {
@@ -174,8 +188,9 @@ function setFullRemoteWidget(ctx: ExtensionCommandContext, lines: string[]): voi
 }
 
 async function renderRemoteWidget(ctx: ExtensionCommandContext, result: { url: string; network?: unknown; started?: boolean }): Promise<void> {
-  const qrLines = await generateQrLines(result.url);
-  const lines = buildRemoteWidgetLines({ url: result.url, qrLines, network: result.network, started: result.started });
+  const qrUrl = remoteAuthQrUrl(result.url, result.network || {});
+  const qrLines = await generateQrLines(qrUrl);
+  const lines = buildRemoteWidgetLines({ url: result.url, qrUrl, qrLines, network: result.network, started: result.started });
   setFullRemoteWidget(ctx, lines);
   setRemoteStatus(ctx, `remote ${result.url}`);
 }
@@ -184,6 +199,32 @@ async function confirmRemoteOpen(options: RemoteOptions, ctx: ExtensionCommandCo
   if (!requiresOpenConfirmation(options)) return true;
   if (!ctx.hasUI) throw new Error("/remote requires confirmation. Re-run with /remote --yes in non-interactive modes.");
   return await ctx.ui.confirm("Open Pi Web UI to LAN?", OPEN_WARNING);
+}
+
+function remoteAuthEnabled(network: unknown): boolean {
+  return (network as RemoteNetworkStatus | undefined)?.auth?.enabled === true;
+}
+
+function networkFromAuthUpdate(previous: unknown, data: unknown): unknown {
+  const update = data as { network?: unknown; auth?: unknown } | undefined;
+  if (update?.network) return update.network;
+  if (update?.auth && previous && typeof previous === "object") return { ...(previous as RemoteNetworkStatus), auth: update.auth };
+  return previous;
+}
+
+async function maybeActivateRemoteAuth(options: RemoteOptions, ctx: ExtensionCommandContext, controller: RemoteWebuiController, network: unknown): Promise<unknown> {
+  if (remoteAuthEnabled(network)) return network;
+
+  let activate = options.yes === true;
+  if (!activate) {
+    if (!ctx.hasUI) return network;
+    activate = await ctx.ui.confirm("Activate Remote PIN auth?", AUTH_WARNING);
+  }
+  if (!activate) return network;
+
+  setRemoteStatus(ctx, "enabling remote PIN auth…");
+  const data = await controller.setRemoteAuth(options.port, true);
+  return networkFromAuthUpdate(network, data);
 }
 
 async function handleStatus(options: RemoteOptions, ctx: ExtensionCommandContext, controller: RemoteWebuiController): Promise<void> {
@@ -243,6 +284,7 @@ async function handleOpen(options: RemoteOptions, ctx: ExtensionCommandContext, 
   const result = await openRemoteWebui(options, {
     controller,
     startWebui: async (startOptions: RemoteOptions) => spawnWebui(startOptions, ctx),
+    prepareNetwork: async (network: unknown) => maybeActivateRemoteAuth(options, ctx, controller, network),
   });
   await renderRemoteWidget(ctx, result);
   ctx.ui.notify(`Pi Remote WebUI ready:\n${result.url}\n\nScan the QR code above from your phone.`, "info");

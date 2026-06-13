@@ -6,7 +6,7 @@ Local browser UI for [Pi coding agent](https://www.npmjs.com/package/@earendil-w
 
 Pi Web UI gives you a local browser companion for Pi: multi-tab chat, streaming output, model controls, uploads, slash-command helpers, workspace navigation, and optional extension widgets.
 
-> **Security:** Pi Web UI can control the spawned Pi session and run anything that session is allowed to run. It binds to `127.0.0.1` by default. Remote PIN authentication is off by default; enable it in **Controls → Network → Remote PIN auth** before exposing it on trusted networks.
+> **Security:** Pi Web UI can control the spawned Pi session and run anything that session is allowed to run. It binds to `127.0.0.1` by default. Remote PIN authentication is off by default on first use; enabling it in **Controls → Network → Remote PIN auth** persists that preference for later Web UI starts.
 
 ## Requirements
 
@@ -123,6 +123,7 @@ Environment variables:
 - `PI_WEBUI_PORT`
 - `PI_WEBUI_PI_BIN`
 - `PI_WEBUI_REMOTE_AUTH=1` to start with remote PIN authentication enabled
+- `PI_WEBUI_SETTINGS_FILE=/path/to/settings.json` to override where Web UI stores persisted settings such as the Remote PIN auth preference
 
 ## Main features
 
@@ -130,7 +131,7 @@ Environment variables:
 - Multi-tab Pi sessions with isolated processes, working directories, prompt drafts, activity state, and a workspace dashboard for common actions.
 - Unified command palette (`Ctrl/Cmd+K`) for commands, tabs, models, sessions, settings, and frequent Web UI actions.
 - Automatic tab naming from the first prompt, with `--name <name>` still available for an explicit initial tab name.
-- Streaming chat transcript with Markdown, thinking output, tool/bash cards, queue and compaction events, edit-and-retry from user prompts, and abort controls.
+- Streaming chat transcript with Markdown, thinking output, tool/bash cards, queue and compaction events, edit-and-retry from user prompts, and guarded abort controls that require holding Esc or the Abort button for 3 seconds.
 - Prompt composer with uploads, drag/drop/paste, inline image support, slash-command autocomplete, and `@` file/path references with live suggestions.
 - Browser dialogs for common Pi selectors such as `/model`, `/settings`, `/theme`, `/fork`, `/clone`, `/resume`, `/tree`, `/scoped-models`, `/tools`, and `/skills`.
 - Model, thinking, session, workspace, theme, optional-feature, Codex usage, network, update/restart, event, and notification controls in the side panel.
@@ -175,6 +176,7 @@ Optional companions:
 - `@firstpick/pi-extension-setup-skills` — TUI `/skills` setup command alongside WebUI-native skill toggles.
 - `@firstpick/pi-extension-todo-progress` — todo-progress rendering.
 - `@firstpick/pi-extension-tools` — TUI `/tools` active-tool manager alongside WebUI-native tool toggles.
+- `@firstpick/pi-package-remote-webui` — `/remote` trusted-LAN QR helper for connecting mobile browsers to Web UI.
 - `@firstpick/pi-extension-git-footer-status` — richer extension-owned git/footer status, including the structured Web UI footer payload.
 - `@firstpick/pi-extension-stats` — stats commands and status data.
 - `@firstpick/pi-themes-bundle` — Web UI and Pi theme resources.
@@ -205,8 +207,8 @@ This requires `/git-staged-msg` and `/pr` from `@firstpick/pi-prompts-git-pr`; b
 
 - Default bind is localhost-only: `127.0.0.1:31415`.
 - The side-panel **Open to network** button rebinds the server to `0.0.0.0`, shows LAN URLs when available, and toggles to "Close for network".
-- The side-panel **Remote PIN auth** toggle is off by default. When enabled, the server generates a random 4-digit PIN, shows it in Controls and `/webui-status`, and requires it from non-local browser clients.
-- Localhost clients stay frictionless and can toggle Remote PIN auth; changing the toggle disconnects existing event streams so remote clients must re-authenticate after enablement.
+- The side-panel **Remote PIN auth** toggle is off by default on first use. When enabled, the server saves that preference, generates a fresh random 4-digit PIN for each server start, shows it in Controls and `/webui-status`, and requires it from non-local browser clients.
+- Localhost clients stay frictionless and can toggle Remote PIN auth; changing the toggle persists the preference and disconnects existing event streams so remote clients must re-authenticate after enablement.
 - `--host 0.0.0.0` also exposes the Web UI to the local network; pass `--remote-auth` to start with PIN auth already enabled.
 - Any connected browser client with access (and the PIN, if enabled) can control Pi and run Web UI bash actions as the Web UI process user.
 - Remote PIN auth is a simple trusted-LAN HTTP gate, not hardened multi-user authentication; do not expose it to untrusted networks.

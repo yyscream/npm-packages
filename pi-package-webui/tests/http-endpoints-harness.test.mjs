@@ -38,6 +38,7 @@ async function request(host, pathname, { method = "GET", body, timeoutMs = 5_000
 }
 
 const cwd = await mkdtemp(path.join(tmpdir(), "pi-webui-http-harness-"));
+const settingsFile = path.join(cwd, "webui-settings.json");
 await chmod(fakePi, 0o755);
 
 const child = spawn(process.execPath, [serverScript, "--cwd", cwd, "--host", "0.0.0.0", "--port", String(port), "--pi", fakePi], {
@@ -48,6 +49,7 @@ const child = spawn(process.execPath, [serverScript, "--cwd", cwd, "--host", "0.
     GIT_AUTHOR_EMAIL: "pi-webui-test@example.invalid",
     GIT_COMMITTER_NAME: "Pi WebUI Test",
     GIT_COMMITTER_EMAIL: "pi-webui-test@example.invalid",
+    PI_WEBUI_SETTINGS_FILE: settingsFile,
   },
 });
 let serverOutput = "";

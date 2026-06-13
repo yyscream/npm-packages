@@ -66,6 +66,7 @@ assert.match(html, /id="terminalTabsLayoutSelect"[\s\S]*<option value="left">Lef
 assert.match(html, /id="terminalTabsLayoutStatus"/, "terminal-tabs layout selector should expose status text");
 assert.match(html, /id="nativeCommandDialog"/, "native slash selector UI should have a dedicated dialog");
 assert.match(html, /id="nativeCommandSearch"[^>]*type="search"/, "native slash selector dialog should expose a filter box");
+assert.match(html, /id="commandPaletteCloseButton"[^>]*aria-label="Close command palette"[^>]*>Close<\/button>/, "command palette should expose a visible accessible close button");
 assert.match(html, /id="pathPickerCreateNameInput"[^>]*placeholder="New directory name"/, "cwd picker should expose a new-directory name input");
 assert.match(html, /id="pathPickerCreateButton"[^>]*>Create directory<\/button>/, "cwd picker should expose a create-directory action");
 assert.match(html, /id="pathPickerSearchInput"[^>]*type="search"[^>]*placeholder="Search current directory…"/, "cwd picker should expose a current-directory search box");
@@ -125,7 +126,7 @@ assert.match(css, /\.attachment-text-dialog[\s\S]*\.attachment-text-editor/, "te
 assert.match(html, /id="composerActionsButton"/, "mobile composer should expose a compact actions trigger");
 assert.match(html, /id="composerActionsPanel"/, "secondary composer controls should live in a mobile actions panel");
 assert.match(html, /<div class="composer-row">[\s\S]*id="abortButton"[\s\S]*id="sendButton"/, "Abort should live in the bottom composer row beside Send");
-assert.match(html, /id="abortButton"[^>]*Esc or hold/, "Abort should advertise Esc and long-press affordances");
+assert.match(html, /id="abortButton"[^>]*Hold Esc or the Abort button for 3 seconds/, "Abort should advertise guarded Esc and long-press affordances");
 assert.doesNotMatch(html, /class="side-panel-controls"[\s\S]*id="abortButton"/, "Abort should not be buried in the side-panel controls");
 assert.match(html, /id="publishButton"[\s\S]*?aria-controls="publishMenu"/, "composer should expose a Publish workflow menu button");
 assert.match(html, /id="releaseNpmButton"[^>]*data-command="\/release-npm"[\s\S]*?<span>NPM Release<\/span>/, "Publish menu should include the npm release workflow by label");
@@ -137,6 +138,14 @@ assert.match(html, /id="nativeToolsButton"[^>]*data-command="\/tools"[\s\S]*?<sp
 assert.match(html, /id="appRunnerInfoButton"[\s\S]*?aria-controls="appRunnerInfoDialog"/, "detected app-runner controls should expose an explanation popup button");
 assert.match(html, /id="appRunnerMenuButton"[\s\S]*?aria-controls="appRunnerMenuPanel"/, "composer should expose a detected app-runner dropdown button");
 assert.ok(html.indexOf('id="optionsMenuButton"') < html.indexOf('id="appRunnerMenuButton"'), "app-runner dropdown should render to the right of the settings/options button");
+assert.match(html, /id="optionsRemoteButton"[^>]*data-command="\/remote"[^>]*hidden[\s\S]*?<span>Open Remote<\/span>/, "Options menu should include the Remote WebUI launcher by label");
+const optionsRemoteIndex = html.indexOf('id="optionsRemoteButton"');
+const optionsReloadIndex = html.indexOf('id="optionsReloadButton"');
+const optionsNameIndex = html.indexOf('id="optionsNameButton"');
+assert.ok(
+  Math.min(optionsReloadIndex, optionsNameIndex) < optionsRemoteIndex && optionsRemoteIndex < Math.max(optionsReloadIndex, optionsNameIndex),
+  "Open Remote should render between Reload Pi and Name Session",
+);
 assert.match(html, /id="appRunnerMenuPanel"[^>]*aria-label="Detected app runners"/, "app-runner dropdown should render detected runner choices only from JS data");
 assert.match(html, /id="appRunnerInfoDialog"[\s\S]*id="appRunnerInfoBody"/, "app-runner explanation popup should have a dynamic details body");
 assert.match(app, /\.pi-webui-runners\.json/, "app-runner popup should explain the project-local custom runner config file");
@@ -175,9 +184,9 @@ assert.match(css, /@media \(max-width: 1050px\)[\s\S]*?body:not\(\.side-panel-co
 assert.match(css, /@media \(max-width: 1050px\)[\s\S]*?\.side-panel-backdrop \{[\s\S]*?z-index:\s*110;[\s\S]*?\.side-panel \{[\s\S]*?z-index:\s*111;[\s\S]*?body\.side-panel-collapsed \.terminal-tabs-shell \{[\s\S]*?padding-right:\s*4\.85rem;[\s\S]*?\.side-panel-expand-button \{[\s\S]*?z-index:\s*120/, "narrow side-panel overlay and expand button should stay above and reserve space from terminal header controls");
 assert.match(css, /@media \(max-width: 720px\), \(max-device-width: 720px\), \(pointer: coarse\) and \(hover: none\)[\s\S]*?body\.side-panel-collapsed \.terminal-tabs-shell \{ padding-right:\s*calc\(44px \+ 0\.8rem\); \}[\s\S]*?\.side-panel-expand-button \{[\s\S]*?z-index:\s*120[\s\S]*?\.side-panel-backdrop \{[\s\S]*?z-index:\s*110;[\s\S]*?\.side-panel \{[\s\S]*?z-index:\s*111;/, "mobile side-panel controls should not hide behind terminal header buttons");
 assert.match(css, /button, select, input \{ min-height: 44px; \}/, "base controls should meet 44px touch-target height");
-assert.match(css, /\.composer-row button[\s\S]*?min-height:\s*44px/, "mobile composer buttons should keep 44px touch targets");
+assert.match(css, /\.composer-row button \{\n\s+width:\s*100%;\n\s+min-height:\s*40px/, "mobile composer buttons should use compact 40px footer controls");
 assert.match(css, /\.composer-abort-button,\n\.composer-row button\.primary \{[\s\S]*?min-width:/, "Abort and Send should share stable bottom-row sizing");
-assert.match(css, /\.composer-abort-button\.long-pressing::after[\s\S]*?animation:\s*abort-long-press-fill 700ms linear forwards/, "Abort should expose a visible long-press progress affordance");
+assert.match(css, /\.composer-abort-button\.long-pressing::after[\s\S]*?animation:\s*abort-long-press-fill var\(--abort-long-press-duration, 3000ms\) linear forwards/, "Abort should expose a visible 3-second long-press progress affordance");
 assert.match(css, /body\.pi-run-active:not\(\.mobile-keyboard-open\) \.composer-abort-button:not\(\[hidden\]\) \{\n\s+order:\s*1;\n\s+grid-column:\s*span 2;/, "active mobile runs should move Abort to the top row");
 assert.match(css, /body\.pi-run-active:not\(\.mobile-keyboard-open\) \.composer-actions-button \{ order:\s*4; \}[\s\S]*?body\.pi-run-active:not\(\.mobile-keyboard-open\) \.composer-row button\.primary \{\n\s+order:\s*5;\n\s+grid-column:\s*span 4;/, "active mobile runs should keep Actions beside Send on the bottom row");
 assert.match(css, /#promptInput \{[\s\S]*?min-height:\s*calc\(1\.5em \+ 1\.8rem\)/, "prompt input should default to a compact single-line height");
@@ -191,7 +200,11 @@ assert.match(css, /\.skill-editor-dialog form \{[\s\S]*?height:\s*100%;[\s\S]*?m
 assert.match(css, /\.skill-editor-text \{[\s\S]*?overflow-x:\s*hidden;[\s\S]*?overflow-wrap:\s*anywhere;[\s\S]*?white-space:\s*pre-wrap/, "skill editor text should wrap long lines instead of horizontal scrolling");
 assert.match(css, /\.composer-busy-mode-menu \{[\s\S]*?bottom:\s*calc\(100% \+ 0\.22rem\);[\s\S]*?background:\s*var\(--ctp-crust\)/, "busy prompt behavior dropdown should expand above the tag with an opaque background");
 assert.match(css, /\.sticky-user-prompt-button \{[\s\S]*?grid-template-columns:\s*auto minmax\(0, 1fr\) auto/, "last-user-prompt jump control should render as a fixed transcript header");
+assert.match(css, /@media \(max-width: 720px\), \(max-device-width: 720px\), \(pointer: coarse\) and \(hover: none\)[\s\S]*?\.sticky-user-prompt-button \{\n\s+grid-template-columns:\s*minmax\(0, 1fr\) auto;\n\s+min-height:\s*36px;[\s\S]*?\.sticky-user-prompt-text \{[\s\S]*?font-size:\s*0\.72rem/, "mobile last-user-prompt card should use compact height and text");
 assert.match(css, /\.message\.extension,[\s\S]*?\.message\.native/, "extension and native command output should have visible transcript styling");
+assert.match(app, /function mirrorRemoteWebuiWidgetToTranscript\(widgetKey, lines = \[\], request = \{\}\)[\s\S]*?widgetKey !== "pi-remote-webui"[\s\S]*?addTransientMessage\(\{ role: "extension", title: "\/remote"/, "remote WebUI QR widget events should mirror into the active tab transcript");
+assert.match(app, /if \(widgetKey === "pi-remote-webui"\) \{[\s\S]*?widgets\.delete\(widgetKey\);[\s\S]*?mirrorRemoteWebuiWidgetToTranscript/, "remote WebUI QR widget events should not render a Web UI overlay widget");
+assert.doesNotMatch(app, /function renderRemoteWebuiWidget/, "remote WebUI QR should only render in the transcript");
 assert.match(css, /\.message\.run-indicator-message \{[\s\S]*?border-color/, "active agent runs should render a visible transcript indicator card");
 assert.match(css, /\.message-copy-button \{[\s\S]*?position:\s*absolute/, "transcript messages should expose a top-right copy button");
 assert.match(css, /\.message\.has-copy-action[\s\S]*?padding-right:\s*3\.1rem/, "copy buttons should reserve space in message cards");
@@ -268,11 +281,18 @@ assert.match(css, /\.composer-publish-menu-panel \{[\s\S]*?display:\s*none;[\s\S
 assert.match(css, /\.composer-publish-menu:hover \.composer-publish-menu-panel,[\s\S]*?\.composer-publish-menu:focus-within \.composer-publish-menu-panel,[\s\S]*?\.composer-publish-menu\.open \.composer-publish-menu-panel \{\n\s+display:\s*flex;/, "Publish workflow menu should open on hover, focus, or explicit open state");
 assert.match(css, /\.composer-native-command-button \{[\s\S]*?color:\s*var\(--ctp-mauve\)/, "skills/tools command menu should have a distinct slash-command button style");
 assert.match(css, /\.composer-options-menu-panel \{[\s\S]*?max-height:\s*min\(calc\(var\(--visual-viewport-height, 100dvh\) - 2rem\), 44rem\)/, "Options menu should be tall enough for common commands without scrolling on normal viewports");
+assert.match(css, /\.composer-publish-menu-panel \{[\s\S]*?overscroll-behavior:\s*contain;[\s\S]*?-webkit-overflow-scrolling:\s*touch/, "dropdown panels should use contained momentum scrolling when their options overflow");
+assert.match(css, /\.composer-actions-panel > \.composer-publish-menu \.composer-publish-menu-panel \{[\s\S]*?max-height:\s*min\(var\(--mobile-dropdown-max-height, 34dvh\), calc\(var\(--visual-viewport-height, 100dvh\) - 2rem\)\)/, "mobile composer dropdowns should clamp to an in-viewport scroll height");
+assert.match(css, /\.composer-actions-panel > \.composer-options-menu \.composer-publish-menu-panel,\n\s+\.composer-actions-panel > \.composer-app-runner-menu \.composer-publish-menu-panel \{\n\s+inset-inline:\s*auto 0;/, "mobile Options and app-runner dropdowns should share the clamped scrollable popover placement");
 assert.match(css, /\.composer-native-command-menu-item \{[\s\S]*?color:\s*var\(--ctp-mauve\)/, "skills/tools command menu items should be styled separately from publish actions");
 assert.match(css, /\.composer-actions-panel > \.composer-publish-menu[\s\S]*?grid-column: span 1/, "Publish and command menu buttons should fit beside Git workflow in mobile actions");
 assert.match(css, /\.composer-actions-panel[\s\S]*?bottom:\s*calc\(100% \+ 0\.42rem\)/, "mobile composer actions should open as an above-composer sheet");
 assert.match(css, /body\.composer-actions-open \.composer-actions-panel \{ display: grid; \}/, "composer actions panel should only open when toggled");
 assert.match(css, /\.terminal-tabs-toggle-button \{ display: none; \}/, "terminal tab toggle should be hidden outside mobile CSS");
+assert.match(css, /@media \(max-width: 720px\) \{[\s\S]*?\.terminal-command-palette-button,\n\s+\.terminal-dashboard-button \{[\s\S]*?display:\s*inline-grid;/, "mobile header should keep the command palette button visible beside the dashboard button");
+assert.match(css, /\.command-palette-close-button \{[\s\S]*?min-width:\s*44px;[\s\S]*?min-height:\s*44px/, "command palette close button should meet touch-target sizing by default");
+assert.match(css, /@media \(max-width: 720px\) \{[\s\S]*?\.command-palette-dialog \{[\s\S]*?width:\s*min\(100vw - 0\.5rem, 42rem\)[\s\S]*?\.command-palette-list \{[\s\S]*?scrollbar-gutter:\s*auto;[\s\S]*?\.command-palette-item \{[\s\S]*?grid-template-columns:\s*minmax\(3\.4rem, 0\.26fr\) minmax\(0, 1fr\);[\s\S]*?min-height:\s*2\.72rem;/, "mobile command palette results should use compact two-column cards instead of tall one-column cards");
+assert.match(css, /@media \(max-width: 720px\) \{[\s\S]*?\.command-palette-item-kind \{[\s\S]*?font-size:\s*0\.56rem;[\s\S]*?\.command-palette-item-label \{ font-size:\s*0\.82rem; \}[\s\S]*?\.command-palette-item-description \{ font-size:\s*0\.6rem; \}/, "mobile command palette result text should be scaled down to fit compact cards");
 assert.match(css, /body\.terminal-tabs-left \.chat-panel \{[\s\S]*?grid-template-columns:\s*clamp\(13rem, 18vw, 19rem\) minmax\(0, 1fr\)/, "terminal tabs left layout should split the chat panel into a sidebar and transcript area");
 assert.match(css, /body\.terminal-tabs-left \.terminal-tabs-shell \{[\s\S]*?grid-column:\s*1;[\s\S]*?grid-row:\s*1 \/ -1;[\s\S]*?flex-direction:\s*column/, "terminal tabs left layout should turn the top tab strip into a vertical sidebar");
 assert.match(css, /body\.terminal-tabs-left \.terminal-tabs \{[\s\S]*?flex-direction:\s*column/, "terminal tabs left layout should stack tabs vertically");
@@ -284,6 +304,7 @@ assert.match(css, /\.terminal-close-all-button \{[\s\S]*?color:\s*var\(--ctp-red
 assert.match(css, /\.terminal-tabs\.terminal-tabs-dense \{[\s\S]*?flex-wrap:\s*wrap/, "large terminal tab sets should wrap into a readable dense tab strip");
 assert.match(css, /\.terminal-tab-group-close \{[\s\S]*?border-left-color/, "terminal tab groups should style their close button distinctly");
 assert.match(css, /body\.mobile-tabs-expanded \.terminal-tabs \{ display: flex; \}/, "mobile tabs should expand only when toggled");
+assert.match(css, /@media \(max-width: 720px\), \(max-device-width: 720px\), \(pointer: coarse\) and \(hover: none\) \{[\s\S]*?\.terminal-tabs \{\n\s+position:\s*absolute;[\s\S]*?top:\s*calc\(100% \+ 0\.35rem\);[\s\S]*?overscroll-behavior:\s*contain;[\s\S]*?-webkit-overflow-scrolling:\s*touch;/, "expanded mobile tabs should overlay below the header with contained touch scrolling");
 assert.match(css, /\.terminal-tab-activity-indicator/, "terminal tabs should expose per-tab agent activity indicators");
 assert.match(css, /\.terminal-tab-group-item \{[\s\S]*?flex:\s*0 0 auto[\s\S]*?background:\s*var\(--ctp-crust\)/, "grouped terminal tab items should keep readable height and use opaque backgrounds");
 assert.match(css, /\.terminal-tab-group-add \{[\s\S]*?flex:\s*0 0 auto/, "grouped terminal tab menus should scroll instead of shrinking the add-tab action");
@@ -331,6 +352,7 @@ assert.match(server, /url\.pathname === "\/api\/git-changes\/untracked-file" && 
 assert.match(server, /async function readGitChanges\(cwd\)[\s\S]*?const diffArgs = \["diff", "--no-ext-diff"[\s\S]*?\["diff", "--cached"/, "server should collect both staged and unstaged git diffs for the changes modal");
 assert.match(server, /url\.pathname === "\/api\/git-changes" && req\.method === "GET"/, "server should expose GET /api/git-changes for the changes modal");
 assert.match(css, /@media \(max-width: 1050px\)[\s\S]*?\.footer-line-meta \{[\s\S]*?display:\s*flex;[\s\S]*?flex-wrap:\s*wrap;[\s\S]*?\.footer-line-meta \.footer-meta \{[\s\S]*?flex:\s*1 1 var\(--footer-chip-min-width\);[\s\S]*?width:\s*auto;[\s\S]*?\.footer-workspace,\n\s+\.footer-model,\n\s+\.footer-thinking \{ grid-column:\s*auto; \}/, "narrow git-footer metadata should wrap like the top metric row instead of forcing a two-column grid");
+assert.match(css, /@media \(max-width: 720px\), \(max-device-width: 720px\), \(pointer: coarse\) and \(hover: none\)[\s\S]*?\.context-meter-bar \{ display:\s*none !important; \}/, "mobile should hide the WebUI context meter that appears after high context usage");
 assert.match(css, /\.footer-line-tui \{[\s\S]*?white-space:\s*nowrap/, "default Web UI footer should use a minimal TUI-like line");
 assert.match(css, /\.footer-tui-cwd[\s\S]*?max-width:\s*38%/, "TUI-like footer should keep cwd compact on desktop");
 assert.match(css, /\.footer-tui-model[\s\S]*?text-align:\s*right/, "TUI-like footer should right-align model information on desktop");
@@ -401,6 +423,13 @@ assert.match(app, /themeSelect\.addEventListener\("change"/, "side-panel theme s
 assert.match(app, /open \? "Close for network" : "Open to network"/, "network button should toggle from open to close action");
 assert.match(app, /remoteAuthToggle: \$\("#remoteAuthToggle"\)/, "Controls should expose the remote PIN auth toggle");
 assert.match(app, /api\("\/api\/remote-auth\/settings", \{ method: "POST"/, "remote PIN auth toggle should call the settings endpoint");
+assert.match(server, /function webuiSettingsFile\(\)[\s\S]*pi-webui[\s\S]*settings\.json/, "server should persist Web UI settings under a pi-webui settings file");
+assert.match(server, /let persistedRemoteAuthEnabled = await readPersistedRemoteAuthEnabled\(\)/, "server should load the saved Remote PIN auth preference before startup");
+assert.match(server, /if \(remoteAuthStartupEnabled\(\)\) enableRemoteAuth\(remoteAuthStartupReason\(\)\)/, "saved Remote PIN auth preference should enable auth on startup");
+assert.match(server, /await saveRemoteAuthPreference\(true\)/, "enabling Remote PIN auth should persist the on preference");
+assert.match(server, /await saveRemoteAuthPreference\(false\)/, "disabling Remote PIN auth should persist the off preference");
+assert.match(server, /function pinFromHash\(\)[\s\S]*new URLSearchParams\(String\(window\.location\.hash \|\| ""\)\.replace\(\/\^#\/, ""\)\)/, "remote auth page should read QR-provided PINs from the URL fragment");
+assert.match(server, /window\.history\.replaceState\(null, "", window\.location\.pathname \+ \(window\.location\.search \|\| ""\)\)/, "remote auth page should scrub fragment PINs from the address bar before authenticating");
 assert.match(app, /api\("\/api\/network\/close", \{ method: "POST"/, "network close action should call the close endpoint");
 assert.match(app, /webuiVersionBadge: \$\("#webuiVersionBadge"\)/, "frontend should bind the Control Deck version badge");
 assert.match(app, /webuiDevBadge: \$\("#webuiDevBadge"\)/, "frontend should bind the Control Deck dev badge");
@@ -435,6 +464,9 @@ assert.match(readme, /toggles to "Close for network"/, "README should document t
 assert.match(app, /window\.visualViewport/, "app should listen to VisualViewport for keyboard/viewport updates");
 assert.match(html, /<textarea id="promptInput"[^>]*autofocus/, "prompt composer should autofocus for new Web UI/app launches");
 assert.match(app, /function syncMobileChatToBottomForInput\(\)/, "mobile input focus should force the output view to the latest message");
+assert.match(app, /function updateMobileDropdownScrollBounds\(\)[\s\S]*--mobile-dropdown-max-height/, "mobile dropdowns should compute a viewport-bounded scroll height when opened");
+assert.match(app, /function setAppRunnerMenuOpen\(open\)[\s\S]*scheduleMobileDropdownScrollBoundsUpdate\(\)/, "app-runner dropdown opening should refresh mobile scroll bounds");
+assert.match(app, /function setOptionsMenuOpen\(open\)[\s\S]*scheduleMobileDropdownScrollBoundsUpdate\(\)/, "Options dropdown opening should refresh mobile scroll bounds");
 assert.match(app, /function focusPromptInput\(\{ defer = false \} = \{\}\)/, "frontend should focus the prompt composer programmatically after tab/app startup");
 assert.match(app, /async function switchTab\(tabId\)[\s\S]*?restoreActiveDraft\(\);\n\s+focusPromptInput\(\{ defer: true \}\);/, "switching to a newly opened tab should focus the prompt input immediately");
 assert.match(app, /async function initializeTabs\(\)[\s\S]*?restoreActiveDraft\(\);[\s\S]*if \(!loadedTabs\.length\)[\s\S]*focusPromptInput\(\{ defer: true \}\);/, "starting the Web UI should prompt for cwd when needed and focus active tabs");
@@ -473,6 +505,8 @@ assert.match(app, /guardrail-safe-action/, "guardrail dialogs should distinguish
 assert.match(app, /function hasQueuedDialogRequest\(id\)/, "frontend should deduplicate replayed extension UI dialogs by request id");
 assert.match(app, /if \(request\.replayed\) addEvent\(`recovered pending \$\{request\.method\} request`, "warn"\)/, "frontend should surface replayed extension UI blockers");
 assert.match(app, /case "webui_extension_ui_cancelled":/, "frontend should close dialogs cancelled by backend abort handling");
+assert.match(app, /case "webui_extension_ui_resolved":[\s\S]*?removeQueuedDialogRequests\(\[event\.id\]\)/, "frontend should close dialogs resolved by another connected browser");
+assert.match(app, /if \(responseId && activeDialog && String\(activeDialog\.id \|\| ""\) !== responseId\) return;/, "dialog response cleanup should not close the next queued dialog after a resolve-event race");
 assert.match(app, /function parseTodoProgressWidget\(lines\)/, "todo-progress widgets should be parsed from extension widget lines");
 assert.match(app, /const todoProgressWidgetExpandedByTab = new Map\(\)/, "todo-progress expansion state should survive widget re-renders per tab");
 assert.match(app, /const node = make\("details", "widget todo-widget"\)/, "todo-progress widget should render collapsed by default as expandable details");
@@ -571,7 +605,10 @@ assert.match(app, /api\("\/api\/optional-feature-install"/, "optional feature in
 assert.match(app, /id: "safetyGuard"[\s\S]*?@firstpick\/pi-extension-safety-guard/, "optional features should include the safety guard companion");
 assert.match(app, /id: "tuiSkillsCommand"[\s\S]*?@firstpick\/pi-extension-setup-skills/, "optional features should include the TUI skills command companion");
 assert.match(app, /id: "tuiToolsCommand"[\s\S]*?@firstpick\/pi-extension-tools/, "optional features should include the TUI tools command companion");
-assert.match(app, /function updateOptionalFeatureAvailability\(\)[\s\S]*hasAvailableCommand\("git-staged-msg"\)[\s\S]*hasAvailableCommand\("release-npm"\)[\s\S]*hasAvailableCommand\("release-aur"\)[\s\S]*hasAvailableCommand\("safety-guard"\)[\s\S]*hasLoadedRpcCommand\("skills"\)[\s\S]*hasAvailableCommand\("todo-progress-status"\)[\s\S]*hasLoadedRpcCommand\("tools"\)/, "optional feature detection should call RPC-visible commands directly and distinguish native resource selectors from TUI companions");
+assert.match(app, /id: "remoteWebui"[\s\S]*?@firstpick\/pi-package-remote-webui/, "optional features should include the Remote WebUI companion");
+assert.match(app, /function updateOptionalFeatureAvailability\(\)[\s\S]*hasAvailableCommand\("git-staged-msg"\)[\s\S]*hasAvailableCommand\("release-npm"\)[\s\S]*hasAvailableCommand\("release-aur"\)[\s\S]*hasAvailableCommand\("safety-guard"\)[\s\S]*hasLoadedRpcCommand\("skills"\)[\s\S]*hasAvailableCommand\("todo-progress-status"\)[\s\S]*hasLoadedRpcCommand\("tools"\)[\s\S]*hasAvailableCommand\("remote"\)/, "optional feature detection should call RPC-visible commands directly and distinguish native resource selectors from TUI companions");
+assert.match(app, /hasRemoteWebuiCommand = isOptionalFeatureEnabled\("remoteWebui"\) && hasAvailableCommand\("remote"\)[\s\S]*optionsRemoteButton\.hidden = !hasRemoteWebuiCommand/, "Options menu should show Open Remote only when /remote is loaded and enabled");
+assert.match(app, /if \(key === "pi-remote-webui"\) return "remoteWebui"/, "optional feature handling should recognize Remote WebUI widget events without rendering them as overlays");
 assert.match(app, /function combineIdenticalDuplicateCommands\(commands\)[\s\S]*duplicateGroups[\s\S]*duplicateCount: group\.length/, "identical duplicate RPC commands should be combined into one visible command entry");
 assert.match(app, /if \(kind === "prompt" && attachments\.length === 0\) message = resolveRpcSlashCommandMessage\(message\)/, "manual slash prompts should resolve combined duplicate command aliases before reaching Pi RPC");
 assert.match(app, /if \(!isOptionalFeatureEnabled\("todoProgressWidget"\)\) return String\(text \|\| ""\)/, "todo progress line stripping should only run when the todo feature is detected and enabled");
@@ -712,10 +749,19 @@ assert.match(app, /const headline = runIndicatorHeadline\(\);\n\s+if \(runIndica
 assert.match(app, /const meta = runIndicatorShowsElapsed\(\) \? `\$\{detail\} · run time[\s\S]*?if \(runIndicatorMeta\.textContent !== meta\) runIndicatorMeta\.textContent = meta;/, "active agent indicator should avoid redundant metadata DOM writes except elapsed changes");
 assert.match(app, /runIndicatorShowsElapsed\(\) \? `\$\{detail\} · run time/, "active agent indicator should label elapsed run time instead of showing a bare counter");
 assert.match(app, /Abort requested/, "abort feedback should clarify that Web UI is checking stop status");
-assert.match(app, /const ABORT_LONG_PRESS_MS = 700/, "Abort long-press timing should be explicit");
+assert.match(app, /const ABORT_LONG_PRESS_MS = 3000/, "Abort long-press timing should be explicit");
+assert.match(app, /const ABORT_LONG_PRESS_TICK_MS = 100/, "Abort hold countdown should update visibly while held");
+assert.match(app, /const ABORT_LONG_PRESS_RELEASE_GRACE_MS = 350/, "Escape release cancellation should be debounced to ignore spurious keyup during key repeat");
+assert.match(app, /function isAbortLongPressActive\(\) \{\n\s+return abortLongPressStartedAt > 0;\n\}/, "Abort hold state should stay active from its monotonic start time, not timer id truthiness");
 assert.match(app, /async function abortActiveRun\(\{ source = "button" \} = \{\}\)/, "Abort should be centralized for button, Esc, and long-press triggers");
 assert.match(app, /elements\.abortButton\.addEventListener\("pointerdown", startAbortLongPress\)/, "Abort should support pointer long-press");
-assert.match(app, /abortActiveRun\(\{ source: "escape" \}\)/, "Escape should trigger the abort action when available");
+assert.match(app, /else if \(!event\.repeat\) startAbortLongPress\(event, \{ source: "escape" \}\)/, "Escape should arm the guarded abort hold only on the initial keydown");
+assert.match(app, /if \(isAbortLongPressActive\(\)\) \{\n\s+resumeAbortLongPressAffordance\(\);\n\s+return true;\n\s+\}\n\s+resetAbortLongPressAffordance\(\);/, "repeat or duplicate start events should resume instead of restart an in-progress abort countdown");
+assert.match(app, /abortLongPressDeadlineAt = abortLongPressStartedAt \+ ABORT_LONG_PRESS_MS/, "Abort hold countdown should use an immutable deadline for display and completion");
+assert.match(app, /function completeAbortLongPress\(\)[\s\S]*?if \(abortLongPressReleasePending\) return;[\s\S]*?if \(isAbortAvailable\(\)\) abortActiveRun\(\{ source \}\);[\s\S]*?else \{\n\s+resetAbortLongPressAffordance\(\);\n\s+updateComposerModeButtons\(\);\n\s+\}/, "completed abort holds should abort only when no release is pending and reset cleanly if the run already stopped");
+assert.match(app, /if \(event\.repeat\) \{\n\s+event\.preventDefault\(\);\n\s+return;\n\s+\}\n\s+if \(document\.activeElement === elements\.promptInput[\s\S]*doubleEscapeAction/, "held Escape key-repeat should not trigger the double-Escape action");
+assert.match(app, /window\.addEventListener\("keyup"[\s\S]*abortLongPressSource === "escape"[\s\S]*scheduleAbortLongPressReleaseReset/, "releasing Escape should debounce-cancel a pending guarded abort hold");
+assert.match(app, /function resumeAbortLongPressAffordance\(\)[\s\S]*clearAbortLongPressResetTimer\(\);\n\s+abortLongPressReleasePending = false;\n\s+tickAbortLongPressAffordance\(\);/, "new Escape keydown events should cancel pending release resets without restarting countdown");
 assert.match(app, /function addAbortTranscriptNotice\(/, "abort button should render a transcript-visible aborted notice");
 assert.match(app, /this transcript marks the run as aborted/, "abort notice should clearly mark the agent output as aborted");
 assert.match(app, /await api\("\/api\/abort"[\s\S]*?addAbortTranscriptNotice\(\{ activeRun: hadActiveRun \}\)/, "abort button should add the aborted transcript notice after the abort request succeeds");
@@ -729,6 +775,9 @@ assert.match(app, /function scheduleAbortStateChecks\(/, "abort handling should 
 assert.match(app, /case "tool_execution_start":[\s\S]*?suppressStreamingAssistantTextBeforeToolCall\(\)[\s\S]*?handleToolExecutionStart\(event\)[\s\S]*?setRunIndicatorActivity\(`Running tool:/, "tool execution should suppress pre-tool assistant text, then update the active agent indicator and live tool card");
 assert.match(app, /case "tool_execution_update":[\s\S]*?handleToolExecutionUpdate\(event\)/, "tool execution updates should be handled as transcript output");
 assert.match(app, /case "auto_retry_start":[\s\S]*?addTransientMessage\(\{ role: "warn", title: "auto retry"/, "auto-retry starts should be transcript-visible warnings");
+assert.match(app, /function trackAutoRetryStateFromEvent\(event\)[\s\S]*?event\.type === "auto_retry_start"[\s\S]*?autoRetryingTabs\.add\(tabId\)[\s\S]*?suppressPendingAgentDoneNotificationsForTab\(tabId\)[\s\S]*?markTabWorkingLocally\(tabId\)/, "auto-retry starts should suppress misleading done notifications and keep the tab working");
+assert.match(app, /function notifyAgentDone[\s\S]*?agentDoneNotificationKeys\.add\(key\);\n\s+if \(isAutoRetryingTab\(tabId\)\) return;/, "agent-done notifications should be ignored while a tab is auto-retrying");
+assert.match(app, /function queueAgentDoneBrowserNotification[\s\S]*?setTimeout\([\s\S]*?if \(isAutoRetryingTab\(tabId\)\) return;[\s\S]*?AGENT_DONE_NOTIFICATION_RETRY_GRACE_MS/, "agent-done notifications should wait briefly so imminent auto-retry events can cancel them");
 assert.match(app, /case "extension_error":[\s\S]*?addTransientMessage\(\{ role: "error", title: "extension error"/, "extension errors should be transcript-visible error cards");
 assert.match(app, /setRunIndicatorActivity\("Requesting context compaction…"\);\n\s+scrollChatToBottom\(\{ force: true \}\);/, "manual compaction should force-follow the transcript to the bottom status card");
 assert.match(app, /function markContextUsageUnknownAfterCompaction\(/, "compaction should have a dedicated context-usage invalidation helper");
@@ -754,7 +803,7 @@ assert.match(app, /const target = runActive \? elements\.composerRow : elements\
 assert.match(app, /const before = runActive \? elements\.abortButton : null/, "active Steer and Follow-up controls should sit before Abort and Send");
 assert.match(app, /button\.hidden = !runActive;\n\s+button\.disabled = !runActive;/, "Steer and Follow-up should be hidden and disabled when the agent is not running");
 assert.match(app, /renderBusyPromptBehaviorTag\(\);\n\s+document\.body\.classList\.toggle\("pi-run-active", runActive \|\| abortAvailable\)/, "composer mode refresh should keep the busy prompt behavior tag current");
-assert.match(app, /elements\.abortButton\.hidden = !abortAvailable;\n\s+elements\.abortButton\.disabled = !abortAvailable \|\| abortRequestInFlight;/, "Abort should only be exposed in the bottom bar while a run can be aborted");
+assert.match(app, /const abortHoldActive = isAbortLongPressActive\(\);\n\s+if \(!abortAvailable && !abortHoldActive\) resetAbortLongPressAffordance\(\);\n\s+elements\.abortButton\.hidden = !abortAvailable && !abortHoldActive;\n\s+elements\.abortButton\.disabled = \(!abortAvailable && !abortHoldActive\) \|\| abortRequestInFlight;/, "Abort should stay visible during an active hold even if run state briefly refreshes unavailable");
 assert.match(app, /document\.body\.classList\.toggle\("pi-run-active", runActive \|\| abortAvailable\)/, "run-active or abort-available state should be reflected in CSS for mobile composer layout");
 assert.match(app, /function showComposerButtonTooltip\(button\)/, "empty mode-button taps should show the usage tooltip");
 assert.match(app, /function renderBusyPromptBehaviorTag\(\)[\s\S]*?tag\.textContent = label/, "busy prompt behavior tag should render only the current follow-up\/steer setting");
@@ -795,7 +844,7 @@ assert.match(app, /releaseNpmButton\.addEventListener\("click", \(\) => runPubli
 assert.match(app, /releaseAurButton\.addEventListener\("click", \(\) => runPublishWorkflow\("\/release-aur"\)\)/, "Publish menu should launch /release-aur");
 assert.match(app, /nativeSkillsButton\.addEventListener\("click", \(\) => runNativeCommandMenu\("\/skills"\)\)/, "skills/tools command menu should launch /skills");
 assert.match(app, /nativeToolsButton\.addEventListener\("click", \(\) => runNativeCommandMenu\("\/tools"\)\)/, "skills/tools command menu should launch /tools");
-for (const command of ["resume", "reload", "name", "clone", "settings", "export", "fork", "tree"]) {
+for (const command of ["resume", "reload", "remote", "name", "clone", "settings", "export", "fork", "tree"]) {
   const id = command.replace(/^./, (letter) => letter.toUpperCase());
   assert.match(app, new RegExp(`options${id}Button\\.addEventListener\\("click", \\(\\) => runNativeCommandMenu\\("\\/${command}"\\)\\)`), `Options menu should launch /${command}`);
 }
@@ -860,10 +909,10 @@ assert.match(css, /\.composer-actions-panel \{[\s\S]*?z-index:\s*55;[\s\S]*?over
 assert.match(css, /\.composer-actions-panel > \.composer-publish-menu\.open \{\n\s+z-index:\s*120;\n\s+\}/, "opened mobile Actions dropdowns should overlay neighboring controls without taking grid space");
 assert.match(css, /\.composer-actions-panel > \.composer-publish-menu::after \{[\s\S]*?bottom:\s*100%;[\s\S]*?height:\s*0\.8rem;[\s\S]*?pointer-events:\s*auto;/, "mobile Actions dropdowns should keep a hover bridge above the trigger and below the floating submenu");
 assert.match(css, /\.composer-actions-panel > \.composer-publish-menu:hover::after,[\s\S]*?\.composer-actions-panel > \.composer-publish-menu:focus-within::after,[\s\S]*?\.composer-actions-panel > \.composer-publish-menu\.open::after \{\n\s+display:\s*block;/, "mobile Actions dropdown hover bridge should activate while hovered, focused, or opened");
-assert.match(css, /\.composer-actions-panel > \.composer-publish-menu \.composer-publish-menu-panel \{[\s\S]*?position:\s*absolute;[\s\S]*?inset:\s*auto auto calc\(100% \+ 0\.38rem\) 0;[\s\S]*?max-height:\s*min\(34dvh, 18rem\);[\s\S]*?overflow:\s*auto;/, "opened mobile Actions dropdown panels should float upward over the Actions controls with their own scrollbar");
+assert.match(css, /\.composer-actions-panel > \.composer-publish-menu \.composer-publish-menu-panel \{[\s\S]*?position:\s*absolute;[\s\S]*?inset:\s*auto auto calc\(100% \+ 0\.38rem\) 0;[\s\S]*?max-height:\s*min\(var\(--mobile-dropdown-max-height, 34dvh\), calc\(var\(--visual-viewport-height, 100dvh\) - 2rem\)\);[\s\S]*?overflow:\s*auto;[\s\S]*?overscroll-behavior:\s*contain;/, "opened mobile Actions dropdown panels should float upward over the Actions controls with a viewport-bounded scrollbar");
 assert.match(css, /\.composer-actions-panel > \.composer-publish-menu \.composer-publish-menu-panel \{[\s\S]*?width:\s*100%;[\s\S]*?min-width:\s*0;[\s\S]*?max-width:\s*100%;/, "mobile Actions dropdown panels should align to the width of their trigger buttons");
 assert.match(css, /\.composer-actions-panel > \.composer-publish-menu \.composer-publish-menu-item \{[\s\S]*?width:\s*100%;[\s\S]*?min-width:\s*0;[\s\S]*?white-space:\s*normal;/, "mobile Actions dropdown option buttons should not keep desktop min-widths that misalign with triggers");
-assert.match(css, /\.composer-actions-panel > \.composer-options-menu \.composer-publish-menu-panel \{[\s\S]*?inset-inline:\s*auto 0;[\s\S]*?max-height:\s*min\(calc\(var\(--visual-viewport-height, 100dvh\) - 2rem\), 44rem\);/, "mobile Options dropdown should be tall enough to avoid scrolling for the standard option list");
+assert.match(css, /\.composer-actions-panel > \.composer-options-menu \.composer-publish-menu-panel,\n\s+\.composer-actions-panel > \.composer-app-runner-menu \.composer-publish-menu-panel \{\n\s+inset-inline:\s*auto 0;/, "mobile Options and app-runner dropdowns should use the shared viewport-bounded scrollbar instead of forcing full viewport height");
 assert.match(app, /function setMobileTabsExpanded\(/, "mobile tab strip should be JS-toggleable");
 assert.match(css, /@media \(max-width: 720px\), \(max-device-width: 720px\), \(pointer: coarse\) and \(hover: none\) \{[\s\S]*?\.terminal-tab-group \{\n\s+display:\s*grid;\n\s+grid-template-columns:\s*minmax\(0, 1fr\) auto;/, "mobile terminal tab groups should use a stable grid row for the tab and close button when expanded");
 assert.match(css, /@media \(max-width: 720px\), \(max-device-width: 720px\), \(pointer: coarse\) and \(hover: none\) \{[\s\S]*?\.terminal-tab-group-menu \{[\s\S]*?grid-column:\s*1 \/ -1;[\s\S]*?margin:\s*0\.34rem 0 0;/, "mobile terminal tab group menus should not add horizontal margins that overflow and distort the tab card");

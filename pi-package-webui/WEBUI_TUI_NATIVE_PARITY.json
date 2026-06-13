@@ -445,8 +445,8 @@
       "priority": "P1",
       "sensitive": false,
       "guards": ["confirmation"],
-      "currentBehavior": "Escape aborts active user bash first, then active agent runs, and closes UI surfaces with tab scoping.",
-      "targetBehavior": "Abort active bash first where applicable; keep agent/tab scoping and clear UI cancellation rules."
+      "currentBehavior": "Holding Escape for 3 seconds aborts active user bash first, then active agent runs, and closes UI surfaces with tab scoping before arming abort.",
+      "targetBehavior": "Abort active bash first where applicable; keep agent/tab scoping and clear UI cancellation rules with a guarded hold-to-abort affordance."
     },
     {
       "id": "shortcut.editor.clear",

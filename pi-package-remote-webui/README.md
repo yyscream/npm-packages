@@ -4,7 +4,7 @@ Mobile connection helper for [Pi coding agent](https://www.npmjs.com/package/@ea
 
 This package adds a `/remote` slash command that reuses the existing `@firstpick/pi-package-webui` server/UI, opens it to a trusted local network, and shows a QR code in Pi so a phone can connect quickly.
 
-> **Security:** Pi Web UI can control the Web UI/Pi session. Remote PIN authentication is off by default; enable it in Web UI **Controls → Network → Remote PIN auth** if you want a 4-digit PIN for non-local clients. Use `/remote` only on trusted local networks and close LAN access when done.
+> **Security:** Pi Web UI can control the Web UI/Pi session. `/remote` asks whether to activate Remote PIN authentication before showing the QR code. Use `/remote` only on trusted local networks and close LAN access when done.
 
 ## Install
 
@@ -23,9 +23,10 @@ Restart Pi after installation so the `/remote` command is loaded. The QR rendere
 Default behavior:
 
 1. Reuse a running Pi Web UI on `127.0.0.1:31415`, or start one for the current working directory.
-2. Open the Web UI listener to the local network through the existing Web UI `/api/network/open` endpoint.
-3. Show a terminal QR code, the LAN URL, and the current Remote PIN auth state.
-4. Scan the QR code from your phone and use the normal Pi Web UI. If Remote PIN auth is enabled, enter the displayed 4-digit PIN on the phone.
+2. Ask whether to activate Remote PIN auth when it is currently off.
+3. Open the Web UI listener to the local network through the existing Web UI `/api/network/open` endpoint.
+4. Show a terminal QR code, the LAN URL, and the current Remote PIN auth state.
+5. Scan the QR code from your phone and use the normal Pi Web UI. If Remote PIN auth is enabled and the local server reports the PIN, the QR code opens an auth link that signs in automatically; the displayed PIN remains a manual fallback.
 
 ## Commands
 
@@ -41,24 +42,25 @@ Default behavior:
 
 | Command | Behavior |
 |---|---|
-| `/remote` | Start/reuse Web UI, confirm, open LAN access, and show QR plus Remote PIN auth state. |
+| `/remote` | Start/reuse Web UI, confirm LAN access, ask whether to activate Remote PIN auth, open LAN access, and show QR plus auth state. |
 | `/remote status` | Show Web UI online/network state, LAN URLs, and auth state. |
 | `/remote refresh` | Re-read current LAN URL/auth state and redraw the QR widget. |
 | `/remote close` | Close Web UI LAN exposure and clear the QR widget. |
 | `/remote --port 31500` | Use another Web UI port. |
 | `/remote --name mobile` | Name the initial Web UI tab when this package starts the server. |
-| `/remote --yes` | Skip the LAN exposure confirmation. |
+| `/remote --yes` | Skip prompts and activate Remote PIN auth automatically before opening LAN access. |
 
 ## Remote PIN auth
 
-`/remote` does not enable Remote PIN auth by itself. Auth is intentionally controlled by the Web UI server:
+`/remote` checks the Web UI server's auth state before opening LAN access:
 
-- In the local Web UI, open **Controls → Network → Remote PIN auth**.
+- If Remote PIN auth is off, `/remote` asks whether to activate it.
+- `/remote --yes` treats the auth prompt as accepted and activates it automatically.
 - Enabling it generates a random 4-digit PIN.
-- Non-local browser clients must enter that PIN before reaching Web UI.
+- Non-local browser clients must authenticate before reaching Web UI.
 - Localhost clients can always use the UI and toggle the setting.
 
-The `/remote` QR widget shows `Remote PIN auth: off` or `Remote PIN auth: on · PIN 1234` when the Web UI server reports it. You can also start Web UI with auth already enabled by using `pi-webui --remote-auth` or `/webui-start --remote-auth` from `@firstpick/pi-package-webui`.
+The `/remote` QR widget shows `Remote PIN auth: off` or `Remote PIN auth: on · PIN 1234` when the Web UI server reports it. When a PIN is available, the QR code targets `/remote-auth#pin=1234` so the phone can authenticate automatically without typing the PIN; the fragment is scrubbed by the auth page before it posts to the server. You can also start Web UI with auth already enabled by using `pi-webui --remote-auth` or `/webui-start --remote-auth` from `@firstpick/pi-package-webui`.
 
 ## Caveat
 

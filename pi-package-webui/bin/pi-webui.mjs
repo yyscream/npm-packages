@@ -43,6 +43,7 @@ const publicDir = path.join(packageRoot, "public");
 const webuiHelperExtensionPath = path.join(packageRoot, "webui-rpc-helper.mjs");
 const agentDir = process.env.PI_CODING_AGENT_DIR || path.join(homedir(), ".pi", "agent");
 const OPTIONAL_FEATURE_INSTALL_ROOT_ENV = "PI_WEBUI_OPTIONAL_FEATURE_INSTALL_ROOT";
+const WEBUI_SETTINGS_FILE_ENV = "PI_WEBUI_SETTINGS_FILE";
 const packageJson = JSON.parse(await readFile(path.join(packageRoot, "package.json"), "utf8"));
 let piPackageJson = {};
 try {
@@ -227,6 +228,7 @@ const OPTIONAL_FEATURE_PACKAGES = new Map([
   ["tuiSkillsCommand", "@firstpick/pi-extension-setup-skills"],
   ["todoProgressWidget", "@firstpick/pi-extension-todo-progress"],
   ["tuiToolsCommand", "@firstpick/pi-extension-tools"],
+  ["remoteWebui", "@firstpick/pi-package-remote-webui"],
   ["gitFooterStatus", "@firstpick/pi-extension-git-footer-status"],
   ["statsCommand", "@firstpick/pi-extension-stats"],
   ["themeBundle", "@firstpick/pi-themes-bundle"],
@@ -265,8 +267,8 @@ Examples:
 
 Security:
   The web UI controls Pi tools. It binds to localhost by default. Remote PIN
-  authentication is off by default; enable it in Controls or with --remote-auth
-  before exposing the server on trusted networks.
+  authentication is off by default on first use; enabling it in Controls saves
+  that preference for later starts.
 `);
 }
 
@@ -289,6 +291,7 @@ function parseArgs(argv) {
     noSession: false,
     name: undefined,
     remoteAuth: isTruthyEnv(process.env.PI_WEBUI_REMOTE_AUTH),
+    remoteAuthExplicit: process.env.PI_WEBUI_REMOTE_AUTH !== undefined,
     piArgs: [],
     help: false,
     version: false,
@@ -345,10 +348,12 @@ function parseArgs(argv) {
     }
     if (arg === "--remote-auth") {
       options.remoteAuth = true;
+      options.remoteAuthExplicit = true;
       continue;
     }
     if (arg === "--no-remote-auth") {
       options.remoteAuth = false;
+      options.remoteAuthExplicit = true;
       continue;
     }
     throw new Error(`Unknown option: ${arg}. Pass Pi CLI args after --.`);
@@ -739,7 +744,7 @@ function sendRemoteAuthPage(res, returnPath = "/") {
 <body>
   <main>
     <h1>Remote PIN required</h1>
-    <p>Enter the 4-digit PIN shown in the local Pi terminal or local Web UI to continue.</p>
+    <p>Scan a trusted /remote QR code to unlock automatically, or enter the 4-digit PIN shown in the local Pi terminal or local Web UI.</p>
     <form id="pinForm" autocomplete="off">
       <label for="pin">PIN</label>
       <input id="pin" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autofocus required>
@@ -753,16 +758,19 @@ function sendRemoteAuthPage(res, returnPath = "/") {
     const input = document.getElementById("pin");
     const button = document.getElementById("submit");
     const error = document.getElementById("error");
-    input.addEventListener("input", () => { input.value = input.value.replace(/\\D/g, "").slice(0, 4); error.textContent = ""; });
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
+    function pinFromHash() {
+      const params = new URLSearchParams(String(window.location.hash || "").replace(/^#/, ""));
+      const pin = String(params.get("pin") || "").trim();
+      return /^\\d{4}$/.test(pin) ? pin : "";
+    }
+    async function submitPin(pin) {
       button.disabled = true;
       error.textContent = "";
       try {
         const response = await fetch("/api/remote-auth", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ pin: input.value }),
+          body: JSON.stringify({ pin }),
         });
         const data = await response.json().catch(() => ({}));
         if (!response.ok || data.ok !== true) throw new Error(data.error || "Incorrect PIN");
@@ -773,7 +781,18 @@ function sendRemoteAuthPage(res, returnPath = "/") {
       } finally {
         button.disabled = false;
       }
+    }
+    input.addEventListener("input", () => { input.value = input.value.replace(/\\D/g, "").slice(0, 4); error.textContent = ""; });
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      await submitPin(input.value);
     });
+    const autoPin = pinFromHash();
+    if (autoPin) {
+      input.value = autoPin;
+      window.history.replaceState(null, "", window.location.pathname + (window.location.search || ""));
+      submitPin(autoPin);
+    }
   </script>
 </body>
 </html>`;
@@ -1330,6 +1349,50 @@ async function writePathFastPicks(picks) {
   await rename(tmpFile, storageFile);
   pathFastPicksCache = normalized;
   return normalized;
+}
+
+function webuiSettingsFile() {
+  if (process.env[WEBUI_SETTINGS_FILE_ENV]) return path.resolve(expandUserPath(process.env[WEBUI_SETTINGS_FILE_ENV]));
+  const configRoot = process.env.XDG_CONFIG_HOME || path.join(homedir(), ".config");
+  return path.join(configRoot, "pi-webui", "settings.json");
+}
+
+function normalizeWebuiSettings(value) {
+  return {
+    version: 1,
+    remoteAuthEnabled: value?.remoteAuthEnabled === true,
+  };
+}
+
+let webuiSettingsCache = null;
+
+async function readWebuiSettings() {
+  if (webuiSettingsCache) return webuiSettingsCache;
+  webuiSettingsCache = normalizeWebuiSettings(await readJsonFileIfExists(webuiSettingsFile()));
+  return webuiSettingsCache;
+}
+
+async function writeWebuiSettings(patch) {
+  const current = await readWebuiSettings();
+  const next = normalizeWebuiSettings({ ...current, ...(patch || {}) });
+  const storageFile = webuiSettingsFile();
+  await mkdir(path.dirname(storageFile), { recursive: true });
+  const tmpFile = `${storageFile}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tmpFile, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+  await rename(tmpFile, storageFile);
+  webuiSettingsCache = next;
+  return next;
+}
+
+async function readPersistedRemoteAuthEnabled() {
+  return (await readWebuiSettings()).remoteAuthEnabled === true;
+}
+
+async function saveRemoteAuthPreference(enabled) {
+  const nextEnabled = enabled === true;
+  await writeWebuiSettings({ remoteAuthEnabled: nextEnabled });
+  persistedRemoteAuthEnabled = nextEnabled;
+  return persistedRemoteAuthEnabled;
 }
 
 function parseCliScopedModelPatterns() {
@@ -6606,6 +6669,7 @@ async function createInitialTabs() {
 }
 
 const serverStartedAt = new Date().toISOString();
+let persistedRemoteAuthEnabled = await readPersistedRemoteAuthEnabled();
 const initialTabs = await createInitialTabs();
 const initialTab = initialTabs[0];
 let currentHost = options.host;
@@ -6648,6 +6712,19 @@ function resetRemoteAuth() {
   remoteAuth.pin = undefined;
   remoteAuth.token = undefined;
   remoteAuth.tokenExpiresAt = 0;
+}
+
+function remoteAuthPreferenceEnabled() {
+  return persistedRemoteAuthEnabled === true;
+}
+
+function remoteAuthStartupEnabled() {
+  return options.remoteAuthExplicit ? options.remoteAuth === true : remoteAuthPreferenceEnabled();
+}
+
+function remoteAuthStartupReason() {
+  if (options.remoteAuthExplicit) return "startup option";
+  return "saved setting";
 }
 
 function remoteAuthStatus({ includePin = false } = {}) {
@@ -6798,9 +6875,9 @@ async function closeNetworkAccess() {
     await closeServerListener();
     await listenOn(nextHost);
     currentHost = nextHost;
-    resetRemoteAuth();
+    if (!remoteAuthPreferenceEnabled()) resetRemoteAuth();
     console.warn("Web UI network access closed; listening on localhost only.");
-    return networkStatus();
+    return networkStatus({ includeAuthPin: true });
   } catch (error) {
     console.error("Failed to close Web UI network access:", sanitizeError(error));
     if (!server.listening) {
@@ -6817,7 +6894,7 @@ async function closeNetworkAccess() {
   }
 }
 
-if (!isLocalHost(currentHost) && options.remoteAuth !== false) enableRemoteAuth("startup network listener");
+if (remoteAuthStartupEnabled()) enableRemoteAuth(remoteAuthStartupReason());
 
 async function safeRpcData(tab, command, timeoutMs = STATUS_RPC_TIMEOUT_MS) {
   try {
@@ -6961,9 +7038,13 @@ const server = createServer(async (req, res) => {
     if (url.pathname === "/api/remote-auth/settings" && req.method === "POST") {
       requireLocalhostRoute(req, url.pathname);
       const body = await readJsonBody(req);
-      if (body.enabled === true) enableRemoteAuth("side panel toggle");
-      else if (body.enabled === false) resetRemoteAuth();
-      else throw makeHttpError(400, "enabled must be true or false");
+      if (body.enabled === true) {
+        enableRemoteAuth("side panel toggle");
+        await saveRemoteAuthPreference(true);
+      } else if (body.enabled === false) {
+        resetRemoteAuth();
+        await saveRemoteAuthPreference(false);
+      } else throw makeHttpError(400, "enabled must be true or false");
       closeSseClientsForRemoteAuthChange();
       const headers = body.enabled === false ? { "set-cookie": clearRemoteAuthCookie() } : {};
       sendJson(res, 200, { ok: true, data: { auth: remoteAuthStatus({ includePin: true }), network: networkStatus({ includeAuthPin: true }) } }, headers);

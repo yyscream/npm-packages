@@ -85,6 +85,7 @@ const elements = {
   optionsCommandPaletteButton: $("#optionsCommandPaletteButton"),
   optionsResumeButton: $("#optionsResumeButton"),
   optionsReloadButton: $("#optionsReloadButton"),
+  optionsRemoteButton: $("#optionsRemoteButton"),
   optionsNameButton: $("#optionsNameButton"),
   optionsCloneButton: $("#optionsCloneButton"),
   optionsSettingsButton: $("#optionsSettingsButton"),
@@ -197,6 +198,7 @@ const elements = {
   commandPaletteInput: $("#commandPaletteInput"),
   commandPaletteList: $("#commandPaletteList"),
   commandPaletteHint: $("#commandPaletteHint"),
+  commandPaletteCloseButton: $("#commandPaletteCloseButton"),
   editRetryDialog: $("#editRetryDialog"),
   editRetryMessage: $("#editRetryMessage"),
   editRetryText: $("#editRetryText"),
@@ -316,6 +318,8 @@ let updateStatusRefreshTimer = null;
 let updateNotificationHideTimer = null;
 let backendOfflineNoticeShown = false;
 let latestMessages = [];
+let latestMessagesSessionKey = "";
+const tabMessagesCache = new Map();
 let promptHistoryByTab = new Map();
 let promptHistoryNavigation = null;
 let transientMessages = [];
@@ -340,6 +344,8 @@ let toolOutputGloballyExpanded = false;
 let agentDoneNotificationPermissionRequested = false;
 let agentDoneNotificationFallbackNoted = false;
 let agentDoneNotificationKeys = new Set();
+let pendingAgentDoneNotificationTimers = new Map();
+let autoRetryingTabs = new Set();
 let availableModels = [];
 let availableThemes = [];
 let currentThemeName = "catppuccin-mocha";
@@ -374,7 +380,17 @@ let workspaceDashboardCollapsed = false;
 let commandPaletteIndex = 0;
 let commandPaletteItems = [];
 let activeEditRetry = null;
+let activePointerActivation = null;
+let pointerActivationTimeout = null;
+let deferredChatFollowScroll = false;
+const deferredUiRenderCallbacks = new Map();
 let abortLongPressTimer = null;
+let abortLongPressTickTimer = null;
+let abortLongPressResetTimer = null;
+let abortLongPressStartedAt = 0;
+let abortLongPressDeadlineAt = 0;
+let abortLongPressSource = "long-press";
+let abortLongPressReleasePending = false;
 let abortLongPressHandled = false;
 const dialogQueue = [];
 const SIDE_PANEL_STORAGE_KEY = "pi-webui-side-panel-collapsed";
@@ -412,6 +428,8 @@ const LAST_USER_PROMPT_STORAGE_KEY = "pi-webui-last-user-prompts";
 const PROMPT_HISTORY_STORAGE_KEY = "pi-webui-prompt-history";
 const PROMPT_LIST_STORAGE_KEY = "pi-webui-prompt-lists";
 const WORKSPACE_DASHBOARD_STORAGE_KEY = "pi-webui-workspace-dashboard-collapsed";
+const POINTER_ACTIVATION_SELECTOR = "button, a[href], input, select, textarea, summary, [role='button'], [tabindex]:not([tabindex='-1'])";
+const POINTER_ACTIVATION_RENDER_DEFER_MAX_MS = 1200;
 const PROMPT_HISTORY_LIMIT_PER_TAB = 50;
 const ATTACHMENT_MAX_FILES = 12;
 const ATTACHMENT_MAX_FILE_BYTES = 64 * 1024 * 1024;
@@ -444,7 +462,9 @@ const UPDATE_STATUS_INITIAL_DELAY_MS = 1800;
 const RUN_INDICATOR_TICK_MS = 1000;
 const RUN_INDICATOR_START_GRACE_MS = 2500;
 const RUN_INDICATOR_STATE_RECHECK_MS = 5000;
-const ABORT_LONG_PRESS_MS = 700;
+const ABORT_LONG_PRESS_MS = 3000;
+const ABORT_LONG_PRESS_TICK_MS = 100;
+const ABORT_LONG_PRESS_RELEASE_GRACE_MS = 350;
 const STREAM_OUTPUT_HIDE_DELAY_MS = 300;
 const STREAM_OUTPUT_TOOLCALL_GUARD_MS = 220;
 const STREAM_OUTPUT_MIN_VISIBLE_MS = 900;
@@ -454,6 +474,7 @@ const TODO_PROGRESS_LINE_REGEX = /^\s*(?:(?:[-*]|\d+[.)])\s*)?\[(?: |x|X|-)\]\s+
 const TODO_PROGRESS_PARTIAL_LINE_REGEX = /^\s*(?:(?:[-*]|\d+[.)])\s*)?\[(?: |x|X|-)?\]?\s*.*$/;
 const CHAT_SCROLL_KEYS = new Set(["ArrowDown", "ArrowUp", "End", "Home", "PageDown", "PageUp", " "]);
 const TAB_ACTIVITY_IDLE_RECONCILE_GRACE_MS = 1200;
+const AGENT_DONE_NOTIFICATION_RETRY_GRACE_MS = 1200;
 const FOREGROUND_RECONCILE_DELAY_MS = 120;
 const TAB_GROUP_STATUS_PRIORITY = ["blocked", "done", "working", "idle"];
 const EXTENSION_UI_BLOCKING_METHODS = new Set(["select", "confirm", "input", "editor"]);
@@ -484,6 +505,7 @@ const optionalFeatureAvailability = {
   tuiSkillsCommand: false,
   todoProgressWidget: false,
   tuiToolsCommand: false,
+  remoteWebui: false,
   themeBundle: false,
 };
 const OPTIONAL_FEATURES = [
@@ -537,6 +559,13 @@ const OPTIONAL_FEATURES = [
     description: "Terminal-native active-tool manager alongside WebUI-native /tools toggles.",
   },
   {
+    id: "remoteWebui",
+    label: "Remote WebUI",
+    packageName: "@firstpick/pi-package-remote-webui",
+    capabilityLabel: "/remote",
+    description: "Trusted-LAN QR helper for opening the Web UI from mobile browsers.",
+  },
+  {
     id: "gitFooterStatus",
     label: "Git footer status",
     packageName: "@firstpick/pi-extension-git-footer-status",
@@ -568,6 +597,7 @@ const OPTIONAL_COMMAND_FEATURES = new Map([
   ["safety-guard", "safetyGuard"],
   ["skills", "tuiSkillsCommand"],
   ["tools", "tuiToolsCommand"],
+  ["remote", "remoteWebui"],
   ["stats", "statsCommand"],
   ["git-footer-refresh", "gitFooterStatus"],
   ["todo-progress-status", "todoProgressWidget"],
@@ -826,12 +856,118 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function activationControlFromEvent(event) {
+  const target = event?.target instanceof Element ? event.target : null;
+  const control = target?.closest?.(POINTER_ACTIVATION_SELECTOR);
+  if (!control || control === document.body || control === document.documentElement) return null;
+  if (control.disabled || control.getAttribute("aria-disabled") === "true") return null;
+  return control;
+}
+
+function shouldDeferUiRenderForPointerActivation() {
+  return Boolean(
+    activePointerActivation
+      && performance.now() - activePointerActivation.startedAt <= POINTER_ACTIVATION_RENDER_DEFER_MAX_MS,
+  );
+}
+
+function deferUiRenderDuringPointerActivation(key, callback) {
+  if (!shouldDeferUiRenderForPointerActivation()) return false;
+  deferredUiRenderCallbacks.set(key, callback);
+  return true;
+}
+
+function deferChatFollowScrollDuringPointerActivation({ force = false } = {}) {
+  if (force || !shouldDeferUiRenderForPointerActivation()) return false;
+  deferredChatFollowScroll = true;
+  return true;
+}
+
+function flushDeferredUiRenders() {
+  const callbacks = [...deferredUiRenderCallbacks.values()];
+  deferredUiRenderCallbacks.clear();
+  const shouldScroll = deferredChatFollowScroll;
+  deferredChatFollowScroll = false;
+
+  for (const callback of callbacks) {
+    try {
+      callback();
+    } catch (error) {
+      console.error("deferred Web UI render failed", error);
+    }
+  }
+  if (shouldScroll) scrollChatToBottom();
+}
+
+function beginPointerActivation(event) {
+  if (event?.button !== undefined && event.button !== 0) return;
+  const control = activationControlFromEvent(event);
+  if (!control) return;
+  clearTimeout(pointerActivationTimeout);
+  const activation = { pointerId: event.pointerId, startedAt: performance.now(), control };
+  activePointerActivation = activation;
+  pointerActivationTimeout = setTimeout(() => {
+    if (activePointerActivation === activation) activePointerActivation = null;
+    pointerActivationTimeout = null;
+    flushDeferredUiRenders();
+  }, POINTER_ACTIVATION_RENDER_DEFER_MAX_MS);
+}
+
+function finishPointerActivation(event) {
+  if (!activePointerActivation) return;
+  if (event?.pointerId !== undefined && activePointerActivation.pointerId !== event.pointerId) return;
+  const activation = activePointerActivation;
+  clearTimeout(pointerActivationTimeout);
+  pointerActivationTimeout = null;
+  setTimeout(() => {
+    if (activePointerActivation === activation) activePointerActivation = null;
+    flushDeferredUiRenders();
+  }, 0);
+}
+
+function cancelPointerActivation() {
+  clearTimeout(pointerActivationTimeout);
+  pointerActivationTimeout = null;
+  activePointerActivation = null;
+  flushDeferredUiRenders();
+}
+
 function isMobileView() {
   return mobileViewMedia?.matches || false;
 }
 
 function isSidePanelOverlayView() {
   return sidePanelOverlayMedia?.matches || false;
+}
+
+function mobileDropdownViewportHeight() {
+  return window.visualViewport?.height || window.innerHeight || document.documentElement.clientHeight || 0;
+}
+
+function mobileDropdownConfigs() {
+  return [
+    { menu: elements.publishButton?.parentElement, button: elements.publishButton, panel: elements.publishButton?.parentElement?.querySelector(".composer-publish-menu-panel") },
+    { menu: elements.nativeCommandMenuButton?.parentElement, button: elements.nativeCommandMenuButton, panel: elements.nativeCommandMenuButton?.parentElement?.querySelector(".composer-publish-menu-panel") },
+    { menu: elements.optionsMenuButton?.parentElement, button: elements.optionsMenuButton, panel: elements.optionsMenu },
+    { menu: elements.appRunnerMenu, button: elements.appRunnerMenuButton, panel: elements.appRunnerMenuPanel },
+  ];
+}
+
+function updateMobileDropdownScrollBounds() {
+  const viewportHeight = mobileDropdownViewportHeight();
+  for (const { menu, button, panel } of mobileDropdownConfigs()) {
+    if (!panel) continue;
+    panel.style.removeProperty("--mobile-dropdown-max-height");
+    if (!isMobileView() || !menu?.classList.contains("open") || !viewportHeight) continue;
+    const anchorRect = (button || menu).getBoundingClientRect();
+    const availableAbove = Math.floor(anchorRect.top - 8);
+    const boundedHeight = Math.max(72, Math.min(viewportHeight - 16, availableAbove));
+    panel.style.setProperty("--mobile-dropdown-max-height", `${boundedHeight}px`);
+  }
+}
+
+function scheduleMobileDropdownScrollBoundsUpdate() {
+  requestAnimationFrame(updateMobileDropdownScrollBounds);
 }
 
 function readStoredSidePanelCollapsed() {
@@ -1592,6 +1728,7 @@ function setComposerActionsOpen(open) {
     setOptionsMenuOpen(false);
     setBusyPromptBehaviorMenuOpen(false);
   }
+  scheduleMobileDropdownScrollBoundsUpdate();
 }
 
 function isUserBashActive(tabId = activeTabId) {
@@ -1643,11 +1780,17 @@ function updateComposerModeButtons() {
     button.hidden = !runActive;
     button.disabled = !runActive;
   }
-  elements.abortButton.hidden = !abortAvailable;
-  elements.abortButton.disabled = !abortAvailable || abortRequestInFlight;
-  elements.abortButton.textContent = abortRequestInFlight ? "Aborting…" : "Abort";
-  elements.abortButton.title = abortAvailable ? "Abort the active Pi run (Esc or hold)" : "Abort is available while Pi is running";
-  elements.abortButton.setAttribute("aria-label", elements.abortButton.title);
+  const abortHoldActive = isAbortLongPressActive();
+  if (!abortAvailable && !abortHoldActive) resetAbortLongPressAffordance();
+  elements.abortButton.hidden = !abortAvailable && !abortHoldActive;
+  elements.abortButton.disabled = (!abortAvailable && !abortHoldActive) || abortRequestInFlight;
+  if (abortHoldActive) {
+    renderAbortLongPressAffordance();
+  } else {
+    elements.abortButton.textContent = abortRequestInFlight ? "Aborting…" : "Abort";
+    elements.abortButton.title = abortAvailable ? abortButtonReadyTitle() : "Abort is available while Pi is running";
+    elements.abortButton.setAttribute("aria-label", elements.abortButton.title);
+  }
   renderBusyPromptBehaviorTag();
   document.body.classList.toggle("pi-run-active", runActive || abortAvailable);
 }
@@ -1851,6 +1994,7 @@ function updateVisualViewportVars() {
     syncMobileChatToBottomForInput();
   }
   updateFooterModelPickerPosition();
+  updateMobileDropdownScrollBounds();
 }
 
 function installViewportHandlers() {
@@ -3726,10 +3870,16 @@ function syncTabMetadata(nextTabs = []) {
     if (!liveIds.has(tabId)) {
       tabActivities.delete(tabId);
       tabSeenCompletionSerials.delete(tabId);
+      autoRetryingTabs.delete(tabId);
+      suppressPendingAgentDoneNotificationsForTab(tabId, { markSeen: false });
       actionFeedbackByTab.delete(tabId);
       skillUsageByTab.delete(tabId);
+      tabMessagesCache.delete(tabId);
       clearGitWorkflowForTab(tabId);
     }
+  }
+  for (const tabId of tabMessagesCache.keys()) {
+    if (!liveIds.has(tabId)) tabMessagesCache.delete(tabId);
   }
   pruneSkillUsageForKnownTabs(liveIds);
 }
@@ -3894,6 +4044,18 @@ function ingestEventTabActivity(event) {
   if (changed) renderTabs();
 }
 
+function trackAutoRetryStateFromEvent(event) {
+  const tabId = event?.tabId || activeTabId;
+  if (!tabId) return;
+  if (event.type === "auto_retry_start") {
+    autoRetryingTabs.add(tabId);
+    suppressPendingAgentDoneNotificationsForTab(tabId);
+    markTabWorkingLocally(tabId);
+  } else if (event.type === "auto_retry_end") {
+    autoRetryingTabs.delete(tabId);
+  }
+}
+
 function rememberActiveTab() {
   try {
     if (activeTabId) localStorage.setItem(TAB_STORAGE_KEY, activeTabId);
@@ -3985,6 +4147,7 @@ function resetActiveTabUi() {
   latestStatsOverlayPayload = null;
   latestWorkspace = null;
   latestMessages = [];
+  latestMessagesSessionKey = "";
   clearRunIndicatorActivity({ render: false });
   statusEntries.clear();
   widgets.clear();
@@ -4016,8 +4179,10 @@ function resetActiveTabUi() {
   renderAppRunnerControls();
   renderWidgets();
   renderGitWorkflow();
-  renderFooter();
-  renderFeedbackTray();
+  if (!restoreCachedMessagesForActiveTab()) {
+    renderFooter();
+    renderFeedbackTray();
+  }
 }
 
 function tabGroupStatusRank(state) {
@@ -4256,6 +4421,7 @@ function moveNewTabMenuFocus(delta) {
 }
 
 function renderTabs() {
+  if (deferUiRenderDuringPointerActivation("tabs", renderTabs)) return;
   const active = activeTab();
   const activeIndicator = active ? tabIndicator(active) : null;
   elements.terminalTabsToggleButton.textContent = active ? `${activeIndicator.glyph} ${active.title}${tabs.length > 1 ? ` · ${tabs.length}` : ""}` : "Tabs";
@@ -4280,7 +4446,7 @@ function renderTabs() {
   updateDocumentTitle();
   renderWorkspaceDashboard();
   renderContextMeter();
-  if (elements.commandPaletteDialog?.open) renderCommandPalette();
+  if (elements.commandPaletteDialog?.open) renderCommandPalette({ preserveScroll: true });
   syncTabPolling();
 }
 
@@ -4311,6 +4477,7 @@ async function switchTab(tabId) {
   footerBranchPickerOpen = false;
   footerBranchPickerRequestSerial += 1;
   saveActiveDraft();
+  cacheMessagesForTab(activeTabId);
   const tabContext = setActiveTabId(tabId, { remember: true });
   resetActiveTabUi();
   renderTabs();
@@ -4423,6 +4590,7 @@ async function closeTerminalTabs(tabIds, { label = "selected terminal tabs" } = 
       clearAttachments(id);
       clearGitWorkflowForTab(id);
       appRunnerDataByTab.delete(id);
+      tabMessagesCache.delete(id);
     }
     clearOpenTerminalTabGroup(null, { force: true });
 
@@ -4689,6 +4857,36 @@ function agentDoneNotificationKey(tabId, activity = {}) {
   return `${tabId}:${Number.isFinite(serial) && serial > 0 ? serial : "done"}`;
 }
 
+function isAutoRetryingTab(tabId) {
+  return !!tabId && autoRetryingTabs.has(tabId);
+}
+
+function clearPendingAgentDoneNotification(key, { markSeen = false } = {}) {
+  const pending = pendingAgentDoneNotificationTimers.get(key);
+  if (!pending) return false;
+  clearTimeout(pending.timer);
+  pendingAgentDoneNotificationTimers.delete(key);
+  if (markSeen) agentDoneNotificationKeys.add(key);
+  return true;
+}
+
+function suppressPendingAgentDoneNotificationsForTab(tabId, { markSeen = true } = {}) {
+  if (!tabId) return;
+  for (const [key, pending] of pendingAgentDoneNotificationTimers) {
+    if (pending.tabId === tabId) clearPendingAgentDoneNotification(key, { markSeen });
+  }
+}
+
+function queueAgentDoneBrowserNotification({ key, tabId, title, body }) {
+  clearPendingAgentDoneNotification(key);
+  const timer = setTimeout(() => {
+    pendingAgentDoneNotificationTimers.delete(key);
+    if (isAutoRetryingTab(tabId)) return;
+    showAgentDoneBrowserNotification({ tabId, title, body });
+  }, AGENT_DONE_NOTIFICATION_RETRY_GRACE_MS);
+  pendingAgentDoneNotificationTimers.set(key, { tabId, timer });
+}
+
 function notifyAgentDone(tabOrId, { activity = null, tabTitle = "" } = {}) {
   if (!agentDoneNotificationsEnabled) return;
   const tabId = typeof tabOrId === "string" ? tabOrId : tabOrId?.id || activeTabId;
@@ -4699,9 +4897,11 @@ function notifyAgentDone(tabOrId, { activity = null, tabTitle = "" } = {}) {
   const key = agentDoneNotificationKey(tabId, normalizedActivity);
   if (agentDoneNotificationKeys.has(key)) return;
   agentDoneNotificationKeys.add(key);
+  if (isAutoRetryingTab(tabId)) return;
 
   const displayTitle = tabTitle || tab?.title || "terminal";
-  showAgentDoneBrowserNotification({
+  queueAgentDoneBrowserNotification({
+    key,
     tabId,
     title: "Pi finished work",
     body: `${displayTitle} finished its agent run.`,
@@ -6183,6 +6383,7 @@ async function requestManualCompaction({ triggerButton = null } = {}) {
 }
 
 function renderContextMeter() {
+  if (deferUiRenderDuringPointerActivation("context-meter", renderContextMeter)) return;
   const root = elements.contextMeterBar;
   if (!root) return;
   const tab = activeTab();
@@ -6239,6 +6440,7 @@ function dashboardAction(label, handler, className = "") {
 }
 
 function renderWorkspaceDashboard() {
+  if (deferUiRenderDuringPointerActivation("workspace-dashboard", renderWorkspaceDashboard)) return;
   const root = elements.workspaceDashboard;
   if (!root) return;
   const tab = activeTab();
@@ -7037,6 +7239,7 @@ async function changeActiveTabCwd() {
 }
 
 function renderFooter() {
+  if (deferUiRenderDuringPointerActivation("footer", renderFooter)) return;
   const gitFooterPayload = parseGitFooterWebuiPayload();
   if (gitFooterPayload) {
     renderGitFooterPayload(footerPayloadWithLiveModel(gitFooterPayload));
@@ -7269,6 +7472,7 @@ function initializeCodexUsage() {
 }
 
 function renderStatus() {
+  if (deferUiRenderDuringPointerActivation("status", renderStatus)) return;
   const state = currentState;
   updateComposerModeButtons();
   const running = state?.isStreaming ? "running" : "idle";
@@ -8710,7 +8914,22 @@ function handleStatsWebuiStatus(statusText) {
   if (payload.open || elements.statsOverlayDialog?.open) renderStatsOverlay();
 }
 
+function remoteWebuiWidgetLines(lines = []) {
+  return (Array.isArray(lines) ? lines : [])
+    .map(stripAnsi)
+    .map((line) => String(line ?? ""))
+    .filter((line, index, array) => line.trim() || (index > 0 && index < array.length - 1));
+}
+
+function mirrorRemoteWebuiWidgetToTranscript(widgetKey, lines = [], request = {}) {
+  if (widgetKey !== "pi-remote-webui" || request.replayed) return;
+  const content = remoteWebuiWidgetLines(lines).join("\n").trimEnd();
+  if (!content) return;
+  addTransientMessage({ role: "extension", title: "/remote", content, level: "info", widgetKey });
+}
+
 function renderWidgets() {
+  if (deferUiRenderDuringPointerActivation("widgets", renderWidgets)) return;
   elements.widgetArea.replaceChildren();
   const releaseOutput = renderReleaseNpmOutputWidget();
   if (releaseOutput) elements.widgetArea.append(releaseOutput);
@@ -8726,8 +8945,9 @@ function renderWidgets() {
   for (const [key, value] of widgets) {
     const widgetFeatureId = optionalFeatureWidgetFeatureId(key);
     if (widgetFeatureId && !isOptionalFeatureEnabled(widgetFeatureId)) continue;
-    if (widgetFeatureId && key !== "todo-progress") continue;
+    if (widgetFeatureId && optionalFeatureWidgetHasSpecializedRenderer(key)) continue;
     const lines = Array.isArray(value.widgetLines) ? value.widgetLines : [];
+    if (key === "pi-remote-webui") continue;
     const specialized = key === "todo-progress" && isOptionalFeatureEnabled("todoProgressWidget") ? renderTodoProgressWidget(key, lines) : null;
     if (specialized) {
       elements.widgetArea.append(specialized);
@@ -10330,6 +10550,7 @@ function renderQueueGroup(label, items, tone) {
 }
 
 function renderQueue(event) {
+  if (deferUiRenderDuringPointerActivation("queue", () => renderQueue(event))) return;
   const snapshot = normalizeQueuedMessages(event);
   const tabId = event?.tabId || activeTabId;
   if (tabId) latestQueuedMessagesByTab.set(tabId, snapshot);
@@ -11281,6 +11502,7 @@ function renderActionFeedbackControls(bubble, message, messageIndex) {
 }
 
 function renderFeedbackTray() {
+  if (deferUiRenderDuringPointerActivation("feedback-tray", renderFeedbackTray)) return;
   const items = queuedActionFeedback();
   const hasItems = items.length > 0;
   elements.feedbackTray.hidden = !hasItems;
@@ -11753,6 +11975,7 @@ function findStickyUserPromptTarget(targets = userPromptTargets()) {
 }
 
 function updateStickyUserPromptButton() {
+  if (deferUiRenderDuringPointerActivation("sticky-user-prompt", updateStickyUserPromptButton)) return;
   const button = elements.stickyUserPromptButton;
   if (!button) return;
   const targets = userPromptTargets();
@@ -12902,6 +13125,7 @@ function pruneDisconnectedLiveToolCards() {
 }
 
 function renderAllMessages({ preserveScroll = false, forceRebuild = false } = {}) {
+  if (deferUiRenderDuringPointerActivation("messages", () => renderAllMessages({ preserveScroll, forceRebuild }))) return;
   const shouldFollow = !preserveScroll && (autoFollowChat || isChatNearBottom());
   const previousScrollTop = elements.chat.scrollTop;
   const transcriptItems = orderedTranscriptItems();
@@ -13073,6 +13297,7 @@ function scheduleChatFollowScroll() {
 }
 
 function scrollChatToBottom({ force = false } = {}) {
+  if (deferChatFollowScrollDuringPointerActivation({ force })) return;
   if (force) autoFollowChat = true;
   if (!autoFollowChat) {
     updateJumpToLatestButton();
@@ -13133,6 +13358,7 @@ function setPublishMenuOpen(open) {
   elements.publishButton.setAttribute("aria-expanded", publishMenuOpen ? "true" : "false");
   elements.publishButton.classList.toggle("menu-open", publishMenuOpen);
   elements.publishButton.parentElement?.classList.toggle("open", publishMenuOpen);
+  scheduleMobileDropdownScrollBoundsUpdate();
 }
 
 function setNativeCommandMenuOpen(open) {
@@ -13140,6 +13366,7 @@ function setNativeCommandMenuOpen(open) {
   elements.nativeCommandMenuButton.setAttribute("aria-expanded", nativeCommandMenuOpen ? "true" : "false");
   elements.nativeCommandMenuButton.classList.toggle("menu-open", nativeCommandMenuOpen);
   elements.nativeCommandMenuButton.parentElement?.classList.toggle("open", nativeCommandMenuOpen);
+  scheduleMobileDropdownScrollBoundsUpdate();
 }
 
 function setAppRunnerMenuOpen(open) {
@@ -13147,6 +13374,7 @@ function setAppRunnerMenuOpen(open) {
   elements.appRunnerMenuButton?.setAttribute("aria-expanded", appRunnerMenuOpen ? "true" : "false");
   elements.appRunnerMenuButton?.classList.toggle("menu-open", appRunnerMenuOpen);
   elements.appRunnerMenuButton?.parentElement?.classList.toggle("open", appRunnerMenuOpen);
+  scheduleMobileDropdownScrollBoundsUpdate();
 }
 
 function setOptionsMenuOpen(open) {
@@ -13154,6 +13382,7 @@ function setOptionsMenuOpen(open) {
   elements.optionsMenuButton.setAttribute("aria-expanded", optionsMenuOpen ? "true" : "false");
   elements.optionsMenuButton.classList.toggle("menu-open", optionsMenuOpen);
   elements.optionsMenuButton.parentElement?.classList.toggle("open", optionsMenuOpen);
+  scheduleMobileDropdownScrollBoundsUpdate();
 }
 
 function optionalFeatureIdForCommand(name) {
@@ -13318,6 +13547,7 @@ function updateOptionalFeatureAvailability() {
   optionalFeatureAvailability.tuiSkillsCommand = hasLoadedRpcCommand("skills");
   optionalFeatureAvailability.todoProgressWidget = hasAvailableCommand("todo-progress-status") || optionalFeatureAvailability.todoProgressWidget || widgets.has("todo-progress");
   optionalFeatureAvailability.tuiToolsCommand = hasLoadedRpcCommand("tools");
+  optionalFeatureAvailability.remoteWebui = hasAvailableCommand("remote") || optionalFeatureAvailability.remoteWebui || statusEntries.has("pi-remote-webui") || widgets.has("pi-remote-webui");
   optionalFeatureAvailability.themeBundle = availableThemes.length > 0;
   requestGitFooterWebuiPayload();
   renderOptionalFeatureControls();
@@ -13342,7 +13572,12 @@ function optionalFeatureWidgetFeatureId(key) {
   if (key.startsWith("release-npm:")) return "releaseNpm";
   if (key.startsWith("release-aur:")) return "releaseAur";
   if (key === "todo-progress") return "todoProgressWidget";
+  if (key === "pi-remote-webui") return "remoteWebui";
   return null;
+}
+
+function optionalFeatureWidgetHasSpecializedRenderer(key) {
+  return key.startsWith("release-npm:") || key.startsWith("release-aur:");
 }
 
 function renderOptionalFeaturePanel() {
@@ -13446,6 +13681,16 @@ function renderOptionalFeatureControls() {
       elements.optionsStatsButton,
       hasStatsCommand,
       optionalFeatureUnavailableMessage("statsCommand"),
+    );
+  }
+
+  const hasRemoteWebuiCommand = isOptionalFeatureEnabled("remoteWebui") && hasAvailableCommand("remote");
+  if (elements.optionsRemoteButton) {
+    elements.optionsRemoteButton.hidden = !hasRemoteWebuiCommand;
+    setOptionalControlState(
+      elements.optionsRemoteButton,
+      hasRemoteWebuiCommand,
+      optionalFeatureUnavailableMessage("remoteWebui"),
     );
   }
 
@@ -14751,6 +14996,10 @@ async function refreshState(tabContext = activeTabContext()) {
   if (!isCurrentTabContext(tabContext)) return;
   const previousState = currentState;
   currentState = response.data || null;
+  if (latestMessages.length) {
+    latestMessagesSessionKey = resolveMessagesSessionKey(tabContext.tabId);
+    cacheMessagesForTab(tabContext.tabId, latestMessages, latestMessagesSessionKey);
+  }
   const shouldRefreshGitFooter = gitFooterRelevantStateChanged(previousState, currentState);
   syncActiveTabActivityFromState(currentState);
   syncRunIndicatorFromState(currentState);
@@ -14904,7 +15153,32 @@ async function refreshFooterData(tabContext = activeTabContext()) {
 
 // Session key of the last applied transcript fetch; deltas are only
 // attempted while the tab+session is unchanged.
-let latestMessagesSessionKey = "";
+function resolveMessagesSessionKey(tabId = activeTabId) {
+  if (!tabId) return "";
+  const stateSessionId = tabId === activeTabId ? currentState?.sessionId : null;
+  if (stateSessionId) return `${tabId}|${stateSessionId}`;
+  if (latestMessagesSessionKey.startsWith(`${tabId}|`)) return latestMessagesSessionKey;
+  const cached = tabMessagesCache.get(tabId);
+  if (cached?.sessionKey?.startsWith(`${tabId}|`)) return cached.sessionKey;
+  return `${tabId}|`;
+}
+
+function cacheMessagesForTab(tabId = activeTabId, messages = latestMessages, sessionKey = latestMessagesSessionKey) {
+  if (!tabId || !Array.isArray(messages)) return;
+  const stateSessionKey = tabId === activeTabId && currentState?.sessionId ? `${tabId}|${currentState.sessionId}` : "";
+  const resolvedSessionKey = stateSessionKey || (sessionKey?.startsWith(`${tabId}|`) ? sessionKey : resolveMessagesSessionKey(tabId));
+  tabMessagesCache.set(tabId, { messages, sessionKey: resolvedSessionKey });
+}
+
+function restoreCachedMessagesForActiveTab() {
+  if (!activeTabId) return false;
+  const cached = tabMessagesCache.get(activeTabId);
+  if (!cached || !Array.isArray(cached.messages)) return false;
+  latestMessages = cached.messages;
+  latestMessagesSessionKey = cached.sessionKey || resolveMessagesSessionKey(activeTabId);
+  renderMessages(latestMessages);
+  return true;
+}
 
 function messagesLookEqual(a, b) {
   return !!a && !!b && a.role === b.role && String(a.timestamp || "") === String(b.timestamp || "")
@@ -14933,7 +15207,7 @@ function mergeMessagesDelta(previous, data) {
 async function refreshMessages(tabContext = activeTabContext()) {
   if (!tabContext.tabId) return;
   const previousMessages = latestMessages;
-  const sessionKey = `${tabContext.tabId}|${currentState?.sessionId || ""}`;
+  const sessionKey = resolveMessagesSessionKey(tabContext.tabId);
   let nextMessages = null;
   if (previousMessages.length > 1 && sessionKey === latestMessagesSessionKey) {
     // Delta fetch with a one-message overlap: the last known message is
@@ -14949,6 +15223,7 @@ async function refreshMessages(tabContext = activeTabContext()) {
   }
   latestMessages = nextMessages;
   latestMessagesSessionKey = sessionKey;
+  cacheMessagesForTab(tabContext.tabId, latestMessages, latestMessagesSessionKey);
   const preserveLiveStream = liveStreamRenderActive();
   if (!preserveLiveStream) resetStreamBubble();
   renderMessages(latestMessages);
@@ -14989,7 +15264,7 @@ async function refreshModels(tabContext = activeTabContext()) {
   syncModelSelectToState();
   renderFooter();
   renderFeedbackTray();
-  if (elements.commandPaletteDialog?.open) renderCommandPalette();
+  if (elements.commandPaletteDialog?.open) renderCommandPalette({ preserveScroll: true });
 }
 
 function syncModelSelectToState() {
@@ -15466,7 +15741,7 @@ async function refreshCommands(tabContext = activeTabContext()) {
   availableCommands = normalizeCommands(response.data?.commands || []);
   updateOptionalFeatureAvailability();
   renderCommands();
-  if (elements.commandPaletteDialog?.open) renderCommandPalette();
+  if (elements.commandPaletteDialog?.open) renderCommandPalette({ preserveScroll: true });
 }
 
 function paletteText(value) {
@@ -15563,12 +15838,14 @@ function setCommandPaletteIndex(index) {
   renderCommandPaletteList();
 }
 
-function renderCommandPaletteList() {
+function renderCommandPaletteList({ preserveScroll = false } = {}) {
   const list = elements.commandPaletteList;
   if (!list) return;
+  const scrollTop = preserveScroll ? list.scrollTop : 0;
   list.replaceChildren();
   if (!commandPaletteItems.length) {
     list.append(make("div", "command-palette-empty muted", "No matching actions."));
+    if (preserveScroll) list.scrollTop = scrollTop;
     return;
   }
   commandPaletteItems.forEach((item, index) => {
@@ -15584,14 +15861,18 @@ function renderCommandPaletteList() {
     );
     list.append(button);
   });
+  if (preserveScroll) {
+    list.scrollTop = scrollTop;
+    return;
+  }
   const active = list.children[commandPaletteIndex];
   active?.scrollIntoView({ block: "nearest" });
 }
 
-function renderCommandPalette() {
+function renderCommandPalette({ preserveScroll = false } = {}) {
   commandPaletteItems = filteredCommandPaletteItems();
   if (commandPaletteIndex >= commandPaletteItems.length) commandPaletteIndex = 0;
-  renderCommandPaletteList();
+  renderCommandPaletteList({ preserveScroll });
 }
 
 function openCommandPalette(initialQuery = "") {
@@ -16167,7 +16448,7 @@ function hasQueuedDialogRequest(id) {
 
 function removeQueuedDialogRequests(ids = []) {
   const idSet = new Set(ids.map((id) => String(id)).filter(Boolean));
-  if (idSet.size === 0) return;
+  if (idSet.size === 0) return false;
   for (let i = dialogQueue.length - 1; i >= 0; i -= 1) {
     if (idSet.has(String(dialogQueue[i]?.id || ""))) dialogQueue.splice(i, 1);
   }
@@ -16175,7 +16456,9 @@ function removeQueuedDialogRequests(ids = []) {
     if (elements.dialog.open) elements.dialog.close();
     activeDialog = null;
     showNextDialog();
+    return true;
   }
+  return false;
 }
 
 function handleExtensionUiRequest(request) {
@@ -16201,12 +16484,20 @@ function handleExtensionUiRequest(request) {
       renderStatus();
       return;
     }
-    case "setWidget":
-      if (Array.isArray(request.widgetLines)) widgets.set(request.widgetKey || request.id, request);
-      else widgets.delete(request.widgetKey || request.id);
+    case "setWidget": {
+      const widgetKey = request.widgetKey || request.id;
+      if (widgetKey === "pi-remote-webui") {
+        widgets.delete(widgetKey);
+        if (Array.isArray(request.widgetLines)) mirrorRemoteWebuiWidgetToTranscript(widgetKey, request.widgetLines, request);
+      } else if (Array.isArray(request.widgetLines)) {
+        widgets.set(widgetKey, request);
+      } else {
+        widgets.delete(widgetKey);
+      }
       updateOptionalFeatureAvailability();
       renderWidgets();
       return;
+    }
     case "setTitle":
       if (request.title) document.title = request.title;
       return;
@@ -16239,6 +16530,7 @@ function handleExtensionUiRequest(request) {
 async function sendDialogResponse(payload) {
   const { tabId = activeTabId, ...body } = payload;
   const tabContext = activeTabContext(tabId);
+  const responseId = String(body.id || "");
   try {
     const response = await api("/api/extension-ui-response", { method: "POST", body, tabId });
     if (!applyResponseTab(response) && decrementTabPendingBlockerCount(tabId)) renderTabs();
@@ -16246,6 +16538,7 @@ async function sendDialogResponse(payload) {
     if (isCurrentTabContext(tabContext)) addEvent(error.message, "error");
   } finally {
     if (!isCurrentTabContext(tabContext)) return;
+    if (responseId && activeDialog && String(activeDialog.id || "") !== responseId) return;
     if (elements.dialog.open) elements.dialog.close();
     activeDialog = null;
     if (runIndicatorIsActive()) setRunIndicatorActivity("Continuing after your response…");
@@ -16336,6 +16629,7 @@ function handleInactiveTabEvent(event) {
 
 function handleEvent(event) {
   ingestEventTabActivity(event);
+  trackAutoRetryStateFromEvent(event);
   trackSkillsFromEvent(event);
   if (!eventTargetsActiveTab(event)) {
     handleInactiveTabEvent(event);
@@ -16390,6 +16684,14 @@ function handleEvent(event) {
       removeQueuedDialogRequests(event.ids || []);
       addEvent(`cancelled ${event.ids?.length || 0} pending extension UI request(s)`, "warn");
       break;
+    case "webui_extension_ui_resolved": {
+      const closedActiveDialog = removeQueuedDialogRequests([event.id]);
+      if (closedActiveDialog) {
+        addEvent("extension UI request resolved");
+        if (runIndicatorIsActive() && !activeDialog) setRunIndicatorActivity("Continuing after extension UI response…");
+      }
+      break;
+    }
     case "webui_app_runner_update":
       setAppRunnerData(event.tabId || activeTabId, { cwd: event.cwd, activeRun: event.activeRun });
       renderAppRunnerControls();
@@ -16894,6 +17196,7 @@ elements.nativeToolsButton.addEventListener("click", () => runNativeCommandMenu(
 elements.optionsCommandPaletteButton.addEventListener("click", () => openCommandPalette());
 elements.optionsResumeButton.addEventListener("click", () => runNativeCommandMenu("/resume"));
 elements.optionsReloadButton.addEventListener("click", () => runNativeCommandMenu("/reload"));
+elements.optionsRemoteButton.addEventListener("click", () => runNativeCommandMenu("/remote"));
 elements.optionsNameButton.addEventListener("click", () => runNativeCommandMenu("/name"));
 elements.optionsCloneButton.addEventListener("click", () => runNativeCommandMenu("/clone"));
 elements.optionsSettingsButton.addEventListener("click", () => runNativeCommandMenu("/settings"));
@@ -16954,6 +17257,7 @@ elements.commandPaletteDialog?.addEventListener("cancel", (event) => {
   event.preventDefault();
   closeCommandPalette();
 });
+elements.commandPaletteCloseButton?.addEventListener("click", closeCommandPalette);
 elements.commandPaletteInput?.addEventListener("input", () => {
   commandPaletteIndex = 0;
   renderCommandPalette();
@@ -16986,11 +17290,104 @@ elements.editRetryCancelButton?.addEventListener("click", closeEditRetryDialog);
 elements.editRetryForkButton?.addEventListener("click", () => submitEditRetry({ send: false }));
 elements.editRetrySendButton?.addEventListener("click", () => submitEditRetry({ send: true }));
 
-function resetAbortLongPressAffordance() {
+function abortButtonHoldSeconds() {
+  return String(Math.round(ABORT_LONG_PRESS_MS / 1000));
+}
+
+function abortButtonReadyTitle() {
+  return `Hold Esc or the Abort button for ${abortButtonHoldSeconds()} seconds to abort the active Pi run`;
+}
+
+function clearAbortLongPressResetTimer() {
+  clearTimeout(abortLongPressResetTimer);
+  abortLongPressResetTimer = null;
+}
+
+function clearAbortLongPressCompletionTimers() {
   clearTimeout(abortLongPressTimer);
+  clearInterval(abortLongPressTickTimer);
   abortLongPressTimer = null;
+  abortLongPressTickTimer = null;
+}
+
+function isAbortLongPressActive() {
+  return abortLongPressStartedAt > 0;
+}
+
+function abortLongPressRemainingMs() {
+  if (!abortLongPressStartedAt || !abortLongPressDeadlineAt) return ABORT_LONG_PRESS_MS;
+  return Math.max(0, abortLongPressDeadlineAt - performance.now());
+}
+
+function formatAbortLongPressRemaining(ms) {
+  return (Math.ceil(Math.max(0, ms) / 100) / 10).toFixed(1);
+}
+
+function abortLongPressLabel() {
+  const remaining = formatAbortLongPressRemaining(abortLongPressRemainingMs());
+  return abortLongPressSource === "escape" ? `Hold Esc ${remaining}s` : `Hold ${remaining}s`;
+}
+
+function renderAbortLongPressAffordance() {
+  const label = abortLongPressLabel();
+  elements.abortButton.textContent = label;
+  elements.abortButton.title = `${label} more to abort the active Pi run`;
+  elements.abortButton.setAttribute("aria-label", elements.abortButton.title);
+}
+
+function completeAbortLongPress() {
+  if (!isAbortLongPressActive()) return;
+  if (abortLongPressReleasePending) return;
+  const source = abortLongPressSource;
+  clearAbortLongPressResetTimer();
+  clearAbortLongPressCompletionTimers();
+  abortLongPressHandled = true;
+  if (isAbortAvailable()) abortActiveRun({ source });
+  else {
+    resetAbortLongPressAffordance();
+    updateComposerModeButtons();
+  }
+}
+
+function tickAbortLongPressAffordance() {
+  if (!isAbortLongPressActive()) return;
+  renderAbortLongPressAffordance();
+  if (abortLongPressRemainingMs() <= 0) completeAbortLongPress();
+}
+
+function resumeAbortLongPressAffordance() {
+  if (!isAbortLongPressActive()) return;
+  clearAbortLongPressResetTimer();
+  abortLongPressReleasePending = false;
+  tickAbortLongPressAffordance();
+}
+
+function scheduleAbortLongPressReleaseReset() {
+  if (!isAbortLongPressActive()) return;
+  abortLongPressReleasePending = true;
+  clearAbortLongPressResetTimer();
+  abortLongPressResetTimer = setTimeout(() => {
+    abortLongPressResetTimer = null;
+    if (!abortLongPressReleasePending) return;
+    resetAbortLongPressAffordance();
+    updateComposerModeButtons();
+  }, ABORT_LONG_PRESS_RELEASE_GRACE_MS);
+}
+
+function resetAbortLongPressAffordance() {
+  clearAbortLongPressResetTimer();
+  clearAbortLongPressCompletionTimers();
+  abortLongPressStartedAt = 0;
+  abortLongPressDeadlineAt = 0;
+  abortLongPressSource = "long-press";
+  abortLongPressReleasePending = false;
   elements.abortButton.classList.remove("long-pressing");
-  if (!abortRequestInFlight) elements.abortButton.textContent = "Abort";
+  elements.abortButton.style.removeProperty("--abort-long-press-duration");
+  if (!abortRequestInFlight) {
+    elements.abortButton.textContent = "Abort";
+    elements.abortButton.title = isAbortAvailable() ? abortButtonReadyTitle() : "Abort is available while Pi is running";
+    elements.abortButton.setAttribute("aria-label", elements.abortButton.title);
+  }
 }
 
 async function abortActiveRun({ source = "button" } = {}) {
@@ -17026,31 +17423,41 @@ async function abortActiveRun({ source = "button" } = {}) {
   }
 }
 
-function startAbortLongPress(event) {
-  if (!isAbortAvailable() || abortRequestInFlight) return;
-  if (event.button !== undefined && event.button !== 0) return;
+function startAbortLongPress(event, { source = "long-press" } = {}) {
+  if (!isAbortAvailable() || abortRequestInFlight) return false;
+  if (source !== "escape" && event?.button !== undefined && event.button !== 0) return false;
+  if (isAbortLongPressActive()) {
+    resumeAbortLongPressAffordance();
+    return true;
+  }
   resetAbortLongPressAffordance();
   abortLongPressHandled = false;
+  abortLongPressReleasePending = false;
+  abortLongPressSource = source;
+  abortLongPressStartedAt = performance.now();
+  abortLongPressDeadlineAt = abortLongPressStartedAt + ABORT_LONG_PRESS_MS;
+  elements.abortButton.style.setProperty("--abort-long-press-duration", `${ABORT_LONG_PRESS_MS}ms`);
   elements.abortButton.classList.add("long-pressing");
-  elements.abortButton.textContent = "Hold…";
-  abortLongPressTimer = setTimeout(() => {
-    abortLongPressTimer = null;
-    abortLongPressHandled = true;
-    abortActiveRun({ source: "long-press" });
-  }, ABORT_LONG_PRESS_MS);
+  renderAbortLongPressAffordance();
+  abortLongPressTickTimer = setInterval(tickAbortLongPressAffordance, ABORT_LONG_PRESS_TICK_MS);
+  abortLongPressTimer = setTimeout(tickAbortLongPressAffordance, ABORT_LONG_PRESS_MS + 10);
+  return true;
 }
 
 elements.abortButton.addEventListener("pointerdown", startAbortLongPress);
 for (const eventName of ["pointerup", "pointerleave", "pointercancel", "blur"]) {
   elements.abortButton.addEventListener(eventName, resetAbortLongPressAffordance);
 }
+elements.abortButton.addEventListener("keydown", (event) => {
+  if (event.key !== " " && event.key !== "Enter") return;
+  if (startAbortLongPress(event)) event.preventDefault();
+});
+elements.abortButton.addEventListener("keyup", (event) => {
+  if (event.key === " " || event.key === "Enter") resetAbortLongPressAffordance();
+});
 elements.abortButton.addEventListener("click", (event) => {
-  if (abortLongPressHandled) {
-    event.preventDefault();
-    abortLongPressHandled = false;
-    return;
-  }
-  abortActiveRun({ source: "button" });
+  event.preventDefault();
+  if (abortLongPressHandled) abortLongPressHandled = false;
 });
 elements.newSessionButton.addEventListener("click", async () => {
   setComposerActionsOpen(false);
@@ -17166,6 +17573,10 @@ elements.chat.addEventListener("scroll", () => {
   markTabOutputSeen();
   updateStickyUserPromptButton();
 }, { passive: true });
+document.addEventListener("pointerdown", beginPointerActivation, { capture: true, passive: true });
+document.addEventListener("pointerup", finishPointerActivation, { capture: true, passive: true });
+document.addEventListener("pointercancel", cancelPointerActivation, { capture: true, passive: true });
+window.addEventListener("blur", cancelPointerActivation, { passive: true });
 document.addEventListener("pointerdown", (event) => {
   if (openTerminalTabGroupKey && !event.target?.closest?.(".terminal-tab-group")) {
     clearOpenTerminalTabGroup(openTerminalTabGroupKey);
@@ -17386,12 +17797,14 @@ window.addEventListener("keydown", (event) => {
 window.addEventListener("keydown", handleNativeAppShortcut, { capture: true });
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") scheduleForegroundReconcile("visibility resume", 0);
+  else resetAbortLongPressAffordance();
 });
 window.addEventListener("pageshow", () => scheduleForegroundReconcile("page show", 0));
 window.addEventListener("focus", () => scheduleForegroundReconcile("window focus"));
 window.addEventListener("online", () => scheduleForegroundReconcile("network online", 0));
 window.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
+  if (event.defaultPrevented) return;
   if (elements.dialog?.open || elements.pathPickerDialog?.open || elements.gitChangesDialog?.open || elements.commandPaletteDialog?.open || elements.editRetryDialog?.open) return;
   if (publishMenuOpen) {
     setPublishMenuOpen(false);
@@ -17437,6 +17850,20 @@ window.addEventListener("keydown", (event) => {
     hideCommandSuggestions();
     return;
   }
+  if (isSidePanelOverlayView() && !document.body.classList.contains("side-panel-collapsed")) {
+    setSidePanelCollapsed(true);
+    return;
+  }
+  if (isAbortAvailable()) {
+    event.preventDefault();
+    if (abortLongPressSource === "escape" && isAbortLongPressActive()) resumeAbortLongPressAffordance();
+    else if (!event.repeat) startAbortLongPress(event, { source: "escape" });
+    return;
+  }
+  if (event.repeat) {
+    event.preventDefault();
+    return;
+  }
   if (document.activeElement === elements.promptInput && !elements.promptInput.value.trim() && doubleEscapeAction !== "none") {
     const now = Date.now();
     if (now - lastEmptyPromptEscapeTime < 500) {
@@ -17447,14 +17874,13 @@ window.addEventListener("keydown", (event) => {
     }
     lastEmptyPromptEscapeTime = now;
   }
-  if (isSidePanelOverlayView() && !document.body.classList.contains("side-panel-collapsed")) {
-    setSidePanelCollapsed(true);
-    return;
-  }
-  if (isAbortAvailable()) {
-    event.preventDefault();
-    abortActiveRun({ source: "escape" });
-  }
+});
+window.addEventListener("keyup", (event) => {
+  if (event.key === "Escape" && abortLongPressSource === "escape") scheduleAbortLongPressReleaseReset();
+}, { capture: true });
+window.addEventListener("blur", () => {
+  if (abortLongPressSource === "escape") scheduleAbortLongPressReleaseReset();
+  else resetAbortLongPressAffordance();
 });
 
 elements.gitChangesRefreshButton?.addEventListener("click", refreshGitChangesDialog);
