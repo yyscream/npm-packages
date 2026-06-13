@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
@@ -249,6 +249,8 @@ Options:
   --pi <command>      Pi executable to spawn (default: bundled dependency, then "pi")
   --no-session        Start Pi RPC with --no-session
   --name <name>       Initial Web UI tab display name
+  --remote-auth       Enable startup PIN authentication for non-local clients
+  --no-remote-auth    Disable startup PIN authentication
   -h, --help          Show this help
   -v, --version       Print version
 
@@ -262,8 +264,9 @@ Examples:
   PI_WEBUI_PI_BIN=/path/to/pi pi-webui --no-session
 
 Security:
-  The web UI has no authentication and can control Pi tools. It binds to
-  localhost by default. Do not expose it on untrusted networks.
+  The web UI controls Pi tools. It binds to localhost by default. Remote PIN
+  authentication is off by default; enable it in Controls or with --remote-auth
+  before exposing the server on trusted networks.
 `);
 }
 
@@ -285,6 +288,7 @@ function parseArgs(argv) {
     piBinExplicit: !!process.env.PI_WEBUI_PI_BIN,
     noSession: false,
     name: undefined,
+    remoteAuth: isTruthyEnv(process.env.PI_WEBUI_REMOTE_AUTH),
     piArgs: [],
     help: false,
     version: false,
@@ -337,6 +341,14 @@ function parseArgs(argv) {
     if (arg === "--name") {
       options.name = takeValue(argv, i, arg);
       i++;
+      continue;
+    }
+    if (arg === "--remote-auth") {
+      options.remoteAuth = true;
+      continue;
+    }
+    if (arg === "--no-remote-auth") {
+      options.remoteAuth = false;
       continue;
     }
     throw new Error(`Unknown option: ${arg}. Pass Pi CLI args after --.`);
@@ -647,6 +659,139 @@ async function readJsonBody(req, { limitBytes = BODY_LIMIT_BYTES } = {}) {
   const text = Buffer.concat(chunks).toString("utf8");
   if (!text.trim()) return {};
   return JSON.parse(text);
+}
+
+function parseCookieHeader(header = "") {
+  const cookies = new Map();
+  for (const part of String(header || "").split(";")) {
+    const index = part.indexOf("=");
+    if (index === -1) continue;
+    const name = part.slice(0, index).trim();
+    const value = part.slice(index + 1).trim();
+    if (name) {
+      try {
+        cookies.set(name, decodeURIComponent(value));
+      } catch {
+        cookies.set(name, value);
+      }
+    }
+  }
+  return cookies;
+}
+
+function safeTimingEqual(a = "", b = "") {
+  const left = Buffer.from(String(a));
+  const right = Buffer.from(String(b));
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+
+function safeReturnPath(value) {
+  const text = String(value || "/").trim();
+  if (!text.startsWith("/") || text.startsWith("//")) return "/";
+  return text;
+}
+
+function remoteAuthCookie(token = remoteAuth.token) {
+  const maxAge = Math.max(0, Math.floor((remoteAuth.tokenExpiresAt - Date.now()) / 1000));
+  return `pi_remote_auth=${encodeURIComponent(token || "")}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}`;
+}
+
+function clearRemoteAuthCookie() {
+  return "pi_remote_auth=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0";
+}
+
+function requestHasRemoteAuth(req) {
+  if (!remoteAuthRequired()) return true;
+  const token = parseCookieHeader(req.headers.cookie).get("pi_remote_auth");
+  return !!(token && remoteAuth.token && remoteAuth.tokenExpiresAt > Date.now() && safeTimingEqual(token, remoteAuth.token));
+}
+
+function isRemoteAuthPublicPath(pathname) {
+  return pathname === "/remote-auth" || pathname === "/api/remote-auth" || pathname === "/favicon.svg";
+}
+
+function shouldChallengeRemoteAuth(req, url) {
+  if (isLocalRequest(req) || !remoteAuthRequired() || isRemoteAuthPublicPath(url.pathname)) return false;
+  return !requestHasRemoteAuth(req);
+}
+
+function sendRemoteAuthPage(res, returnPath = "/") {
+  const safeReturn = safeReturnPath(returnPath);
+  const body = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pi Web UI Remote PIN</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0f172a; color: #e5e7eb; }
+    body { min-height: 100vh; display: grid; place-items: center; margin: 0; padding: 24px; box-sizing: border-box; }
+    main { width: min(420px, 100%); padding: 28px; border: 1px solid rgba(148, 163, 184, 0.28); border-radius: 20px; background: rgba(15, 23, 42, 0.92); box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35); }
+    h1 { margin: 0 0 8px; font-size: 1.45rem; }
+    p { margin: 0 0 20px; color: #94a3b8; line-height: 1.5; }
+    label { display: block; margin-bottom: 8px; color: #cbd5e1; font-weight: 650; }
+    input { width: 100%; box-sizing: border-box; border: 1px solid rgba(148, 163, 184, 0.36); border-radius: 14px; padding: 14px 16px; background: #020617; color: #f8fafc; font: inherit; font-size: 1.6rem; letter-spacing: 0.32em; text-align: center; }
+    button { width: 100%; margin-top: 16px; border: 0; border-radius: 14px; padding: 14px 16px; background: #22c55e; color: #052e16; font: inherit; font-weight: 800; cursor: pointer; }
+    button:disabled { opacity: 0.65; cursor: wait; }
+    .error { min-height: 1.4em; margin-top: 14px; color: #fca5a5; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Remote PIN required</h1>
+    <p>Enter the 4-digit PIN shown in the local Pi terminal or local Web UI to continue.</p>
+    <form id="pinForm" autocomplete="off">
+      <label for="pin">PIN</label>
+      <input id="pin" name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autofocus required>
+      <button id="submit" type="submit">Unlock Web UI</button>
+      <div id="error" class="error" role="alert"></div>
+    </form>
+  </main>
+  <script>
+    const returnPath = ${JSON.stringify(safeReturn).replace(/</g, "\\u003c")};
+    const form = document.getElementById("pinForm");
+    const input = document.getElementById("pin");
+    const button = document.getElementById("submit");
+    const error = document.getElementById("error");
+    input.addEventListener("input", () => { input.value = input.value.replace(/\\D/g, "").slice(0, 4); error.textContent = ""; });
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      button.disabled = true;
+      error.textContent = "";
+      try {
+        const response = await fetch("/api/remote-auth", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ pin: input.value }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || data.ok !== true) throw new Error(data.error || "Incorrect PIN");
+        window.location.replace(returnPath || "/");
+      } catch (err) {
+        error.textContent = err?.message || String(err);
+        input.select();
+      } finally {
+        button.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>`;
+  res.writeHead(200, {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+  });
+  res.end(body);
+}
+
+function sendRemoteAuthRequired(req, res, url) {
+  const acceptsHtml = String(req.headers.accept || "").includes("text/html");
+  if (req.method === "GET" && (acceptsHtml || url.pathname === "/" || url.pathname === "/index.html" || url.pathname === "/remote-auth")) {
+    sendRemoteAuthPage(res, `${url.pathname}${url.search || ""}`);
+    return;
+  }
+  sendJson(res, 401, { ok: false, error: "Remote PIN required", remoteAuthRequired: true }, { "www-authenticate": "PiRemotePin" });
 }
 
 function sendSse(res, event) {
@@ -6466,6 +6611,11 @@ const initialTab = initialTabs[0];
 let currentHost = options.host;
 let networkRebindInProgress = false;
 let networkRebindTargetHost = null;
+const remoteAuth = {
+  pin: undefined,
+  token: undefined,
+  tokenExpiresAt: 0,
+};
 
 function localNetworkAddresses() {
   const addresses = [];
@@ -6478,7 +6628,39 @@ function localNetworkAddresses() {
   return [...new Set(addresses)].sort();
 }
 
-function networkStatus() {
+function remoteAuthRequired() {
+  return !isLocalHost(currentHost) && !!remoteAuth.pin;
+}
+
+function generateRemotePin() {
+  return String(randomInt(0, 10_000)).padStart(4, "0");
+}
+
+function enableRemoteAuth(reason = "network exposure") {
+  remoteAuth.pin = generateRemotePin();
+  remoteAuth.token = createHash("sha256").update(`${randomUUID()}:${remoteAuth.pin}:${Date.now()}`).digest("base64url");
+  remoteAuth.tokenExpiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000;
+  console.warn(`Pi Web UI remote PIN for ${reason}: ${remoteAuth.pin}`);
+  return remoteAuth.pin;
+}
+
+function resetRemoteAuth() {
+  remoteAuth.pin = undefined;
+  remoteAuth.token = undefined;
+  remoteAuth.tokenExpiresAt = 0;
+}
+
+function remoteAuthStatus({ includePin = false } = {}) {
+  const enabled = !!remoteAuth.pin;
+  const status = {
+    enabled,
+    required: enabled && !isLocalHost(currentHost),
+  };
+  if (includePin && enabled) status.pin = remoteAuth.pin;
+  return status;
+}
+
+function networkStatus({ includeAuthPin = false } = {}) {
   const open = !isLocalHost(currentHost);
   const targetHost = networkRebindTargetHost || currentHost;
   const opening = networkRebindInProgress && !isLocalHost(targetHost);
@@ -6492,6 +6674,7 @@ function networkStatus() {
     port: options.port,
     localUrl: `http://127.0.0.1:${options.port}/`,
     networkUrls,
+    auth: remoteAuthStatus({ includePin: includeAuthPin }),
   };
 }
 
@@ -6509,6 +6692,23 @@ function closeSseClientsForRebind(nextHost) {
     recordEvent(rebindEvent);
     for (const client of tab.sseClients) {
       sendSse(client, rebindEvent);
+      client.end();
+    }
+    tab.sseClients.clear();
+  }
+}
+
+function closeSseClientsForRemoteAuthChange() {
+  for (const tab of tabs.values()) {
+    const authEvent = {
+      type: "webui_remote_auth_changed",
+      tabId: tab.id,
+      tabTitle: tab.title,
+      auth: remoteAuthStatus(),
+    };
+    recordEvent(authEvent);
+    for (const client of tab.sseClients) {
+      sendSse(client, authEvent);
       client.end();
     }
     tab.sseClients.clear();
@@ -6558,7 +6758,7 @@ function listenOn(host) {
 
 async function openToLocalNetwork() {
   const nextHost = "0.0.0.0";
-  if (!isLocalHost(currentHost) || networkRebindInProgress) return networkStatus();
+  if (!isLocalHost(currentHost) || networkRebindInProgress) return networkStatus({ includeAuthPin: true });
 
   networkRebindInProgress = true;
   networkRebindTargetHost = nextHost;
@@ -6568,8 +6768,8 @@ async function openToLocalNetwork() {
     await closeServerListener();
     await listenOn(nextHost);
     currentHost = nextHost;
-    console.warn("WARNING: Web UI is now reachable from the local network and has no authentication.");
-    return networkStatus();
+    console.warn(`WARNING: Web UI is now reachable from the local network${remoteAuth.pin ? " and requires the remote PIN for non-local clients" : " without remote PIN authentication"}.`);
+    return networkStatus({ includeAuthPin: true });
   } catch (error) {
     console.error("Failed to open Web UI to local network:", sanitizeError(error));
     if (!server.listening) {
@@ -6598,6 +6798,7 @@ async function closeNetworkAccess() {
     await closeServerListener();
     await listenOn(nextHost);
     currentHost = nextHost;
+    resetRemoteAuth();
     console.warn("Web UI network access closed; listening on localhost only.");
     return networkStatus();
   } catch (error) {
@@ -6615,6 +6816,8 @@ async function closeNetworkAccess() {
     networkRebindTargetHost = null;
   }
 }
+
+if (!isLocalHost(currentHost) && options.remoteAuth !== false) enableRemoteAuth("startup network listener");
 
 async function safeRpcData(tab, command, timeoutMs = STATUS_RPC_TIMEOUT_MS) {
   try {
@@ -6693,9 +6896,9 @@ async function tabStatusDetails(tab) {
   };
 }
 
-async function webuiStatus({ detailed = false, eventLimit = 40 } = {}) {
+async function webuiStatus({ detailed = false, eventLimit = 40, includeAuthPin = false } = {}) {
   const tab = firstTab();
-  const network = networkStatus();
+  const network = networkStatus({ includeAuthPin });
   const statusTabs = listTabs();
   const data = {
     online: true,
@@ -6730,6 +6933,42 @@ async function webuiStatus({ detailed = false, eventLimit = 40 } = {}) {
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+
+    if (url.pathname === "/remote-auth" && req.method === "GET") {
+      sendRemoteAuthPage(res, url.searchParams.get("return") || "/");
+      return;
+    }
+
+    if (url.pathname === "/api/remote-auth" && req.method === "GET") {
+      sendJson(res, 200, { ok: true, data: { auth: remoteAuthStatus({ includePin: isLocalRequest(req) }), local: isLocalRequest(req) } });
+      return;
+    }
+
+    if (url.pathname === "/api/remote-auth" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const pin = String(body.pin || "").trim();
+      if (!remoteAuth.pin) throw makeHttpError(400, "Remote PIN authentication is not enabled");
+      if (!/^\d{4}$/.test(pin) || !safeTimingEqual(pin, remoteAuth.pin)) throw makeHttpError(403, "Incorrect remote PIN");
+      sendJson(res, 200, { ok: true, data: { auth: remoteAuthStatus() } }, { "set-cookie": remoteAuthCookie() });
+      return;
+    }
+
+    if (shouldChallengeRemoteAuth(req, url)) {
+      sendRemoteAuthRequired(req, res, url);
+      return;
+    }
+
+    if (url.pathname === "/api/remote-auth/settings" && req.method === "POST") {
+      requireLocalhostRoute(req, url.pathname);
+      const body = await readJsonBody(req);
+      if (body.enabled === true) enableRemoteAuth("side panel toggle");
+      else if (body.enabled === false) resetRemoteAuth();
+      else throw makeHttpError(400, "enabled must be true or false");
+      closeSseClientsForRemoteAuthChange();
+      const headers = body.enabled === false ? { "set-cookie": clearRemoteAuthCookie() } : {};
+      sendJson(res, 200, { ok: true, data: { auth: remoteAuthStatus({ includePin: true }), network: networkStatus({ includeAuthPin: true }) } }, headers);
+      return;
+    }
 
     if (url.pathname === "/api/tabs" && req.method === "GET") {
       sendJson(res, 200, { ok: true, data: { tabs: await listTabsWithReconciledActivity() } });
@@ -6800,7 +7039,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/health" && req.method === "GET") {
-      const status = await webuiStatus();
+      const status = await webuiStatus({ includeAuthPin: isLocalRequest(req) });
       sendJson(res, 200, {
         ok: true,
         webuiVersion: status.webuiVersion,
@@ -6821,7 +7060,7 @@ const server = createServer(async (req, res) => {
       const detailed = ["1", "true", "yes", "detailed"].includes(String(url.searchParams.get("detailed") || "").toLowerCase());
       const parsedEventLimit = Number.parseInt(url.searchParams.get("events") || "40", 10);
       const eventLimit = Number.isFinite(parsedEventLimit) ? parsedEventLimit : 40;
-      sendJson(res, 200, { ok: true, data: await webuiStatus({ detailed, eventLimit }) });
+      sendJson(res, 200, { ok: true, data: await webuiStatus({ detailed, eventLimit, includeAuthPin: isLocalRequest(req) }) });
       return;
     }
 
@@ -6858,13 +7097,13 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/network" && req.method === "GET") {
-      sendJson(res, 200, { ok: true, data: networkStatus() });
+      sendJson(res, 200, { ok: true, data: networkStatus({ includeAuthPin: isLocalRequest(req) }) });
       return;
     }
 
     if (url.pathname === "/api/network/open" && req.method === "POST") {
       requireLocalhostRoute(req, url.pathname);
-      const before = networkStatus();
+      const before = networkStatus({ includeAuthPin: true });
       const shouldOpen = !before.open && !networkRebindInProgress;
       sendJson(res, 202, { ok: true, data: { ...before, opening: shouldOpen || before.opening, closing: before.closing } }, { connection: "close" });
       if (shouldOpen) {
@@ -6875,7 +7114,7 @@ const server = createServer(async (req, res) => {
 
     if (url.pathname === "/api/network/close" && req.method === "POST") {
       requireLocalhostRoute(req, url.pathname);
-      const before = networkStatus();
+      const before = networkStatus({ includeAuthPin: true });
       const shouldClose = before.open && !networkRebindInProgress;
       sendJson(res, 202, { ok: true, data: { ...before, opening: before.opening, closing: shouldClose || before.closing } }, { connection: "close" });
       if (shouldClose) {
@@ -7363,7 +7602,7 @@ server.listen(options.port, currentHost, () => {
   else console.log("Pi RPC: waiting for CWD selection in the Web UI");
   if (restoreTabs.length) console.log(`Restored Web UI tabs: ${initialTabs.length}`);
   if (!isLocalHost(currentHost)) {
-    console.warn("WARNING: Web UI has no authentication. Only expose it on trusted networks.");
+    console.warn(`WARNING: Web UI is exposed to the network. Remote PIN auth is ${remoteAuth.pin ? "enabled" : "OFF"}; only expose it on trusted networks.`);
   }
 });
 

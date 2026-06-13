@@ -9,8 +9,8 @@
 
 ### Verification Log
 
-- `cd pi-package-remote-webui && npm test` — passed 13/13 tests.
-- `cd pi-package-remote-webui && npm run check` — passed syntax check for `lib/remote-core.mjs` and 13/13 tests.
+- `cd pi-package-remote-webui && npm test` — passed 14/14 tests.
+- `cd pi-package-remote-webui && npm run check` — passed syntax check for `lib/remote-core.mjs` and 14/14 tests.
 - `cd pi-package-remote-webui && npm pack --dry-run` — package dry-run succeeded and includes 9 files.
 
 ### Recommendation
@@ -126,7 +126,9 @@ Scan with your phone:
 
 http://192.168.1.42:31415/
 
-Trusted LAN only. Anyone with this URL can control Pi.
+Remote PIN auth: off
+
+Trusted LAN only. Remote PIN auth is off; anyone with this URL can control Pi/WebUI.
 Close with: /remote close
 ```
 
@@ -168,26 +170,26 @@ Do **not** put a reverse proxy in front of WebUI for v1, because WebUI currently
 
 ### Required v1 behavior
 
-Before opening the WebUI to LAN, show a confirmation:
-
-```text
-Pi Web UI has no authentication.
-Anyone on this network who opens the URL can control Pi and run allowed tools.
-
-Open to local network?
-```
+Before opening the WebUI to LAN, show a confirmation that remote browsers can control the Web UI/Pi session and that Remote PIN auth is off by default unless enabled in Web UI Controls.
 
 Default should be “No” unless `/remote --yes` is provided.
 
-### Future hardening
+### Remote PIN auth
 
-A later version can add true pairing/auth, but it should ideally be implemented inside `pi-package-webui`, e.g.
+Remote PIN auth is implemented in `pi-package-webui`, not in `/remote`, so the localhost-vs-remote trust semantics remain server-owned:
+
+- The Web UI side-panel **Controls → Network → Remote PIN auth** toggle is off by default.
+- Enabling it generates a random 4-digit PIN.
+- Non-local clients are challenged before accessing Web UI routes and APIs.
+- Localhost clients can toggle the setting and see the PIN.
+- `/remote` reads the reported auth state from `/api/network` and includes it in the QR widget.
+
+Startup auth is also available through:
 
 ```text
-pi-webui --remote-token <token>
+pi-webui --remote-auth
+/webui-start --remote-auth
 ```
-
-or an upstream pairing endpoint that preserves localhost/remote trust semantics.
 
 ---
 
@@ -360,5 +362,6 @@ pi install ./pi-package-remote-webui
 - Mobile browser opens existing Pi WebUI.
 - No separate mobile UI is built.
 - `/remote close` closes LAN exposure.
-- User is warned that WebUI has no authentication.
+- User is warned that Remote PIN auth is off by default unless enabled in Web UI Controls.
+- QR/widget output shows Remote PIN auth state and PIN when enabled.
 - Existing WebUI remote trust boundaries remain intact.

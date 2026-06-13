@@ -148,7 +148,7 @@ New ideas that do not duplicate the tables above. Same scoring rubric. Overlaps 
 
 | Idea | Impact | Effort | Confidence | Notes / acceptance shape |
 |---|---:|---|---|---|
-| **Optional auth token/PIN for non-localhost binds** | 92 | M | H | Today "Open to network" exposes full unauthenticated control. A generated token/PIN (shown as QR for mobile pairing) required for non-localhost clients removes the biggest blocker to safe LAN/tailnet use. Keep localhost frictionless; document that this is not multi-user hardening. |
+| **Optional auth token/PIN for non-localhost binds** | Implemented | M | H | Implemented as the side-panel **Remote PIN auth** toggle plus `--remote-auth` startup option. It generates a 4-digit PIN for non-localhost clients while keeping localhost frictionless. Still documented as trusted-LAN convenience, not multi-user hardening. |
 | **Web push notifications when the page is closed** | 76 | M | M | The service worker already exists; add push subscription so agent-done/blocked-UI events reach mobile even with the PWA backgrounded. Requires HTTPS/localhost constraints per platform. |
 | **Transcript export with redaction** | 75 | S-M | M | Export session as Markdown/HTML with a secret-scrubbing pass (env-style tokens, key patterns) and attachment handling. Safer stepping stone toward `/share` parity. |
 | **Read-only spectator mode** | 71 | M | M | Per-server toggle issuing view-only links (no prompt/bash/action dispatch). Useful for pairing/demos on LAN; depends on the auth layer above. |

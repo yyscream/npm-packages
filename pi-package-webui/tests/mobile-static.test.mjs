@@ -399,6 +399,8 @@ assert.match(app, /initializeCustomBackground\(\)\.catch/, "startup should resto
 assert.match(app, /Restart Web UI to load themes/, "frontend should explain when a stale server cannot serve the themes endpoint");
 assert.match(app, /themeSelect\.addEventListener\("change"/, "side-panel theme selector should switch themes immediately");
 assert.match(app, /open \? "Close for network" : "Open to network"/, "network button should toggle from open to close action");
+assert.match(app, /remoteAuthToggle: \$\("#remoteAuthToggle"\)/, "Controls should expose the remote PIN auth toggle");
+assert.match(app, /api\("\/api\/remote-auth\/settings", \{ method: "POST"/, "remote PIN auth toggle should call the settings endpoint");
 assert.match(app, /api\("\/api\/network\/close", \{ method: "POST"/, "network close action should call the close endpoint");
 assert.match(app, /webuiVersionBadge: \$\("#webuiVersionBadge"\)/, "frontend should bind the Control Deck version badge");
 assert.match(app, /webuiDevBadge: \$\("#webuiDevBadge"\)/, "frontend should bind the Control Deck dev badge");

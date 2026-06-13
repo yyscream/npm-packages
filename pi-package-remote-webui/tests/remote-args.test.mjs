@@ -73,14 +73,16 @@ test("formatStatus renders offline and online states", () => {
   );
 });
 
-test("buildRemoteWidgetLines includes QR, URL, and close instruction", () => {
+test("buildRemoteWidgetLines includes QR, URL, auth state, and close instruction", () => {
   const lines = buildRemoteWidgetLines({
     url: "http://192.168.1.20:31415/",
     qrLines: ["QR-A", "QR-B"],
+    network: { auth: { enabled: true, pin: "1234" } },
     started: true,
   });
   assert(lines.includes("QR-A"));
   assert(lines.includes("http://192.168.1.20:31415/"));
+  assert(lines.some((line) => line.includes("PIN 1234")));
   assert(lines.some((line) => line.includes("/remote close")));
   assert(lines.some((line) => line.includes("Started a Pi Web UI server")));
 });
@@ -96,4 +98,15 @@ test("generateQrLines accepts an injected QR module", async () => {
     },
   });
   assert.deepEqual(lines, ["QR", "CODE"]);
+});
+
+test("generateQrLines reports QR failures without duplicating the URL", async () => {
+  const lines = await generateQrLines("http://example.test/", {
+    qrcodeModule: {
+      generate() {
+        throw new Error("boom");
+      },
+    },
+  });
+  assert.deepEqual(lines, ["[QR generation failed: boom]"]);
 });

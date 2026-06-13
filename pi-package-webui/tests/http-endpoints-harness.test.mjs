@@ -245,8 +245,15 @@ try {
   assert.equal(traversalDelete.status, 403, "session delete outside the session dir must return 403");
   assert.match(String(traversalDelete.body?.error || ""), /session directory/i);
 
+  const initialAuth = await request("127.0.0.1", "/api/remote-auth");
+  assert.equal(initialAuth.status, 200);
+  assert.equal(initialAuth.body?.data?.auth?.enabled, false, "remote PIN auth should be off by default");
+
   const lan = lanAddress();
   if (lan) {
+    const remoteHealthBeforeAuth = await request(lan, "/api/health");
+    assert.equal(remoteHealthBeforeAuth.status, 200, "LAN clients should connect without a PIN while auth is off");
+
     const remoteDelete = await request(lan, "/api/session-delete", {
       method: "POST",
       body: { sessionPath: path.join(cwd, "outside.jsonl"), confirmed: true, tab: tabId },
@@ -262,7 +269,55 @@ try {
 
     const remoteClose = await request(lan, "/api/network/close", { method: "POST" });
     assert.equal(remoteClose.status, 403, "network close must be localhost-only");
+
+    const enableAuth = await request("127.0.0.1", "/api/remote-auth/settings", { method: "POST", body: { enabled: true } });
+    assert.equal(enableAuth.status, 200, "localhost can enable remote PIN auth");
+    const pin = enableAuth.body?.data?.auth?.pin;
+    assert.match(pin, /^\d{4}$/, "enabling remote auth should generate a 4-digit PIN");
+
+    const remoteHealthWithAuth = await request(lan, "/api/health");
+    assert.equal(remoteHealthWithAuth.status, 401, "unauthenticated LAN clients should be challenged while remote auth is on");
+
+    const wrongPin = pin === "0000" ? "0001" : "0000";
+    const badLogin = await request(lan, "/api/remote-auth", { method: "POST", body: { pin: wrongPin } });
+    assert.equal(badLogin.status, 403, "wrong remote PIN should be rejected");
+
+    const loginResponse = await fetch(`http://${lan}:${port}/api/remote-auth`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pin }),
+      signal: AbortSignal.timeout(5_000),
+    });
+    assert.equal(loginResponse.status, 200, "correct remote PIN should be accepted");
+    const authCookie = loginResponse.headers.get("set-cookie")?.split(";", 1)[0];
+    assert.ok(authCookie, "remote auth login should set an auth cookie");
+
+    const authedHealth = await fetch(`http://${lan}:${port}/api/health`, {
+      headers: { cookie: authCookie },
+      signal: AbortSignal.timeout(5_000),
+    });
+    assert.equal(authedHealth.status, 200, "authenticated LAN client should reach guarded APIs");
+    await authedHealth.json();
+
+    const remoteSettings = await fetch(`http://${lan}:${port}/api/remote-auth/settings`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: authCookie },
+      body: JSON.stringify({ enabled: false }),
+      signal: AbortSignal.timeout(5_000),
+    });
+    assert.equal(remoteSettings.status, 403, "remote clients must not toggle remote PIN auth settings");
+    await remoteSettings.json().catch(() => undefined);
+
+    const disableAuth = await request("127.0.0.1", "/api/remote-auth/settings", { method: "POST", body: { enabled: false } });
+    assert.equal(disableAuth.status, 200, "localhost can disable remote PIN auth");
+    const remoteHealthAfterDisable = await request(lan, "/api/health");
+    assert.equal(remoteHealthAfterDisable.status, 200, "LAN clients should reconnect without a PIN after auth is disabled");
   } else {
+    const enableAuth = await request("127.0.0.1", "/api/remote-auth/settings", { method: "POST", body: { enabled: true } });
+    assert.equal(enableAuth.status, 200, "localhost can enable remote PIN auth");
+    assert.match(enableAuth.body?.data?.auth?.pin, /^\d{4}$/);
+    const disableAuth = await request("127.0.0.1", "/api/remote-auth/settings", { method: "POST", body: { enabled: false } });
+    assert.equal(disableAuth.status, 200, "localhost can disable remote PIN auth");
     console.log("http-endpoints-harness: no LAN address detected; skipping remote-client checks");
   }
 

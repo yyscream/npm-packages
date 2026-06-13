@@ -22,6 +22,7 @@ type WebuiAddress = {
 type StartWebuiOptions = WebuiAddress & {
   open: boolean;
   noSession: boolean;
+  remoteAuth: boolean;
   name?: string;
   piArgs: string[];
 };
@@ -104,6 +105,7 @@ function parseStartWebuiArgs(args: string): StartWebuiOptions {
     port: DEFAULT_PORT,
     open: true,
     noSession: false,
+    remoteAuth: false,
     piArgs: [],
   };
   const tokens = tokenizeArgs(args || "");
@@ -120,6 +122,14 @@ function parseStartWebuiArgs(args: string): StartWebuiOptions {
     }
     if (token === "--no-session") {
       options.noSession = true;
+      continue;
+    }
+    if (token === "--remote-auth") {
+      options.remoteAuth = true;
+      continue;
+    }
+    if (token === "--no-remote-auth") {
+      options.remoteAuth = false;
       continue;
     }
     if (token === "--host") {
@@ -516,6 +526,7 @@ function waitForWebuiUrl(child: WebuiChild, timeoutMs = START_TIMEOUT_MS): Promi
 async function startWebui(options: StartWebuiOptions, ctx: ExtensionCommandContext, restoreTabs: RestorableWebuiTab[] = []): Promise<string> {
   const args = [webuiBin, "--host", options.host, "--port", String(options.port), "--cwd", ctx.cwd];
   if (options.noSession) args.push("--no-session");
+  if (options.remoteAuth) args.push("--remote-auth");
   if (options.name) args.push("--name", options.name);
   if (options.piArgs.length > 0) args.push("--", ...options.piArgs);
 
@@ -688,8 +699,10 @@ function formatWebuiStatus(result: WebuiStatusFetchResult, requestedDetailed: bo
   const network = data.network || {};
   const tabs = Array.isArray(data.tabs) ? data.tabs : [];
   const networkUrls = Array.isArray(network.networkUrls) ? network.networkUrls : [];
+  const auth = network.auth || {};
   const pageUrl = data.pageUrl || network.localUrl || result.url;
   const networkLabel = network.open ? `open to LAN${network.opening ? " (opening)" : ""}` : network.opening ? "opening" : "local only";
+  const authLabel = auth.enabled ? `remote PIN on${auth.pin ? ` · PIN ${auth.pin}` : ""}` : "remote PIN off";
 
   if (!requestedDetailed) {
     const lines = [
@@ -698,6 +711,7 @@ function formatWebuiStatus(result: WebuiStatusFetchResult, requestedDetailed: bo
       detailLine("URL", pageUrl),
       detailLine("Online", "yes"),
       detailLine("Network", networkLabel),
+      detailLine("Auth", authLabel),
       detailLine("Tabs", tabs.length || "?"),
     ];
     if (networkUrls.length) lines.push(detailLine("LAN URLs", networkUrls.join(", ")));
@@ -712,6 +726,7 @@ function formatWebuiStatus(result: WebuiStatusFetchResult, requestedDetailed: bo
     detailLine("URL", pageUrl),
     detailLine("Online", "yes"),
     detailLine("Network", networkLabel),
+    detailLine("Auth", authLabel),
     detailLine("Bind", `${data.boundHost || network.host || "unknown"}:${data.port || network.port || "?"}`),
     detailLine("Version", data.webuiVersion || "unknown"),
     detailLine("PIDs", `webui ${data.webuiPid || "unknown"} · pi ${data.piPid || "unknown"}`),
@@ -758,7 +773,7 @@ function formatWebuiStatus(result: WebuiStatusFetchResult, requestedDetailed: bo
 
 function usage(): string {
   return [
-    "Usage: /webui-start [port] [--port N] [--no-open] [--no-session] [--name NAME] [-- --model provider/model]",
+    "Usage: /webui-start [port] [--port N] [--no-open] [--no-session] [--remote-auth] [--name NAME] [-- --model provider/model]",
     "Starts the Pi Web UI companion server for the current cwd, prints the localhost URL, and opens it in your default browser.",
   ].join("\n");
 }

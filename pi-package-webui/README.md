@@ -6,7 +6,7 @@ Local browser UI for [Pi coding agent](https://www.npmjs.com/package/@earendil-w
 
 Pi Web UI gives you a local browser companion for Pi: multi-tab chat, streaming output, model controls, uploads, slash-command helpers, workspace navigation, and optional extension widgets.
 
-> **Security:** Pi Web UI has no authentication. It can control the spawned Pi session and run anything that session is allowed to run. It binds to `127.0.0.1` by default; only expose it on trusted networks.
+> **Security:** Pi Web UI can control the spawned Pi session and run anything that session is allowed to run. It binds to `127.0.0.1` by default. Remote PIN authentication is off by default; enable it in **Controls → Network → Remote PIN auth** before exposing it on trusted networks.
 
 ## Requirements
 
@@ -54,6 +54,8 @@ Check a running Web UI with:
   --no-open          Do not open the browser automatically
   --no-session       Start Pi RPC with --no-session
   --name <name>      Initial Web UI tab name
+  --remote-auth      Enable startup PIN authentication for non-local clients
+  --no-remote-auth   Disable startup PIN authentication
   -- <pi args...>    Extra arguments forwarded to Pi RPC
 ```
 
@@ -63,6 +65,7 @@ Examples:
 /webui-start
 /webui-start 31500
 /webui-start --port 31500 --no-open
+/webui-start --remote-auth --host 0.0.0.0
 /webui-start --name browser -- --model anthropic/claude-sonnet-4-5:high
 ```
 
@@ -74,7 +77,7 @@ Running `/webui-start` again on the same URL restarts the server and restores cu
 /webui-status [detailed] [port] [--port N] [--host HOST]
 ```
 
-`/webui-status` reports the URL, online state, and network exposure. `detailed` adds tabs, sessions, models/providers, and recent backend events.
+`/webui-status` reports the URL, online state, network exposure, and Remote PIN auth state. `detailed` adds tabs, sessions, models/providers, and recent backend events.
 
 ## Standalone CLI
 
@@ -96,6 +99,8 @@ pi-webui [options] [-- <pi args...>]
   --pi <command>      Pi executable to spawn (default: bundled dependency, then "pi")
   --no-session        Start Pi RPC with --no-session
   --name <name>       Initial Web UI tab name
+  --remote-auth       Enable startup PIN authentication for non-local clients
+  --no-remote-auth    Disable startup PIN authentication
   -h, --help          Show help
   -v, --version       Print version
 ```
@@ -107,6 +112,7 @@ Examples:
 ```bash
 pi-webui
 pi-webui --cwd ~/src/my-project
+pi-webui --host 0.0.0.0 --remote-auth --cwd ~/src/my-project
 pi-webui --port 3000 -- --model anthropic/claude-sonnet-4-5:high
 PI_WEBUI_PI_BIN=/path/to/pi pi-webui --no-session
 ```
@@ -116,6 +122,7 @@ Environment variables:
 - `PI_WEBUI_HOST`
 - `PI_WEBUI_PORT`
 - `PI_WEBUI_PI_BIN`
+- `PI_WEBUI_REMOTE_AUTH=1` to start with remote PIN authentication enabled
 
 ## Main features
 
@@ -143,6 +150,7 @@ Useful browser endpoints exposed by the local server include:
 - `GET /api/optional-features` for optional companion package install/update status.
 - `POST /api/optional-feature-install` for installing or updating known optional companion packages from the side panel.
 - `GET /api/update-status` and localhost-only `POST /api/update` for checking Pi/Web UI updates and running `pi update` plus all detected local/global Web UI and Pi package-manager updates followed by a Web UI server restart.
+- `GET /api/remote-auth`, `POST /api/remote-auth`, and localhost-only `POST /api/remote-auth/settings` for optional 4-digit PIN authentication when serving non-local browser clients.
 
 For local development, run the checkout helper directly, for example:
 
@@ -197,8 +205,11 @@ This requires `/git-staged-msg` and `/pr` from `@firstpick/pi-prompts-git-pr`; b
 
 - Default bind is localhost-only: `127.0.0.1:31415`.
 - The side-panel **Open to network** button rebinds the server to `0.0.0.0`, shows LAN URLs when available, and toggles to "Close for network".
-- `--host 0.0.0.0` also exposes the Web UI to the local network.
-- Any connected browser client can control Pi and run Web UI bash actions as the Web UI process user.
+- The side-panel **Remote PIN auth** toggle is off by default. When enabled, the server generates a random 4-digit PIN, shows it in Controls and `/webui-status`, and requires it from non-local browser clients.
+- Localhost clients stay frictionless and can toggle Remote PIN auth; changing the toggle disconnects existing event streams so remote clients must re-authenticate after enablement.
+- `--host 0.0.0.0` also exposes the Web UI to the local network; pass `--remote-auth` to start with PIN auth already enabled.
+- Any connected browser client with access (and the PIN, if enabled) can control Pi and run Web UI bash actions as the Web UI process user.
+- Remote PIN auth is a simple trusted-LAN HTTP gate, not hardened multi-user authentication; do not expose it to untrusted networks.
 - The Web UI update endpoint is restricted to localhost, because it runs package update commands and restarts the server.
 - Treat Pi Web UI as a local companion, not a hardened multi-user web service.
 
@@ -207,4 +218,5 @@ This requires `/git-staged-msg` and `/pr` from `@firstpick/pi-prompts-git-pr`; b
 - **`/webui-start` is missing:** restart Pi after installing the package.
 - **Wrong port or existing server:** use `/webui-status detailed`, or start on another port with `/webui-start --port 31500`.
 - **Optional feature is disabled or missing:** check the side panel, install the companion package if needed, then run `/reload` in the active Pi tab.
+- **Remote browser asks for a PIN:** read it from **Controls → Network → Remote PIN auth**, `/webui-status`, or the local Web UI server log. Disable the toggle from localhost to remove the PIN gate.
 - **PWA install or notifications are unavailable:** use `localhost` or HTTPS; browser support varies on LAN HTTP URLs.

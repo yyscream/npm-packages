@@ -370,6 +370,13 @@
                 <div class="control-field network-control-field">
                   <label>Network</label>
                   <div id="networkStatus" class="network-status closed">Local only</div>
+                  <label class="toggle-control remote-auth-toggle" for="remoteAuthToggle">
+                    <input id="remoteAuthToggle" type="checkbox" />
+                    <span>
+                      <span class="toggle-control-label">Remote PIN auth</span>
+                      <span id="remoteAuthStatus" class="toggle-control-hint">Off</span>
+                    </span>
+                  </label>
                   <button id="openNetworkButton" type="button">Open to network</button>
                 </div>
                 <div class="control-field server-control-field">

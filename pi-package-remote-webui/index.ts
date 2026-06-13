@@ -24,8 +24,8 @@ const require = createRequire(import.meta.url);
 const LOCAL_HOST = "127.0.0.1";
 
 const OPEN_WARNING = [
-  "Pi Web UI has no authentication.",
-  "Anyone on this network who opens the URL can control Pi/WebUI and run allowed tools.",
+  "Pi Web UI can control Pi/WebUI and run allowed tools from connected browsers.",
+  "Remote PIN auth is off by default; enable it in Web UI Controls if you want a 4-digit PIN for non-local clients.",
   "",
   "Only open this on a trusted local network.",
   "",
@@ -145,10 +145,38 @@ function clearRemoteWidget(ctx: ExtensionCommandContext): void {
   ctx.ui.setWidget(REMOTE_WIDGET_KEY, undefined);
 }
 
+function truncatePlainLine(line: string, width: number): string {
+  if (width <= 0) return "";
+  return line.length > width ? line.slice(0, width) : line;
+}
+
+function formatWidgetLine(line: string, width: number): string {
+  if (width <= 0) return "";
+  if (width === 1) return " ";
+  return ` ${truncatePlainLine(line, width - 1)}`;
+}
+
+function setFullRemoteWidget(ctx: ExtensionCommandContext, lines: string[]): void {
+  if (ctx.mode !== "tui") {
+    ctx.ui.setWidget(REMOTE_WIDGET_KEY, lines, { placement: "aboveEditor" });
+    return;
+  }
+
+  const widgetLines = lines.map((line) => String(line ?? ""));
+  ctx.ui.setWidget(
+    REMOTE_WIDGET_KEY,
+    () => ({
+      render: (width: number) => widgetLines.map((line) => formatWidgetLine(line, width)),
+      invalidate: () => {},
+    }),
+    { placement: "aboveEditor" },
+  );
+}
+
 async function renderRemoteWidget(ctx: ExtensionCommandContext, result: { url: string; network?: unknown; started?: boolean }): Promise<void> {
   const qrLines = await generateQrLines(result.url);
   const lines = buildRemoteWidgetLines({ url: result.url, qrLines, network: result.network, started: result.started });
-  ctx.ui.setWidget(REMOTE_WIDGET_KEY, lines, { placement: "aboveEditor" });
+  setFullRemoteWidget(ctx, lines);
   setRemoteStatus(ctx, `remote ${result.url}`);
 }
 

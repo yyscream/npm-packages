@@ -127,6 +127,8 @@ const elements = {
   backgroundClearButton: $("#backgroundClearButton"),
   backgroundStatus: $("#backgroundStatus"),
   networkStatus: $("#networkStatus"),
+  remoteAuthToggle: $("#remoteAuthToggle"),
+  remoteAuthStatus: $("#remoteAuthStatus"),
   openNetworkButton: $("#openNetworkButton"),
   serverActionSelect: $("#serverActionSelect"),
   runServerActionButton: $("#runServerActionButton"),
@@ -2267,6 +2269,10 @@ async function api(path, { method = "GET", body, tabId = activeTabId, scoped = t
   setBackendOffline(false);
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
+    if (response.status === 401 && data.remoteAuthRequired) {
+      const returnPath = `${window.location.pathname}${window.location.search || ""}` || "/";
+      window.location.assign(`/remote-auth?return=${encodeURIComponent(returnPath)}`);
+    }
     const error = new Error(data.error || data.message || JSON.stringify(data));
     error.statusCode = response.status;
     error.data = data;
@@ -14838,7 +14844,22 @@ function renderNetworkStatus() {
     if (networkUrls.length === 0) list.append(make("div", "network-status-empty", "No LAN address detected."));
   }
 
-  elements.networkStatus.replaceChildren(heading, detail, list);
+  const auth = network?.auth || {};
+  const authText = auth.enabled
+    ? auth.pin
+      ? `Remote PIN auth on · PIN ${auth.pin}`
+      : "Remote PIN auth on"
+    : "Remote PIN auth off";
+  const authDetail = make("div", "network-status-detail", authText);
+
+  elements.networkStatus.replaceChildren(heading, detail, list, authDetail);
+  elements.remoteAuthToggle.checked = !!auth.enabled;
+  elements.remoteAuthToggle.disabled = rebinding;
+  elements.remoteAuthStatus.textContent = auth.enabled
+    ? auth.pin
+      ? `PIN ${auth.pin}`
+      : "On"
+    : "Off";
   elements.openNetworkButton.disabled = rebinding;
   elements.openNetworkButton.textContent = opening ? "Opening…" : closing ? "Closing…" : open ? "Close for network" : "Open to network";
 }
@@ -14852,6 +14873,28 @@ async function refreshNetworkStatus() {
     latestNetwork = health.network || { open: false, opening: false, localUrl: window.location.origin };
   }
   renderNetworkStatus();
+}
+
+async function toggleRemoteAuth() {
+  const enable = !latestNetwork?.auth?.enabled;
+  const message = enable
+    ? "Enable remote PIN authentication?\n\nA random 4-digit PIN will be required for non-local browser clients. The PIN is shown in Controls."
+    : "Disable remote PIN authentication?\n\nNon-local browser clients will no longer need a PIN while the network listener is open.";
+  if (!confirm(message)) {
+    renderNetworkStatus();
+    return;
+  }
+
+  elements.remoteAuthToggle.disabled = true;
+  try {
+    const response = await api("/api/remote-auth/settings", { method: "POST", body: { enabled: enable }, scoped: false });
+    latestNetwork = response.data?.network || { ...(latestNetwork || {}), auth: response.data?.auth };
+    addEvent(enable ? "remote PIN auth enabled" : "remote PIN auth disabled", enable ? "warn" : "info");
+  } catch (error) {
+    addEvent(error.message || String(error), "error");
+  } finally {
+    renderNetworkStatus();
+  }
 }
 
 async function refreshFooterData(tabContext = activeTabContext()) {
@@ -15636,7 +15679,7 @@ async function openToNetwork() {
     await closeNetworkAccess();
     return;
   }
-  if (!confirm("Open Pi Web UI to your local network?\n\nThe Web UI has no authentication and can control Pi/tools. Only do this on a trusted LAN.")) return;
+  if (!confirm(`Open Pi Web UI to your local network?\n\nRemote PIN auth is ${latestNetwork?.auth?.enabled ? "ON" : "OFF"}. The Web UI can control Pi/tools, so only do this on a trusted LAN.`)) return;
 
   elements.openNetworkButton.disabled = true;
   elements.openNetworkButton.textContent = "Opening…";
@@ -16374,6 +16417,11 @@ function handleEvent(event) {
       renderNetworkStatus();
       break;
     }
+    case "webui_remote_auth_changed":
+      latestNetwork = { ...(latestNetwork || {}), auth: event.auth || {} };
+      addEvent(`remote PIN auth ${event.auth?.enabled ? "enabled" : "disabled"}`, event.auth?.enabled ? "warn" : "info");
+      renderNetworkStatus();
+      break;
     case "pi_process_exit":
       addEvent(`pi rpc exited (${event.code ?? event.signal ?? "unknown"})`, "error");
       clearRunIndicatorActivity();
@@ -17071,6 +17119,7 @@ if (elements.backgroundChooseButton && elements.backgroundInput) {
 if (elements.backgroundClearButton) {
   elements.backgroundClearButton.addEventListener("click", () => clearCustomBackground().catch((error) => addEvent(error.message || String(error), "error")));
 }
+elements.remoteAuthToggle.addEventListener("change", () => toggleRemoteAuth().catch((error) => addEvent(error.message || String(error), "error")));
 elements.openNetworkButton.addEventListener("click", openToNetwork);
 elements.serverActionSelect.addEventListener("change", updateServerActionButton);
 elements.runServerActionButton.addEventListener("click", () => runSelectedServerAction().catch((error) => addEvent(error.message || String(error), "error")));

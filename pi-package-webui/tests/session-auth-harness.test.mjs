@@ -132,6 +132,10 @@ try {
     LOCALHOST_ONLY_POST_ROUTES.has("/api/network/close"),
     "closing network access must be localhost-only like opening it",
   );
+  assert.ok(
+    LOCALHOST_ONLY_POST_ROUTES.has("/api/remote-auth/settings"),
+    "remote PIN auth settings must be localhost-only",
+  );
 } finally {
   await rm(tempDir, { recursive: true, force: true });
   await rm(outsideDir, { recursive: true, force: true });

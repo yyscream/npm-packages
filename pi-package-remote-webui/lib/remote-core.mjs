@@ -305,6 +305,11 @@ export function formatStatus(status) {
 }
 
 export function buildRemoteWidgetLines({ url, qrLines = [], network = {}, started = false } = {}) {
+  const auth = network?.auth || {};
+  const authLine = auth.enabled ? `Remote PIN auth: on${auth.pin ? ` · PIN ${auth.pin}` : ""}` : "Remote PIN auth: off";
+  const warningLine = auth.enabled
+    ? "Trusted LAN only. Anyone with this URL and PIN can control Pi/WebUI."
+    : "Trusted LAN only. Remote PIN auth is off; anyone with this URL can control Pi/WebUI.";
   const lines = [
     "Pi Remote WebUI",
     "",
@@ -313,8 +318,9 @@ export function buildRemoteWidgetLines({ url, qrLines = [], network = {}, starte
     ...qrLines,
     "",
     url || selectLanUrl(network) || network.localUrl || "(no URL)",
+    authLine,
     "",
-    "Trusted LAN only. Anyone with this URL can control Pi/WebUI.",
+    warningLine,
     "Close LAN access with: /remote close",
   ];
   if (started) lines.push("Started a Pi Web UI server for this session.");
@@ -327,7 +333,7 @@ export async function generateQrLines(url, { qrcodeModule } = {}) {
     try {
       qrcode = (await import("qrcode-terminal")).default || (await import("qrcode-terminal"));
     } catch {
-      return ["[QR generator unavailable: qrcode-terminal is not installed]", url];
+      return ["[QR generator unavailable: qrcode-terminal is not installed]"];
     }
   }
 
@@ -338,7 +344,7 @@ export async function generateQrLines(url, { qrcodeModule } = {}) {
         resolve(lines.filter((line, index, array) => line.trim() || (index > 0 && index < array.length - 1)));
       });
     } catch (error) {
-      resolve([`[QR generation failed: ${error?.message || String(error)}]`, url]);
+      resolve([`[QR generation failed: ${error?.message || String(error)}]`]);
     }
   });
 }
