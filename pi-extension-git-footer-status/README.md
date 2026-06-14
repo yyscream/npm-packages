@@ -30,6 +30,14 @@ pi install npm:@firstpick/pi-extension-git-footer-status
 
 No required configuration.
 
+Performance-related environment toggles:
+
+- `PI_GIT_FOOTER_FETCH=0` — disable startup `git fetch`. Enabled by default.
+- `PI_GIT_FOOTER_AUTO_REFRESH_MS=10000` — git status auto-refresh interval. Set `0` to disable.
+- `PI_GIT_FOOTER_DISABLE_PROMPT_ESTIMATE=1` — disable the background `PI: X tok` prompt estimate.
+
+The initial prompt estimate and session-usage recompute run lazily after the TUI is ready, so the footer should not block startup.
+
 ## Commands
 
 - `/git-footer-refresh` — refresh git/footer information immediately.

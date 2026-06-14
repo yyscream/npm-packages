@@ -203,7 +203,7 @@ run_startup_case() {
   if command -v script >/dev/null 2>&1; then
     local quoted_cmd
     printf -v quoted_cmd '%q ' env "${envs[@]}" "$PI_BIN" "$@"
-    timeout --foreground 90 script -qfec "$quoted_cmd" "$pty_log" >"$stdout" 2>"$stderr"
+    timeout --foreground 90 script -qfec "$quoted_cmd" "$pty_log" >"$stdout" 2>"$stderr" < /dev/null
     rc=$?
     timing_source="$pty_log"
   else
@@ -290,9 +290,11 @@ run_tui_idle_case() {
 discover_extensions() {
   local ext_dir="$AGENT_DIR/extensions"
   [[ -d "$ext_dir" ]] || return 0
-  find -L "$ext_dir" \
+  # Match Pi auto-discovery shape: direct *.ts files and one-level */index.ts
+  # entries. Do not descend into extension helper src/tests files.
+  find -L "$ext_dir" -maxdepth 2 \
     \( -path '*/node_modules/*' -o -path '*/tests/*' -o -path '*/dev/*' \) -prune -o \
-    -type f \( -name 'index.ts' -o -name '*.ts' \) -print 2>/dev/null | sort
+    -type f \( -path "$ext_dir/*.ts" -o -path "$ext_dir/*/index.ts" \) -print 2>/dev/null | sort
 }
 
 extension_label_for_path() {
@@ -421,7 +423,7 @@ run_extension_startup_suite() {
     if command -v script >/dev/null 2>&1; then
       local quoted_cmd
       printf -v quoted_cmd '%q ' env "${envs[@]}" "$PI_BIN" --no-extensions -e "$path" --no-skills --no-prompt-templates --no-themes --no-context-files "${FAST_COMMON[@]}"
-      timeout --foreground 90 script -qfec "$quoted_cmd" "$pty_log" >"$stdout" 2>"$stderr"
+      timeout --foreground 90 script -qfec "$quoted_cmd" "$pty_log" >"$stdout" 2>"$stderr" < /dev/null
       rc=$?
       timing_source="$pty_log"
     else

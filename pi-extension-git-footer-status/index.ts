@@ -50,10 +50,12 @@ type SigningDiagnostics = {
 };
 
 const LIVE_TOKEN_SPEED_ROLLING_WINDOW_MS = 2000;
-const GIT_AUTO_REFRESH_INTERVAL_MS = 2000;
+const DEFAULT_GIT_AUTO_REFRESH_INTERVAL_MS = 10_000;
 const GIT_INITIAL_FETCH_TIMEOUT_MS = 30_000;
 const GIT_FETCH_MESSAGE_MAX_LENGTH = 240;
 const GIT_CHANGED_FILES_LIMIT = 80;
+const PROMPT_ESTIMATE_REFRESH_DELAY_MS = 1000;
+const FOOTER_USAGE_RECOMPUTE_DELAY_MS = 1000;
 const WEBUI_FOOTER_STATUS_KEY = "git-footer-webui";
 const GIT_FOOTER_STATUS_KEY = "git-footer";
 const WEBUI_FOOTER_PAYLOAD_TYPE = "firstpick.git-footer-status.footer";
@@ -150,6 +152,25 @@ type WebuiFooterPayload = {
 type GitRefreshOptions = {
   publishIfUnchanged?: boolean;
 };
+
+function envFlag(name: string, fallback = false): boolean {
+  const raw = process.env[name]?.trim().toLowerCase();
+  if (!raw) return fallback;
+  if (["1", "true", "yes", "on"].includes(raw)) return true;
+  if (["0", "false", "no", "off"].includes(raw)) return false;
+  return fallback;
+}
+
+function envMs(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) ? Math.max(0, parsed) : fallback;
+}
+
+const GIT_AUTO_REFRESH_INTERVAL_MS = envMs("PI_GIT_FOOTER_AUTO_REFRESH_MS", DEFAULT_GIT_AUTO_REFRESH_INTERVAL_MS);
+const GIT_INITIAL_FETCH_ENABLED = envFlag("PI_GIT_FOOTER_FETCH", true);
+const PROMPT_ESTIMATE_ENABLED = !envFlag("PI_GIT_FOOTER_DISABLE_PROMPT_ESTIMATE", false);
 
 function formatCwd(cwd: string): string {
   const home = homedir();
@@ -536,12 +557,13 @@ function buildGitStatusSections(snapshot: GitSnapshot): GitStatusSection[] {
   if (f.lastCommitAge && snapshot.lastCommitAge) extraSection.push({ text: `⏱${snapshot.lastCommitAge}`, tone: "dim" });
   if (f.signingMismatch && snapshot.signingMismatch) extraSection.push({ text: "⚠️!", tone: "warning" });
 
-  return [
+  const sections: GitStatusSection[] = [
     { key: "branch", items: branchSection },
     { key: "sync", items: syncSection },
     { key: "changes", items: changesSection },
     { key: "extra", items: extraSection },
-  ].filter((section) => section.items.length > 0);
+  ];
+  return sections.filter((section) => section.items.length > 0);
 }
 
 function buildStatusText(ctx: ExtensionContext, snapshot: GitSnapshot): string {
@@ -859,26 +881,37 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
   let latestFooterCwd = "";
   let requestFooterRender: (() => void) | null = null;
   let webuiFooterPublishTimer: ReturnType<typeof setTimeout> | null = null;
+  let promptEstimateRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  let footerUsageRecomputeTimer: ReturnType<typeof setTimeout> | null = null;
   let gitAutoRefreshTimer: ReturnType<typeof setInterval> | null = null;
   let lastWebuiFooterPublishMs = 0;
+  let promptEstimateCanCalibrateCurrent = false;
+  let accountedAssistantUsageKeys = new Set<string>();
+  let promptCalibrationCache: { sessionDir: string; value: ReturnType<typeof collectInitialPromptCalibration>; checkedAt: number } | null = null;
 
-  const getPromptCalibration = (ctx: ExtensionContext) => collectInitialPromptCalibration(ctx.sessionManager.getSessionDir());
+  const getPromptCalibration = (ctx: ExtensionContext) => {
+    const sessionDir = ctx.sessionManager.getSessionDir();
+    const now = Date.now();
+    if (promptCalibrationCache?.sessionDir === sessionDir && now - promptCalibrationCache.checkedAt < 60_000) {
+      return promptCalibrationCache.value;
+    }
+    const value = collectInitialPromptCalibration(sessionDir);
+    promptCalibrationCache = { sessionDir, value, checkedAt: now };
+    return value;
+  };
   const promptEstimateService = createInitialPromptEstimateService({
     pi,
     getCalibration: getPromptCalibration,
     publishFallback: false,
     onUpdate: (_snapshot, ctx) => {
       const footerCtx = rememberFooterContext(ctx);
-      promptEstimateKeyCheck = null;
       requestFooterRender?.();
       publishWebuiFooter(footerCtx);
     },
   });
   let promptEstimateRefreshPromise: Promise<unknown> | null = null;
-  let promptEstimateKeyCheck: { checkedAt: number; key: string } | null = null;
 
   const rememberPromptEstimateContext = (ctx: ExtensionContext) => {
-    if (latestPromptEstimateContext !== ctx) promptEstimateKeyCheck = null;
     latestPromptEstimateContext = ctx;
   };
 
@@ -904,43 +937,38 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
 
   const getEstimateContext = (fallback: ExtensionContext): ExtensionContext => latestPromptEstimateContext ?? fallback;
 
-  const getCurrentPromptEstimateKey = (ctx: ExtensionContext): string => {
-    const estimateCtx = getEstimateContext(ctx);
-    const now = Date.now();
-    if (promptEstimateKeyCheck && now - promptEstimateKeyCheck.checkedAt < 1000) return promptEstimateKeyCheck.key;
-    const key = promptEstimateService.getFallbackSnapshot(estimateCtx).key;
-    promptEstimateKeyCheck = { checkedAt: now, key };
-    return key;
-  };
-
   const queuePromptInjectionEstimateRefresh = (ctx: ExtensionContext): Promise<unknown> => {
+    if (!PROMPT_ESTIMATE_ENABLED) return Promise.resolve(null);
     const estimateCtx = getEstimateContext(ctx);
     promptEstimateRefreshPromise ??= promptEstimateService.refresh(estimateCtx).finally(() => {
       promptEstimateRefreshPromise = null;
-      promptEstimateKeyCheck = null;
     });
     return promptEstimateRefreshPromise;
   };
 
   const refreshPromptInjectionEstimate = async (ctx: ExtensionContext) => {
+    if (!PROMPT_ESTIMATE_ENABLED) return;
     rememberFooterContext(ctx);
     await queuePromptInjectionEstimateRefresh(ctx);
   };
 
+  const schedulePromptInjectionEstimateRefresh = (ctx: ExtensionContext, delayMs = PROMPT_ESTIMATE_REFRESH_DELAY_MS) => {
+    if (!PROMPT_ESTIMATE_ENABLED || promptEstimateRefreshTimer || promptEstimateRefreshPromise) return;
+    rememberFooterContext(ctx);
+    promptEstimateRefreshTimer = setTimeout(() => {
+      promptEstimateRefreshTimer = null;
+      void refreshPromptInjectionEstimate(getEstimateContext(ctx));
+    }, Math.max(0, delayMs));
+    promptEstimateRefreshTimer.unref?.();
+  };
+
   const getFooterPromptInjectionEstimate = (ctx: ExtensionContext): InitialPromptInputEstimate | null => {
     const snapshot = promptEstimateService.getSnapshot();
-    if (!snapshot) {
-      void queuePromptInjectionEstimateRefresh(ctx);
-      return null;
-    }
-
-    const currentKey = getCurrentPromptEstimateKey(ctx);
-    if (snapshot.key !== currentKey) {
-      void queuePromptInjectionEstimateRefresh(ctx);
-      return null;
-    }
-
-    return snapshot.estimate;
+    if (!snapshot) schedulePromptInjectionEstimateRefresh(ctx);
+    // Do not recompute/validate the estimate key from the render path. The key
+    // computation walks system prompt/tool schemas and was the dominant startup
+    // cost when the footer rendered before the background estimate settled.
+    return snapshot?.estimate ?? null;
   };
 
   const buildFooterTelemetry = (ctx: ExtensionContext): FooterTelemetry => {
@@ -977,7 +1005,7 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
       latestTokenSpeed,
       promptInjectionTokens: promptInjectionEstimate?.total ?? null,
       promptInjectionCalibrationSamples: promptInjectionEstimate?.calibrationSamples ?? 0,
-      promptInjectionCanCalibrateCurrent: canCalibrateCurrentPromptEstimate(ctx),
+      promptInjectionCanCalibrateCurrent: promptEstimateCanCalibrateCurrent,
       contextWindow,
       contextPercent: rawContextPercent,
       contextDisplay,
@@ -1064,6 +1092,52 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
     }
 
     return snapshot;
+  };
+
+  const assistantUsageKey = (message: AssistantMessage): string => {
+    return message.responseId || `${message.timestamp}:${message.provider}:${message.model}:${message.usage?.input ?? 0}:${message.usage?.output ?? 0}`;
+  };
+
+  const addAssistantUsageToSnapshot = (message: AssistantMessage): boolean => {
+    const usage = message.usage;
+    if (!usage) return false;
+    const hasUsage = Boolean(
+      usage.input ||
+        usage.output ||
+        usage.cacheRead ||
+        usage.cacheWrite ||
+        usage.cost?.total,
+    );
+    if (!hasUsage) return false;
+
+    const key = assistantUsageKey(message);
+    if (accountedAssistantUsageKeys.has(key)) return false;
+    accountedAssistantUsageKeys.add(key);
+
+    footerUsageSnapshot.totalInput += usage.input ?? 0;
+    footerUsageSnapshot.totalOutput += usage.output ?? 0;
+    footerUsageSnapshot.totalCacheRead += usage.cacheRead ?? 0;
+    footerUsageSnapshot.totalCacheWrite += usage.cacheWrite ?? 0;
+    footerUsageSnapshot.totalCost += usage.cost?.total ?? 0;
+    return true;
+  };
+
+  const refreshPromptCalibrationCapability = (ctx: ExtensionContext) => {
+    promptEstimateCanCalibrateCurrent = canCalibrateCurrentPromptEstimate(ctx);
+  };
+
+  const scheduleFooterUsageRecompute = (ctx: ExtensionContext, delayMs = FOOTER_USAGE_RECOMPUTE_DELAY_MS) => {
+    if (footerUsageRecomputeTimer) return;
+    rememberFooterContext(ctx);
+    footerUsageRecomputeTimer = setTimeout(() => {
+      footerUsageRecomputeTimer = null;
+      const footerCtx = getFooterContext(ctx);
+      footerUsageSnapshot = recomputeFooterUsageSnapshot(footerCtx);
+      refreshPromptCalibrationCapability(footerCtx);
+      requestFooterRender?.();
+      publishWebuiFooter(footerCtx);
+    }, Math.max(0, delayMs));
+    footerUsageRecomputeTimer.unref?.();
   };
 
   const recordAssistantSpeed = (message: AssistantMessage, endMs = Date.now()): boolean => {
@@ -1153,6 +1227,7 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
   const startGitAutoRefresh = (ctx: ExtensionContext) => {
     rememberFooterContext(ctx);
     stopGitAutoRefresh();
+    if (GIT_AUTO_REFRESH_INTERVAL_MS <= 0) return;
     gitAutoRefreshTimer = setInterval(() => {
       void refresh(getFooterContext(ctx), { publishIfUnchanged: false });
     }, GIT_AUTO_REFRESH_INTERVAL_MS);
@@ -1160,6 +1235,10 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
   };
 
   const runInitialGitFetch = async (ctx: ExtensionContext, sessionSerial: number) => {
+    if (!GIT_INITIAL_FETCH_ENABLED) {
+      latestGitFetchState = { status: "skipped", message: "startup fetch disabled by PI_GIT_FOOTER_FETCH=0" };
+      return;
+    }
     if (gitInitialFetchPromise || !latestGitSnapshot) return;
 
     const remotes = await runGit(pi, ctx.cwd, ["remote"], 2000);
@@ -1204,15 +1283,18 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
     gitInitialFetchPromise = null;
     latestGitFetchState = { status: "idle" };
     promptEstimateService.clear();
-    promptEstimateKeyCheck = null;
     latestPromptEstimateContext = null;
     latestFooterContext = ctx;
     latestFooterCwd = ctx.cwd || "";
     latestGitSnapshot = null;
     latestGitSnapshotFingerprint = null;
-    footerUsageSnapshot = recomputeFooterUsageSnapshot(ctx);
+    footerUsageSnapshot = emptyFooterUsageSnapshot();
+    accountedAssistantUsageKeys = new Set<string>();
+    promptEstimateCanCalibrateCurrent = false;
+    promptCalibrationCache = null;
     stopGitAutoRefresh();
-    void refreshPromptInjectionEstimate(ctx);
+    scheduleFooterUsageRecompute(ctx);
+    schedulePromptInjectionEstimateRefresh(ctx);
 
     ctx.ui.setFooter((tui, theme, footerData) => {
       const render = () => tui.requestRender();
@@ -1339,22 +1421,23 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
       };
     });
 
-    await refresh(ctx);
-    void runInitialGitFetch(ctx, sessionSerial);
+    void refresh(ctx).then(() => {
+      void runInitialGitFetch(ctx, sessionSerial);
+    });
     startGitAutoRefresh(ctx);
   });
 
   pi.on("agent_start", async (_event, ctx) => {
-    void refreshPromptInjectionEstimate(ctx);
+    schedulePromptInjectionEstimateRefresh(ctx);
   });
 
   pi.on("agent_end", async (_event, ctx) => {
     rememberFooterContext(ctx);
     resetLiveAssistantState();
-    footerUsageSnapshot = recomputeFooterUsageSnapshot(ctx);
+    refreshPromptCalibrationCapability(ctx);
     requestFooterRender?.();
-    void refreshPromptInjectionEstimate(ctx);
-    await refresh(ctx);
+    schedulePromptInjectionEstimateRefresh(ctx);
+    void refresh(ctx);
   });
 
   pi.on("message_start", (event, ctx) => {
@@ -1400,7 +1483,9 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
   pi.on("message_end", (event, ctx) => {
     rememberFooterContext(ctx);
     if (event.message.role === "assistant") {
-      if (recordAssistantSpeed(event.message as AssistantMessage)) {
+      const assistantMessage = event.message as AssistantMessage;
+      addAssistantUsageToSnapshot(assistantMessage);
+      if (recordAssistantSpeed(assistantMessage)) {
         resetLiveAssistantState();
       }
       publishWebuiFooter(ctx);
@@ -1411,13 +1496,15 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
     rememberFooterContext(ctx);
     // Safety net for runtimes where message_end fires before usage is populated.
     if (event.message.role === "assistant") {
-      recordAssistantSpeed(event.message as AssistantMessage);
+      const assistantMessage = event.message as AssistantMessage;
+      addAssistantUsageToSnapshot(assistantMessage);
+      recordAssistantSpeed(assistantMessage);
       resetLiveAssistantState();
     }
-    footerUsageSnapshot = recomputeFooterUsageSnapshot(ctx);
+    refreshPromptCalibrationCapability(ctx);
     requestFooterRender?.();
-    void refreshPromptInjectionEstimate(ctx);
-    await refresh(ctx);
+    schedulePromptInjectionEstimateRefresh(ctx);
+    void refresh(ctx);
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
@@ -1428,6 +1515,14 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
     if (webuiFooterPublishTimer) {
       clearTimeout(webuiFooterPublishTimer);
       webuiFooterPublishTimer = null;
+    }
+    if (promptEstimateRefreshTimer) {
+      clearTimeout(promptEstimateRefreshTimer);
+      promptEstimateRefreshTimer = null;
+    }
+    if (footerUsageRecomputeTimer) {
+      clearTimeout(footerUsageRecomputeTimer);
+      footerUsageRecomputeTimer = null;
     }
     latestGitSnapshotFingerprint = null;
     latestFooterContext = null;
