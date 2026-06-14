@@ -52,7 +52,7 @@ try {
 } catch {
   piPackageJson = {};
 }
-const nativeParityMatrix = JSON.parse(await readFile(path.join(packageRoot, "WEBUI_TUI_NATIVE_PARITY.json"), "utf8"));
+const nativeParityMatrix = JSON.parse(await readFile(path.join(packageRoot, "dev", "docs", "WEBUI_TUI_NATIVE_PARITY.json"), "utf8"));
 const webuiDevServer = isTruthyEnv(process.env.PI_WEBUI_DEV) || isSourceCheckout(packageRoot);
 
 const DEFAULT_HOST = "127.0.0.1";
@@ -5381,8 +5381,10 @@ function renameTab(tab, title, { source = "explicit", maxLength, unique = source
 }
 
 function maybeNameTabForConversation(tab, command) {
-  if (!tab || !commandStartsConversation(command) || tab.conversationStarted || tab.titleSource === "explicit") return false;
+  if (!tab || !commandStartsConversation(command)) return false;
+  const shouldRename = !tab.conversationStarted && tab.titleSource !== "explicit";
   tab.conversationStarted = true;
+  if (!shouldRename) return false;
   const title = generatedTabTitleFromPrompt(command.message) || `Conversation ${tab.index}`;
   return renameTab(tab, title, { source: "auto", maxLength: AUTO_TAB_TITLE_MAX_LENGTH });
 }

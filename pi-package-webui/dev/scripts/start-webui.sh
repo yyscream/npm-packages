@@ -21,9 +21,13 @@ script_dir() {
   cd -P "$(dirname "$source")" >/dev/null 2>&1 && pwd
 }
 
+package_root() {
+  cd -P "$(script_dir)/../.." >/dev/null 2>&1 && pwd
+}
+
 local_pi_webui_bin() {
   local candidate
-  candidate="$(script_dir)/bin/pi-webui.mjs"
+  candidate="$(package_root)/bin/pi-webui.mjs"
 
   if [[ ! -f "$candidate" ]]; then
     echo "--dev expected the local Pi Web UI server at: $candidate" >&2

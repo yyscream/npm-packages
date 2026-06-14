@@ -156,7 +156,7 @@ Useful browser endpoints exposed by the local server include:
 For local development, run the checkout helper directly, for example:
 
 ```bash
-./start-webui.sh --dev --cwd /path/to/project
+./dev/scripts/start-webui.sh --dev --cwd /path/to/project
 ```
 
 Run `../dev/scripts/sync-pi-package-symlinks.sh` first when developing companion packages from this workspace. The Web UI manifest loads companions through `node_modules/` paths, and the sync script links those paths to the top-level dev packages so only one copy is loaded.

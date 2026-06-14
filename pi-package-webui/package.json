@@ -76,9 +76,7 @@
     "public",
     "images",
     "tests",
-    "start-webui.sh",
-    "start-webui.ps1",
-    "WEBUI_TUI_NATIVE_PARITY.json",
+    "dev/docs/WEBUI_TUI_NATIVE_PARITY.json",
     "README.md",
     "LICENSE"
   ],

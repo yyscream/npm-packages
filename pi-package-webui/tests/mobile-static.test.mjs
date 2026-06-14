@@ -12,7 +12,7 @@ const [pkgRaw, html, css, app, server, extension, readme, startScript, manifestR
   readFile(join(root, "bin", "pi-webui.mjs"), "utf8"),
   readFile(join(root, "index.ts"), "utf8"),
   readFile(join(root, "README.md"), "utf8"),
-  readFile(join(root, "start-webui.sh"), "utf8"),
+  readFile(join(root, "dev", "scripts", "start-webui.sh"), "utf8"),
   readFile(join(root, "public", "manifest.webmanifest"), "utf8"),
   readFile(join(root, "public", "service-worker.js"), "utf8"),
   readFile(join(root, "public", "apple-touch-icon.png")),
@@ -368,6 +368,8 @@ assert.match(css, /\.footer-model-option\.active/, "footer model picker should s
 assert.match(app, /async function createPathPickerDirectory\(\)/, "cwd picker should implement create-directory behavior in the browser");
 assert.match(app, /function renderPathPickerDirectoryList\(\)[\s\S]*pathPickerDirectoryMatchesSearch/, "cwd picker should filter current-directory entries in the browser");
 assert.match(app, /elements\.pathPickerSearchInput\.addEventListener\("input", renderPathPickerDirectoryList\)/, "cwd picker should update directory matches as the user types");
+assert.match(app, /function shouldOpenCwdChangeInNewTab\(tab\) \{[\s\S]*!!tab\?\.conversationStarted[\s\S]*activeTabHasConversationMessages\(tab\)[\s\S]*stateHasVisibleWork\(currentState\)[\s\S]*tabHasActiveAgent\(tab\)/, "cwd changes for started conversations should be routed to a new tab");
+assert.match(app, /if \(shouldOpenCwdChangeInNewTab\(tab\)\) \{[\s\S]*await createTerminalTab\(cwd, \{ triggerButton: null \}\);[\s\S]*return;[\s\S]*window\.confirm\(`Restart/, "footer cwd changes should open a new tab before destructive cwd restarts once a session is active");
 assert.match(server, /async function createDirectoryPickerDirectory\(parentPath, nameValue, activeCwd\)/, "server should implement cwd picker directory creation");
 assert.match(server, /function directoryPickerActiveCwd\(req, url, body = \{\}\)/, "server should let the cwd picker run before any Pi tabs exist");
 assert.match(server, /url\.pathname === "\/api\/directories" && req\.method === "POST"/, "server should expose POST /api/directories for cwd picker directory creation");
@@ -1035,6 +1037,7 @@ assert.match(server, /WEBUI_TUI_NATIVE_PARITY\.json/, "native command descriptio
 assert.match(server, /function parseSlashCommand\(message\)/, "server should parse native slash commands before prompt forwarding");
 assert.match(server, /function generatedTabTitleFromPrompt\(message\)/, "server should derive concise automatic tab titles from first prompts");
 assert.match(server, /function maybeNameTabForConversation\(tab, command\)/, "server should auto-name default tabs when a conversation starts");
+assert.match(server, /function maybeNameTabForConversation\(tab, command\) \{[\s\S]*const shouldRename = !tab\.conversationStarted && tab\.titleSource !== "explicit";[\s\S]*tab\.conversationStarted = true;[\s\S]*if \(!shouldRename\) return false;/, "server should mark conversations as started even when an explicit title prevents auto-renaming");
 assert.match(server, /function createTabActivity\(/, "server should track per-tab activity for idle, working, and completed work");
 assert.match(server, /function reconcileTabActivityFromState\(tab, state/, "server should recover stale working tab activity from get_state snapshots");
 assert.match(server, /pendingExtensionUiRequests\(tab\)\.length > 0[\s\S]*?markTabWorking\(tab, timestamp\)/, "server should keep tabs with pending blockers in working activity until the blocker resolves");
@@ -1190,17 +1193,19 @@ assert.match(readme, /avoiding duplicate loads while keeping global `pi-webui` l
 assert.match(readme, /checks loaded Pi capabilities directly through RPC-visible commands and live widget events/, "README should document capability-based startup checks");
 assert.match(readme, /side panel shows each optional feature as enabled, disabled, installed-but-not-loaded, update-available, or install-needed/, "README should document optional feature side-panel controls");
 assert.match(readme, /Installing or updating a feature is an explicit, warned action with running\/failure feedback/, "README should document optional feature install and update warning behavior");
-assert.match(readme, /\.\/start-webui\.sh --dev --cwd \/path\/to\/project/, "README should document the dev helper launcher");
+assert.match(readme, /\.\/dev\/scripts\/start-webui\.sh --dev --cwd \/path\/to\/project/, "README should document the dev helper launcher");
 assert.match(readme, /sync-pi-package-symlinks\.sh[\s\S]*only one copy is loaded/, "README should document dev companion symlink setup");
 assert.match(startScript, /--dev\)/, "start-webui.sh should accept a --dev flag");
 assert.match(startScript, /local_pi_webui_bin\(\)/, "start-webui.sh should resolve this checkout's local server entrypoint");
+assert.match(startScript, /candidate="\$\(package_root\)\/bin\/pi-webui\.mjs"/, "start-webui.sh should resolve the package-root bin from dev/scripts");
 assert.match(startScript, /webui_cmd=\(node "\$local_webui_bin"\)/, "start-webui.sh --dev should run the local bin with node");
 assert.match(startScript, /export PI_WEBUI_DEV=1/, "start-webui.sh --dev should mark the Web UI server as dev mode");
 assert.match(startScript, /"\$\{webui_cmd\[@\]\}" --cwd "\$cwd" --host "\$host" --port "\$port" "\$\{pass_args\[@\]\}"/, "start-webui.sh should launch through the selected server command without forwarding --dev");
 
 assert.match(pkg.scripts?.test || "", /node tests\/run-all\.mjs/, "package test script should run every tests/*.test.mjs through the shared runner");
-assert.ok(pkg.files?.includes("start-webui.sh"), "npm package should include the Bash helper launcher");
-assert.ok(pkg.files?.includes("start-webui.ps1"), "npm package should include the PowerShell helper launcher");
+assert.ok(!pkg.files?.includes("start-webui.sh"), "npm package should not list the moved Bash dev helper at the package root");
+assert.ok(!pkg.files?.includes("start-webui.ps1"), "npm package should not list the moved PowerShell dev helper at the package root");
+assert.ok(!pkg.files?.some((entry) => entry === "dev/scripts" || entry.startsWith("dev/scripts/")), "npm package should not publish development helper scripts");
 for (const [name, range] of Object.entries(companionDependencies)) {
   assert.equal(pkg.optionalDependencies?.[name], range, `webui package should optionally depend on ${name}`);
   assert.equal(pkg.dependencies?.[name], undefined, `webui package should not require optional companion ${name}`);

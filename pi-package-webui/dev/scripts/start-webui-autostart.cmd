@@ -24,8 +24,8 @@ if defined PI_WEBUI_SCRIPT_RESOLVED if not exist "%PI_WEBUI_SCRIPT_RESOLVED%" (
   exit /b 1
 )
 
-if not defined PI_WEBUI_SCRIPT_RESOLVED if exist "%~dp0bin\pi-webui.mjs" (
-  set "PI_WEBUI_SCRIPT_RESOLVED=%~dp0bin\pi-webui.mjs"
+if not defined PI_WEBUI_SCRIPT_RESOLVED if exist "%~dp0..\..\bin\pi-webui.mjs" (
+  set "PI_WEBUI_SCRIPT_RESOLVED=%~dp0..\..\bin\pi-webui.mjs"
 )
 
 if not defined PI_WEBUI_SCRIPT_RESOLVED if defined PI_CODING_AGENT_DIR (
@@ -67,7 +67,7 @@ if defined PI_WEBUI_SCRIPT_RESOLVED (
   echo Pi Web UI was not found.
   echo Checked:
   echo   PI_WEBUI_SCRIPT
-  echo   script-local bin\pi-webui.mjs
+  echo   script-local ..\..\bin\pi-webui.mjs
   echo   %%PI_CODING_AGENT_DIR%%\npm\node_modules\@firstpick\pi-package-webui\bin\pi-webui.mjs
   echo   %%USERPROFILE%%\.pi\agent\npm\node_modules\@firstpick\pi-package-webui\bin\pi-webui.mjs
   echo   %%APPDATA%%\npm\node_modules\@firstpick\pi-package-webui\bin\pi-webui.mjs

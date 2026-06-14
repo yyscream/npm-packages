@@ -4584,6 +4584,20 @@ function tabHasActiveAgent(tab) {
   return !!activity.isWorking || indicator.state === "working" || indicator.state === "blocked";
 }
 
+function activeTabHasConversationMessages(tab = activeTab()) {
+  const tabId = tab?.id || activeTabId;
+  if (!tabId) return false;
+  if (tabId !== activeTabId && !latestMessagesSessionKey.startsWith(`${tabId}|`)) return false;
+  return latestMessages.some((message) => ["user", "assistant"].includes(message?.role));
+}
+
+function shouldOpenCwdChangeInNewTab(tab) {
+  return !!tab?.conversationStarted
+    || activeTabHasConversationMessages(tab)
+    || stateHasVisibleWork(currentState)
+    || tabHasActiveAgent(tab);
+}
+
 function confirmCloseTerminalTabs(targetTabs, label) {
   const count = targetTabs.length;
   const noun = count === 1 ? "tab" : "tabs";
@@ -7304,6 +7318,12 @@ async function changeActiveTabCwd() {
   const currentCwd = latestWorkspace?.cwd || tab.cwd || "";
   const cwd = await pickCwd(tab, currentCwd);
   if (!isCurrentTabContext(tabContext) || !cwd || cwd === currentCwd) return;
+
+  if (shouldOpenCwdChangeInNewTab(tab)) {
+    await createTerminalTab(cwd, { triggerButton: null });
+    return;
+  }
+
   if (!window.confirm(`Restart ${tab.title} in:\n${cwd}\n\nCurrent in-flight work in this tab will be stopped. The conversation continues in the new directory.`)) return;
 
   saveActiveDraft();
