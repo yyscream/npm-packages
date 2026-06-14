@@ -1,0 +1,39 @@
+{
+  "name": "@firstpick/pi-extension-workflows",
+  "version": "0.1.0",
+  "description": "Minimal modular workflow runtime extension for Pi.",
+  "license": "MIT",
+  "homepage": "https://github.com/Firstp1ck/npm-packages/tree/main/pi-extension-workflows#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Firstp1ck/npm-packages.git",
+    "directory": "pi-extension-workflows"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "extension",
+    "workflow"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types tests/schema.test.mjs && node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types tests/loader.test.mjs && node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types tests/runner.test.mjs && node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types tests/extension.test.mjs && node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types tests/workflow-test.test.mjs",
+    "check": "npm test"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "files": [
+    "index.ts",
+    "src",
+    "workflows",
+    "README.md",
+    "LICENSE"
+  ]
+}

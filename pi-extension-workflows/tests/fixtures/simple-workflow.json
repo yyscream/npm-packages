@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "key": "simple-workflow",
+  "name": "Simple Workflow",
+  "defaults": {
+    "maxConcurrency": 2,
+    "maxTasks": 5
+  },
+  "phases": [
+    {
+      "id": "first",
+      "name": "First",
+      "mode": "sequential",
+      "tasks": [
+        {
+          "id": "one",
+          "name": "One",
+          "tools": ["read", "grep"],
+          "prompt": "Hello {{topic}}"
+        }
+      ]
+    }
+  ]
+}

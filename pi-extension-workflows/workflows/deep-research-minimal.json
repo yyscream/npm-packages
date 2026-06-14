@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "key": "deep-research-minimal",
+  "name": "Minimal Deep Research",
+  "description": "Research, verify, and summarize a topic using staged read-only tasks.",
+  "defaults": {
+    "maxConcurrency": 3,
+    "maxTasks": 12
+  },
+  "phases": [
+    {
+      "id": "scout",
+      "name": "Source discovery",
+      "description": "Collect primary local evidence and implementation references.",
+      "mode": "parallel",
+      "maxConcurrency": 3,
+      "tasks": [
+        {
+          "id": "official-docs",
+          "name": "Find official docs",
+          "agent": "scout",
+          "tools": ["read", "grep", "find", "ls"],
+          "prompt": "Find official documentation or primary local source files relevant to: {{topic}}. Return paths, short snippets, and gaps. Do not modify files."
+        },
+        {
+          "id": "implementation-evidence",
+          "name": "Find implementation evidence",
+          "agent": "scout",
+          "tools": ["read", "grep", "find", "ls"],
+          "prompt": "Find concrete implementation examples in the current repository relevant to: {{topic}}. Return exact paths, symbols, and what each file proves. Do not modify files."
+        },
+        {
+          "id": "risk-scan",
+          "name": "Identify risks and constraints",
+          "agent": "reviewer",
+          "tools": ["read", "grep", "find", "ls"],
+          "prompt": "Review local evidence for risks, missing prerequisites, safety constraints, and likely failure modes for: {{topic}}. Do not modify files."
+        }
+      ]
+    },
+    {
+      "id": "synthesis",
+      "name": "Synthesis",
+      "mode": "sequential",
+      "tasks": [
+        {
+          "id": "summarize",
+          "name": "Summarize findings",
+          "agent": "planner",
+          "tools": ["read", "grep", "find", "ls"],
+          "prompt": "Synthesize the prior phase outputs into a concise implementation-ready report for: {{topic}}. Include evidence paths, decisions, risks, and next steps."
+        }
+      ]
+    }
+  ]
+}
