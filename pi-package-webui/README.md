@@ -173,6 +173,7 @@ Optional companions:
 - `@firstpick/pi-prompts-git-pr` — guided Git commit/push workflow.
 - `@firstpick/pi-extension-release-npm` — NPM publish menu and release widgets.
 - `@firstpick/pi-extension-release-aur` — AUR publish menu and release widgets.
+- `@firstpick/pi-extension-workflows` — `/workflow` runtime with non-blocking Web UI subprocess-output widgets.
 - `@firstpick/pi-extension-safety-guard` — interactive guardrails for dangerous bash commands and protected file edits.
 - `@firstpick/pi-extension-setup-skills` — TUI `/skills` setup command alongside WebUI-native skill toggles.
 - `@firstpick/pi-extension-todo-progress` — todo-progress rendering.

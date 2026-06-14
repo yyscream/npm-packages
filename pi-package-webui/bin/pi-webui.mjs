@@ -225,6 +225,7 @@ const OPTIONAL_FEATURE_PACKAGES = new Map([
   ["gitWorkflow", "@firstpick/pi-prompts-git-pr"],
   ["releaseNpm", "@firstpick/pi-extension-release-npm"],
   ["releaseAur", "@firstpick/pi-extension-release-aur"],
+  ["workflows", "@firstpick/pi-extension-workflows"],
   ["safetyGuard", "@firstpick/pi-extension-safety-guard"],
   ["tuiSkillsCommand", "@firstpick/pi-extension-setup-skills"],
   ["todoProgressWidget", "@firstpick/pi-extension-todo-progress"],

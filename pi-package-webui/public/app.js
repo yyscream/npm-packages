@@ -434,6 +434,9 @@ const BTW_OUTPUT_WIDGET_KEY = "btw:output";
 const BTW_FOOTER_WIDGET_KEY = "btw:footer";
 const BTW_WIDGET_PAYLOAD_PREFIX = "BTW_WEBUI_PAYLOAD ";
 const BTW_WEBUI_PAYLOAD_TYPES = new Set(["firstpick.pi-extension-btw.overlay", "firstpick.pi-extension-btw.output"]);
+const WORKFLOW_WIDGET_PAYLOAD_PREFIX = "WORKFLOW_WEBUI_PAYLOAD ";
+const WORKFLOW_SUBPROCESS_PAYLOAD_TYPE = "firstpick.pi-extension-workflows.subprocess";
+const WORKFLOW_SUBPROCESS_PAYLOAD_VERSION = 1;
 const GIT_CHANGES_RENDER_ROW_LIMIT = 4000;
 const LAST_USER_PROMPT_STORAGE_KEY = "pi-webui-last-user-prompts";
 const PROMPT_HISTORY_STORAGE_KEY = "pi-webui-prompt-history";
@@ -511,6 +514,7 @@ const optionalFeatureAvailability = {
   gitWorkflow: false,
   releaseNpm: false,
   releaseAur: false,
+  workflows: false,
   safetyGuard: false,
   statsCommand: false,
   gitFooterStatus: false,
@@ -548,6 +552,13 @@ const OPTIONAL_FEATURES = [
     packageName: "@firstpick/pi-extension-release-aur",
     capabilityLabel: "/release-aur",
     description: "Publish menu action, setup helpers, skills, and AUR release widgets.",
+  },
+  {
+    id: "workflows",
+    label: "Workflows",
+    packageName: "@firstpick/pi-extension-workflows",
+    capabilityLabel: "/workflow or workflow subprocess widget event",
+    description: "Modular workflow runner with live subprocess output shown in a non-blocking Web UI widget.",
   },
   {
     id: "safetyGuard",
@@ -616,6 +627,8 @@ const OPTIONAL_COMMAND_FEATURES = new Map([
   ["pr", "gitWorkflow"],
   ["release-npm", "releaseNpm"],
   ["release-aur", "releaseAur"],
+  ["workflow", "workflows"],
+  ["workflow-clear", "workflows"],
   ["safety-guard", "safetyGuard"],
   ["skills", "tuiSkillsCommand"],
   ["tools", "tuiToolsCommand"],
@@ -7827,6 +7840,10 @@ function releaseNpmLineTone(line) {
   if (/^(WARN|warning)\b/i.test(clean)) return "warn";
   if (/^(INFO|npm notice|notice)\b/i.test(clean)) return "info";
   if (/^RELEASE_NPM_EVENT\b/.test(clean)) return "event";
+  if (/^\[[0-9:]+\]\s+\[[^\]]+\]\s+\$/.test(clean)) return "command";
+  if (/\b(STDERR|failed|error|exited with code)\b/i.test(clean)) return "fail";
+  if (/\b(completed|succeeded|agent completed|tool completed)\b/i.test(clean)) return "pass";
+  if (/\b(started|running|auto retry|compaction)\b/i.test(clean)) return "info";
   return "";
 }
 
@@ -8031,6 +8048,74 @@ function renderReleaseAurLogWidget() {
     appendReleaseNpmTerminalLine(terminal, line);
   }
   const outputDetails = renderReleaseNpmOutputDetails("release-aur:logs", streamHeader, terminal);
+  node.append(header, outputDetails);
+  requestAnimationFrame(() => { if (outputDetails.open) terminal.scrollTop = terminal.scrollHeight; });
+  return node;
+}
+
+function parseWorkflowSubprocessPayload(lines) {
+  const raw = String(lines?.[0] || "").trim();
+  if (!raw) return null;
+  const json = raw.startsWith(WORKFLOW_WIDGET_PAYLOAD_PREFIX) ? raw.slice(WORKFLOW_WIDGET_PAYLOAD_PREFIX.length) : raw;
+  try {
+    const payload = JSON.parse(json);
+    if (payload?.type !== WORKFLOW_SUBPROCESS_PAYLOAD_TYPE || payload.version !== WORKFLOW_SUBPROCESS_PAYLOAD_VERSION) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+function workflowSubprocessIsLive(payload) {
+  return payload?.status === "queued" || payload?.status === "running" || Number(payload?.taskCounts?.running || 0) > 0;
+}
+
+function workflowTaskCountLabel(payload) {
+  const counts = payload?.taskCounts || {};
+  const done = Number(counts.completed || 0);
+  const total = Number(counts.total || 0);
+  const failed = Number(counts.failed || 0);
+  const cancelled = Number(counts.cancelled || 0);
+  return `${done}/${total} done${failed ? ` · ${failed} failed` : ""}${cancelled ? ` · ${cancelled} cancelled` : ""}`;
+}
+
+function renderWorkflowSubprocessWidget() {
+  if (!isOptionalFeatureEnabled("workflows")) return null;
+  const payload = parseWorkflowSubprocessPayload(getWidgetLines("workflow:subprocess"));
+  if (!payload) return null;
+
+  const live = workflowSubprocessIsLive(payload);
+  const node = make("section", `widget release-npm-widget workflow-widget ${live ? "workflow-live-widget" : "workflow-log-widget"}`);
+  node.setAttribute("aria-label", "workflow subprocess output");
+
+  const header = make("div", "release-npm-header");
+  const titleWrap = make("div", "release-npm-title-wrap");
+  titleWrap.append(
+    make("span", "release-npm-kicker", "workflow subprocesses"),
+    make("strong", "release-npm-title", payload.workflowName || payload.workflowKey || "workflow"),
+  );
+
+  const meta = make("div", "release-npm-meta");
+  meta.append(make("span", `release-npm-pill workflow-status ${payload.status || "unknown"}`, payload.status || "unknown"));
+  if (payload.activePhase) meta.append(make("span", "release-npm-pill", payload.activePhase));
+  meta.append(make("span", "release-npm-pill elapsed", workflowTaskCountLabel(payload)));
+  if (payload.truncated) meta.append(make("span", "release-npm-pill workflow-truncated", "truncated"));
+
+  const actions = make("div", "release-npm-actions");
+  actions.append(releaseNpmActionButton("Status", "/workflow status"));
+  if (live) actions.append(releaseNpmActionButton("Abort", "/workflow abort", "danger"));
+  actions.append(releaseNpmActionButton("Clear", "/workflow-clear"));
+  header.append(titleWrap, meta, actions);
+
+  const lines = Array.isArray(payload.lines) && payload.lines.length ? payload.lines : ["Waiting for workflow subprocess output..."];
+  const streamHeader = releaseNpmStreamHeader(live ? "Live subprocess output" : "Subprocess output", lines.length, { live });
+  const terminal = make("div", "release-npm-terminal");
+  terminal.setAttribute("role", "log");
+  terminal.setAttribute("aria-live", live ? "polite" : "off");
+  for (const line of lines) appendReleaseNpmTerminalLine(terminal, line);
+
+  const controls = make("div", "release-npm-controls", "Workflow subprocess output is shown as a non-blocking Web UI widget. Use /workflow abort to stop an active run.");
+  const outputDetails = renderReleaseNpmOutputDetails("workflow:subprocess", streamHeader, terminal, controls);
   node.append(header, outputDetails);
   requestAnimationFrame(() => { if (outputDetails.open) terminal.scrollTop = terminal.scrollHeight; });
   return node;
@@ -9319,6 +9404,8 @@ function renderWidgets() {
   if (releaseAurOutput) elements.widgetArea.append(releaseAurOutput);
   const releaseAurLog = renderReleaseAurLogWidget();
   if (releaseAurLog) elements.widgetArea.append(releaseAurLog);
+  const workflowSubprocessWidget = renderWorkflowSubprocessWidget();
+  if (workflowSubprocessWidget) elements.widgetArea.append(workflowSubprocessWidget);
   const appRunnerWidget = renderAppRunnerWidget();
   if (appRunnerWidget) elements.widgetArea.append(appRunnerWidget);
   const btwWidget = renderBtwOutputWidget();
@@ -13959,6 +14046,7 @@ function updateOptionalFeatureAvailability() {
   optionalFeatureAvailability.gitWorkflow = hasAvailableCommand("git-staged-msg");
   optionalFeatureAvailability.releaseNpm = hasAvailableCommand("release-npm");
   optionalFeatureAvailability.releaseAur = hasAvailableCommand("release-aur");
+  optionalFeatureAvailability.workflows = hasAvailableCommand("workflow") || hasAvailableCommand("workflow-clear") || optionalFeatureAvailability.workflows || widgets.has("workflow") || widgets.has("workflow:subprocess");
   optionalFeatureAvailability.safetyGuard = hasAvailableCommand("safety-guard") || optionalFeatureAvailability.safetyGuard || statusEntries.has("safety-guard");
   optionalFeatureAvailability.statsCommand = hasAvailableCommand("stats");
   optionalFeatureAvailability.gitFooterStatus = hasAvailableCommand("git-footer-refresh") || optionalFeatureAvailability.gitFooterStatus || statusEntries.has("git-footer") || statusEntries.has(GIT_FOOTER_WEBUI_STATUS_KEY);
@@ -13990,13 +14078,14 @@ function optionalFeatureWidgetFeatureId(key) {
   if (key.startsWith("btw:")) return "btwCommand";
   if (key.startsWith("release-npm:")) return "releaseNpm";
   if (key.startsWith("release-aur:")) return "releaseAur";
+  if (key === "workflow" || key.startsWith("workflow:")) return "workflows";
   if (key === "todo-progress") return "todoProgressWidget";
   if (key === "pi-remote-webui") return "remoteWebui";
   return null;
 }
 
 function optionalFeatureWidgetHasSpecializedRenderer(key) {
-  return key.startsWith("btw:") || key.startsWith("release-npm:") || key.startsWith("release-aur:");
+  return key.startsWith("btw:") || key.startsWith("release-npm:") || key.startsWith("release-aur:") || key === "workflow:subprocess";
 }
 
 function renderOptionalFeaturePanel() {
