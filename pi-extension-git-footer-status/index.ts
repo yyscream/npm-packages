@@ -865,6 +865,7 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
   let currentAssistantStartMs: number | null = null;
   let currentAssistantOutputChars = 0;
   let currentAssistantEstimatedOutputTokens = 0;
+  let currentAssistantUsageOutputTokens = 0;
   let currentAssistantLiveTokenSpeed: number | null = null;
   let currentAssistantTokenSamples: LiveTokenSample[] = [];
   let latestMeasuredTokenSpeed: number | null = null;
@@ -1175,6 +1176,7 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
     currentAssistantStartMs = null;
     currentAssistantOutputChars = 0;
     currentAssistantEstimatedOutputTokens = 0;
+    currentAssistantUsageOutputTokens = 0;
     currentAssistantLiveTokenSpeed = null;
     currentAssistantTokenSamples = [];
   };
@@ -1446,6 +1448,7 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
       currentAssistantStartMs = Date.now();
       currentAssistantOutputChars = 0;
       currentAssistantEstimatedOutputTokens = 0;
+      currentAssistantUsageOutputTokens = 0;
       currentAssistantLiveTokenSpeed = null;
       currentAssistantTokenSamples = [];
       publishWebuiFooter(ctx);
@@ -1468,9 +1471,17 @@ export default function gitFooterStatus(pi: ExtensionAPI) {
     const nowMs = Date.now();
     currentAssistantOutputChars += streamEvent.delta.length;
 
-    const estimatedOutputTokens = estimateTokensFromCharCount(currentAssistantOutputChars);
-    const newTokens = Math.max(0, estimatedOutputTokens - currentAssistantEstimatedOutputTokens);
-    currentAssistantEstimatedOutputTokens = estimatedOutputTokens;
+    const usageOutputTokens = streamEvent.partial.usage?.output;
+    let newTokens = 0;
+    if (typeof usageOutputTokens === "number" && usageOutputTokens > currentAssistantUsageOutputTokens) {
+      newTokens = usageOutputTokens - currentAssistantUsageOutputTokens;
+      currentAssistantUsageOutputTokens = usageOutputTokens;
+      currentAssistantEstimatedOutputTokens = usageOutputTokens;
+    } else if (currentAssistantUsageOutputTokens <= 0) {
+      const estimatedOutputTokens = estimateTokensFromCharCount(currentAssistantOutputChars);
+      newTokens = Math.max(0, estimatedOutputTokens - currentAssistantEstimatedOutputTokens);
+      currentAssistantEstimatedOutputTokens = estimatedOutputTokens;
+    }
 
     if (newTokens > 0) {
       currentAssistantTokenSamples.push({ timestampMs: nowMs, tokens: newTokens });

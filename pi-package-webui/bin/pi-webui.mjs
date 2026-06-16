@@ -58,6 +58,7 @@ const webuiDevServer = isTruthyEnv(process.env.PI_WEBUI_DEV) || isSourceCheckout
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 31415;
 const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
+const PROMPT_REQUEST_TIMEOUT_MS = Math.max(REQUEST_TIMEOUT_MS, Number.parseInt(process.env.PI_WEBUI_PROMPT_TIMEOUT_MS || "7200000", 10) || 7200000);
 const WEBUI_HELPER_TIMEOUT_MS = 8 * 1000;
 const WEBUI_HELPER_COMMAND = "webui-helper";
 const WEBUI_HELPER_RESPONSE_PREFIX = "__PI_WEBUI_HELPER_RESPONSE__:";
@@ -7545,7 +7546,7 @@ const server = createServer(async (req, res) => {
         maybeNameTabForConversation(tab, command);
         markTabWorking(tab);
       }
-      const response = await tab.rpc.send(command);
+      const response = await tab.rpc.send(command, PROMPT_REQUEST_TIMEOUT_MS);
       if (response.success === false && startsVisibleWork) markTabIdle(tab);
       sendJson(res, response.success === false ? 400 : 200, responseWithTab(response, tab));
       return;

@@ -117,6 +117,14 @@ Adds a `brave_search` tool to Pi for up-to-date web search.
 - Supports query options like country/language/freshness/safesearch
 - Includes status/test helper commands
 
+### `@firstpick/pi-extension-cursor-composer`
+Adds Cursor SDK Composer 2.5 integration to Pi.
+
+- Registers native Pi provider `cursor-composer/composer-2.5`
+- Adds `/cursor-composer-*` setup/status/model commands
+- Adds `cursor_composer_agent` tool for explicit delegated Cursor agent runs
+- Can append Composer 2.5 to Pi `enabledModels` scoped-model cycling
+
 ### `@firstpick/pi-extension-fish-user-bash`
 Runs Pi `!` / `!!` commands through fish shell.
 
