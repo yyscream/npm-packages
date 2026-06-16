@@ -12,7 +12,7 @@ This package adds a `/remote` slash command that reuses the existing `@firstpick
 pi install npm:@firstpick/pi-package-remote-webui
 ```
 
-Restart Pi after installation so the `/remote` command is loaded. The QR renderer (`qrcode-terminal`) is a runtime dependency of this Pi package and is installed with the package. For local checkout development, run `npm install` in this package directory instead of installing `qrcode-terminal` globally.
+Restart Pi after installation so the `/remote` command is loaded. `/remote` expects `@firstpick/pi-package-webui` to be installed in the same Pi/npm environment or available from this checkout; install `@firstpick/pi-package-webui` first if Pi cannot locate `pi-webui`. The QR renderer (`qrcode-terminal`) is a runtime dependency of this Pi package and is installed with the package. For local checkout development, run `npm install` in this package directory instead of installing `qrcode-terminal` globally.
 
 ## Usage
 

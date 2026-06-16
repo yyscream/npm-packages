@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-package-remote-webui",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Pi /remote command that opens the existing Pi Web UI to a trusted LAN and shows a QR code for mobile.",
   "license": "MIT",
   "homepage": "https://github.com/Firstp1ck/npm-packages/tree/main/pi-package-remote-webui#readme",
@@ -30,14 +30,17 @@
     "test": "node tests/run-all.mjs"
   },
   "dependencies": {
-    "@firstpick/pi-package-webui": "^0.3.8",
     "qrcode-terminal": "^0.12.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "@firstpick/pi-package-webui": "^0.4.5"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@firstpick/pi-package-webui": {
       "optional": true
     }
   },
