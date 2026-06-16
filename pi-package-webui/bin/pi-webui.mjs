@@ -4369,6 +4369,22 @@ function isNodeScriptCommand(command) {
   return [".cjs", ".js", ".mjs"].includes(path.extname(String(command || "")).toLowerCase());
 }
 
+async function resolvedPiCliScript() {
+  const packagePathParts = PI_CODING_AGENT_PACKAGE.split("/").filter(Boolean);
+  const searchRoots = require.resolve.paths(PI_CODING_AGENT_PACKAGE) || [];
+  for (const nodeModulesRoot of searchRoots) {
+    const cliPath = path.join(nodeModulesRoot, ...packagePathParts, "dist", "cli.js");
+    try {
+      await access(cliPath);
+      return cliPath;
+    } catch {
+      // Continue through Node's resolution roots; global npm installs can hoist
+      // pi-coding-agent beside pi-package-webui instead of nesting it.
+    }
+  }
+  return "";
+}
+
 async function resolvePiCommand(piArgs) {
   if (options.piBinExplicit) {
     if (isNodeScriptCommand(options.piBin)) {
@@ -4381,17 +4397,16 @@ async function resolvePiCommand(piArgs) {
     return { command: options.piBin, args: piArgs, displayCommand: `${options.piBin} ${piArgs.join(" ")}` };
   }
 
-  const bundledCli = path.join(packageRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
-  try {
-    await access(bundledCli);
+  const bundledCli = await resolvedPiCliScript();
+  if (bundledCli) {
     return {
       command: process.execPath,
       args: [bundledCli, ...piArgs],
       displayCommand: `${process.execPath} ${bundledCli} ${piArgs.join(" ")}`,
     };
-  } catch {
-    return { command: options.piBin, args: piArgs, displayCommand: `${options.piBin} ${piArgs.join(" ")}` };
   }
+
+  return { command: options.piBin, args: piArgs, displayCommand: `${options.piBin} ${piArgs.join(" ")}` };
 }
 
 const tabs = new Map();
@@ -5079,7 +5094,8 @@ async function getUpdateStatus({ force = false } = {}) {
 
 async function resolvePiUpdateCommand() {
   if (options.piBinExplicit) {
-    return { label: "Pi CLI and configured packages", command: options.piBin, args: ["update"], displayCommand: formatCommandForDisplay(options.piBin, ["update"]) };
+    const command = await resolvePiCommand(["update"]);
+    return { ...command, label: "Pi CLI and configured packages" };
   }
 
   const pathPi = await runCommand(options.piBin, ["--version"], { timeoutMs: 3000, maxOutputLength: 4000 });

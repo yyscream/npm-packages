@@ -450,6 +450,9 @@ assert.match(server, /--cwd does not exist:/, "server should report nonexistent 
 assert.match(server, /options\.cwd = await validateStartupCwd\(options\.cwd\)/, "server should fail fast for invalid startup cwd paths");
 assert.match(server, /cwdExplicit: false/, "server should track whether startup cwd was explicitly requested");
 assert.match(server, /return options\.cwdExplicit \? \[await createTab\(\)\] : \[\]/, "server should wait for UI cwd selection when no --cwd is supplied");
+assert.match(server, /async function resolvedPiCliScript\(\)[\s\S]*require\.resolve\.paths\(PI_CODING_AGENT_PACKAGE\)[\s\S]*nodeModulesRoot[\s\S]*dist[\s\S]*cli\.js/, "server should resolve the bundled Pi CLI through Node resolution roots so hoisted global installs can spawn RPC tabs");
+assert.match(server, /const bundledCli = await resolvedPiCliScript\(\)/, "standalone server should prefer the resolved Pi CLI script before falling back to PATH pi");
+assert.match(server, /if \(options\.piBinExplicit\) \{\n\s+const command = await resolvePiCommand\(\["update"\]\)/, "explicit --pi JavaScript launchers should also work for update commands");
 assert.match(app, /serverActionSelect\.addEventListener\("change", updateServerActionButton\)/, "Server action dropdown should control the guarded run button");
 assert.match(app, /runServerActionButton\.addEventListener\("click"[\s\S]*runSelectedServerAction/, "Server action run button should execute the selected action");
 assert.match(app, /api\("\/api\/restart", \{ method: "POST", scoped: false \}\)/, "Restart Server action should call the unscoped restart endpoint");
