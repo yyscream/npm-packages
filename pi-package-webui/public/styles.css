@@ -1307,6 +1307,24 @@ body.side-panel-collapsed .terminal-tabs-shell {
   isolation: isolate;
   background: var(--ctp-crust);
 }
+.terminal-tab[draggable="true"],
+.terminal-tab-group-item[draggable="true"] {
+  cursor: grab;
+}
+.terminal-tab.terminal-tab-dragging,
+.terminal-tab-group-item.terminal-tab-dragging {
+  cursor: grabbing;
+  opacity: 0.68;
+  transform: scale(0.985);
+}
+.terminal-tab-custom-group {
+  border-color: rgba(203, 166, 247, 0.34);
+}
+.terminal-tab-custom-group .terminal-tab-group-count {
+  color: var(--ctp-mauve);
+  border-color: rgba(203, 166, 247, 0.30);
+  background: rgba(203, 166, 247, 0.12);
+}
 .terminal-tab-group:hover,
 .terminal-tab-group:focus-within {
   z-index: 100;
@@ -1431,6 +1449,15 @@ body.side-panel-collapsed .terminal-tabs-shell {
 .terminal-tab.activity-done {
   border-color: rgba(166, 227, 161, 0.52);
   box-shadow: 0 0 1rem rgba(166, 227, 161, 0.16), inset 0 1px 0 rgba(255,255,255,0.045);
+}
+.terminal-tab.terminal-tab-drag-over,
+.terminal-tab-group-item.terminal-tab-drag-over {
+  border-color: rgba(137, 180, 250, 0.82);
+  box-shadow: 0 0 0 2px rgba(137, 180, 250, 0.34), 0 0 1.2rem rgba(137, 180, 250, 0.28), inset 0 1px 0 rgba(255,255,255,0.06);
+}
+.terminal-tab.terminal-tab-drag-over > .terminal-tab-button,
+.terminal-tab-group-item.terminal-tab-drag-over > .terminal-tab-button {
+  background: linear-gradient(120deg, rgba(137, 180, 250, 0.18), rgba(203, 166, 247, 0.12));
 }
 .terminal-tab-button,
 .terminal-tab-close,

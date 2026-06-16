@@ -943,7 +943,11 @@ assert.match(app, /classList\.toggle\("terminal-tabs-dense", tabs\.length >= 10\
 assert.match(app, /appendTerminalTabContent\(button, \{ title: activeTitle,[\s\S]*?count: groupTabs\.length \}\)/, "group buttons should show the active terminal name instead of only the cwd label");
 assert.match(app, /wrapper\.addEventListener\("pointerenter", \(\) => setOpenTerminalTabGroup\(group\.key\)\)/, "terminal tab groups should mark themselves open while hovered");
 assert.match(app, /if \(openTerminalTabGroupKey\) \{\n\s+scheduleRefreshTabs\(600\);/, "tab polling should defer full tab refreshes while a group menu is open");
-assert.match(app, /function shouldRenderTerminalTabGroup\(group, groupCount\) \{\n\s+return groupCount > 1 && group\.tabs\.length > 1 && Boolean\(group\.cwd\);\n\}/, "terminal tabs should only collapse cwd groups when multiple groups are available");
+assert.match(app, /function shouldRenderTerminalTabGroup\(group, groupCount\) \{\n\s+if \(group\.custom\) return group\.tabs\.length > 1;\n\s+return groupCount > 1 && group\.tabs\.length > 1 && Boolean\(group\.cwd\);\n\}/, "terminal tabs should always render custom groups while only collapsing cwd groups when multiple groups are available");
+assert.match(app, /TERMINAL_CUSTOM_GROUPS_STORAGE_KEY/, "frontend should persist custom terminal tab groups in browser storage");
+assert.match(app, /function bindTerminalTabDragAndDrop\(/, "terminal tabs should bind drag-and-drop grouping behavior");
+assert.match(app, /function handleTerminalTabDrop\(sourceTabId, target\)[\s\S]*?createTerminalCustomGroup/, "dropping a terminal tab onto another tab or group should create or update a custom group");
+assert.match(css, /\.terminal-tab\.terminal-tab-drag-over,[\s\S]*?\.terminal-tab-group-item\.terminal-tab-drag-over/, "terminal tab drop targets should show drag-over affordance");
 assert.match(app, /function closeTerminalTabGroup\(group\)[\s\S]*?closeTerminalTabs\(group\.tabs\.map\(\(tab\) => tab\.id\)/, "terminal tab groups should be closable as a batch");
 assert.match(app, /function closeAllTerminalTabs\(\)[\s\S]*?closeTerminalTabs\(tabs\.map\(\(tab\) => tab\.id\)/, "tab header should close all terminal tabs as a batch");
 assert.match(app, /WARNING: \$\{activeAgentTabs\.length\}[\s\S]*?still running or waiting for input/, "tab close confirmations should warn when agents are still running");

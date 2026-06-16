@@ -276,6 +276,9 @@ let pathFastPicksReady = false;
 let pathFastPicksLoadPromise = null;
 let mobileTabsExpanded = false;
 let openTerminalTabGroupKey = null;
+let terminalCustomGroups = new Map();
+let terminalCustomGroupSerial = 1;
+let terminalTabDragId = null;
 let newTabMenuOpen = false;
 let nativeCommandMenuOpen = false;
 let appRunnerMenuOpen = false;
@@ -409,6 +412,8 @@ const THINKING_VISIBILITY_STORAGE_KEY = "pi-webui-thinking-visible";
 const BUSY_PROMPT_BEHAVIOR_STORAGE_KEY = "pi-webui-busy-prompt-behavior";
 const SKILL_USAGE_STORAGE_KEY = "pi-webui-skill-usage-v1";
 const TERMINAL_TABS_LAYOUT_STORAGE_KEY = "pi-webui-terminal-tabs-layout";
+const TERMINAL_CUSTOM_GROUPS_STORAGE_KEY = "pi-webui-terminal-custom-groups-v1";
+const TERMINAL_TAB_DRAG_MIME = "application/x-pi-terminal-tab-id";
 const TOOL_OUTPUT_EXPANDED_STORAGE_KEY = "pi-webui-tool-output-expanded";
 const THEME_STORAGE_KEY = "pi-webui-theme";
 const CUSTOM_BACKGROUND_STORAGE_KEY = "pi-webui-custom-background";
@@ -1243,6 +1248,252 @@ function setTerminalTabsLayout(layout, { persist = true, announce = false } = {}
 
 function restoreTerminalTabsLayoutSetting() {
   setTerminalTabsLayout(readStoredTerminalTabsLayout(), { persist: false });
+}
+
+function normalizeTerminalCustomGroupTitle(value, fallback = "Custom group") {
+  const title = String(value || "").replace(/\s+/g, " ").trim();
+  return (title || fallback).slice(0, 40);
+}
+
+function normalizeTerminalCustomGroupTabIds(value) {
+  const ids = [];
+  const seen = new Set();
+  for (const item of Array.isArray(value) ? value : []) {
+    const id = String(item || "").trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  return ids;
+}
+
+function nextTerminalCustomGroupId() {
+  const id = `group-${Date.now().toString(36)}-${terminalCustomGroupSerial.toString(36)}`;
+  terminalCustomGroupSerial += 1;
+  return id;
+}
+
+function restoreTerminalCustomGroups() {
+  terminalCustomGroups = new Map();
+  terminalCustomGroupSerial = 1;
+  let parsed = null;
+  try {
+    parsed = JSON.parse(localStorage.getItem(TERMINAL_CUSTOM_GROUPS_STORAGE_KEY) || "null");
+  } catch {
+    return;
+  }
+  const records = Array.isArray(parsed?.groups) ? parsed.groups : Array.isArray(parsed) ? parsed : [];
+  const usedTabIds = new Set();
+  for (const record of records) {
+    const rawId = String(record?.id || "").trim();
+    const id = rawId && !terminalCustomGroups.has(rawId) ? rawId : nextTerminalCustomGroupId();
+    const title = normalizeTerminalCustomGroupTitle(record?.title, `Group ${terminalCustomGroups.size + 1}`);
+    const tabIds = normalizeTerminalCustomGroupTabIds(record?.tabIds).filter((tabId) => {
+      if (usedTabIds.has(tabId)) return false;
+      usedTabIds.add(tabId);
+      return true;
+    });
+    if (tabIds.length < 2) continue;
+    terminalCustomGroups.set(id, { id, title, tabIds });
+    const serialMatch = /^Group\s+(\d+)$/i.exec(title);
+    if (serialMatch) terminalCustomGroupSerial = Math.max(terminalCustomGroupSerial, Number(serialMatch[1]) + 1);
+  }
+}
+
+function persistTerminalCustomGroups() {
+  try {
+    const groups = [...terminalCustomGroups.values()].map((group) => ({
+      id: group.id,
+      title: normalizeTerminalCustomGroupTitle(group.title),
+      tabIds: normalizeTerminalCustomGroupTabIds(group.tabIds),
+    })).filter((group) => group.tabIds.length >= 2);
+    localStorage.setItem(TERMINAL_CUSTOM_GROUPS_STORAGE_KEY, JSON.stringify({ version: 1, groups }));
+  } catch {
+    // Ignore storage failures; custom tab groups still work for this page load.
+  }
+}
+
+function terminalCustomGroupByTabId() {
+  const map = new Map();
+  for (const [groupId, group] of terminalCustomGroups) {
+    for (const tabId of group.tabIds || []) {
+      if (!map.has(tabId)) map.set(tabId, groupId);
+    }
+  }
+  return map;
+}
+
+function terminalCustomGroupIdForTab(tabId) {
+  const id = String(tabId || "").trim();
+  if (!id) return null;
+  for (const [groupId, group] of terminalCustomGroups) {
+    if (group.tabIds?.includes(id)) return groupId;
+  }
+  return null;
+}
+
+function syncTerminalCustomGroupsWithTabs(currentTabs = tabs, { persist = true } = {}) {
+  const validTabIds = new Set((currentTabs || []).map((tab) => tab.id).filter(Boolean));
+  const claimedTabIds = new Set();
+  let changed = false;
+  for (const [groupId, group] of [...terminalCustomGroups]) {
+    const filtered = [];
+    for (const tabId of normalizeTerminalCustomGroupTabIds(group.tabIds)) {
+      if (!validTabIds.has(tabId) || claimedTabIds.has(tabId)) {
+        changed = true;
+        continue;
+      }
+      claimedTabIds.add(tabId);
+      filtered.push(tabId);
+    }
+    if (filtered.length < 2) {
+      terminalCustomGroups.delete(groupId);
+      changed = true;
+      continue;
+    }
+    if (filtered.length !== group.tabIds.length || filtered.some((tabId, index) => tabId !== group.tabIds[index])) {
+      group.tabIds = filtered;
+      changed = true;
+    }
+  }
+  if (changed && persist) persistTerminalCustomGroups();
+  return changed;
+}
+
+function removeTabsFromOtherTerminalCustomGroups(tabIds, keepGroupId = null) {
+  const moving = new Set(normalizeTerminalCustomGroupTabIds(tabIds));
+  if (!moving.size) return false;
+  let changed = false;
+  for (const [groupId, group] of [...terminalCustomGroups]) {
+    if (groupId === keepGroupId) continue;
+    const filtered = normalizeTerminalCustomGroupTabIds(group.tabIds).filter((tabId) => !moving.has(tabId));
+    if (filtered.length === group.tabIds.length) continue;
+    changed = true;
+    if (filtered.length < 2) terminalCustomGroups.delete(groupId);
+    else group.tabIds = filtered;
+  }
+  return changed;
+}
+
+function createTerminalCustomGroup(tabIds) {
+  const validTabIds = new Set(tabs.map((tab) => tab.id).filter(Boolean));
+  const unique = normalizeTerminalCustomGroupTabIds(tabIds).filter((tabId) => validTabIds.has(tabId));
+  if (unique.length < 2) return null;
+  removeTabsFromOtherTerminalCustomGroups(unique);
+  const title = `Group ${terminalCustomGroupSerial}`;
+  const id = nextTerminalCustomGroupId();
+  const group = { id, title, tabIds: unique };
+  terminalCustomGroups.set(id, group);
+  syncTerminalCustomGroupsWithTabs(tabs, { persist: false });
+  persistTerminalCustomGroups();
+  return terminalCustomGroups.get(id) || group;
+}
+
+function addTabsToTerminalCustomGroup(groupId, tabIds) {
+  const group = terminalCustomGroups.get(groupId);
+  if (!group) return null;
+  const validTabIds = new Set(tabs.map((tab) => tab.id).filter(Boolean));
+  const unique = normalizeTerminalCustomGroupTabIds(tabIds).filter((tabId) => validTabIds.has(tabId) && !group.tabIds.includes(tabId));
+  if (!unique.length) return group;
+  removeTabsFromOtherTerminalCustomGroups(unique, groupId);
+  group.tabIds = normalizeTerminalCustomGroupTabIds([...group.tabIds, ...unique]);
+  syncTerminalCustomGroupsWithTabs(tabs, { persist: false });
+  persistTerminalCustomGroups();
+  return terminalCustomGroups.get(groupId) || null;
+}
+
+function terminalTabById(tabId) {
+  return tabs.find((tab) => tab.id === tabId) || null;
+}
+
+function terminalTabDragIdFromEvent(event) {
+  return event?.dataTransfer?.getData?.(TERMINAL_TAB_DRAG_MIME) || terminalTabDragId || "";
+}
+
+function canDropTerminalTabOnTarget(sourceTabId, target) {
+  if (!sourceTabId || !terminalTabById(sourceTabId) || !target) return false;
+  if (target.type === "group") {
+    const groupTabs = target.group?.tabs || [];
+    return groupTabs.length > 0 && !groupTabs.some((tab) => tab.id === sourceTabId);
+  }
+  return Boolean(target.tabId && target.tabId !== sourceTabId && terminalTabById(target.tabId));
+}
+
+function clearTerminalTabDragState() {
+  terminalTabDragId = null;
+  document.body.classList.remove("terminal-tab-dragging");
+  elements.tabBar?.querySelectorAll(".terminal-tab-dragging, .terminal-tab-drag-over").forEach((item) => {
+    item.classList.remove("terminal-tab-dragging", "terminal-tab-drag-over");
+  });
+}
+
+function bindTerminalTabDragAndDrop(element, { sourceTabId = "", target = null } = {}) {
+  if (!element) return;
+  if (sourceTabId) {
+    element.draggable = true;
+    element.dataset.dragTabId = sourceTabId;
+    element.addEventListener("dragstart", (event) => {
+      if (event.target?.closest?.(".terminal-tab-close, .terminal-tab-group-add")) {
+        event.preventDefault();
+        return;
+      }
+      terminalTabDragId = sourceTabId;
+      document.body.classList.add("terminal-tab-dragging");
+      element.classList.add("terminal-tab-dragging");
+      try {
+        event.dataTransfer?.setData(TERMINAL_TAB_DRAG_MIME, sourceTabId);
+        event.dataTransfer?.setData("text/plain", terminalTabById(sourceTabId)?.title || sourceTabId);
+        if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+      } catch {
+        // Ignore browser drag payload restrictions; same-page state still carries the tab id.
+      }
+    });
+    element.addEventListener("dragend", clearTerminalTabDragState);
+  }
+  if (!target) return;
+  element.addEventListener("dragover", (event) => {
+    const sourceTabIdFromEvent = terminalTabDragIdFromEvent(event);
+    if (!canDropTerminalTabOnTarget(sourceTabIdFromEvent, target)) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    element.classList.add("terminal-tab-drag-over");
+    if (target.type === "group") setOpenTerminalTabGroup(target.group?.key);
+  });
+  element.addEventListener("dragleave", (event) => {
+    if (event.relatedTarget && element.contains(event.relatedTarget)) return;
+    element.classList.remove("terminal-tab-drag-over");
+  });
+  element.addEventListener("drop", (event) => {
+    const sourceTabIdFromEvent = terminalTabDragIdFromEvent(event);
+    element.classList.remove("terminal-tab-drag-over");
+    if (!canDropTerminalTabOnTarget(sourceTabIdFromEvent, target)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    handleTerminalTabDrop(sourceTabIdFromEvent, target);
+  });
+}
+
+function handleTerminalTabDrop(sourceTabId, target) {
+  const sourceTab = terminalTabById(sourceTabId);
+  if (!sourceTab) return;
+  let group = null;
+  if (target.type === "group" && target.group) {
+    if (target.group.custom && target.group.customGroupId) {
+      group = addTabsToTerminalCustomGroup(target.group.customGroupId, [sourceTabId]);
+    } else {
+      group = createTerminalCustomGroup([...target.group.tabs.map((tab) => tab.id), sourceTabId]);
+    }
+  } else if (target.tabId) {
+    const targetTab = terminalTabById(target.tabId);
+    if (!targetTab || targetTab.id === sourceTabId) return;
+    const targetGroupId = terminalCustomGroupIdForTab(targetTab.id);
+    group = targetGroupId ? addTabsToTerminalCustomGroup(targetGroupId, [sourceTabId]) : createTerminalCustomGroup([targetTab.id, sourceTabId]);
+  }
+  if (!group) return;
+  clearOpenTerminalTabGroup(null, { force: true });
+  clearTerminalTabDragState();
+  renderTabs();
+  addEvent(`added ${sourceTab.title || "tab"} to ${normalizeTerminalCustomGroupTitle(group.title).toLowerCase()}`, "info");
 }
 
 function removeStreamingThinkingBubble() {
@@ -4261,13 +4512,39 @@ function tabCwdGroupKey(tab) {
 }
 
 function tabCwdGroups() {
+  syncTerminalCustomGroupsWithTabs(tabs);
   const groups = [];
   const byKey = new Map();
+  const customByTab = terminalCustomGroupByTabId();
+  const customGroups = new Map([...terminalCustomGroups.values()].map((group) => [group.id, {
+    key: `custom:${group.id}`,
+    custom: true,
+    customGroupId: group.id,
+    title: normalizeTerminalCustomGroupTitle(group.title),
+    tabs: [],
+    cwd: "",
+  }]));
+
   for (const tab of tabs) {
+    const customGroupId = customByTab.get(tab.id);
+    if (customGroupId) customGroups.get(customGroupId)?.tabs.push(tab);
+  }
+
+  const emittedCustomGroups = new Set();
+  for (const tab of tabs) {
+    const customGroupId = customByTab.get(tab.id);
+    if (customGroupId) {
+      const customGroup = customGroups.get(customGroupId);
+      if (customGroup && !emittedCustomGroups.has(customGroupId)) {
+        groups.push(customGroup);
+        emittedCustomGroups.add(customGroupId);
+      }
+      continue;
+    }
     const key = tabCwdGroupKey(tab);
     let group = byKey.get(key);
     if (!group) {
-      group = { key, cwd: tab.cwd || "", tabs: [] };
+      group = { key, custom: false, cwd: tab.cwd || "", tabs: [] };
       byKey.set(key, group);
       groups.push(group);
     }
@@ -4280,6 +4557,18 @@ function tabGroupTitle(cwd, fallback = "cwd") {
   const normalized = normalizeDisplayPath(cwd).replace(/\/+$/, "");
   const leaf = normalized.split("/").filter(Boolean).pop() || normalized || fallback;
   return leaf.length > 26 ? `…${leaf.slice(-25)}` : leaf;
+}
+
+function terminalDisplayGroupTitle(group, fallback = "group") {
+  return group?.custom ? normalizeTerminalCustomGroupTitle(group.title, "Custom group") : tabGroupTitle(group?.cwd, fallback);
+}
+
+function terminalDisplayGroupDetail(group, fallback = "group") {
+  if (!group?.custom) return normalizeDisplayPath(group?.cwd || fallback);
+  const cwdLabels = [...new Set((group.tabs || []).map((tab) => normalizeDisplayPath(tab.cwd || "")).filter(Boolean))];
+  if (!cwdLabels.length) return "custom group";
+  if (cwdLabels.length === 1) return cwdLabels[0];
+  return `${cwdLabels[0]} + ${cwdLabels.length - 1} cwd${cwdLabels.length === 2 ? "" : "s"}`;
 }
 
 function terminalTabMeta(tab, indicator) {
@@ -4299,12 +4588,15 @@ function renderTerminalTab(tab) {
   const isActive = tab.id === activeTabId;
   const indicator = tabIndicator(tab);
   const wrapper = make("div", `terminal-tab activity-${indicator.state}${isActive ? " active" : ""}${tab.running ? "" : " stopped"}`);
+  wrapper.dataset.tabId = tab.id;
+  bindTerminalTabDragAndDrop(wrapper, { sourceTabId: tab.id, target: { type: "tab", tabId: tab.id } });
   const button = make("button", "terminal-tab-button");
   button.type = "button";
+  button.draggable = false;
   button.setAttribute("role", "tab");
   button.setAttribute("aria-selected", isActive ? "true" : "false");
   button.setAttribute("aria-label", `${tab.title}: ${indicator.label}`);
-  button.title = `${tab.title} · ${indicator.label}${tab.running ? ` · pid ${tab.pid || "starting"}` : " · stopped"}`;
+  button.title = `${tab.title} · ${indicator.label}${tab.running ? ` · pid ${tab.pid || "starting"}` : " · stopped"} · drag onto another tab or group to group`;
   appendTerminalTabContent(button, { title: tab.title, indicator, meta: terminalTabMeta(tab, indicator) });
   button.addEventListener("click", () => switchTab(tab.id));
   wrapper.append(button);
@@ -4312,6 +4604,7 @@ function renderTerminalTab(tab) {
   if (tabs.length > 1) {
     const close = make("button", "terminal-tab-close", "×");
     close.type = "button";
+    close.draggable = false;
     close.title = `Close ${tab.title}`;
     close.setAttribute("aria-label", `Close ${tab.title}`);
     close.addEventListener("click", (event) => {
@@ -4324,16 +4617,19 @@ function renderTerminalTab(tab) {
   return wrapper;
 }
 
-function renderTerminalTabGroupItem(tab) {
+function renderTerminalTabGroupItem(tab, group) {
   const isActive = tab.id === activeTabId;
   const indicator = tabIndicator(tab);
   const item = make("div", `terminal-tab-group-item activity-${indicator.state}${isActive ? " active" : ""}${tab.running ? "" : " stopped"}`);
+  item.dataset.tabId = tab.id;
+  bindTerminalTabDragAndDrop(item, { sourceTabId: tab.id, target: group?.custom ? { type: "group", group } : { type: "tab", tabId: tab.id } });
   const button = make("button", "terminal-tab-button terminal-tab-group-item-button");
   button.type = "button";
+  button.draggable = false;
   button.setAttribute("role", "tab");
   button.setAttribute("aria-selected", isActive ? "true" : "false");
   button.setAttribute("aria-label", `${tab.title}: ${indicator.label}`);
-  button.title = `${tab.title} · ${indicator.label}${tab.running ? ` · pid ${tab.pid || "starting"}` : " · stopped"}`;
+  button.title = `${tab.title} · ${indicator.label}${tab.running ? ` · pid ${tab.pid || "starting"}` : " · stopped"} · drag onto another tab or group to group`;
   appendTerminalTabContent(button, { title: tab.title, indicator, meta: terminalTabMeta(tab, indicator) });
   button.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -4344,6 +4640,7 @@ function renderTerminalTabGroupItem(tab) {
   if (tabs.length > 1) {
     const close = make("button", "terminal-tab-close terminal-tab-group-item-close", "×");
     close.type = "button";
+    close.draggable = false;
     close.title = `Close ${tab.title}`;
     close.setAttribute("aria-label", `Close ${tab.title}`);
     close.addEventListener("click", (event) => {
@@ -4357,6 +4654,7 @@ function renderTerminalTabGroupItem(tab) {
 }
 
 function shouldRenderTerminalTabGroup(group, groupCount) {
+  if (group.custom) return group.tabs.length > 1;
   return groupCount > 1 && group.tabs.length > 1 && Boolean(group.cwd);
 }
 
@@ -4366,11 +4664,13 @@ function renderTerminalTabGroup(group, groupCount = 1) {
   const isActive = groupTabs.some((tab) => tab.id === activeTabId);
   const isStopped = groupTabs.every((tab) => !tab.running);
   const indicator = tabGroupIndicator(groupTabs);
-  const cwdTitle = tabGroupTitle(group.cwd, activeGroupTab?.title || "cwd");
-  const activeTitle = activeGroupTab?.title || cwdTitle;
-  const displayCwd = normalizeDisplayPath(group.cwd || cwdTitle);
-  const wrapper = make("div", `terminal-tab terminal-tab-group activity-${indicator.state}${isActive ? " active" : ""}${isStopped ? " stopped" : ""}`);
+  const groupTitle = terminalDisplayGroupTitle(group, activeGroupTab?.title || "group");
+  const activeTitle = activeGroupTab?.title || groupTitle;
+  const groupDetail = terminalDisplayGroupDetail(group, groupTitle);
+  const wrapper = make("div", `terminal-tab terminal-tab-group${group.custom ? " terminal-tab-custom-group" : ""} activity-${indicator.state}${isActive ? " active" : ""}${isStopped ? " stopped" : ""}`);
   wrapper.dataset.groupKey = group.key;
+  if (group.customGroupId) wrapper.dataset.customGroupId = group.customGroupId;
+  bindTerminalTabDragAndDrop(wrapper, { sourceTabId: activeGroupTab?.id || "", target: { type: "group", group } });
   wrapper.addEventListener("pointerenter", () => setOpenTerminalTabGroup(group.key));
   wrapper.addEventListener("pointerleave", () => clearOpenTerminalTabGroup(group.key));
   wrapper.addEventListener("focusin", () => setOpenTerminalTabGroup(group.key));
@@ -4381,21 +4681,23 @@ function renderTerminalTabGroup(group, groupCount = 1) {
   });
   const button = make("button", "terminal-tab-button terminal-tab-group-button");
   button.type = "button";
+  button.draggable = false;
   button.setAttribute("role", "tab");
   button.setAttribute("aria-selected", isActive ? "true" : "false");
   button.setAttribute("aria-haspopup", "true");
   button.setAttribute("aria-expanded", group.key === openTerminalTabGroupKey ? "true" : "false");
-  button.setAttribute("aria-label", `${cwdTitle} group: ${groupTabs.length} tabs, ${indicator.label}. Active ${activeTitle}`);
-  button.title = `${activeTitle} · ${displayCwd} · ${groupTabs.length} tabs · ${indicator.label}`;
-  appendTerminalTabContent(button, { title: activeTitle, indicator, meta: `${cwdTitle} · ${indicator.meta}`, count: groupTabs.length });
+  button.setAttribute("aria-label", `${groupTitle} ${group.custom ? "custom" : "cwd"} group: ${groupTabs.length} tabs, ${indicator.label}. Active ${activeTitle}`);
+  button.title = `${activeTitle} · ${groupTitle} · ${groupDetail} · ${groupTabs.length} tabs · ${indicator.label} · drop tabs here to add to group`;
+  appendTerminalTabContent(button, { title: activeTitle, indicator, meta: `${groupTitle} · ${indicator.meta}`, count: groupTabs.length });
   button.addEventListener("click", () => switchTab(activeGroupTab.id));
   wrapper.append(button);
 
-  if (groupCount > 1) {
+  if (groupCount > 1 || group.custom) {
     const close = make("button", "terminal-tab-close terminal-tab-group-close", "×");
     close.type = "button";
-    close.title = `Close ${displayCwd} group`;
-    close.setAttribute("aria-label", `Close ${displayCwd} group`);
+    close.draggable = false;
+    close.title = `Close ${groupTitle} group`;
+    close.setAttribute("aria-label", `Close ${groupTitle} group`);
     close.addEventListener("click", (event) => {
       event.stopPropagation();
       closeTerminalTabGroup(group);
@@ -4405,16 +4707,17 @@ function renderTerminalTabGroup(group, groupCount = 1) {
 
   const menu = make("div", "terminal-tab-group-menu");
   menu.setAttribute("role", "group");
-  menu.setAttribute("aria-label", `${displayCwd} tabs`);
-  for (const tab of groupTabs) menu.append(renderTerminalTabGroupItem(tab));
+  menu.setAttribute("aria-label", `${groupTitle} tabs`);
+  for (const tab of groupTabs) menu.append(renderTerminalTabGroupItem(tab, group));
 
   const add = make("button", "terminal-tab-group-add", "+ Tab");
   add.type = "button";
-  add.title = `Add tab in ${displayCwd}`;
-  add.setAttribute("aria-label", `Add tab in ${displayCwd}`);
+  add.draggable = false;
+  add.title = `Add tab in ${groupTitle}`;
+  add.setAttribute("aria-label", `Add tab in ${groupTitle}`);
   add.addEventListener("click", (event) => {
     event.stopPropagation();
-    createTerminalTab(group.cwd, { triggerButton: add });
+    createTerminalTab(activeGroupTab?.cwd || group.cwd || currentDirectoryForNewTab(), { triggerButton: add, customGroupId: group.customGroupId || null });
   });
   menu.append(add);
   wrapper.append(menu);
@@ -4543,7 +4846,7 @@ function currentDirectoryForNewTab() {
   return latestWorkspace?.cwd || activeTab()?.cwd || "";
 }
 
-async function createTerminalTab(cwd = currentDirectoryForNewTab(), { triggerButton = elements.newTabButton } = {}) {
+async function createTerminalTab(cwd = currentDirectoryForNewTab(), { triggerButton = elements.newTabButton, customGroupId = null } = {}) {
   setMobileTabsExpanded(false);
   setNewTabMenuOpen(false);
   const resolvedCwd = cwd || currentDirectoryForNewTab();
@@ -4558,6 +4861,7 @@ async function createTerminalTab(cwd = currentDirectoryForNewTab(), { triggerBut
     tabs = response.data?.tabs || tabs;
     syncTabMetadata(tabs);
     const tab = response.data?.tab;
+    if (tab?.id && customGroupId && terminalCustomGroups.has(customGroupId)) addTabsToTerminalCustomGroup(customGroupId, [tab.id]);
     renderTabs();
     if (tab?.id) {
       await switchTab(tab.id);
@@ -4657,6 +4961,7 @@ async function closeTerminalTabs(tabIds, { label = "selected terminal tabs" } = 
       appRunnerDataByTab.delete(id);
       tabMessagesCache.delete(id);
     }
+    syncTerminalCustomGroupsWithTabs(tabs);
     clearOpenTerminalTabGroup(null, { force: true });
 
     const activeTabNeedsFallback = closedIds.includes(activeTabId) || !tabs.some((item) => item.id === activeTabId);
@@ -4689,7 +4994,7 @@ async function closeTerminalTab(tabId) {
 }
 
 async function closeTerminalTabGroup(group) {
-  const title = tabGroupTitle(group.cwd, group.tabs[0]?.title || "cwd");
+  const title = terminalDisplayGroupTitle(group, group.tabs[0]?.title || "group");
   await closeTerminalTabs(group.tabs.map((tab) => tab.id), { label: `${title} group` });
 }
 
@@ -18549,6 +18854,7 @@ initializeFastPicks().catch((error) => addEvent(`failed to initialize path fast 
 restoreAgentDoneNotificationsSetting();
 restoreThinkingVisibilitySetting();
 restoreTerminalTabsLayoutSetting();
+restoreTerminalCustomGroups();
 restoreToolOutputExpansionSetting();
 restoreWorkspaceDashboardState();
 restoreSidePanelSectionState();
