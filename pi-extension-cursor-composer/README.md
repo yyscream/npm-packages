@@ -95,6 +95,10 @@ Provider usage/status behavior:
 - Set `CURSOR_COMPOSER_PROVIDER_HEARTBEAT_MS=0` or `false` to disable heartbeats entirely.
 - Set `CURSOR_COMPOSER_PROVIDER_AUTO_REVIEW=false` to disable Cursor local auto-review.
 - Set `CURSOR_COMPOSER_PROVIDER_SANDBOX=true` to enable Cursor SDK sandboxing for native model runs.
+- Large Pi `toolResult` messages are truncated by default before they are replayed into the native provider prompt. This keeps previous `read`/`bash` dumps from being resent to Cursor on every turn while preserving the message header, preview, original size, and instructions to re-read/rerun if exact content is needed.
+- Set `CURSOR_COMPOSER_PROVIDER_TRUNCATE_TOOL_RESULTS=false` to restore the previous full tool-result replay behavior.
+- Tune truncation with `CURSOR_COMPOSER_PROVIDER_TOOL_RESULT_MAX_BYTES` and `CURSOR_COMPOSER_PROVIDER_TOOL_RESULT_MAX_LINES`.
+
 
 ## Tool
 
@@ -107,3 +111,27 @@ export CURSOR_COMPOSER_REQUIRE_CONFIRMATION=false
 ```
 
 Use that only if you accept unattended Cursor SDK tool execution.
+
+## Development tests
+
+Offline serialization tests do not call Cursor:
+
+```bash
+cd pi-extension-cursor-composer
+npm install
+npm test
+```
+
+Live smoke tests call Cursor in `plan` mode and print prompt byte counts plus SDK-reported usage for baseline full replay versus optimized tool-result truncation:
+
+```bash
+cd pi-extension-cursor-composer
+CURSOR_COMPOSER_LIVE_SMOKE=true npm run smoke:cursor
+```
+
+A longer live benchmark runs the same multi-turn fixture twice — first with original full tool-result replay, then with optimized truncation — and writes JSONL records plus a summary under `benchmark-output/`:
+
+```bash
+cd pi-extension-cursor-composer
+CURSOR_COMPOSER_LIVE_BENCHMARK=true npm run benchmark:cursor
+```

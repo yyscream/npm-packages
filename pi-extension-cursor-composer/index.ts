@@ -17,6 +17,7 @@ import {
 	type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { serializeProviderContext } from "./context.ts";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -652,43 +653,6 @@ async function runCursorComposer(options: RunCursorComposerOptions): Promise<Cur
 	}
 }
 
-function contentToText(content: unknown): string {
-	if (typeof content === "string") return content;
-	if (!Array.isArray(content)) return normalizeText(content);
-	return content
-		.map((block: any) => {
-			if (block?.type === "text") return block.text ?? "";
-			if (block?.type === "thinking") return `[thinking]\n${block.thinking ?? ""}`;
-			if (block?.type === "toolCall") return `[tool call: ${block.name ?? "unknown"}]\n${normalizeText(block.arguments)}`;
-			if (block?.type === "image") return "[image omitted by Pi Cursor provider wrapper]";
-			return normalizeText(block);
-		})
-		.filter(Boolean)
-		.join("\n");
-}
-
-function serializeProviderContext(context: Context): string {
-	const lines: string[] = [];
-	if ((context as any).systemPrompt) {
-		lines.push("# Pi system prompt", String((context as any).systemPrompt), "");
-	}
-	lines.push(
-		"# Task",
-		"You are being called from Pi through the Cursor SDK Composer 2.5 provider wrapper.",
-		"Respond to the latest user request. If you modify files, summarize the exact changes and verification.",
-		"",
-		"# Conversation",
-	);
-	for (const message of ((context as any).messages ?? []) as any[]) {
-		if (message.role === "toolResult") {
-			lines.push(`## toolResult ${message.toolName ?? "tool"}`, contentToText(message.content), "");
-		} else {
-			lines.push(`## ${message.role ?? "message"}`, contentToText(message.content), "");
-		}
-	}
-	return lines.join("\n").trim();
-}
-
 function thinkingFromProviderOptions(options?: SimpleStreamOptions): Thinking | undefined {
 	const value = options?.reasoning;
 	if (value === "medium" || value === "high") return value;
@@ -728,6 +692,7 @@ function streamCursorComposerProvider(
 	const stream = createAssistantMessageEventStream();
 
 	(async () => {
+		const thinking = thinkingFromProviderOptions(options);
 		const promptText = serializeProviderContext(context);
 		const output: AssistantMessage = {
 			role: "assistant",
@@ -817,7 +782,7 @@ function streamCursorComposerProvider(
 				cwd: process.cwd(),
 				apiKey,
 				mode: "agent",
-				thinking: thinkingFromProviderOptions(options),
+				thinking,
 				autoReview: providerAutoReview(),
 				sandbox: providerSandbox(),
 				signal: options?.signal,
@@ -1004,7 +969,7 @@ export default function cursorComposerExtension(pi: ExtensionAPI): void {
 				sdkStatus = error instanceof Error ? error.message : String(error);
 			}
 			ctx.ui.notify(
-				`${ENV_KEY}: ${key.apiKey ? `configured via ${key.source}${key.path ? ` (${key.path})` : ""}` : "missing"}\n@cursor/sdk: ${sdkStatus}\nPi provider: ${PI_MODEL_REF}\nPricing: ${describeCursorComposerPricing()}\nContext: ${CURSOR_COMPOSER_CONTEXT_WINDOW.toLocaleString()} tokens\nScoped models: ${scopedStatus}`,
+				`${ENV_KEY}: ${key.apiKey ? `configured via ${key.source}${key.path ? ` (${key.path})` : ""}` : "missing"}\n@cursor/sdk: ${sdkStatus}\nPi provider: ${PI_MODEL_REF}\nPricing: ${describeCursorComposerPricing()}\nContext: ${CURSOR_COMPOSER_CONTEXT_WINDOW.toLocaleString()} tokens\nTool-result truncation: ${process.env.CURSOR_COMPOSER_PROVIDER_TRUNCATE_TOOL_RESULTS === "false" ? "off" : "on"}\nScoped models: ${scopedStatus}`,
 				key.apiKey && sdkStatus === "installed" ? "info" : "warning",
 			);
 		},
