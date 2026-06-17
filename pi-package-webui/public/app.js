@@ -114,6 +114,7 @@ const elements = {
   gitChangesStatus: $("#gitChangesStatus"),
   gitChangesBody: $("#gitChangesBody"),
   gitChangesRefreshButton: $("#gitChangesRefreshButton"),
+  gitChangesPullButton: $("#gitChangesPullButton"),
   gitChangesCloseButton: $("#gitChangesCloseButton"),
   modelSelect: $("#modelSelect"),
   setModelButton: $("#setModelButton"),
@@ -265,7 +266,7 @@ let foregroundReconcileTimer = null;
 let eventSource = null;
 let activeDialog = null;
 let activeGitPrDialogResolve = null;
-let gitChangesState = { loading: false, error: "", data: null, tabId: null };
+let gitChangesState = { loading: false, pulling: false, error: "", message: "", data: null, tabId: null };
 let gitChangesRequestSerial = 0;
 const gitChangesUntrackedContentRequests = new Set();
 let nativeCommandTabId = null;
@@ -6382,13 +6383,23 @@ function renderGitChangesOverview(data) {
   return overview;
 }
 
+function gitDiffDisplayLine(row, side) {
+  const type = row.type || "context";
+  if (side === "old") {
+    const text = row.left ?? "";
+    return row.oldNumber !== "" && (type === "removed" || type === "changed") ? `-${text}` : text;
+  }
+  const text = row.right ?? "";
+  return row.newNumber !== "" && (type === "added" || type === "changed") ? `+${text}` : text;
+}
+
 function renderGitDiffRow(row) {
   const node = make("div", `git-diff-row ${row.type || "context"}`.trim());
   node.append(
     make("span", "git-diff-line-number old", row.oldNumber === "" ? "" : String(row.oldNumber)),
-    make("code", "git-diff-line old", row.left ?? ""),
+    make("code", "git-diff-line old", gitDiffDisplayLine(row, "old")),
     make("span", "git-diff-line-number new", row.newNumber === "" ? "" : String(row.newNumber)),
-    make("code", "git-diff-line new", row.right ?? ""),
+    make("code", "git-diff-line new", gitDiffDisplayLine(row, "new")),
   );
   return node;
 }
@@ -6605,16 +6616,28 @@ function gitChangesGeneratedLabel(data) {
 
 function renderGitChangesDialog() {
   if (!elements.gitChangesDialog || !elements.gitChangesBody) return;
-  const { loading, error, data } = gitChangesState;
-  if (elements.gitChangesTitle) elements.gitChangesTitle.textContent = "Uncommitted Changes";
-  if (elements.gitChangesSubtitle) elements.gitChangesSubtitle.textContent = data?.root ? `${data.branch || "detached"} · ${data.root}` : "Current tab git diff";
+  const { loading, pulling, error, message, data } = gitChangesState;
+  const behind = Number(data?.remote?.behind ?? data?.summary?.behind ?? 0) || 0;
+  const canPull = behind > 0 && data?.remote?.canPull !== false;
+  const remoteNotice = !error && data?.remote?.error ? `Incoming diff unavailable: ${data.remote.error}` : "";
+  if (elements.gitChangesTitle) elements.gitChangesTitle.textContent = "Git Changes";
+  if (elements.gitChangesSubtitle) {
+    const base = data?.root ? `${data.branch || "detached"} · ${data.root}` : "Current tab git diff";
+    elements.gitChangesSubtitle.textContent = data?.remote?.upstream ? `${base} · upstream ${data.remote.upstream}` : base;
+  }
   if (elements.gitChangesRefreshButton) {
-    elements.gitChangesRefreshButton.disabled = loading;
+    elements.gitChangesRefreshButton.disabled = loading || pulling;
     elements.gitChangesRefreshButton.textContent = loading ? "Refreshing…" : "Refresh";
   }
+  if (elements.gitChangesPullButton) {
+    elements.gitChangesPullButton.disabled = loading || pulling || !canPull;
+    elements.gitChangesPullButton.textContent = pulling ? "Pulling…" : behind > 0 ? `Pull ↓${behind}` : "Pull";
+    elements.gitChangesPullButton.title = canPull ? "Run git pull --ff-only for the current repository" : "No remote commits to pull";
+  }
   if (elements.gitChangesStatus) {
-    elements.gitChangesStatus.className = `git-changes-status ${error ? "error" : "muted"}`;
-    elements.gitChangesStatus.textContent = error || (loading ? "Loading git diff…" : data ? gitChangesGeneratedLabel(data) : "");
+    const statusText = error || (pulling ? "Pulling changes…" : loading ? "Loading git diff…" : message || remoteNotice || (data ? gitChangesGeneratedLabel(data) : ""));
+    elements.gitChangesStatus.className = `git-changes-status ${error || remoteNotice ? "error" : message ? "success" : "muted"}`;
+    elements.gitChangesStatus.textContent = statusText;
     elements.gitChangesStatus.hidden = !elements.gitChangesStatus.textContent;
   }
 
@@ -6624,7 +6647,7 @@ function renderGitChangesDialog() {
     body.append(make("div", "git-changes-empty", "Loading git diff…"));
     return;
   }
-  if (error) {
+  if (error && !data) {
     body.append(make("div", "git-changes-empty error", error));
     return;
   }
@@ -6642,20 +6665,23 @@ function renderGitChangesDialog() {
   if (hasVisibleFiles) body.append(renderGitCurrentFileHeader());
   for (const entry of parsedSections) body.append(renderGitDiffSection(entry.section, entry.files));
   if (untracked.length) body.append(renderGitUntrackedSection(untracked));
-  if (!hasVisibleFiles) body.append(make("div", "git-changes-empty success", "Working tree is clean. No staged or unstaged diff."));
+  if (!hasVisibleFiles) {
+    const emptyMessage = behind > 0 ? "No textual incoming diff was available for the remote commits." : "Working tree is clean. No staged, unstaged, untracked, or incoming diff.";
+    body.append(make("div", "git-changes-empty success", emptyMessage));
+  }
   if (hasVisibleFiles) requestAnimationFrame(updateGitChangesCurrentFileHeader);
 }
 
 async function loadGitChangesDialog(tabContext = activeTabContext()) {
   const requestSerial = ++gitChangesRequestSerial;
   gitChangesUntrackedContentRequests.clear();
-  gitChangesState = { ...gitChangesState, loading: true, error: "", tabId: tabContext.tabId || activeTabId };
+  gitChangesState = { ...gitChangesState, loading: true, error: "", message: "", tabId: tabContext.tabId || activeTabId };
   renderGitChangesDialog();
   try {
     const response = await api("/api/git-changes", { tabId: tabContext.tabId });
     if (requestSerial !== gitChangesRequestSerial) return;
     if (!response.ok) throw new Error(response.error || "Failed to load git changes");
-    gitChangesState = { loading: false, error: "", data: response.data || null, tabId: tabContext.tabId || activeTabId };
+    gitChangesState = { loading: false, pulling: false, error: "", message: "", data: response.data || null, tabId: tabContext.tabId || activeTabId };
   } catch (error) {
     if (requestSerial !== gitChangesRequestSerial) return;
     gitChangesState = { ...gitChangesState, loading: false, error: error.message || String(error) };
@@ -6668,7 +6694,7 @@ function openGitChangesDialog() {
   hideFooterTooltip();
   const tabContext = activeTabContext();
   const tabId = tabContext.tabId || activeTabId;
-  gitChangesState = { loading: true, error: "", data: gitChangesState.tabId === tabId ? gitChangesState.data : null, tabId };
+  gitChangesState = { loading: true, pulling: false, error: "", message: "", data: gitChangesState.tabId === tabId ? gitChangesState.data : null, tabId };
   renderGitChangesDialog();
   if (!elements.gitChangesDialog.open) elements.gitChangesDialog.showModal();
   loadGitChangesDialog(tabContext).catch((error) => addEvent(error.message || String(error), "error"));
@@ -6679,10 +6705,46 @@ function refreshGitChangesDialog() {
   loadGitChangesDialog(tabContext).catch((error) => addEvent(error.message || String(error), "error"));
 }
 
+async function pullGitChangesDialog() {
+  const tabContext = { tabId: gitChangesState.tabId || activeTabId };
+  const behind = Number(gitChangesState.data?.remote?.behind ?? gitChangesState.data?.summary?.behind ?? 0) || 0;
+  if (behind <= 0 || gitChangesState.pulling || gitChangesState.loading) return;
+  const root = gitChangesState.data?.root || "the current repository";
+  if (!window.confirm(`Run git pull --ff-only in ${root}?`)) return;
+
+  const requestSerial = ++gitChangesRequestSerial;
+  gitChangesState = { ...gitChangesState, pulling: true, loading: false, error: "", message: "", tabId: tabContext.tabId };
+  renderGitChangesDialog();
+  try {
+    const response = await api("/api/git-changes/pull", { method: "POST", body: {}, tabId: tabContext.tabId });
+    if (requestSerial !== gitChangesRequestSerial) return;
+    if (!response.ok) {
+      const detail = [response.error, response.data?.stderr || response.data?.stdout].filter(Boolean).join("\n").trim();
+      throw new Error(detail || "Failed to pull git changes");
+    }
+    const output = String(response.data?.stdout || response.data?.stderr || "").trim();
+    gitChangesState = {
+      loading: false,
+      pulling: false,
+      error: "",
+      message: output || "Pulled remote changes successfully.",
+      data: response.data?.changes || gitChangesState.data,
+      tabId: tabContext.tabId,
+    };
+    addEvent("Pulled remote git changes.", "success");
+    requestGitFooterWebuiPayload(tabContext, { force: true });
+  } catch (error) {
+    if (requestSerial !== gitChangesRequestSerial) return;
+    gitChangesState = { ...gitChangesState, pulling: false, error: error.message || String(error) };
+    addEvent(error.message || String(error), "error");
+  }
+  renderGitChangesDialog();
+}
+
 function closeGitChangesDialog() {
   gitChangesRequestSerial += 1;
   gitChangesUntrackedContentRequests.clear();
-  gitChangesState = { ...gitChangesState, loading: false };
+  gitChangesState = { ...gitChangesState, loading: false, pulling: false };
   if (elements.gitChangesDialog?.open) elements.gitChangesDialog.close();
 }
 
@@ -18713,6 +18775,7 @@ window.addEventListener("blur", () => {
 });
 
 elements.gitChangesRefreshButton?.addEventListener("click", refreshGitChangesDialog);
+elements.gitChangesPullButton?.addEventListener("click", () => pullGitChangesDialog().catch((error) => addEvent(error.message || String(error), "error")));
 elements.gitChangesCloseButton?.addEventListener("click", closeGitChangesDialog);
 elements.gitChangesBody?.addEventListener("scroll", updateGitChangesCurrentFileHeader, { passive: true });
 elements.gitChangesDialog?.addEventListener("cancel", (event) => {
@@ -18721,7 +18784,7 @@ elements.gitChangesDialog?.addEventListener("cancel", (event) => {
 });
 elements.gitChangesDialog?.addEventListener("close", () => {
   gitChangesRequestSerial += 1;
-  gitChangesState = { ...gitChangesState, loading: false };
+  gitChangesState = { ...gitChangesState, loading: false, pulling: false };
 });
 
 elements.refreshCodexUsageButton?.addEventListener("click", () => {

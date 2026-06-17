@@ -3066,6 +3066,7 @@ async function getWorkspaceInfo(cwd, startedAt) {
 let activeGitWorkflowProcess = null;
 const GIT_CHANGES_COMMAND_TIMEOUT_MS = 5000;
 const GIT_CHANGES_DIFF_MAX_OUTPUT = 500_000;
+const GIT_PULL_TIMEOUT_MS = 15 * 60 * 1000;
 
 async function getGitRoot(cwd) {
   const result = await runCommand("git", ["rev-parse", "--show-toplevel"], { cwd, timeoutMs: 2000 });
@@ -3176,15 +3177,61 @@ async function readGitUntrackedFile(cwd, requestedPath) {
   return readGitUntrackedEntry(root, normalized);
 }
 
+async function gitUpstreamRef(root) {
+  try {
+    const upstream = await runGitReadCommand(root, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], { timeoutMs: 5000, maxOutputLength: 10_000 });
+    return upstream.trim();
+  } catch {
+    return "";
+  }
+}
+
+async function readGitIncomingChanges(root, summary) {
+  const upstream = await gitUpstreamRef(root);
+  const remote = {
+    upstream,
+    behind: Number(summary?.behind || 0) || 0,
+    canPull: !!upstream && (Number(summary?.behind || 0) || 0) > 0,
+  };
+  if (!remote.canPull) return { remote, section: null };
+
+  const diffArgs = ["diff", "--no-ext-diff", "--no-color", "--find-renames", "--unified=0", "--src-prefix=a/", "--dst-prefix=b/", "HEAD..@{upstream}"];
+  try {
+    const diff = await runGitReadCommand(root, diffArgs);
+    return {
+      remote,
+      section: {
+        key: "incoming",
+        label: `Incoming from ${upstream}`,
+        command: `git diff --unified=0 HEAD..${upstream}`,
+        diff: diff.trimEnd(),
+      },
+    };
+  } catch (error) {
+    return { remote: { ...remote, error: sanitizeError(error) }, section: null };
+  }
+}
+
+async function pullGitChanges(cwd) {
+  const root = await getGitRoot(cwd);
+  const payload = gitWorkflowCommandPayload(await runGitWorkflowCommand(["pull", "--ff-only"], { cwd: root, timeoutMs: GIT_PULL_TIMEOUT_MS }));
+  if (payload.data) payload.data.root = root;
+  if (payload.ok) payload.data.changes = await readGitChanges(root);
+  else payload.error = (payload.data?.stderr || payload.data?.stdout || payload.error || "git pull --ff-only failed").trim();
+  return payload;
+}
+
 async function readGitChanges(cwd) {
   const root = await getGitRoot(cwd);
-  const diffArgs = ["diff", "--no-ext-diff", "--no-color", "--find-renames", "--src-prefix=a/", "--dst-prefix=b/"];
+  const diffArgs = ["diff", "--no-ext-diff", "--no-color", "--find-renames", "--unified=0", "--src-prefix=a/", "--dst-prefix=b/"];
   const [statusText, unstagedDiff, stagedDiff, untrackedText] = await Promise.all([
     runGitReadCommand(root, ["status", "--short", "--branch", "--untracked-files=all"], { maxOutputLength: 120_000 }),
     runGitReadCommand(root, diffArgs),
-    runGitReadCommand(root, ["diff", "--cached", "--no-ext-diff", "--no-color", "--find-renames", "--src-prefix=a/", "--dst-prefix=b/"]),
+    runGitReadCommand(root, ["diff", "--cached", "--no-ext-diff", "--no-color", "--find-renames", "--unified=0", "--src-prefix=a/", "--dst-prefix=b/"]),
     runGitReadCommand(root, ["ls-files", "--others", "--exclude-standard"], { maxOutputLength: 120_000 }),
   ]);
+  const summary = summarizeGitShortStatus(statusText);
+  const incoming = await readGitIncomingChanges(root, summary);
   const untrackedFiles = untrackedText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const untracked = await readGitUntrackedEntries(root, untrackedFiles);
   return {
@@ -3192,12 +3239,14 @@ async function readGitChanges(cwd) {
     root,
     branch: gitBranchFromStatus(statusText),
     generatedAt: new Date().toISOString(),
-    summary: summarizeGitShortStatus(statusText),
+    summary,
+    remote: incoming.remote,
     status: statusText.trimEnd(),
     sections: [
-      { key: "staged", label: "Staged", command: "git diff --cached", diff: stagedDiff.trimEnd() },
-      { key: "unstaged", label: "Unstaged", command: "git diff", diff: unstagedDiff.trimEnd() },
-    ],
+      incoming.section,
+      { key: "staged", label: "Staged", command: "git diff --cached --unified=0", diff: stagedDiff.trimEnd() },
+      { key: "unstaged", label: "Unstaged", command: "git diff --unified=0", diff: unstagedDiff.trimEnd() },
+    ].filter(Boolean),
     untracked,
   };
 }
@@ -7566,6 +7615,17 @@ const server = createServer(async (req, res) => {
       const tab = getRequestedTab(req, url);
       try {
         sendJson(res, 200, { ok: true, data: await readGitUntrackedFile(tab.cwd, url.searchParams.get("path") || "") });
+      } catch (error) {
+        sendJson(res, 200, { ok: false, error: sanitizeError(error) });
+      }
+      return;
+    }
+
+    if (url.pathname === "/api/git-changes/pull" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const tab = getRequestedTab(req, url, body);
+      try {
+        sendJson(res, 200, await pullGitChanges(tab.cwd));
       } catch (error) {
         sendJson(res, 200, { ok: false, error: sanitizeError(error) });
       }

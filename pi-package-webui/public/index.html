@@ -539,7 +539,10 @@
             <h2 id="gitChangesTitle">Uncommitted Changes</h2>
             <p id="gitChangesSubtitle" class="muted">Current tab git diff</p>
           </div>
-          <button id="gitChangesRefreshButton" type="button">Refresh</button>
+          <div class="git-changes-actions">
+            <button id="gitChangesRefreshButton" type="button">Refresh</button>
+            <button id="gitChangesPullButton" class="primary" type="button" disabled>Pull</button>
+          </div>
         </div>
         <p id="gitChangesStatus" class="git-changes-status muted" role="status" aria-live="polite"></p>
         <div id="gitChangesBody" class="git-changes-body"></div>
