@@ -674,6 +674,9 @@ assert.doesNotMatch(app, /gitWorkflowVisibleTabId|Workflow belongs to/, "guided 
 assert.match(app, /function renderReleaseNpmOutputWidget\(\)/, "release-npm live output should use a specialized Web UI renderer");
 assert.match(app, /async function refreshAppRunners\(tabContext = activeTabContext\(\)\)/, "frontend should load detected app runners for the active tab cwd");
 assert.match(app, /function renderAppRunnerWidget\(\)/, "frontend should render app runner output in the shared top widget area");
+assert.match(app, /function appRunnerFailureState\(runnerId, error[\s\S]*failed to start app runner/, "frontend should render visible app-runner start failures instead of only logging them");
+assert.match(app, /appRunnerCustomFeedback[\s\S]*Custom app runner was not saved/, "custom app-runner save failures should be shown inline in the dialog");
+assert.match(server, /function customAppRunnerUnavailableReason\(projectRoot, runner\)[\s\S]*Command is not available/, "server should explain why saved custom app runners are unavailable");
 assert.match(server, /url\.pathname === "\/api\/app-runners" && req\.method === "GET"/, "server should expose detected app runners for the active tab cwd");
 assert.match(server, /url\.pathname === "\/api\/app-runner" && req\.method === "POST"/, "server should start selected app runners directly");
 assert.match(server, /function addGoRunner\(runners, cwd\)[\s\S]*Go\/Golang app entry/, "server should detect Go\/Golang app runners");

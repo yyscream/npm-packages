@@ -640,7 +640,8 @@ function makeHttpError(statusCode, message) {
 }
 
 function sendError(res, statusCode, error) {
-  sendJson(res, statusCode, { ok: false, error: sanitizeError(error) });
+  const message = statusCode >= 500 ? sanitizeError(error) : formatCliError(error);
+  sendJson(res, statusCode, { ok: false, error: message });
 }
 
 function formatBytes(bytes) {
@@ -1627,22 +1628,85 @@ function normalizeCustomRunnerDefinition(raw, projectRoot, { strict = false } = 
   return { id, label, command, path: filePath, args };
 }
 
-async function readAppRunnerConfig(projectRoot) {
+function customAppRunnerDiagnostic(severity, message, runner = {}) {
+  const source = runner && typeof runner === "object" ? runner : {};
+  return {
+    severity,
+    message,
+    runnerId: source.id || "",
+    runnerLabel: source.label || "",
+    path: source.path || source.projectFile || "",
+  };
+}
+
+function directCustomRunnerUnavailableReason(filePath, stats) {
+  if (process.platform !== "win32" && stats && (stats.mode & 0o111) === 0) {
+    return `Path is not executable: ${filePath}. Run chmod +x ${filePath} or set Command to bash, python3, node, etc.`;
+  }
+  return "";
+}
+
+async function customAppRunnerUnavailableReason(projectRoot, runner) {
+  const filePath = runner.path;
+  let stats;
+  try {
+    stats = await fileStatsIfExists(resolveProjectRelativePath(projectRoot, filePath));
+  } catch (error) {
+    return `Cannot access path ${filePath}: ${formatCliError(error)}`;
+  }
+  if (!stats?.isFile()) return `Path to file does not exist: ${filePath}`;
+  const command = cleanCustomRunnerCommand(runner.command);
+  const directReason = command === "./" ? directCustomRunnerUnavailableReason(filePath, stats) : "";
+  if (directReason) return directReason;
+  const commandParts = customRunnerCommandParts(command);
+  if (command !== "./" && !await appRunnerCommandAvailable(commandParts[0], projectRoot)) return `Command is not available: ${commandParts[0]}`;
+  return "";
+}
+
+async function readAppRunnerConfig(projectRoot, { strictRead = false } = {}) {
   const configPath = path.join(projectRoot, APP_RUNNER_CONFIG_FILE);
-  const parsed = await readJsonFileIfExists(configPath);
-  const source = parsed && typeof parsed === "object" ? parsed : {};
+  let source = {};
+  const diagnostics = [];
+  try {
+    const parsed = JSON.parse(await readFile(configPath, "utf8"));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      source = parsed;
+    } else {
+      const message = `${APP_RUNNER_CONFIG_FILE} must contain a JSON object`;
+      if (strictRead) throw makeHttpError(400, message);
+      diagnostics.push(customAppRunnerDiagnostic("error", message));
+    }
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      const message = `Cannot read ${APP_RUNNER_CONFIG_FILE}: ${formatCliError(error)}`;
+      if (strictRead) throw makeHttpError(400, message);
+      diagnostics.push(customAppRunnerDiagnostic("error", message));
+      console.warn(`failed to read custom app runner config ${configPath}: ${sanitizeError(error)}`);
+    }
+  }
+  if (source.runners !== undefined && !Array.isArray(source.runners)) {
+    const message = `${APP_RUNNER_CONFIG_FILE} runners must be an array`;
+    if (strictRead) throw makeHttpError(400, message);
+    diagnostics.push(customAppRunnerDiagnostic("error", message));
+  }
   const rawRunners = Array.isArray(source.runners) ? source.runners : [];
   const runners = [];
   for (const raw of rawRunners) {
     try {
       const runner = normalizeCustomRunnerDefinition(raw, projectRoot);
-      if (!runners.some((item) => item.id === runner.id)) runners.push(runner);
+      if (runners.some((item) => item.id === runner.id)) {
+        diagnostics.push(customAppRunnerDiagnostic("warning", `Duplicate custom runner ignored: ${runner.label || runner.path || runner.id}`, runner));
+      } else {
+        runners.push(runner);
+      }
     } catch (error) {
+      const message = `Invalid custom runner ignored: ${formatCliError(error)}`;
+      diagnostics.push(customAppRunnerDiagnostic("error", message, raw));
       console.warn(`skipping invalid custom app runner in ${configPath}: ${sanitizeError(error)}`);
     }
     if (runners.length >= APP_RUNNER_CUSTOM_LIMIT) break;
   }
-  return { projectRoot, configPath, runners };
+  return { projectRoot, configPath, runners, diagnostics };
 }
 
 async function writeAppRunnerConfig(projectRoot, runners) {
@@ -1660,15 +1724,12 @@ async function writeAppRunnerConfig(projectRoot, runners) {
 
 async function customAppRunnerCandidate(projectRoot, configPath, runner) {
   const filePath = runner.path;
-  const absolutePath = resolveProjectRelativePath(projectRoot, filePath);
-  const stats = await fileStatsIfExists(absolutePath);
-  if (!stats?.isFile()) return null;
+  if (await customAppRunnerUnavailableReason(projectRoot, runner)) return null;
   const command = cleanCustomRunnerCommand(runner.command);
   const args = parseCustomRunnerArgs(runner.args);
   const commandParts = customRunnerCommandParts(command);
   const effectiveCommand = command === "./" ? `./${filePath}` : commandParts[0];
   const effectiveArgs = command === "./" ? args : [...commandParts.slice(1), filePath, ...args];
-  if (command !== "./" && !await appRunnerCommandAvailable(commandParts[0], projectRoot)) return null;
   return appRunnerCandidate({
     id: appRunnerId("custom", runner.id),
     label: runner.label || path.basename(filePath),
@@ -1696,24 +1757,32 @@ async function addCustomAppRunners(runners, cwd) {
 async function getCustomAppRunnerConfigData(tab) {
   const projectRoot = await findAppRunnerProjectRoot(tab?.cwd || options.cwd);
   const config = await readAppRunnerConfig(projectRoot);
+  const runners = [];
+  for (const runner of config.runners) {
+    const unavailableReason = await customAppRunnerUnavailableReason(projectRoot, runner);
+    runners.push({
+      ...publicCustomRunnerDefinition(runner),
+      available: !unavailableReason,
+      unavailableReason,
+    });
+  }
   return {
     projectRoot,
     displayProjectRoot: displayPath(projectRoot),
     configFile: config.configPath,
     displayConfigFile: displayPath(config.configPath),
     relativeConfigFile: APP_RUNNER_CONFIG_FILE,
-    runners: config.runners.map(publicCustomRunnerDefinition),
+    runners,
+    diagnostics: config.diagnostics,
   };
 }
 
 async function saveCustomAppRunner(tab, rawRunner) {
   const projectRoot = await findAppRunnerProjectRoot(tab?.cwd || options.cwd);
-  const config = await readAppRunnerConfig(projectRoot);
+  const config = await readAppRunnerConfig(projectRoot, { strictRead: true });
   const normalized = normalizeCustomRunnerDefinition(rawRunner, projectRoot, { strict: true });
-  const stats = await fileStatsIfExists(resolveProjectRelativePath(projectRoot, normalized.path));
-  if (!stats?.isFile()) throw makeHttpError(400, `Path to file does not exist: ${normalized.path}`);
-  const commandParts = customRunnerCommandParts(normalized.command);
-  if (normalized.command !== "./" && !await appRunnerCommandAvailable(commandParts[0], projectRoot)) throw makeHttpError(400, `Command is not available: ${commandParts[0]}`);
+  const unavailableReason = await customAppRunnerUnavailableReason(projectRoot, normalized);
+  if (unavailableReason) throw makeHttpError(400, unavailableReason);
   const runners = config.runners.filter((runner) => runner.id !== normalized.id);
   if (runners.length >= APP_RUNNER_CUSTOM_LIMIT) throw makeHttpError(400, `Custom runner limit reached (${APP_RUNNER_CUSTOM_LIMIT})`);
   runners.push(normalized);

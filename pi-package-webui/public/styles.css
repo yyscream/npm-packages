@@ -5801,10 +5801,40 @@ button.composer-skill-tag:focus-visible {
   gap: 0.6rem;
   align-items: center;
 }
+.app-runner-custom-item.unavailable {
+  border-color: rgba(243, 139, 168, 0.32);
+}
 .app-runner-custom-item-details {
   display: grid;
   gap: 0.18rem;
   min-width: 0;
+}
+.app-runner-custom-warning,
+.app-runner-custom-feedback {
+  color: var(--danger);
+  line-height: 1.4;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+.app-runner-custom-feedback {
+  padding: 0.58rem 0.66rem;
+  border: 1px solid rgba(243, 139, 168, 0.26);
+  border-radius: 0.68rem;
+  background: rgba(243, 139, 168, 0.08);
+}
+.app-runner-custom-feedback.success {
+  color: var(--ctp-green);
+  border-color: rgba(166, 227, 161, 0.28);
+  background: rgba(166, 227, 161, 0.08);
+}
+.app-runner-custom-feedback.warning {
+  color: var(--ctp-yellow);
+  border-color: rgba(249, 226, 175, 0.28);
+  background: rgba(249, 226, 175, 0.08);
+}
+.app-runner-custom-diagnostics {
+  display: grid;
+  gap: 0.42rem;
 }
 .app-runner-custom-item-actions,
 .app-runner-custom-form-actions {

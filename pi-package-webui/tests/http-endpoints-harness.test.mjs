@@ -219,6 +219,54 @@ try {
   assert.equal(clampedMessages.body?.data?.since, 3, "since beyond the transcript should clamp to the total count");
   assert.equal((clampedMessages.body?.data?.messages || []).length, 0);
 
+  // Custom app runners: save failures must be explicit, saved runners must be runnable,
+  // and stale saved runners must explain why they are not shown in the Run menu.
+  await writeFile(path.join(cwd, "custom-runner.mjs"), "console.log('custom runner ok')\n");
+  const missingCommandRunner = await request("127.0.0.1", "/api/app-runner-config", {
+    method: "POST",
+    body: { tab: tabId, runner: { label: "Broken custom", command: "definitely-missing-pi-webui-runner", path: "custom-runner.mjs" } },
+  });
+  assert.equal(missingCommandRunner.status, 400, "saving a custom runner with a missing command should fail visibly");
+  assert.match(String(missingCommandRunner.body?.error || ""), /Command is not available: definitely-missing-pi-webui-runner/);
+
+  const savedCustomRunner = await request("127.0.0.1", "/api/app-runner-config", {
+    method: "POST",
+    body: { tab: tabId, runner: { label: "Custom node", command: process.execPath, path: "custom-runner.mjs" } },
+    timeoutMs: 10_000,
+  });
+  assert.equal(savedCustomRunner.status, 200, `saving a valid custom runner should succeed: ${savedCustomRunner.body?.error || ""}`);
+  const customConfigRunner = savedCustomRunner.body?.data?.customRunnerConfig?.runners?.find((runner) => runner.label === "Custom node");
+  assert.equal(customConfigRunner?.available, true, "saved custom runner config should mark runnable entries available");
+  const customRunner = savedCustomRunner.body?.data?.runners?.find((runner) => runner.custom === true && runner.label === "Custom node");
+  assert.ok(customRunner?.id, "saved available custom runner should appear in detected app runners");
+
+  const customRunStart = await request("127.0.0.1", "/api/app-runner", {
+    method: "POST",
+    body: { tab: tabId, runnerId: customRunner.id },
+    timeoutMs: 10_000,
+  });
+  assert.equal(customRunStart.status, 200, `custom runner start should return ok: ${customRunStart.body?.error || ""}`);
+  let customRunState = customRunStart;
+  for (let attempt = 0; attempt < 50; attempt++) {
+    if (customRunState.body?.data?.activeRun?.status && customRunState.body.data.activeRun.status !== "running") break;
+    await delay(100);
+    customRunState = await request("127.0.0.1", `/api/app-runners?tab=${encodeURIComponent(tabId)}`, { timeoutMs: 5_000 });
+  }
+  assert.equal(customRunState.body?.data?.activeRun?.status, "done", "custom runner should finish successfully");
+  assert.match((customRunState.body?.data?.activeRun?.lines || []).join("\n"), /custom runner ok/, "custom runner output should be captured");
+  await request("127.0.0.1", "/api/app-runner/clear", { method: "POST", body: { tab: tabId } });
+
+  await writeFile(path.join(cwd, ".pi-webui-runners.json"), `${JSON.stringify({
+    version: 1,
+    runners: [{ id: "broken-custom", label: "Broken custom", command: "definitely-missing-pi-webui-runner", path: "custom-runner.mjs" }],
+  }, null, 2)}\n`);
+  const staleCustomRunner = await request("127.0.0.1", `/api/app-runners?tab=${encodeURIComponent(tabId)}`, { timeoutMs: 10_000 });
+  assert.equal(staleCustomRunner.status, 200);
+  const brokenConfigRunner = staleCustomRunner.body?.data?.customRunnerConfig?.runners?.find((runner) => runner.label === "Broken custom");
+  assert.equal(brokenConfigRunner?.available, false, "unavailable saved custom runners should be flagged in config data");
+  assert.match(String(brokenConfigRunner?.unavailableReason || ""), /Command is not available: definitely-missing-pi-webui-runner/);
+  assert.equal(staleCustomRunner.body?.data?.runners?.some((runner) => runner.label === "Broken custom"), false, "unavailable custom runners should not appear in runnable menu data");
+
   // Native slash command routed through the adapter (/copy → get_last_assistant_text).
   const copy = await request("127.0.0.1", "/api/prompt", {
     method: "POST",

@@ -286,6 +286,7 @@ let appRunnerMenuOpen = false;
 let busyPromptBehaviorMenuOpen = false;
 const skillUsageByTab = new Map();
 let appRunnerCustomDraft = { id: "", label: "", command: "./", path: "", args: "" };
+let appRunnerCustomFeedback = { type: "", message: "" };
 let appRunnerFileBrowserState = { open: false, loading: false, path: "", data: null, error: "" };
 let optionsMenuOpen = false;
 let availableCommands = [];
@@ -8539,6 +8540,29 @@ async function refreshAppRunners(tabContext = activeTabContext()) {
   renderWidgets();
 }
 
+function appRunnerFailureState(runnerId, error, data = activeAppRunnerData()) {
+  const runners = Array.isArray(data.runners) ? data.runners : [];
+  const runner = runners.find((item) => item.id === runnerId) || {};
+  const message = cleanStatusText(error?.message || String(error) || "Unknown app runner error");
+  const command = runner.displayCommand || runner.shortDisplayCommand || runner.label || runnerId || "app runner";
+  const timestamp = new Date().toISOString();
+  return {
+    id: `start-error:${Date.now()}`,
+    runnerId,
+    kind: runner.kind || "custom",
+    label: runner.label || "App runner failed",
+    command: runner.command || "",
+    args: Array.isArray(runner.args) ? runner.args : [],
+    displayCommand: command,
+    cwd: data.cwd || "",
+    status: "error",
+    startedAt: timestamp,
+    endedAt: timestamp,
+    lineCount: 3,
+    lines: [`$ ${command}`, "# failed to start app runner", `# ${message}`],
+  };
+}
+
 async function runAppRunner(runnerId) {
   const tabContext = activeTabContext();
   if (!tabContext.tabId || !runnerId) return;
@@ -8553,7 +8577,12 @@ async function runAppRunner(runnerId) {
     const command = response.data?.activeRun?.displayCommand || "app runner";
     addEvent(`started ${command}`, "info");
   } catch (error) {
-    if (isCurrentTabContext(tabContext)) addEvent(error.message || String(error), "error");
+    if (!isCurrentTabContext(tabContext)) return;
+    const message = cleanStatusText(error.message || String(error));
+    setAppRunnerData(tabContext.tabId, { activeRun: appRunnerFailureState(runnerId, error, activeAppRunnerData()) });
+    renderAppRunnerControls();
+    renderWidgets();
+    addEvent(`app runner failed: ${message}`, "error");
   }
 }
 
@@ -8634,9 +8663,14 @@ function activeAppRunnerCustomConfig() {
   return activeAppRunnerData().customRunnerConfig || { runners: [], projectRoot: "", displayProjectRoot: "", displayConfigFile: "" };
 }
 
-function resetAppRunnerCustomDraft() {
+function resetAppRunnerCustomDraft({ clearFeedback = true } = {}) {
   appRunnerCustomDraft = { id: "", label: "", command: "./", path: "", args: "" };
   appRunnerFileBrowserState = { open: false, loading: false, path: "", data: null, error: "" };
+  if (clearFeedback) appRunnerCustomFeedback = { type: "", message: "" };
+}
+
+function setAppRunnerCustomFeedback(type, message) {
+  appRunnerCustomFeedback = { type, message: cleanStatusText(message || "") };
 }
 
 function appRunnerRelativeDir(filePath) {
@@ -8696,8 +8730,10 @@ async function saveAppRunnerCustomRunner(form) {
   updateAppRunnerCustomDraftFrom(form);
   const payload = appRunnerCustomDraftPayload();
   if (!payload.path) {
+    setAppRunnerCustomFeedback("warning", "Custom app runner path is required.");
+    renderAppRunnerInfoDialog();
+    requestAnimationFrame(() => document.querySelector("#appRunnerCustomPathInput")?.focus());
     addEvent("custom app runner path is required", "warn");
-    form?.querySelector("#appRunnerCustomPathInput")?.focus();
     return;
   }
   const tabContext = activeTabContext();
@@ -8705,13 +8741,18 @@ async function saveAppRunnerCustomRunner(form) {
     const response = await api("/api/app-runner-config", { method: "POST", body: { runner: payload }, tabId: tabContext.tabId });
     if (!isCurrentTabContext(tabContext)) return;
     setAppRunnerData(tabContext.tabId, response.data || {});
-    resetAppRunnerCustomDraft();
+    resetAppRunnerCustomDraft({ clearFeedback: false });
+    setAppRunnerCustomFeedback("success", "Saved custom app runner. It should now appear in the Run menu when available.");
     renderAppRunnerControls();
     renderWidgets();
     renderAppRunnerInfoDialog();
     addEvent("saved custom app runner", "info");
   } catch (error) {
-    if (isCurrentTabContext(tabContext)) addEvent(error.message || String(error), "error");
+    if (!isCurrentTabContext(tabContext)) return;
+    const message = error.message || String(error);
+    setAppRunnerCustomFeedback("error", `Custom app runner was not saved: ${message}`);
+    renderAppRunnerInfoDialog();
+    addEvent(`custom app runner was not saved: ${message}`, "error");
   }
 }
 
@@ -8721,13 +8762,18 @@ async function deleteAppRunnerCustomRunner(id) {
     const response = await api("/api/app-runner-config", { method: "DELETE", body: { id }, tabId: tabContext.tabId });
     if (!isCurrentTabContext(tabContext)) return;
     setAppRunnerData(tabContext.tabId, response.data || {});
-    if (appRunnerCustomDraft.id === id) resetAppRunnerCustomDraft();
+    if (appRunnerCustomDraft.id === id) resetAppRunnerCustomDraft({ clearFeedback: false });
+    setAppRunnerCustomFeedback("success", "Deleted custom app runner.");
     renderAppRunnerControls();
     renderWidgets();
     renderAppRunnerInfoDialog();
     addEvent("deleted custom app runner", "warn");
   } catch (error) {
-    if (isCurrentTabContext(tabContext)) addEvent(error.message || String(error), "error");
+    if (!isCurrentTabContext(tabContext)) return;
+    const message = error.message || String(error);
+    setAppRunnerCustomFeedback("error", `Custom app runner was not deleted: ${message}`);
+    renderAppRunnerInfoDialog();
+    addEvent(`custom app runner was not deleted: ${message}`, "error");
   }
 }
 
@@ -8812,9 +8858,10 @@ function renderAppRunnerCustomSection() {
     existing.append(make("div", "app-runner-custom-empty muted", "No custom runners saved for this project yet."));
   } else {
     for (const runner of customRunners) {
-      const row = make("div", "app-runner-custom-item");
+      const row = make("div", `app-runner-custom-item${runner.available === false ? " unavailable" : ""}`);
       const details = make("div", "app-runner-custom-item-details");
       details.append(make("strong", "", runner.label || runner.path || "custom runner"), make("code", "", runner.displayCommand || runner.path || ""));
+      if (runner.unavailableReason) details.append(make("span", "app-runner-custom-warning", `Not available: ${runner.unavailableReason}`));
       const actions = make("div", "app-runner-custom-item-actions");
       const edit = make("button", "", "Edit");
       edit.type = "button";
@@ -8835,6 +8882,13 @@ function renderAppRunnerCustomSection() {
     }
   }
   section.append(existing);
+
+  const diagnostics = Array.isArray(config.diagnostics) ? config.diagnostics.filter((item) => item?.message) : [];
+  if (diagnostics.length) {
+    const diagnosticList = make("div", "app-runner-custom-diagnostics");
+    for (const item of diagnostics) diagnosticList.append(make("div", `app-runner-custom-feedback ${item.severity || "warning"}`, item.message));
+    section.append(diagnosticList);
+  }
 
   const form = make("div", "app-runner-custom-form");
   const labelField = appRunnerInputField({ id: "appRunnerCustomLabelInput", label: "Label", value: appRunnerCustomDraft.label, placeholder: "My app" });
@@ -8860,6 +8914,7 @@ function renderAppRunnerCustomSection() {
   reset.addEventListener("click", () => { resetAppRunnerCustomDraft(); renderAppRunnerInfoDialog(); });
   formActions.append(save, reset);
   form.append(formActions);
+  if (appRunnerCustomFeedback.message) form.append(make("div", `app-runner-custom-feedback ${appRunnerCustomFeedback.type || "info"}`, appRunnerCustomFeedback.message));
   const browser = renderAppRunnerFileBrowser();
   if (browser) form.append(browser);
   section.append(form);
