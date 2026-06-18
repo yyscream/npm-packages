@@ -10,3 +10,4 @@ __pycache__/
 *$py.class
 .pytest_cache/
 pi-skill-repo-explorer/skills/repo-explorer/repo-explorer-effectiveness-*.md
+pi-extension-cursor-composer/benchmark-output/

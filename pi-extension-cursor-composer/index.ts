@@ -17,6 +17,14 @@ import {
 	type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import {
+	TOOL_RESULT_RECOVERY_TOOL_NAME,
+	createToolResultRecoveryCustomTools,
+	providerToolResultSerializationOptionsFromEnv,
+	serializeProviderContextWithMetadata,
+	type ProviderContextSerializationMetadata,
+	type ToolResultRecoveryRecord,
+} from "./context.ts";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -71,6 +79,7 @@ type RunCursorComposerOptions = {
 	onStatus?: (message: string) => void;
 	onTextDelta?: (delta: string, accumulated: string) => void;
 	onUsage?: (usage: CursorComposerUsage) => void;
+	toolResultRecoveryRecords?: ToolResultRecoveryRecord[];
 };
 
 type CursorComposerResult = {
@@ -508,12 +517,21 @@ function shouldForwardProviderStatus(message: string): boolean {
 	return false;
 }
 
+function cursorConversationErrorSummary(conversation: unknown): unknown {
+	if (conversation === undefined) return undefined;
+	if (Array.isArray(conversation)) return { type: "array", items: conversation.length };
+	if (conversation && typeof conversation === "object") {
+		return { type: "object", keys: Object.keys(conversation as Record<string, unknown>).slice(0, 12) };
+	}
+	return { type: typeof conversation };
+}
+
 function cursorRunErrorMessage(result: any, run: any, conversation?: unknown): string {
 	const requestId = result?.requestId ?? run?.requestId;
 	const parts = ["Cursor Composer run failed"];
 	if (requestId) parts.push(`requestId=${requestId}`);
-	if (result?.result) parts.push(String(result.result));
-	parts.push(compactJson({ status: result?.status, model: result?.model, git: result?.git, conversation }));
+	if (result?.result) parts.push(truncateForTool(String(result.result)).text);
+	parts.push(compactJson({ status: result?.status, model: result?.model, git: result?.git, conversation: cursorConversationErrorSummary(conversation) }));
 	return parts.filter(Boolean).join(" — ");
 }
 
@@ -568,7 +586,14 @@ async function runCursorComposer(options: RunCursorComposerOptions): Promise<Cur
 	};
 
 	try {
+		const recoveryTools = createToolResultRecoveryCustomTools(options.toolResultRecoveryRecords ?? [], {
+			maxBytes: DEFAULT_MAX_BYTES,
+			maxLineCount: DEFAULT_MAX_LINES,
+		});
 		options.onStatus?.(`Creating Cursor local agent in ${options.cwd}`);
+		if (recoveryTools) {
+			options.onStatus?.(`Registered ${TOOL_RESULT_RECOVERY_TOOL_NAME} for exact truncated Pi tool-result recovery`);
+		}
 		agent = await Agent.create({
 			apiKey: options.apiKey,
 			model,
@@ -577,6 +602,7 @@ async function runCursorComposer(options: RunCursorComposerOptions): Promise<Cur
 				cwd: options.cwd,
 				autoReview: options.autoReview,
 				sandboxOptions: { enabled: options.sandbox },
+				...(recoveryTools ? { customTools: recoveryTools } : {}),
 			},
 		});
 
@@ -652,49 +678,25 @@ async function runCursorComposer(options: RunCursorComposerOptions): Promise<Cur
 	}
 }
 
-function contentToText(content: unknown): string {
-	if (typeof content === "string") return content;
-	if (!Array.isArray(content)) return normalizeText(content);
-	return content
-		.map((block: any) => {
-			if (block?.type === "text") return block.text ?? "";
-			if (block?.type === "thinking") return `[thinking]\n${block.thinking ?? ""}`;
-			if (block?.type === "toolCall") return `[tool call: ${block.name ?? "unknown"}]\n${normalizeText(block.arguments)}`;
-			if (block?.type === "image") return "[image omitted by Pi Cursor provider wrapper]";
-			return normalizeText(block);
-		})
-		.filter(Boolean)
-		.join("\n");
-}
-
-function serializeProviderContext(context: Context): string {
-	const lines: string[] = [];
-	if ((context as any).systemPrompt) {
-		lines.push("# Pi system prompt", String((context as any).systemPrompt), "");
-	}
-	lines.push(
-		"# Task",
-		"You are being called from Pi through the Cursor SDK Composer 2.5 provider wrapper.",
-		"Respond to the latest user request. If you modify files, summarize the exact changes and verification.",
-		"",
-		"# Conversation",
-	);
-	for (const message of ((context as any).messages ?? []) as any[]) {
-		if (message.role === "toolResult") {
-			lines.push(`## toolResult ${message.toolName ?? "tool"}`, contentToText(message.content), "");
-		} else {
-			lines.push(`## ${message.role ?? "message"}`, contentToText(message.content), "");
-		}
-	}
-	return lines.join("\n").trim();
-}
-
 function thinkingFromProviderOptions(options?: SimpleStreamOptions): Thinking | undefined {
 	const value = options?.reasoning;
 	if (value === "medium" || value === "high") return value;
 	if (value === "minimal" || value === "low") return "low";
 	if (value === "xhigh") return "high";
 	return undefined;
+}
+
+function summarizeProviderContextTruncation(metadata: ProviderContextSerializationMetadata): string | undefined {
+	const truncated = metadata.truncatedToolResults;
+	if (truncated.length === 0) return undefined;
+	const originalBytes = truncated.reduce((total, item) => total + item.originalBytes, 0);
+	const previewBytes = truncated.reduce((total, item) => total + item.previewBytes, 0);
+	const omittedBytes = truncated.reduce((total, item) => total + item.omittedBytes, 0);
+	const toolNames = Array.from(new Set(truncated.map((item) => item.toolName))).slice(0, 4).join(", ");
+	const toolSuffix = toolNames ? ` (${toolNames}${truncated.length > 4 ? ", …" : ""})` : "";
+	const recoverableCount = truncated.filter((item) => item.recoveryId).length;
+	const recoverySuffix = recoverableCount > 0 ? ` ${recoverableCount} recoverable through ${TOOL_RESULT_RECOVERY_TOOL_NAME}.` : "";
+	return `Pi Cursor provider truncated ${truncated.length} prior tool result${truncated.length === 1 ? "" : "s"}${toolSuffix}: sent ${formatSize(previewBytes)} of ${formatSize(originalBytes)}, omitted ${formatSize(omittedBytes)}.${recoverySuffix}`;
 }
 
 function providerAutoReview(): boolean {
@@ -728,7 +730,14 @@ function streamCursorComposerProvider(
 	const stream = createAssistantMessageEventStream();
 
 	(async () => {
-		const promptText = serializeProviderContext(context);
+		const thinking = thinkingFromProviderOptions(options);
+		const serializedContext = serializeProviderContextWithMetadata(context, {
+			maxToolResultBytes: DEFAULT_MAX_BYTES,
+			maxToolResultLines: DEFAULT_MAX_LINES,
+		});
+		const promptText = serializedContext.prompt;
+		const toolResultRecoveryRecords = serializedContext.metadata.toolResultRecoveryRecords;
+		const truncationSummary = summarizeProviderContextTruncation(serializedContext.metadata);
 		const output: AssistantMessage = {
 			role: "assistant",
 			content: [],
@@ -809,6 +818,20 @@ function streamCursorComposerProvider(
 		try {
 			stream.push({ type: "start", partial: output });
 			startHeartbeat();
+			if (truncationSummary) {
+				pushProviderStatus(truncationSummary);
+				output.diagnostics = [
+					...(output.diagnostics ?? []),
+					{
+						type: "cursor-composer.provider_context_truncated",
+						timestamp: Date.now(),
+						details: {
+							summary: truncationSummary,
+							truncatedToolResults: serializedContext.metadata.truncatedToolResults,
+						},
+					},
+				];
+			}
 			const apiKey = options?.apiKey ?? resolveApiKey(process.cwd()).apiKey;
 			if (!apiKey) throw new Error(`${ENV_KEY} is missing. Run /cursor-composer-setup first.`);
 
@@ -817,13 +840,14 @@ function streamCursorComposerProvider(
 				cwd: process.cwd(),
 				apiKey,
 				mode: "agent",
-				thinking: thinkingFromProviderOptions(options),
+				thinking,
 				autoReview: providerAutoReview(),
 				sandbox: providerSandbox(),
 				signal: options?.signal,
 				onStatus: pushProviderStatus,
 				onTextDelta: (delta) => pushText(delta),
 				onUsage: applyCursorUsage,
+				toolResultRecoveryRecords,
 			});
 
 			if (result.status === "cancelled") throw new Error("Cursor Composer run cancelled.");
@@ -1003,8 +1027,15 @@ export default function cursorComposerExtension(pi: ExtensionAPI): void {
 			} catch (error) {
 				sdkStatus = error instanceof Error ? error.message : String(error);
 			}
+			const truncation = providerToolResultSerializationOptionsFromEnv(process.env, {
+				maxToolResultBytes: DEFAULT_MAX_BYTES,
+				maxToolResultLines: DEFAULT_MAX_LINES,
+			});
+			const truncationStatus = truncation.truncateToolResults
+				? `on (${formatSize(truncation.maxToolResultBytes)}, ${truncation.maxToolResultLines.toLocaleString()} lines)`
+				: "off";
 			ctx.ui.notify(
-				`${ENV_KEY}: ${key.apiKey ? `configured via ${key.source}${key.path ? ` (${key.path})` : ""}` : "missing"}\n@cursor/sdk: ${sdkStatus}\nPi provider: ${PI_MODEL_REF}\nPricing: ${describeCursorComposerPricing()}\nContext: ${CURSOR_COMPOSER_CONTEXT_WINDOW.toLocaleString()} tokens\nScoped models: ${scopedStatus}`,
+				`${ENV_KEY}: ${key.apiKey ? `configured via ${key.source}${key.path ? ` (${key.path})` : ""}` : "missing"}\n@cursor/sdk: ${sdkStatus}\nPi provider: ${PI_MODEL_REF}\nPricing: ${describeCursorComposerPricing()}\nContext: ${CURSOR_COMPOSER_CONTEXT_WINDOW.toLocaleString()} tokens\nTool-result truncation: ${truncationStatus}\nScoped models: ${scopedStatus}`,
 				key.apiKey && sdkStatus === "installed" ? "info" : "warning",
 			);
 		},
