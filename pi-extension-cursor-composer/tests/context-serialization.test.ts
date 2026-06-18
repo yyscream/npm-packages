@@ -3,6 +3,9 @@ import test from "node:test";
 import {
 	DEFAULT_PROVIDER_TOOL_RESULT_MAX_BYTES,
 	DEFAULT_PROVIDER_TOOL_RESULT_MAX_LINES,
+	TOOL_RESULT_RECOVERY_TOOL_NAME,
+	createToolResultRecoveryCustomTools,
+	deterministicToolResultRecoveryId,
 	previewTextByBytesAndLines,
 	providerToolResultSerializationOptionsFromEnv,
 	serializeProviderContext,
@@ -10,12 +13,12 @@ import {
 	serializeToolResultContent,
 } from "../context.ts";
 
-function contextWithToolResult(toolText: string, toolName = "read") {
+function contextWithToolResult(toolText: string, toolName = "read", toolCallId = "call-read-1") {
 	return {
 		systemPrompt: "system instructions stay visible",
 		messages: [
 			{ role: "user", content: [{ type: "text", text: "please inspect the file" }] },
-			{ role: "toolResult", toolName, content: [{ type: "text", text: toolText }] },
+			{ role: "toolResult", toolName, toolCallId, content: [{ type: "text", text: toolText }] },
 			{ role: "assistant", content: [{ type: "text", text: "I inspected it." }] },
 			{ role: "user", content: [{ type: "text", text: "now summarize" }] },
 		],
@@ -45,6 +48,7 @@ test("large tool results are previewed with metadata while preserving conversati
 		truncateToolResults: true,
 		maxToolResultBytes: 4_000,
 		maxToolResultLines: 50,
+		recoveryIdFactory: () => "test-recovery-read-1",
 	});
 
 	assert.ok(optimized.length < unoptimized.length * 0.25, `expected optimized prompt to be <25% of baseline (${optimized.length}/${unoptimized.length})`);
@@ -53,16 +57,21 @@ test("large tool results are previewed with metadata while preserving conversati
 	assert.match(optimized, /## toolResult read/);
 	assert.match(optimized, /## assistant/);
 	assert.match(optimized, /Original: 2000 lines/);
+	assert.match(optimized, /Recovery ID: test-recovery-read-1/);
 	assert.match(optimized, /Original SHA-256: [a-f0-9]{64}/);
-	assert.match(optimized, /If exact historical content is required/);
+	assert.match(optimized, new RegExp(`call the Cursor local tool ${TOOL_RESULT_RECOVERY_TOOL_NAME}`));
 	assert.match(optimized, /<tool_result_preview_head>/);
 	assert.match(optimized, /<tool_result_preview_tail>/);
 	assert.match(optimized, /line-0000/);
 	assert.match(optimized, /line-1999/);
 	assert.equal(metadata.truncatedToolResults.length, 1);
 	assert.equal(metadata.truncatedToolResults[0].toolName, "read");
+	assert.equal(metadata.truncatedToolResults[0].recoveryId, "test-recovery-read-1");
 	assert.equal(metadata.truncatedToolResults[0].originalLines, 2_000);
 	assert.ok(metadata.truncatedToolResults[0].omittedBytes > 0);
+	assert.equal(metadata.toolResultRecoveryRecords.length, 1);
+	assert.equal(metadata.toolResultRecoveryRecords[0].id, "test-recovery-read-1");
+	assert.equal(metadata.toolResultRecoveryRecords[0].text, huge);
 });
 
 test("tool-result truncation can be disabled", () => {
@@ -73,6 +82,89 @@ test("tool-result truncation can be disabled", () => {
 		maxToolResultLines: 1,
 	});
 	assert.equal(rendered, huge);
+});
+
+test("recovery custom tool returns exact omitted tool-result slices", async () => {
+	const huge = Array.from({ length: 300 }, (_, i) => `line-${i.toString().padStart(3, "0")}${i === 150 ? " MIDDLE-SENTINEL" : ""}`).join("\n");
+	const { prompt, metadata } = serializeProviderContextWithMetadata(contextWithToolResult(huge, "bash"), {
+		truncateToolResults: true,
+		maxToolResultBytes: 900,
+		maxToolResultLines: 20,
+		recoveryIdFactory: () => "test-recovery-bash-1",
+	});
+	assert.match(prompt, /Recovery ID: test-recovery-bash-1/);
+	assert.doesNotMatch(prompt, /MIDDLE-SENTINEL/);
+
+	const tools = createToolResultRecoveryCustomTools(metadata.toolResultRecoveryRecords, {
+		defaultLineCount: 5,
+		maxLineCount: 20,
+		maxBytes: 2_000,
+	});
+	assert.ok(tools);
+	const recoveryTool = tools[TOOL_RESULT_RECOVERY_TOOL_NAME] as {
+		execute: (args: Record<string, unknown>) => Promise<any> | any;
+	};
+	const result = await recoveryTool.execute({ id: "test-recovery-bash-1", startLine: 151, lineCount: 1 });
+	assert.equal(result.isError, undefined);
+	assert.equal(result.structuredContent.id, "test-recovery-bash-1");
+	assert.equal(result.structuredContent.startLine, 151);
+	assert.equal(result.structuredContent.endLine, 151);
+	assert.match(result.content[0].text, /line-150 MIDDLE-SENTINEL/);
+	assert.match(result.content[0].text, /Original: 300 lines/);
+	assert.match(result.content[0].text, /SHA-256 [a-f0-9]{64}/);
+
+	const pastEnd = await recoveryTool.execute({ id: "test-recovery-bash-1", startLine: 9999 });
+	assert.equal(pastEnd.isError, true);
+	assert.match(pastEnd.content[0].text, /past the end/);
+	assert.equal(pastEnd.structuredContent.returnedBytes, 0);
+
+	const missing = await recoveryTool.execute({ id: "does-not-exist" });
+	assert.equal(missing.isError, true);
+	assert.equal(missing.structuredContent.found, false);
+});
+
+test("recovery custom tool preserves original CRLF line endings in returned slices", async () => {
+	const crlfText = Array.from({ length: 120 }, (_, i) => `crlf-line-${i.toString().padStart(3, "0")}`).join("\r\n");
+	const { metadata } = serializeProviderContextWithMetadata(contextWithToolResult(crlfText, "read", "call-crlf-1"), {
+		truncateToolResults: true,
+		maxToolResultBytes: 500,
+		maxToolResultLines: 10,
+		recoveryIdFactory: () => "test-recovery-crlf-1",
+	});
+	const tools = createToolResultRecoveryCustomTools(metadata.toolResultRecoveryRecords, {
+		defaultLineCount: 5,
+		maxLineCount: 20,
+		maxBytes: 2_000,
+	});
+	assert.ok(tools);
+	const recoveryTool = tools[TOOL_RESULT_RECOVERY_TOOL_NAME] as {
+		execute: (args: Record<string, unknown>) => Promise<any> | any;
+	};
+	const result = await recoveryTool.execute({ id: "test-recovery-crlf-1", startLine: 51, lineCount: 3 });
+	const expectedSlice = "crlf-line-050\r\ncrlf-line-051\r\ncrlf-line-052\r\n";
+	assert.match(result.content[0].text, /<recovered_tool_result>/);
+	assert.ok(result.content[0].text.includes(expectedSlice), result.content[0].text);
+});
+
+test("deterministic recovery IDs are stable across serializations and tied to tool-result identity", () => {
+	const huge = Array.from({ length: 200 }, (_, i) => `stable-line-${i} ${"x".repeat(80)}`).join("\n");
+	const options = { truncateToolResults: true, maxToolResultBytes: 1_000, maxToolResultLines: 10 };
+	const first = serializeProviderContextWithMetadata(contextWithToolResult(huge, "read", "call-stable-1"), options);
+	const second = serializeProviderContextWithMetadata(contextWithToolResult(huge, "read", "call-stable-1"), options);
+	const changedContent = serializeProviderContextWithMetadata(contextWithToolResult(`${huge}\nchanged`, "read", "call-stable-1"), options);
+	const changedCall = serializeProviderContextWithMetadata(contextWithToolResult(huge, "read", "call-stable-2"), options);
+
+	const firstId = first.metadata.truncatedToolResults[0].recoveryId;
+	assert.match(firstId ?? "", /^ptr_[a-f0-9]{24}$/);
+	assert.equal(second.metadata.truncatedToolResults[0].recoveryId, firstId);
+	assert.equal(first.metadata.toolResultRecoveryRecords[0].id, firstId);
+	assert.match(first.prompt, new RegExp(`Recovery ID: ${firstId}`));
+	assert.equal(
+		deterministicToolResultRecoveryId("read", "call-stable-1", first.metadata.truncatedToolResults[0].sha256),
+		firstId,
+	);
+	assert.notEqual(changedContent.metadata.truncatedToolResults[0].recoveryId, firstId);
+	assert.notEqual(changedCall.metadata.truncatedToolResults[0].recoveryId, firstId);
 });
 
 test("preview preserves head and tail while respecting byte and line content ceilings", () => {

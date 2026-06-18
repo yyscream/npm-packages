@@ -18,9 +18,12 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import {
+	TOOL_RESULT_RECOVERY_TOOL_NAME,
+	createToolResultRecoveryCustomTools,
 	providerToolResultSerializationOptionsFromEnv,
 	serializeProviderContextWithMetadata,
 	type ProviderContextSerializationMetadata,
+	type ToolResultRecoveryRecord,
 } from "./context.ts";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -76,6 +79,7 @@ type RunCursorComposerOptions = {
 	onStatus?: (message: string) => void;
 	onTextDelta?: (delta: string, accumulated: string) => void;
 	onUsage?: (usage: CursorComposerUsage) => void;
+	toolResultRecoveryRecords?: ToolResultRecoveryRecord[];
 };
 
 type CursorComposerResult = {
@@ -513,12 +517,21 @@ function shouldForwardProviderStatus(message: string): boolean {
 	return false;
 }
 
+function cursorConversationErrorSummary(conversation: unknown): unknown {
+	if (conversation === undefined) return undefined;
+	if (Array.isArray(conversation)) return { type: "array", items: conversation.length };
+	if (conversation && typeof conversation === "object") {
+		return { type: "object", keys: Object.keys(conversation as Record<string, unknown>).slice(0, 12) };
+	}
+	return { type: typeof conversation };
+}
+
 function cursorRunErrorMessage(result: any, run: any, conversation?: unknown): string {
 	const requestId = result?.requestId ?? run?.requestId;
 	const parts = ["Cursor Composer run failed"];
 	if (requestId) parts.push(`requestId=${requestId}`);
-	if (result?.result) parts.push(String(result.result));
-	parts.push(compactJson({ status: result?.status, model: result?.model, git: result?.git, conversation }));
+	if (result?.result) parts.push(truncateForTool(String(result.result)).text);
+	parts.push(compactJson({ status: result?.status, model: result?.model, git: result?.git, conversation: cursorConversationErrorSummary(conversation) }));
 	return parts.filter(Boolean).join(" — ");
 }
 
@@ -573,7 +586,14 @@ async function runCursorComposer(options: RunCursorComposerOptions): Promise<Cur
 	};
 
 	try {
+		const recoveryTools = createToolResultRecoveryCustomTools(options.toolResultRecoveryRecords ?? [], {
+			maxBytes: DEFAULT_MAX_BYTES,
+			maxLineCount: DEFAULT_MAX_LINES,
+		});
 		options.onStatus?.(`Creating Cursor local agent in ${options.cwd}`);
+		if (recoveryTools) {
+			options.onStatus?.(`Registered ${TOOL_RESULT_RECOVERY_TOOL_NAME} for exact truncated Pi tool-result recovery`);
+		}
 		agent = await Agent.create({
 			apiKey: options.apiKey,
 			model,
@@ -582,6 +602,7 @@ async function runCursorComposer(options: RunCursorComposerOptions): Promise<Cur
 				cwd: options.cwd,
 				autoReview: options.autoReview,
 				sandboxOptions: { enabled: options.sandbox },
+				...(recoveryTools ? { customTools: recoveryTools } : {}),
 			},
 		});
 
@@ -673,7 +694,9 @@ function summarizeProviderContextTruncation(metadata: ProviderContextSerializati
 	const omittedBytes = truncated.reduce((total, item) => total + item.omittedBytes, 0);
 	const toolNames = Array.from(new Set(truncated.map((item) => item.toolName))).slice(0, 4).join(", ");
 	const toolSuffix = toolNames ? ` (${toolNames}${truncated.length > 4 ? ", …" : ""})` : "";
-	return `Pi Cursor provider truncated ${truncated.length} prior tool result${truncated.length === 1 ? "" : "s"}${toolSuffix}: sent ${formatSize(previewBytes)} of ${formatSize(originalBytes)}, omitted ${formatSize(omittedBytes)}. Re-read/rerun if exact omitted content is needed.`;
+	const recoverableCount = truncated.filter((item) => item.recoveryId).length;
+	const recoverySuffix = recoverableCount > 0 ? ` ${recoverableCount} recoverable through ${TOOL_RESULT_RECOVERY_TOOL_NAME}.` : "";
+	return `Pi Cursor provider truncated ${truncated.length} prior tool result${truncated.length === 1 ? "" : "s"}${toolSuffix}: sent ${formatSize(previewBytes)} of ${formatSize(originalBytes)}, omitted ${formatSize(omittedBytes)}.${recoverySuffix}`;
 }
 
 function providerAutoReview(): boolean {
@@ -713,6 +736,7 @@ function streamCursorComposerProvider(
 			maxToolResultLines: DEFAULT_MAX_LINES,
 		});
 		const promptText = serializedContext.prompt;
+		const toolResultRecoveryRecords = serializedContext.metadata.toolResultRecoveryRecords;
 		const truncationSummary = summarizeProviderContextTruncation(serializedContext.metadata);
 		const output: AssistantMessage = {
 			role: "assistant",
@@ -823,6 +847,7 @@ function streamCursorComposerProvider(
 				onStatus: pushProviderStatus,
 				onTextDelta: (delta) => pushText(delta),
 				onUsage: applyCursorUsage,
+				toolResultRecoveryRecords,
 			});
 
 			if (result.status === "cancelled") throw new Error("Cursor Composer run cancelled.");

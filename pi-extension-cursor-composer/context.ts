@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { SDKCustomTool } from "@cursor/sdk";
 
 // Keep provider replay truncation aligned with Pi's normal tool-output truncation defaults.
 // These mirror @earendil-works/pi-coding-agent DEFAULT_MAX_BYTES / DEFAULT_MAX_LINES
@@ -12,8 +13,12 @@ export type ProviderToolResultSerializationOptions = {
 	maxToolResultLines: number;
 };
 
+export const TOOL_RESULT_RECOVERY_TOOL_NAME = "pi_get_truncated_tool_result";
+
 export type TruncatedToolResultMetadata = {
 	toolName: string;
+	toolCallId?: string;
+	recoveryId?: string;
 	originalBytes: number;
 	originalLines: number;
 	previewBytes: number;
@@ -22,8 +27,19 @@ export type TruncatedToolResultMetadata = {
 	sha256: string;
 };
 
+export type ToolResultRecoveryRecord = {
+	id: string;
+	toolName: string;
+	toolCallId?: string;
+	text: string;
+	originalBytes: number;
+	originalLines: number;
+	sha256: string;
+};
+
 export type ProviderContextSerializationMetadata = {
 	truncatedToolResults: TruncatedToolResultMetadata[];
+	toolResultRecoveryRecords: ToolResultRecoveryRecord[];
 };
 
 export type ProviderContextSerializationResult = {
@@ -37,6 +53,8 @@ export type ProviderContextSerializationOptions = Partial<ProviderToolResultSeri
 	messages?: unknown[];
 	taskLines?: string[];
 	conversationTitle?: string;
+	enableToolResultRecovery?: boolean;
+	recoveryIdFactory?: () => string;
 };
 
 type TextPreview = {
@@ -70,6 +88,11 @@ function lineCount(text: string): number {
 
 function sha256(text: string): string {
 	return createHash("sha256").update(text).digest("hex");
+}
+
+export function deterministicToolResultRecoveryId(toolName: string, toolCallId: string | undefined, contentSha256: string): string {
+	const stableIdentity = JSON.stringify({ toolName, toolCallId: toolCallId ?? null, contentSha256 });
+	return `ptr_${createHash("sha256").update(stableIdentity).digest("hex").slice(0, 24)}`;
 }
 
 function formatBytes(bytes: number): string {
@@ -218,15 +241,28 @@ export function previewTextByBytesAndLines(
 export function serializeToolResultContent(
 	content: unknown,
 	options: ProviderToolResultSerializationOptions,
-	metadata?: { toolName?: string; truncatedToolResults?: TruncatedToolResultMetadata[] },
+	metadata?: {
+		toolName?: string;
+		toolCallId?: string;
+		truncatedToolResults?: TruncatedToolResultMetadata[];
+		toolResultRecoveryRecords?: ToolResultRecoveryRecord[];
+		enableToolResultRecovery?: boolean;
+		recoveryIdFactory?: () => string;
+	},
 ): string {
 	const text = contentToText(content);
 	if (!options.truncateToolResults) return text;
 	const preview = previewTextByBytesAndLines(text, options.maxToolResultBytes, options.maxToolResultLines);
 	if (!preview.truncated) return text;
 	const toolName = metadata?.toolName ?? "tool";
+	const recoveryEnabled = (metadata?.enableToolResultRecovery ?? true) && Boolean(metadata?.toolResultRecoveryRecords);
+	const recoveryId = recoveryEnabled
+		? (metadata?.recoveryIdFactory ?? (() => deterministicToolResultRecoveryId(toolName, metadata?.toolCallId, preview.sha256)))()
+		: undefined;
 	metadata?.truncatedToolResults?.push({
 		toolName,
+		toolCallId: metadata?.toolCallId,
+		recoveryId,
 		originalBytes: preview.originalBytes,
 		originalLines: preview.originalLines,
 		previewBytes: preview.previewBytes,
@@ -234,14 +270,33 @@ export function serializeToolResultContent(
 		omittedBytes: Math.max(0, preview.originalBytes - preview.previewBytes),
 		sha256: preview.sha256,
 	});
+	if (recoveryId) {
+		metadata?.toolResultRecoveryRecords?.push({
+			id: recoveryId,
+			toolName,
+			toolCallId: metadata?.toolCallId,
+			text,
+			originalBytes: preview.originalBytes,
+			originalLines: preview.originalLines,
+			sha256: preview.sha256,
+		});
+	}
 	return [
 		"[Large tool result truncated by Pi Cursor provider wrapper]",
 		`Tool: ${toolName}.`,
+		...(metadata?.toolCallId ? [`Tool call ID: ${metadata.toolCallId}.`] : []),
+		...(recoveryId ? [`Recovery ID: ${recoveryId}.`] : []),
 		`Original: ${preview.originalLines} lines, ${formatBytes(preview.originalBytes)}.`,
 		`Included preview: ${preview.previewLines} lines, ${formatBytes(preview.previewBytes)}.`,
 		`Original SHA-256: ${preview.sha256}.`,
 		"Reason: avoid resending very large prior Pi tool outputs to Cursor Composer on every provider turn.",
-		"If exact historical content is required, disable CURSOR_COMPOSER_PROVIDER_TRUNCATE_TOOL_RESULTS or use available tools to re-read/rerun when safe and equivalent.",
+		...(recoveryId
+			? [
+				`If exact historical content is required, call the Cursor local tool ${TOOL_RESULT_RECOVERY_TOOL_NAME} with this Recovery ID and an optional line range.`,
+			]
+			: [
+				"If exact historical content is required, disable CURSOR_COMPOSER_PROVIDER_TRUNCATE_TOOL_RESULTS or use available tools to re-read/rerun when safe and equivalent.",
+			]),
 		"",
 		"<tool_result_preview_head>",
 		preview.headText,
@@ -250,6 +305,143 @@ export function serializeToolResultContent(
 			? ["", "<tool_result_preview_tail>", preview.tailText, "</tool_result_preview_tail>"]
 			: []),
 	].join("\n");
+}
+
+function integerArg(value: unknown, fallback: number): number {
+	const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+	if (!Number.isFinite(parsed)) return fallback;
+	return Math.floor(parsed);
+}
+
+function lineSegmentsPreservingEndings(text: string): string[] {
+	if (!text) return [];
+	const segments: string[] = [];
+	let start = 0;
+	for (let index = 0; index < text.length; index += 1) {
+		const char = text[index];
+		if (char !== "\r" && char !== "\n") continue;
+		if (char === "\r" && text[index + 1] === "\n") index += 1;
+		segments.push(text.slice(start, index + 1));
+		start = index + 1;
+	}
+	if (start < text.length) {
+		segments.push(text.slice(start));
+	} else if (text.length > 0) {
+		segments.push("");
+	}
+	return segments;
+}
+
+export function readToolResultRecoveryRecord(
+	records: ToolResultRecoveryRecord[],
+	args: Record<string, unknown>,
+	options: { defaultLineCount?: number; maxLineCount?: number; maxBytes?: number } = {},
+): {
+	content: Array<{ type: "text"; text: string }>;
+	isError?: boolean;
+	structuredContent: Record<string, string | number | boolean | null>;
+} {
+	const id = typeof args.id === "string" ? args.id : typeof args.recoveryId === "string" ? args.recoveryId : "";
+	const record = records.find((candidate) => candidate.id === id);
+	if (!record) {
+		return {
+			content: [{ type: "text", text: `No truncated Pi tool result found for recovery ID: ${id || "<missing>"}` }],
+			isError: true,
+			structuredContent: { id: id || null, found: false },
+		};
+	}
+
+	const defaultLineCount = Math.max(1, options.defaultLineCount ?? 200);
+	const maxLineCount = Math.max(1, options.maxLineCount ?? DEFAULT_PROVIDER_TOOL_RESULT_MAX_LINES);
+	const maxBytes = Math.max(1, options.maxBytes ?? DEFAULT_PROVIDER_TOOL_RESULT_MAX_BYTES);
+	const lines = lineSegmentsPreservingEndings(record.text);
+	const requestedStartLine = Math.max(1, integerArg(args.startLine, 1));
+	const requestedLineCount = Math.max(1, integerArg(args.lineCount, defaultLineCount));
+	const returnedLineCount = Math.min(requestedLineCount, maxLineCount);
+	if (requestedStartLine > record.originalLines) {
+		return {
+			content: [
+				{
+					type: "text",
+					text: `Recovery ID ${record.id} has ${record.originalLines} lines; requested startLine ${requestedStartLine} is past the end of the output.`,
+				},
+			],
+			isError: true,
+			structuredContent: {
+				id: record.id,
+				found: true,
+				toolName: record.toolName,
+				toolCallId: record.toolCallId ?? null,
+				sha256: record.sha256,
+				originalBytes: record.originalBytes,
+				originalLines: record.originalLines,
+				startLine: requestedStartLine,
+				endLine: record.originalLines,
+				returnedBytes: 0,
+				truncatedByBytes: false,
+				hasMore: false,
+			},
+		};
+	}
+	const startIndex = requestedStartLine - 1;
+	const endIndex = Math.min(lines.length, startIndex + returnedLineCount);
+	let text = lines.slice(startIndex, endIndex).join("");
+	let truncatedByBytes = false;
+	if (byteLength(text) > maxBytes) {
+		text = clipTextToBytes(text, maxBytes);
+		truncatedByBytes = true;
+	}
+	const actualStartLine = startIndex + 1;
+	const actualEndLine = endIndex;
+	const header = [
+		`Recovered exact Pi tool result slice for ${record.toolName}.`,
+		`Recovery ID: ${record.id}.`,
+		...(record.toolCallId ? [`Tool call ID: ${record.toolCallId}.`] : []),
+		`Original: ${record.originalLines} lines, ${formatBytes(record.originalBytes)}, SHA-256 ${record.sha256}.`,
+		`Returned lines ${actualStartLine}-${actualEndLine}${truncatedByBytes ? `, clipped to ${formatBytes(maxBytes)}` : ""}.`,
+		endIndex < record.originalLines || truncatedByBytes ? "Request a later startLine or smaller lineCount for more exact content." : "End of recovered output.",
+	].join("\n");
+
+	return {
+		content: [{ type: "text", text: `${header}\n\n<recovered_tool_result>\n${text}\n</recovered_tool_result>` }],
+		structuredContent: {
+			id: record.id,
+			found: true,
+			toolName: record.toolName,
+			toolCallId: record.toolCallId ?? null,
+			sha256: record.sha256,
+			originalBytes: record.originalBytes,
+			originalLines: record.originalLines,
+			startLine: actualStartLine,
+			endLine: actualEndLine,
+			returnedBytes: byteLength(text),
+			truncatedByBytes,
+			hasMore: endIndex < record.originalLines || truncatedByBytes,
+		},
+	};
+}
+
+export function createToolResultRecoveryCustomTools(
+	records: ToolResultRecoveryRecord[],
+	options: { defaultLineCount?: number; maxLineCount?: number; maxBytes?: number } = {},
+): Record<string, SDKCustomTool> | undefined {
+	if (records.length === 0) return undefined;
+	return {
+		[TOOL_RESULT_RECOVERY_TOOL_NAME]: {
+			description:
+				"Fetch an exact slice of a large historical Pi tool result that was truncated in the Cursor Composer provider prompt. Use the Recovery ID shown in the truncation marker.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					id: { type: "string", description: "Recovery ID from the truncated Pi tool-result marker." },
+					startLine: { type: "number", description: "1-based first line to return. Defaults to 1." },
+					lineCount: { type: "number", description: "Number of lines to return. Defaults to 200 and is capped." },
+				},
+				required: ["id"],
+			},
+			execute: (args: Record<string, unknown>) => readToolResultRecoveryRecord(records, args, options),
+		},
+	};
 }
 
 export function serializeProviderContextWithMetadata(
@@ -261,7 +453,7 @@ export function serializeProviderContextWithMetadata(
 		...providerToolResultSerializationOptionsFromEnv(),
 		...options,
 	};
-	const metadata: ProviderContextSerializationMetadata = { truncatedToolResults: [] };
+	const metadata: ProviderContextSerializationMetadata = { truncatedToolResults: [], toolResultRecoveryRecords: [] };
 	const includeSystemPrompt = options.includeSystemPrompt ?? true;
 	const systemPrompt = options.systemPrompt ?? contextObject.systemPrompt;
 	const messages = options.messages ?? contextObject.messages ?? [];
@@ -281,7 +473,11 @@ export function serializeProviderContextWithMetadata(
 				`## toolResult ${toolName}`,
 				serializeToolResultContent(message.content, toolOptions, {
 					toolName,
+					toolCallId: typeof message.toolCallId === "string" ? message.toolCallId : undefined,
 					truncatedToolResults: metadata.truncatedToolResults,
+					toolResultRecoveryRecords: metadata.toolResultRecoveryRecords,
+					enableToolResultRecovery: options.enableToolResultRecovery,
+					recoveryIdFactory: options.recoveryIdFactory,
 				}),
 				"",
 			);

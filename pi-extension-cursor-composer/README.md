@@ -95,7 +95,8 @@ Provider usage/status behavior:
 - Set `CURSOR_COMPOSER_PROVIDER_HEARTBEAT_MS=0` or `false` to disable heartbeats entirely.
 - Set `CURSOR_COMPOSER_PROVIDER_AUTO_REVIEW=false` to disable Cursor local auto-review.
 - Set `CURSOR_COMPOSER_PROVIDER_SANDBOX=true` to enable Cursor SDK sandboxing for native model runs.
-- Large Pi `toolResult` messages are truncated by default before they are replayed into the native provider prompt. This keeps previous `read`/`bash` dumps from being resent to Cursor on every turn while preserving the message header, head/tail previews, original size, content hash, and instructions to re-read/rerun when exact omitted content is needed. Truncation uses Pi's normal tool-output byte and line limits.
+- Large Pi `toolResult` messages are truncated by default before they are replayed into the native provider prompt. This keeps previous `read`/`bash` dumps from being resent to Cursor on every turn while preserving the message header, head/tail previews, original size, content hash, and a deterministic Recovery ID. Truncation uses Pi's normal tool-output byte and line limits.
+- When a provider prompt contains truncated tool results, the local Cursor agent also receives an ephemeral `pi_get_truncated_tool_result` custom tool. Composer can call it with the Recovery ID and an optional line range to fetch exact omitted historical content for that provider run without replaying every large output up front. Recovery IDs are deterministic for the same persisted tool result, but the recovery map itself is rebuilt per provider run rather than stored separately.
 - Set `CURSOR_COMPOSER_PROVIDER_TRUNCATE_TOOL_RESULTS=false` to restore the previous full tool-result replay behavior.
 
 
