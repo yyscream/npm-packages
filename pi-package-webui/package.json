@@ -1,6 +1,6 @@
 {
   "name": "@firstpick/pi-package-webui",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "description": "Pi Web UI companion package with a local browser UI CLI plus /webui-start and /webui-status commands.",
   "license": "MIT",
   "homepage": "https://github.com/Firstp1ck/npm-packages/tree/main/pi-package-webui#readme",
@@ -53,7 +53,7 @@
     "test": "node tests/run-all.mjs"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "^0.79.6"
+    "@earendil-works/pi-coding-agent": "^0.79.7"
   },
   "optionalDependencies": {
     "@firstpick/pi-extension-btw": "^0.1.0",
@@ -66,7 +66,7 @@
     "@firstpick/pi-extension-todo-progress": "^0.2.4",
     "@firstpick/pi-extension-tools": "^0.1.6",
     "@firstpick/pi-extension-workflows": "^0.1.0",
-    "@firstpick/pi-package-remote-webui": "^0.1.0",
+    "@firstpick/pi-package-remote-webui": "^0.1.2",
     "@firstpick/pi-prompts-git-pr": "^0.1.2",
     "@firstpick/pi-themes-bundle": "^0.1.4"
   },
@@ -84,5 +84,12 @@
   ],
   "engines": {
     "node": ">=22.19.0"
+  },
+  "overrides": {
+    "@earendil-works/pi-coding-agent": {
+      "protobufjs": "7.6.3",
+      "undici": "8.5.0",
+      "ws": "8.21.0"
+    }
   }
 }
