@@ -53,7 +53,7 @@
     "test": "node tests/run-all.mjs"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "^0.79.5"
+    "@earendil-works/pi-coding-agent": "^0.79.6"
   },
   "optionalDependencies": {
     "@firstpick/pi-extension-btw": "^0.1.0",
