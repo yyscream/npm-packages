@@ -1,10 +1,34 @@
-const DEFAULT_PROVIDER_TOOL_RESULT_MAX_BYTES = 32_000;
-const DEFAULT_PROVIDER_TOOL_RESULT_MAX_LINES = 500;
+import { createHash } from "node:crypto";
+
+// Keep provider replay truncation aligned with Pi's normal tool-output truncation defaults.
+// These mirror @earendil-works/pi-coding-agent DEFAULT_MAX_BYTES / DEFAULT_MAX_LINES
+// without adding a test-time dependency on Pi internals for this source-repo package.
+export const DEFAULT_PROVIDER_TOOL_RESULT_MAX_BYTES = 51_200;
+export const DEFAULT_PROVIDER_TOOL_RESULT_MAX_LINES = 2_000;
 
 export type ProviderToolResultSerializationOptions = {
 	truncateToolResults: boolean;
 	maxToolResultBytes: number;
 	maxToolResultLines: number;
+};
+
+export type TruncatedToolResultMetadata = {
+	toolName: string;
+	originalBytes: number;
+	originalLines: number;
+	previewBytes: number;
+	previewLines: number;
+	omittedBytes: number;
+	sha256: string;
+};
+
+export type ProviderContextSerializationMetadata = {
+	truncatedToolResults: TruncatedToolResultMetadata[];
+};
+
+export type ProviderContextSerializationResult = {
+	prompt: string;
+	metadata: ProviderContextSerializationMetadata;
 };
 
 export type ProviderContextSerializationOptions = Partial<ProviderToolResultSerializationOptions> & {
@@ -17,11 +41,14 @@ export type ProviderContextSerializationOptions = Partial<ProviderToolResultSeri
 
 type TextPreview = {
 	text: string;
+	headText: string;
+	tailText: string;
 	truncated: boolean;
 	originalBytes: number;
 	originalLines: number;
 	previewBytes: number;
 	previewLines: number;
+	sha256: string;
 };
 
 function envBoolean(value: string | undefined, fallback: boolean): boolean {
@@ -32,12 +59,6 @@ function envBoolean(value: string | undefined, fallback: boolean): boolean {
 	return fallback;
 }
 
-function envPositiveInteger(value: string | undefined, fallback: number): number {
-	const parsed = value ? Number(value) : NaN;
-	if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
-	return Math.floor(parsed);
-}
-
 function byteLength(text: string): number {
 	return Buffer.byteLength(text, "utf8");
 }
@@ -45,6 +66,10 @@ function byteLength(text: string): number {
 function lineCount(text: string): number {
 	if (!text) return 0;
 	return text.split(/\r?\n/).length;
+}
+
+function sha256(text: string): string {
+	return createHash("sha256").update(text).digest("hex");
 }
 
 function formatBytes(bytes: number): string {
@@ -64,19 +89,68 @@ function normalizeText(value: unknown): string {
 	}
 }
 
+function clipTextToBytes(text: string, maxBytes: number): string {
+	if (byteLength(text) <= maxBytes) return text;
+	let clipped = "";
+	for (const char of text) {
+		if (byteLength(clipped + char) > maxBytes) break;
+		clipped += char;
+	}
+	return clipped;
+}
+
+function takeHead(lines: string[], maxLines: number, maxBytes: number): string {
+	const selected = lines.slice(0, Math.max(0, maxLines));
+	const parts: string[] = [];
+	let usedBytes = 0;
+	for (const line of selected) {
+		const prefix = parts.length === 0 ? "" : "\n";
+		const candidate = `${prefix}${line}`;
+		const candidateBytes = byteLength(candidate);
+		if (usedBytes + candidateBytes > maxBytes) {
+			const remaining = Math.max(0, maxBytes - usedBytes - byteLength(prefix));
+			const clipped = clipTextToBytes(line, remaining);
+			if (clipped) parts.push(`${prefix}${clipped}`);
+			break;
+		}
+		parts.push(candidate);
+		usedBytes += candidateBytes;
+	}
+	return parts.join("");
+}
+
+function takeTail(lines: string[], maxLines: number, maxBytes: number): string {
+	const selected = lines.slice(Math.max(0, lines.length - Math.max(0, maxLines)));
+	const parts: string[] = [];
+	let usedBytes = 0;
+	for (let index = selected.length - 1; index >= 0; index -= 1) {
+		const line = selected[index];
+		const suffix = parts.length === 0 ? "" : "\n";
+		const candidate = `${line}${suffix}`;
+		const candidateBytes = byteLength(candidate);
+		if (usedBytes + candidateBytes > maxBytes) {
+			const remaining = Math.max(0, maxBytes - usedBytes - byteLength(suffix));
+			const clipped = clipTextToBytes(line, remaining);
+			if (clipped) parts.unshift(`${clipped}${suffix}`);
+			break;
+		}
+		parts.unshift(candidate);
+		usedBytes += candidateBytes;
+	}
+	return parts.join("");
+}
+
 export function providerToolResultSerializationOptionsFromEnv(
 	env: NodeJS.ProcessEnv = process.env,
+	defaults: Pick<ProviderToolResultSerializationOptions, "maxToolResultBytes" | "maxToolResultLines"> = {
+		maxToolResultBytes: DEFAULT_PROVIDER_TOOL_RESULT_MAX_BYTES,
+		maxToolResultLines: DEFAULT_PROVIDER_TOOL_RESULT_MAX_LINES,
+	},
 ): ProviderToolResultSerializationOptions {
 	return {
 		truncateToolResults: envBoolean(env.CURSOR_COMPOSER_PROVIDER_TRUNCATE_TOOL_RESULTS, true),
-		maxToolResultBytes: envPositiveInteger(
-			env.CURSOR_COMPOSER_PROVIDER_TOOL_RESULT_MAX_BYTES,
-			DEFAULT_PROVIDER_TOOL_RESULT_MAX_BYTES,
-		),
-		maxToolResultLines: envPositiveInteger(
-			env.CURSOR_COMPOSER_PROVIDER_TOOL_RESULT_MAX_LINES,
-			DEFAULT_PROVIDER_TOOL_RESULT_MAX_LINES,
-		),
+		maxToolResultBytes: defaults.maxToolResultBytes,
+		maxToolResultLines: defaults.maxToolResultLines,
 	};
 }
 
@@ -102,78 +176,92 @@ export function previewTextByBytesAndLines(
 ): TextPreview {
 	const originalBytes = byteLength(text);
 	const originalLines = lineCount(text);
+	const digest = sha256(text);
 	if (originalBytes <= maxBytes && originalLines <= maxLines) {
 		return {
 			text,
+			headText: text,
+			tailText: "",
 			truncated: false,
 			originalBytes,
 			originalLines,
 			previewBytes: originalBytes,
 			previewLines: originalLines,
+			sha256: digest,
 		};
 	}
 
-	const lines = text.split(/\r?\n/).slice(0, Math.max(0, maxLines));
-	const previewParts: string[] = [];
-	let usedBytes = 0;
-	for (const line of lines) {
-		const suffix = previewParts.length === 0 ? "" : "\n";
-		const candidate = `${suffix}${line}`;
-		const candidateBytes = byteLength(candidate);
-		if (usedBytes + candidateBytes > maxBytes) {
-			const remaining = Math.max(0, maxBytes - usedBytes - byteLength(suffix));
-			if (remaining > 0) {
-				let clipped = "";
-				for (const char of line) {
-					if (byteLength(clipped + char) > remaining) break;
-					clipped += char;
-				}
-				if (clipped) previewParts.push(`${suffix}${clipped}`);
-			}
-			break;
-		}
-		previewParts.push(candidate);
-		usedBytes += candidateBytes;
-	}
+	const lines = text.split(/\r?\n/);
+	const headLineBudget = Math.max(1, Math.ceil(maxLines / 2));
+	const tailLineBudget = Math.max(0, maxLines - headLineBudget);
+	const headByteBudget = Math.max(1, Math.ceil(maxBytes / 2));
+	const tailByteBudget = Math.max(0, maxBytes - headByteBudget);
+	const headText = takeHead(lines, headLineBudget, headByteBudget);
+	const tailText = tailLineBudget > 0 && tailByteBudget > 0 ? takeTail(lines, tailLineBudget, tailByteBudget) : "";
+	const textParts = [headText];
+	if (tailText) textParts.push("[... middle omitted ...]", tailText);
+	const previewText = textParts.filter(Boolean).join("\n");
 
-	const preview = previewParts.join("");
 	return {
-		text: preview,
+		text: previewText,
+		headText,
+		tailText,
 		truncated: true,
 		originalBytes,
 		originalLines,
-		previewBytes: byteLength(preview),
-		previewLines: lineCount(preview),
+		previewBytes: byteLength(headText) + byteLength(tailText),
+		previewLines: lineCount(headText) + lineCount(tailText),
+		sha256: digest,
 	};
 }
 
 export function serializeToolResultContent(
 	content: unknown,
 	options: ProviderToolResultSerializationOptions,
+	metadata?: { toolName?: string; truncatedToolResults?: TruncatedToolResultMetadata[] },
 ): string {
 	const text = contentToText(content);
 	if (!options.truncateToolResults) return text;
 	const preview = previewTextByBytesAndLines(text, options.maxToolResultBytes, options.maxToolResultLines);
 	if (!preview.truncated) return text;
+	const toolName = metadata?.toolName ?? "tool";
+	metadata?.truncatedToolResults?.push({
+		toolName,
+		originalBytes: preview.originalBytes,
+		originalLines: preview.originalLines,
+		previewBytes: preview.previewBytes,
+		previewLines: preview.previewLines,
+		omittedBytes: Math.max(0, preview.originalBytes - preview.previewBytes),
+		sha256: preview.sha256,
+	});
 	return [
 		"[Large tool result truncated by Pi Cursor provider wrapper]",
+		`Tool: ${toolName}.`,
 		`Original: ${preview.originalLines} lines, ${formatBytes(preview.originalBytes)}.`,
 		`Included preview: ${preview.previewLines} lines, ${formatBytes(preview.previewBytes)}.`,
+		`Original SHA-256: ${preview.sha256}.`,
 		"Reason: avoid resending very large prior Pi tool outputs to Cursor Composer on every provider turn.",
-		"If exact content is needed, use available tools to re-read the referenced file or re-run the relevant command from the conversation context.",
+		"If exact historical content is required, disable CURSOR_COMPOSER_PROVIDER_TRUNCATE_TOOL_RESULTS or use available tools to re-read/rerun when safe and equivalent.",
 		"",
-		"<tool_result_preview>",
-		preview.text,
-		"</tool_result_preview>",
+		"<tool_result_preview_head>",
+		preview.headText,
+		"</tool_result_preview_head>",
+		...(preview.tailText
+			? ["", "<tool_result_preview_tail>", preview.tailText, "</tool_result_preview_tail>"]
+			: []),
 	].join("\n");
 }
 
-export function serializeProviderContext(context: unknown, options: ProviderContextSerializationOptions = {}): string {
+export function serializeProviderContextWithMetadata(
+	context: unknown,
+	options: ProviderContextSerializationOptions = {},
+): ProviderContextSerializationResult {
 	const contextObject = (context ?? {}) as any;
 	const toolOptions: ProviderToolResultSerializationOptions = {
 		...providerToolResultSerializationOptionsFromEnv(),
 		...options,
 	};
+	const metadata: ProviderContextSerializationMetadata = { truncatedToolResults: [] };
 	const includeSystemPrompt = options.includeSystemPrompt ?? true;
 	const systemPrompt = options.systemPrompt ?? contextObject.systemPrompt;
 	const messages = options.messages ?? contextObject.messages ?? [];
@@ -188,14 +276,22 @@ export function serializeProviderContext(context: unknown, options: ProviderCont
 	lines.push("# Task", ...taskLines, "", options.conversationTitle ?? "# Conversation");
 	for (const message of messages as any[]) {
 		if (message?.role === "toolResult") {
+			const toolName = message.toolName ?? "tool";
 			lines.push(
-				`## toolResult ${message.toolName ?? "tool"}`,
-				serializeToolResultContent(message.content, toolOptions),
+				`## toolResult ${toolName}`,
+				serializeToolResultContent(message.content, toolOptions, {
+					toolName,
+					truncatedToolResults: metadata.truncatedToolResults,
+				}),
 				"",
 			);
 		} else {
 			lines.push(`## ${message?.role ?? "message"}`, contentToText(message?.content), "");
 		}
 	}
-	return lines.join("\n").trim();
+	return { prompt: lines.join("\n").trim(), metadata };
+}
+
+export function serializeProviderContext(context: unknown, options: ProviderContextSerializationOptions = {}): string {
+	return serializeProviderContextWithMetadata(context, options).prompt;
 }

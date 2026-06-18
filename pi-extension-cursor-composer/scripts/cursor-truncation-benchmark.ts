@@ -12,6 +12,7 @@ const PACKAGE_DIR = resolve(SCRIPT_DIR, "..");
 const OUTPUT_DIR = join(PACKAGE_DIR, "benchmark-output");
 const TURN_COUNT = Math.min(10, Math.max(1, Number(process.env.CURSOR_COMPOSER_BENCHMARK_TURNS ?? 10)));
 const TOOL_RESULT_TARGET_BYTES = Math.max(12_000, Number(process.env.CURSOR_COMPOSER_BENCHMARK_TOOL_BYTES ?? 32_000));
+const BENCHMARK_ORDER = ["optimized", "original"] as const;
 
 type Usage = {
 	inputTokens?: number;
@@ -268,7 +269,7 @@ function summarize(records: TurnRecord[]) {
 	};
 }
 
-async function writeOutputs(original: TurnRecord[], optimized: TurnRecord[]) {
+async function writeOutputs(original: TurnRecord[], optimized: TurnRecord[], runOrder: string[]) {
 	await mkdir(OUTPUT_DIR, { recursive: true });
 	const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 	const recordsPath = join(OUTPUT_DIR, `cursor-truncation-benchmark-${stamp}.jsonl`);
@@ -281,6 +282,7 @@ async function writeOutputs(original: TurnRecord[], optimized: TurnRecord[]) {
 		generatedAt: new Date().toISOString(),
 		turns: TURN_COUNT,
 		toolResultTargetBytes: TOOL_RESULT_TARGET_BYTES,
+		runOrder,
 		original: originalSummary,
 		optimized: optimizedSummary,
 		reductions: {
@@ -311,10 +313,14 @@ async function main() {
 	const workspace = await createBenchmarkWorkspace();
 	try {
 		console.log(`benchmarkWorkspace=${workspace}`);
-		console.log(`turns=${TURN_COUNT} toolResultTargetBytes=${TOOL_RESULT_TARGET_BYTES}`);
-		const original = await runVariant("original", workspace, corpus);
-		const optimized = await runVariant("optimized", workspace, corpus);
-		await writeOutputs(original, optimized);
+		console.log(`turns=${TURN_COUNT} toolResultTargetBytes=${TOOL_RESULT_TARGET_BYTES} order=${BENCHMARK_ORDER.join(",")}`);
+		let original: TurnRecord[] = [];
+		let optimized: TurnRecord[] = [];
+		for (const variant of BENCHMARK_ORDER) {
+			if (variant === "optimized") optimized = await runVariant("optimized", workspace, corpus);
+			else original = await runVariant("original", workspace, corpus);
+		}
+		await writeOutputs(original, optimized, [...BENCHMARK_ORDER]);
 	} finally {
 		if (process.env.CURSOR_COMPOSER_KEEP_BENCHMARK_WORKSPACE !== "true") {
 			await rm(workspace, { recursive: true, force: true });

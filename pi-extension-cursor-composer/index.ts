@@ -17,7 +17,11 @@ import {
 	type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { serializeProviderContext } from "./context.ts";
+import {
+	providerToolResultSerializationOptionsFromEnv,
+	serializeProviderContextWithMetadata,
+	type ProviderContextSerializationMetadata,
+} from "./context.ts";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -661,6 +665,17 @@ function thinkingFromProviderOptions(options?: SimpleStreamOptions): Thinking | 
 	return undefined;
 }
 
+function summarizeProviderContextTruncation(metadata: ProviderContextSerializationMetadata): string | undefined {
+	const truncated = metadata.truncatedToolResults;
+	if (truncated.length === 0) return undefined;
+	const originalBytes = truncated.reduce((total, item) => total + item.originalBytes, 0);
+	const previewBytes = truncated.reduce((total, item) => total + item.previewBytes, 0);
+	const omittedBytes = truncated.reduce((total, item) => total + item.omittedBytes, 0);
+	const toolNames = Array.from(new Set(truncated.map((item) => item.toolName))).slice(0, 4).join(", ");
+	const toolSuffix = toolNames ? ` (${toolNames}${truncated.length > 4 ? ", …" : ""})` : "";
+	return `Pi Cursor provider truncated ${truncated.length} prior tool result${truncated.length === 1 ? "" : "s"}${toolSuffix}: sent ${formatSize(previewBytes)} of ${formatSize(originalBytes)}, omitted ${formatSize(omittedBytes)}. Re-read/rerun if exact omitted content is needed.`;
+}
+
 function providerAutoReview(): boolean {
 	return process.env.CURSOR_COMPOSER_PROVIDER_AUTO_REVIEW !== "false";
 }
@@ -693,7 +708,12 @@ function streamCursorComposerProvider(
 
 	(async () => {
 		const thinking = thinkingFromProviderOptions(options);
-		const promptText = serializeProviderContext(context);
+		const serializedContext = serializeProviderContextWithMetadata(context, {
+			maxToolResultBytes: DEFAULT_MAX_BYTES,
+			maxToolResultLines: DEFAULT_MAX_LINES,
+		});
+		const promptText = serializedContext.prompt;
+		const truncationSummary = summarizeProviderContextTruncation(serializedContext.metadata);
 		const output: AssistantMessage = {
 			role: "assistant",
 			content: [],
@@ -774,6 +794,20 @@ function streamCursorComposerProvider(
 		try {
 			stream.push({ type: "start", partial: output });
 			startHeartbeat();
+			if (truncationSummary) {
+				pushProviderStatus(truncationSummary);
+				output.diagnostics = [
+					...(output.diagnostics ?? []),
+					{
+						type: "cursor-composer.provider_context_truncated",
+						timestamp: Date.now(),
+						details: {
+							summary: truncationSummary,
+							truncatedToolResults: serializedContext.metadata.truncatedToolResults,
+						},
+					},
+				];
+			}
 			const apiKey = options?.apiKey ?? resolveApiKey(process.cwd()).apiKey;
 			if (!apiKey) throw new Error(`${ENV_KEY} is missing. Run /cursor-composer-setup first.`);
 
@@ -968,8 +1002,15 @@ export default function cursorComposerExtension(pi: ExtensionAPI): void {
 			} catch (error) {
 				sdkStatus = error instanceof Error ? error.message : String(error);
 			}
+			const truncation = providerToolResultSerializationOptionsFromEnv(process.env, {
+				maxToolResultBytes: DEFAULT_MAX_BYTES,
+				maxToolResultLines: DEFAULT_MAX_LINES,
+			});
+			const truncationStatus = truncation.truncateToolResults
+				? `on (${formatSize(truncation.maxToolResultBytes)}, ${truncation.maxToolResultLines.toLocaleString()} lines)`
+				: "off";
 			ctx.ui.notify(
-				`${ENV_KEY}: ${key.apiKey ? `configured via ${key.source}${key.path ? ` (${key.path})` : ""}` : "missing"}\n@cursor/sdk: ${sdkStatus}\nPi provider: ${PI_MODEL_REF}\nPricing: ${describeCursorComposerPricing()}\nContext: ${CURSOR_COMPOSER_CONTEXT_WINDOW.toLocaleString()} tokens\nTool-result truncation: ${process.env.CURSOR_COMPOSER_PROVIDER_TRUNCATE_TOOL_RESULTS === "false" ? "off" : "on"}\nScoped models: ${scopedStatus}`,
+				`${ENV_KEY}: ${key.apiKey ? `configured via ${key.source}${key.path ? ` (${key.path})` : ""}` : "missing"}\n@cursor/sdk: ${sdkStatus}\nPi provider: ${PI_MODEL_REF}\nPricing: ${describeCursorComposerPricing()}\nContext: ${CURSOR_COMPOSER_CONTEXT_WINDOW.toLocaleString()} tokens\nTool-result truncation: ${truncationStatus}\nScoped models: ${scopedStatus}`,
 				key.apiKey && sdkStatus === "installed" ? "info" : "warning",
 			);
 		},
