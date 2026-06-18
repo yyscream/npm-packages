@@ -8,6 +8,232 @@ The LLM should act as a worker. The harness should be the source of truth.
 
 ---
 
+## Implementation Review & Refinements (2026-06-18)
+
+This plan should be implemented as a **TypeScript Pi extension package**, not as a Python module tree. Pi extensions can enforce the MVP with existing extension hooks:
+
+- `before_agent_start`: initialize/restore task state and append reliability instructions.
+- `context`: inject a compact goal/plan/verification header before every LLM call.
+- `tool_call`: attach tool calls to the active task step and block exact repeat loops.
+- `tool_result`: record tool outcomes, touched files, errors, and verification evidence.
+- `message_end`: persist state after every assistant response.
+- `agent_end`: update the scratchpad and user-facing progress status.
+
+### MVP Scope for First Implementation
+
+Implement the smallest useful reliability layer first:
+
+- [x] Extension package `pi-extension-reliability-harness` with `package.json`, `index.ts`, `README.md`, and `LICENSE`.
+- [x] Opt-in activation via `--reliability` or `/reliability on`; no surprise default behavior for existing sessions.
+- [x] `TaskState` persisted as JSON under `.pi/tasks/{task_id}/state.json` plus session custom-entry pointers for resume.
+- [x] Deterministic initial plan generation with a model-editable plan update tool.
+- [x] Compact context header injected before every LLM call.
+- [x] Deterministic scratchpad regenerated from state at `.pi/tasks/{task_id}/scratchpad.md`.
+- [x] Exact tool-call repeat detection with blocking at a configurable threshold.
+- [x] Verification checklist tool and final-answer guidance requiring evidence or explicit unknowns.
+- [x] Commands/tools for status, plan updates, progress records, and verification.
+
+### Important Design Adjustments
+
+- Prefer local JSON for MVP persistence. SQLite can wait until tasks require querying across many sessions.
+- Store raw tool logs only as an explicit opt-in because local logs can contain secrets; when enabled, logs are redacted, truncated, and linked from tool history.
+- Do not mutate or remove normal conversation history in the first version. Context compression can be added later after validating state quality.
+- Keep supervisor/worker split as a prompt/tool contract by default; separate supervisor/worker/verifier subprocess orchestration is available only when explicitly enabled.
+- Treat verification as evidence-gated but not omniscient: the verifier should report `Unknown` rather than inventing success.
+- Make all enforcement bounded and reversible: `/reliability off`, `/reliability reset`, and loop blocking only for identical repeated tool calls.
+
+### Implemented MVP Files
+
+```text
+pi-extension-reliability-harness/
+  package.json
+  index.ts
+  README.md
+  LICENSE
+  src/core.ts
+  src/completion-gate.ts
+  src/config.ts
+  src/context-builder.ts
+  src/evaluation.ts
+  src/loop-detector.ts
+  src/orchestration.ts
+  src/paths.ts
+  src/planner.ts
+  src/progress-ui.ts
+  src/redaction.ts
+  src/scratchpad.ts
+  src/supervisor.ts
+  src/task-state.ts
+  src/tool-normalizer.ts
+  src/types.ts
+  src/utils.ts
+  src/verification-state.ts
+  src/verification-suggestions.ts
+  src/verifier.ts
+  tests/reliability-harness.test.mjs
+```
+
+The remaining phases below are still useful as a roadmap, but the reliability harness now includes the MVP+, modularization pass, verification-parser pass, profile pass, completion-gating pass, context-compression pass, raw-log pass, granular domain modules, deterministic supervisor/worker contract, opt-in separate-model supervisor/worker/verifier orchestration, and offline reliability evaluation metrics. The next highest-impact improvement is live small-model evaluation on representative tasks.
+
+### Phase Status Summary
+
+| Phase | MVP status | Notes |
+|---|---|---|
+| 1. Persistent Task State | Implemented | JSON `TaskState`, state-event diff log, session custom-entry pointer, `.pi/tasks/{task_id}` storage. |
+| 2. Explicit Planning System | Implemented | Deterministic default plan plus `reliability_set_plan` for model-driven revisions. |
+| 3. Goal Reminder Injection | Implemented | `context` hook appends a compact goal/plan/verification header before each model call. |
+| 4. Scratchpad Memory File | Implemented | Scratchpad is regenerated from state; optional via `.pi/reliability.json`. |
+| 5. Context Builder and Compression | Implemented MVP | Headers support `full`, `compact`, and `delta` modes; full conversation replacement/compression remains future work. |
+| 6. Loop Detection | Implemented | Exact tool+argument repeat detection blocks loops at a configurable threshold. |
+| 7. Verification Layer | Implemented MVP++ | `reliability_verify_completion` records Passed/Failed/Unknown evidence; `reliability_suggest_verification` detects common project checks; verification result parsers summarize common tool output; strict completion gating prevents silent unsupported completion claims. |
+| 8. Supervisor / Worker Split | Implemented MVP+ | Deterministic supervisor decisions, worker contract prompt, `reliability_submit_worker_result`, and opt-in separate-model subprocess orchestration are implemented. |
+| 9. Tool Result Normalization | Implemented MVP+ | Compact redacted summaries are stored; optional redacted/truncated raw-log archival is available. |
+| 10. User-Facing Progress Updates | Implemented MVP+ | Footer/widget/status commands exist; `/reliability tasks`, `resume`, `archive`, and `orchestrate` improve task UX. Richer event emitter remains future work. |
+| 11. Configuration | Implemented MVP+ | `.pi/reliability.json`, `/reliability`, `--reliability`, strict/balanced/relaxed profiles, context/raw-log settings, and orchestration settings are supported. |
+| 12. Testing Strategy | Implemented MVP+ | `node:test` mocks cover task creation, context injection/modes, profile behavior, supervisor/worker contracts, orchestration dry-runs/parsers, offline evaluation metrics, completion gating, loop blocking, redacted raw logs, verification suggestions/parsers/failures, and task list/resume/archive UX. |
+
+### Implementation Update — Iteration 2
+
+Additional implementation completed after the initial MVP:
+
+- [x] Added `npm test` using Node's built-in test runner with mocked Pi lifecycle events.
+- [x] Added `reliability_suggest_verification` model-facing tool.
+- [x] Added `/reliability suggest` command.
+- [x] Added project manifest verification detection for `package.json`, `Cargo.toml`, `pyproject.toml`, `go.mod`, Maven, and Gradle.
+- [x] Added failed verification-command recording so failed checks can surface as failed verification criteria.
+- [x] Added `/reliability tasks`, `/reliability tasks --all`, `/reliability resume <task_id_prefix>`, and `/reliability archive <task_id_prefix>`.
+- [x] Updated README usage and development documentation.
+- [x] Verified with import smoke test, `npm test`, and `npm pack --dry-run --json`.
+
+### Implementation Update — Iteration 3
+
+- [x] Performed the first modularization pass.
+- [x] Moved core task-state, planning, scratchpad, context, loop, verification, and task-list helpers into `src/core.ts`.
+- [x] Kept `index.ts` focused on Pi extension registration, commands, tools, and event wiring.
+- [x] Added `src` to package files so the published package includes the extracted module.
+- [x] Re-ran `npm test`, import smoke test, and `npm pack --dry-run --json` successfully.
+
+### Implementation Update — Iteration 4
+
+- [x] Added `parseVerificationResult()` for common verification tools.
+- [x] Parses TypeScript, ESLint, Ruff, mypy, pytest, Cargo, Go test, JavaScript test scripts, Maven, and Gradle signals into structured summaries.
+- [x] Verification command evidence now includes concise parsed output instead of only the command string.
+- [x] Successful verification commands mark the verification step complete; failed verification commands block it and store failed evidence.
+- [x] Added parser tests for representative TypeScript, pytest, Cargo, Go test, and Gradle outputs.
+- [x] Re-ran `npm test`, import smoke test, and `npm pack --dry-run --json` successfully.
+
+### Implementation Update — Iteration 5
+
+- [x] Added strict/balanced/relaxed reliability profiles.
+- [x] Added `profile` support in `.pi/reliability.json`.
+- [x] Added `/reliability profile strict|balanced|relaxed` for session-level switching.
+- [x] Surfaced active profile and effective repeat limit in `/reliability status` and `reliability_status`.
+- [x] Strict profile defaults to repeat limit 2 with plan/verification required.
+- [x] Balanced profile preserves current repeat limit 3 behavior.
+- [x] Relaxed profile disables non-failing repeat blocking while still blocking repeated failures.
+- [x] Added tests for strict and relaxed profile behavior.
+- [x] Re-ran `npm test`, import smoke test, and `npm pack --dry-run --json` successfully.
+
+### Implementation Update — Iteration 6
+
+- [x] Added completion-claim detection for assistant messages.
+- [x] Added `evaluateCompletionGate()` and `buildCompletionGatePrompt()`.
+- [x] Completion claims with failed/unknown criteria now record an open question and notify the user.
+- [x] Strict profile queues a follow-up user message that tells the agent not to claim completion yet and asks for evidence, verification, plan revision, or explicit partial-completion reporting.
+- [x] Completion-gate follow-up is sent once per task to avoid spam.
+- [x] Added tests for strict completion-gate behavior.
+- [x] Re-ran `npm test`, import smoke test, and `npm pack --dry-run --json` successfully.
+
+### Implementation Update — Iteration 7
+
+- [x] Added context header modes: `full`, `compact`, and `delta`.
+- [x] Added profile defaults for context mode: strict → full, balanced → compact, relaxed → delta.
+- [x] Added `contextMode` support in `.pi/reliability.json`.
+- [x] Added `/reliability context full|compact|delta` for session-level switching.
+- [x] Added context snapshots so delta headers only show material state changes after the first header.
+- [x] Updated status output to include context mode.
+- [x] Added tests for compact and delta headers.
+- [x] Re-ran `npm test`, import smoke test, and `npm pack --dry-run --json` successfully.
+
+### Implementation Update — Iteration 8
+
+- [x] Added optional raw tool log storage behind `storeRawToolLogs`.
+- [x] Added `rawLogMaxChars` with bounded normalization.
+- [x] Raw logs are written under `.pi/tasks/{task_id}/tool-logs/` only when explicitly enabled.
+- [x] Added redaction for API keys, GitHub tokens, AWS access keys, bearer tokens, password/token assignments, private-key blocks, and URL credentials.
+- [x] Added head/tail truncation for large redacted raw logs.
+- [x] Stored raw log paths on `tool_history[].raw_log_path`.
+- [x] Added tests for redacted raw-log storage and redaction/truncation helpers.
+- [x] Re-ran `npm test`, import smoke test, and `npm pack --dry-run --json` successfully.
+
+### Implementation Update — Iteration 9
+
+- [x] Added `src/redaction.ts` for secret redaction and raw-log truncation helpers.
+- [x] Added `src/supervisor.ts` for deterministic supervisor decisions and worker-result application.
+- [x] Added supervisor/worker contract prompt injection in `before_agent_start`.
+- [x] Added `reliability_supervisor_decision` tool.
+- [x] Added `reliability_submit_worker_result` tool implementing the worker contract: step id, action taken, result, changed files, errors, next recommendation, and complete/blocked/failed status.
+- [x] Supervisor now owns worker-step acceptance and state transition for submitted worker results.
+- [x] Added tests for supervisor/worker contract acceptance.
+- [x] Re-ran `npm test`, import smoke test, and `npm pack --dry-run --json` successfully.
+
+### Implementation Update — Iteration 10
+
+- [x] Added `src/types.ts` for shared task/config/result types, schemas, constants, and profile defaults.
+- [x] Added `src/config.ts` for profile, context, raw-log, and orchestration config normalization.
+- [x] Added `src/orchestration.ts` for role prompts, dry-run planning, JSON parsing, and separate `pi --mode json --no-session` subprocess role execution.
+- [x] Added `orchestrationMode`, `orchestrationModels`, `orchestrationTools`, and `orchestrationMaxOutputChars` config fields.
+- [x] Added `/reliability orchestrate [--run]`.
+- [x] Separate-model execution remains explicitly opt-in: `orchestrationMode: "separate-model"` plus `--run` plus UI confirmation when available.
+- [x] Orchestration runs supervisor, worker, and verifier roles separately; applies valid worker results through supervisor-owned state transitions; merges verifier evidence when present.
+- [x] Added tests for orchestration dry-run prompts and JSON parsers.
+- [x] Re-ran `npm test`, import smoke test, and `npm pack --dry-run --json` successfully.
+
+### Implementation Update — Iteration 11
+
+- [x] Extracted shared JSON/text/hash/content helpers into `src/utils.ts`.
+- [x] Extracted `.pi/tasks` path helpers into `src/paths.ts`.
+- [x] Extracted goal/criteria/default-plan/step-transition logic into `src/planner.ts`.
+- [x] Extracted repeated-action blocking into `src/loop-detector.ts`.
+- [x] Extracted tool path tracking, tool summaries, and raw-log writes into `src/tool-normalizer.ts`.
+- [x] Extracted verification command suggestions into `src/verification-suggestions.ts`.
+- [x] Extracted verification output parsers into `src/verifier.ts`.
+- [x] Kept `src/core.ts` as a compatibility facade plus remaining task-state/context/scratchpad/verification-state/UI glue.
+- [x] Re-ran `npm test` and import smoke test successfully.
+
+### Implementation Update — Iteration 12
+
+- [x] Extracted remaining `src/core.ts` domains into focused modules:
+  - `src/task-state.ts`
+  - `src/context-builder.ts`
+  - `src/scratchpad.ts`
+  - `src/verification-state.ts`
+  - `src/completion-gate.ts`
+  - `src/progress-ui.ts`
+- [x] Converted `src/core.ts` into a compatibility re-export facade.
+- [x] Added `src/evaluation.ts` for deterministic offline reliability evaluation metrics.
+- [x] Added `/reliability eval [--write]` to report repeated-action blocking, false-completion gating, verification failure capture, parser behavior, and context-size behavior.
+- [x] `--write` stores Markdown and JSON reports under `.pi/reliability-evaluations/`.
+- [x] Added tests for offline reliability evaluation metrics and command UX.
+- [x] Re-ran `npm test`, import smoke test, and `npm pack --dry-run --json` successfully.
+
+### Current Plan Status
+
+The reliability harness now has a complete MVP++ implementation: persistent task state, planning, scratchpad, compact/delta context headers, loop detection, verification suggestions/parsers, strict completion gating, task UX, profiles, optional redacted raw logs, granular domain modules, deterministic supervisor/worker contract, opt-in separate-model supervisor/worker/verifier subprocess orchestration, offline reliability evaluation metrics, and a 15-test Node test suite.
+
+### Next Implementation Backlog
+
+Prioritize these next, in order:
+
+1. [ ] **Live small-model reliability evaluation**.
+   - Run the harness on representative coding/research/resume/verification tasks using strict/balanced/relaxed profiles and prompt-contract vs separate-model orchestration.
+   - Acceptance: record task completion, repeated actions, false completions, verification coverage, context size metrics, model IDs, and cost/usage where available.
+2. [ ] **Optional in-process role runner**.
+   - Replace subprocess role orchestration with SDK-backed in-process role calls if a safe extension-local model-call abstraction is preferable.
+   - Acceptance: preserves opt-in behavior, cancellation, and no-secret logging defaults.
+
+---
+
 ## Core Problem
 
 Smaller LLMs often fail on long or multi-step tasks because they:
@@ -266,7 +492,7 @@ Replace long raw conversation history with a curated context package.
 - Add `ContextBuilder` module.
 - Rank context items by relevance.
 - Summarize old tool outputs.
-- Keep full logs on disk.
+- Keep optional redacted raw logs on disk only when explicitly enabled.
 - Inject only relevant excerpts.
 - Add token budget management.
 
@@ -405,19 +631,27 @@ Verifier
 }
 ```
 
-### Implementation Tasks
+### Implementation Status
 
-- Add role-specific prompt templates.
-- Keep worker context narrow.
-- Keep supervisor context strategic.
-- Add structured worker output parsing.
-- Let supervisor update task state, not worker directly.
+- [x] Added role-specific supervisor/worker contract prompt in `src/supervisor.ts`.
+- [x] Injected the worker contract during `before_agent_start`.
+- [x] Added `reliability_supervisor_decision` for inspecting the current supervisor-selected step.
+- [x] Added `reliability_submit_worker_result` for structured worker output.
+- [x] Supervisor validates the submitted `step_id` and owns task-state transitions.
+- [x] Worker result contract supports changed files, errors, next recommendation, and complete/blocked/failed status.
+- [x] Added supervisor/worker contract tests.
+- [x] Added `src/orchestration.ts` for separate supervisor, worker, and verifier role prompts.
+- [x] Added opt-in `/reliability orchestrate --run` subprocess orchestration using `pi --mode json --no-session`.
+- [x] Added orchestration dry-run/parser tests.
+- [ ] Optional future: replace subprocess orchestration with an in-process SDK role runner if Pi exposes a safe extension-local model-call abstraction.
 
 ### Acceptance Criteria
 
-- Workers only receive the context needed for their step.
-- Supervisor remains aware of the whole task.
-- Step results are structured and verifiable.
+- [x] Workers receive a narrow current-step contract.
+- [x] Supervisor remains aware of the whole task through persistent task state.
+- [x] Step results are structured and task-state updates are supervisor-owned.
+- [x] Separate-model orchestration is available as explicit opt-in subprocess execution.
+- [ ] In-process separate-role execution remains future work.
 
 ---
 
@@ -503,35 +737,42 @@ Next: {next_action}
 
 ## Phase 11 — Configuration
 
-### Example Config
+### MVP Config
 
-```toml
-[reliability]
-enabled = true
-require_plan = true
-require_verification = true
-max_repeated_action = 3
-scratchpad_enabled = true
-context_budget_tokens = 6000
-summarize_tool_output = true
+Save optional project configuration at `.pi/reliability.json` in a trusted project:
 
-[roles]
-supervisor_model = "local-14b"
-worker_model = "local-14b"
-verifier_model = "local-14b"
-allow_larger_verifier = true
-
-[storage]
-task_state_backend = "sqlite"
-task_dir = ".pi/tasks"
+```json
+{
+  "enabled": false,
+  "profile": "balanced",
+  "requirePlan": true,
+  "requireVerification": true,
+  "maxRepeatedAction": 3,
+  "scratchpadEnabled": true,
+  "contextBudgetChars": 6000,
+  "contextMode": "compact",
+  "progressWidget": true,
+  "storeRawToolLogs": false,
+  "rawLogMaxChars": 50000,
+  "orchestrationMode": "prompt",
+  "orchestrationModels": {
+    "supervisor": "provider/model-id",
+    "worker": "provider/model-id",
+    "verifier": "provider/model-id"
+  },
+  "orchestrationTools": ["read", "grep", "find", "ls"],
+  "orchestrationMaxOutputChars": 50000
+}
 ```
+
+Role-specific model overrides are supported via `orchestrationModels`; subprocess execution remains opt-in via `orchestrationMode: "separate-model"` plus `/reliability orchestrate --run`.
 
 ### Implementation Tasks
 
-- Add config section.
-- Allow reliability mode to be enabled per task.
-- Allow stricter mode for small models.
-- Allow relaxed mode for large models.
+- [x] Add config section.
+- [x] Allow reliability mode to be enabled per task/session with `/reliability on` and `--reliability`.
+- [x] Allow stricter mode for small models.
+- [x] Allow relaxed mode for large models.
 
 ---
 
@@ -546,6 +787,24 @@ task_dir = ".pi/tasks"
 5. Task interrupted and resumed later.
 6. Task with changed user requirements mid-run.
 7. Task with irrelevant tempting context.
+
+### Implemented Test Coverage
+
+- [x] Task creation writes `state.json` and `scratchpad.md`.
+- [x] Context hook injects the reliability header.
+- [x] Context headers support full, compact, and delta modes.
+- [x] Redacted raw-log storage is disabled by default and covered by tests.
+- [x] Exact repeated tool calls are blocked at the threshold.
+- [x] Verification command suggestions are detected from `package.json`.
+- [x] Strict and relaxed profiles are loaded from config and affect repeat blocking.
+- [x] Strict completion-gate follow-up is queued on unsupported completion claims.
+- [x] Failed verification commands are reflected in verification criteria.
+- [x] Common verification outputs are parsed into concise pass/fail evidence.
+- [x] Task list/resume/archive/orchestrate/eval commands work against `.pi/tasks`.
+- [x] Supervisor/worker contract tool accepts current step results and updates task state.
+- [x] Orchestration dry-run prompts and JSON parsers are covered.
+- [x] Offline reliability evaluation metrics are covered.
+- [x] Current suite: 15 Node tests pass with `npm test`.
 
 ### Metrics
 
@@ -571,14 +830,23 @@ Track:
 
 ## Minimal MVP
 
-Build these first:
+Completed and extended in `pi-extension-reliability-harness`:
 
-1. `TaskState`
-2. Plan creation
-3. Goal reminder injection
-4. Scratchpad file
-5. Loop detection
-6. Verification checklist
+1. [x] `TaskState`
+2. [x] Plan creation
+3. [x] Goal reminder injection
+4. [x] Scratchpad file
+5. [x] Loop detection
+6. [x] Verification checklist
+7. [x] Verification command suggestions and parsers
+8. [x] Strict/balanced/relaxed profiles
+9. [x] Compact/delta context modes
+10. [x] Optional redacted raw-log storage
+11. [x] Deterministic supervisor/worker contract
+12. [x] Opt-in separate-model supervisor/worker/verifier subprocess orchestration
+13. [x] Offline deterministic reliability evaluation metrics
+14. [x] Task list/resume/archive/orchestrate/eval UX
+15. [x] Node test suite for core extension lifecycle behavior
 
 This MVP already solves the most common small-model failures.
 
@@ -587,70 +855,93 @@ This MVP already solves the most common small-model failures.
 ## Suggested File Structure
 
 ```text
-pi/
-  reliability/
-    __init__.py
-    task_state.py
-    planner.py
-    context_builder.py
-    scratchpad.py
-    loop_detector.py
-    verifier.py
-    tool_wrapper.py
-    progress.py
-    prompts/
-      planner.md
-      executor.md
-      verifier.md
-      loop_warning.md
-  tasks/
-    {task_id}/
-      state.json
-      scratchpad.md
-      tool_logs/
-      artifacts/
+pi-extension-reliability-harness/
+  package.json
+  index.ts
+  README.md
+  LICENSE
+  src/
+    core.ts
+    completion-gate.ts
+    config.ts
+    context-builder.ts
+    evaluation.ts
+    loop-detector.ts
+    orchestration.ts
+    paths.ts
+    planner.ts
+    progress-ui.ts
+    redaction.ts
+    scratchpad.ts
+    supervisor.ts
+    task-state.ts
+    tool-normalizer.ts
+    types.ts
+    utils.ts
+    verification-state.ts
+    verification-suggestions.ts
+    verifier.ts
+  tests/
+    reliability-harness.test.mjs
+
+.pi/tasks/
+  latest.json
+  {task_id}/
+    state.json
+    scratchpad.md
+    state-events.jsonl
+```
+
+Future larger versions may add optional live-evaluation and SDK-runner modules:
+
+```text
+src/
+  live-evaluation.ts
+  role-runner-sdk.ts
 ```
 
 ---
 
-## Example Execution Loop
+## Example Event-Driven Extension Loop
 
-```python
-def run_task(task_id: str):
-    state = load_task_state(task_id)
+```typescript
+pi.on("before_agent_start", (event, ctx) => {
+  state = ensureTask(ctx, event.prompt);
+  selectNextStep(state);
+  saveTaskState(state, "before_agent_start");
+  return { systemPrompt: event.systemPrompt + reliabilityInstructions };
+});
 
-    if not state.plan:
-        state.plan = create_plan(state)
-        save_task_state(state)
+pi.on("context", (event) => {
+  return { messages: [...event.messages, buildContextHeaderMessage(state)] };
+});
 
-    while state.status not in ["complete", "failed"]:
-        step = select_next_step(state)
-        state.current_step_id = step.step_id
+pi.on("tool_call", (event, ctx) => {
+  if (detectRepeatedToolCall(state, event)) {
+    recordLoopWarning(state, event);
+    return { block: true, reason: "Choose a different strategy." };
+  }
+  recordToolCall(state, event);
+  saveTaskState(state, "tool_call_recorded");
+});
 
-        context = build_context_package(state, step)
-        result = call_worker_model(context)
+pi.on("tool_result", (event) => {
+  normalizeAndRecordToolResult(state, event);
+  updateScratchpad(state);
+  saveTaskState(state, "tool_result_recorded");
+});
 
-        normalized_result = normalize_worker_result(result)
-        update_task_state(state, normalized_result)
-        update_scratchpad(state)
+pi.on("message_end", (event) => {
+  recordAssistantResponse(state, event.message);
+  saveTaskState(state, "assistant_message_recorded");
+});
 
-        if detect_loop(state):
-            inject_loop_warning(state)
-            continue
-
-        verification = verify_step(state, step)
-        update_task_state(state, verification)
-
-        if all_success_criteria_met(state):
-            final_verification = verify_task_completion(state)
-            if final_verification.passed:
-                state.status = "complete"
-            else:
-                state.status = "executing"
-
-        save_task_state(state)
-
-    return build_final_response(state)
+pi.on("agent_end", () => {
+  const verification = computeVerification(state);
+  if (allCriteriaPassed(verification)) markTaskComplete(state);
+  updateScratchpad(state);
+  saveTaskState(state, "agent_end");
+});
 ```
 
 ---
