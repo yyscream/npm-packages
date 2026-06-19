@@ -52,7 +52,8 @@
         <p id="updateNotificationMessage">A newer Pi version is available.</p>
         <p id="updateNotificationDetail" class="update-notification-detail muted"></p>
         <div class="update-notification-actions">
-          <button id="updateNotificationUpdateButton" class="primary" type="button">Update &amp; restart</button>
+          <button id="updateNotificationUpdateButton" class="primary" type="button">Update Pi &amp; restart</button>
+          <button id="updateNotificationUpdateAllButton" type="button">Update all &amp; restart</button>
           <button id="updateNotificationDismissButton" type="button">Later</button>
         </div>
       </div>
@@ -398,6 +399,7 @@
                       <option value="" selected>Choose action…</option>
                       <option value="restart">Restart Server</option>
                       <option value="update">Update Pi &amp; Restart</option>
+                      <option value="update-all">Update Pi + Packages &amp; Restart</option>
                       <option value="stop">Stop Server</option>
                     </select>
                     <button id="runServerActionButton" type="button" disabled>Run</button>

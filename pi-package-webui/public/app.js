@@ -24,6 +24,7 @@ const elements = {
   updateNotificationMessage: $("#updateNotificationMessage"),
   updateNotificationDetail: $("#updateNotificationDetail"),
   updateNotificationUpdateButton: $("#updateNotificationUpdateButton"),
+  updateNotificationUpdateAllButton: $("#updateNotificationUpdateAllButton"),
   updateNotificationDismissButton: $("#updateNotificationDismissButton"),
   serverOfflineCommand: $("#serverOfflineCommand"),
   serverOfflineSlashCommand: $("#serverOfflineSlashCommand"),
@@ -2829,22 +2830,34 @@ function renderUpdateNotification(status = latestUpdateStatus, { force = false }
   }
 
   const canRunUpdate = latestUpdateStatus.canRunUpdate !== false;
+  const hasPiUpdate = !!latestUpdateStatus.pi?.updateAvailable;
+  const hasPackageUpdate = !!latestUpdateStatus.webui?.updateAvailable;
   if (elements.updateNotificationTitle) elements.updateNotificationTitle.textContent = items.length === 1 ? `${items[0]} available` : "Pi updates available";
   if (elements.updateNotificationMessage) {
-    elements.updateNotificationMessage.textContent = canRunUpdate
-      ? "Run Pi and Web UI package updates now, then restart this Web UI server automatically."
-      : "Updates are available. Direct Web UI updates are only enabled from localhost on the host machine.";
+    let message = "Updates are available. Direct Web UI updates are only enabled from localhost on the host machine.";
+    if (canRunUpdate) {
+      if (hasPiUpdate && hasPackageUpdate) message = "Run pi update for Pi only, or pi update --all to include Web UI/package updates, then restart this Web UI server automatically.";
+      else if (hasPackageUpdate) message = "Run pi update --all to update Web UI/package entries, then restart this Web UI server automatically.";
+      else message = "Run pi update for Pi only, then restart this Web UI server automatically.";
+    }
+    elements.updateNotificationMessage.textContent = message;
   }
   const details = [
     items.join(" · "),
-    latestUpdateStatus.webuiDev && latestUpdateStatus.webui?.updateAvailable ? "The current Web UI is a dev checkout; update also refreshes this checkout's Web UI/Pi package dependencies when possible." : "",
+    latestUpdateStatus.webuiDev && latestUpdateStatus.webui?.updateAvailable ? "The current Web UI is a dev checkout; pi update --all refreshes configured package dependencies when possible." : "",
     latestUpdateStatus.packages?.note || "",
   ].filter(Boolean).join(" ");
   if (elements.updateNotificationDetail) elements.updateNotificationDetail.textContent = details;
   if (elements.updateNotificationUpdateButton) {
-    elements.updateNotificationUpdateButton.hidden = !canRunUpdate;
+    elements.updateNotificationUpdateButton.hidden = !canRunUpdate || !hasPiUpdate;
     elements.updateNotificationUpdateButton.disabled = updateRequestInProgress || latestUpdateStatus.updateInProgress;
-    elements.updateNotificationUpdateButton.textContent = latestUpdateStatus.updateInProgress ? "Updating…" : "Update & restart";
+    elements.updateNotificationUpdateButton.textContent = latestUpdateStatus.updateInProgress ? "Updating…" : "Update Pi & restart";
+  }
+  if (elements.updateNotificationUpdateAllButton) {
+    elements.updateNotificationUpdateAllButton.hidden = !canRunUpdate || !hasPackageUpdate;
+    elements.updateNotificationUpdateAllButton.disabled = updateRequestInProgress || latestUpdateStatus.updateInProgress;
+    elements.updateNotificationUpdateAllButton.classList.toggle("primary", !hasPiUpdate);
+    elements.updateNotificationUpdateAllButton.textContent = latestUpdateStatus.updateInProgress ? "Updating…" : "Update all & restart";
   }
   clearTimeout(updateNotificationHideTimer);
   panel.hidden = false;
@@ -2875,30 +2888,33 @@ function initializeUpdateNotifications() {
   }, UPDATE_STATUS_INITIAL_DELAY_MS);
 }
 
-function piUpdateConfirmationText() {
+function piUpdateConfirmationText({ all = false } = {}) {
   const items = updateNotificationItems();
   const workingWarning = hasWorkingTab() ? "\n\nOne or more Pi tabs look busy or blocked. Finish or abort in-flight work before updating if you need to preserve it." : "";
   const versionText = items.length ? `\n\nDetected update: ${items.join(" · ")}.` : "";
-  return `Run Pi/Web UI package updates now?${versionText}\n\nThis will run \"pi update\" plus detected local and global Web UI/Pi package-manager updates on the Web UI host. After it finishes, Pi Web UI will restart itself. Browser clients will briefly disconnect, and managed Pi tabs/RPC processes will be restarted from saved session state when possible.${workingWarning}`;
+  const command = all ? "pi update --all" : "pi update";
+  const scope = all ? "Pi and configured package updates" : "Pi only";
+  return `Run ${scope} now?${versionText}\n\nThis will run \"${command}\" on the Web UI host. After it finishes, Pi Web UI will restart itself. Browser clients will briefly disconnect, and managed Pi tabs/RPC processes will be restarted from saved session state when possible.${workingWarning}`;
 }
 
-async function runPiUpdateAndRestart() {
+async function runPiUpdateAndRestart({ all = false } = {}) {
   if (updateRequestInProgress) return;
   if (latestUpdateStatus?.canRunUpdate === false) {
-    addEvent("Pi/Web UI package updates can only be started from localhost on the Web UI host", "warn");
+    addEvent("Pi updates can only be started from localhost on the Web UI host", "warn");
     renderUpdateNotification(latestUpdateStatus, { force: true });
     return;
   }
-  if (!confirm(piUpdateConfirmationText())) return;
+  if (!confirm(piUpdateConfirmationText({ all }))) return;
 
+  const updateLabel = all ? "Pi and package updates" : "Pi update";
   updateRequestInProgress = true;
   hideUpdateNotification();
   setServerActionBusy("Updating…");
-  setServerActionStatus("Running Pi/Web UI package updates. The server will restart after the update completes…", "warn");
-  setServerRestartOverlay(true, "Running Pi/Web UI package updates. The server will restart after the update completes…");
+  setServerActionStatus(`Running ${updateLabel}. The server will restart after the update completes…`, "warn");
+  setServerRestartOverlay(true, `Running ${updateLabel}. The server will restart after the update completes…`);
   try {
-    await api("/api/update", { method: "POST", scoped: false });
-    addEvent("Pi/Web UI package updates completed; Pi Web UI server restart requested", "warn");
+    await api(all ? "/api/update?all=1" : "/api/update", { method: "POST", scoped: false });
+    addEvent(`${updateLabel} completed; Pi Web UI server restart requested`, "warn");
   } catch (error) {
     if (!error?.backendOffline) {
       updateRequestInProgress = false;
@@ -17000,10 +17016,11 @@ function updateServerActionButton() {
   const button = elements.runServerActionButton;
   if (!button) return;
   button.disabled = !action;
-  button.textContent = action === "restart" ? "Restart" : action === "update" ? "Update" : action === "stop" ? "Stop" : "Run";
+  button.textContent = action === "restart" ? "Restart" : action === "update" || action === "update-all" ? "Update" : action === "stop" ? "Stop" : "Run";
   button.classList.toggle("danger", action === "stop");
   if (action === "restart") setServerActionStatus("Ready to restart the Web UI server.", "info");
-  else if (action === "update") setServerActionStatus("Ready to run pi update, then restart the Web UI server.", "info");
+  else if (action === "update") setServerActionStatus("Ready to run pi update for Pi only, then restart the Web UI server.", "info");
+  else if (action === "update-all") setServerActionStatus("Ready to run pi update --all for Pi and configured packages, then restart the Web UI server.", "info");
   else if (action === "stop") setServerActionStatus("Ready to stop the Web UI server.", "info");
   else setServerActionStatus();
 }
@@ -17111,6 +17128,7 @@ async function runSelectedServerAction() {
   const action = elements.serverActionSelect?.value || "";
   if (action === "restart") await restartServer();
   else if (action === "update") await runPiUpdateAndRestart();
+  else if (action === "update-all") await runPiUpdateAndRestart({ all: true });
   else if (action === "stop") await stopServer();
 }
 
@@ -18495,6 +18513,7 @@ elements.openNetworkButton.addEventListener("click", openToNetwork);
 elements.serverActionSelect.addEventListener("change", updateServerActionButton);
 elements.runServerActionButton.addEventListener("click", () => runSelectedServerAction().catch((error) => addEvent(error.message || String(error), "error")));
 elements.updateNotificationUpdateButton?.addEventListener("click", () => runPiUpdateAndRestart().catch((error) => addEvent(error.message || String(error), "error")));
+elements.updateNotificationUpdateAllButton?.addEventListener("click", () => runPiUpdateAndRestart({ all: true }).catch((error) => addEvent(error.message || String(error), "error")));
 elements.updateNotificationDismissButton?.addEventListener("click", () => hideUpdateNotification({ remember: true }));
 updateServerActionButton();
 elements.agentDoneNotificationsToggle.addEventListener("change", () => {

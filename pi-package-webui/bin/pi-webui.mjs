@@ -5201,32 +5201,35 @@ async function getUpdateStatus({ force = false } = {}) {
     checkedAt: new Date(now).toISOString(),
     updateAvailable,
     restartRequired: true,
-    command: "pi update + Web UI/Pi package-manager updates",
+    command: "pi update",
+    allCommand: "pi update --all",
     webuiDev: webuiDevServer,
     pi: piStatus,
     webui: webuiStatus,
     packages: {
       checked: false,
-      note: "Update runs pi update plus all detected local, Pi-agent, npm-global, and Bun-global Web UI/Pi package roots."
+      note: "Default update runs pi update for Pi only. Use update all to run pi update --all for Pi and configured packages."
     },
   };
   updateStatusCacheAt = now;
   return updateStatusCache;
 }
 
-async function resolvePiUpdateCommand() {
+async function resolvePiUpdateCommand({ all = false } = {}) {
+  const updateArgs = all ? ["update", "--all"] : ["update"];
+  const label = all ? "Pi CLI and configured packages" : "Pi CLI";
   if (options.piBinExplicit) {
-    const command = await resolvePiCommand(["update"]);
-    return { ...command, label: "Pi CLI and configured packages" };
+    const command = await resolvePiCommand(updateArgs);
+    return { ...command, label, timeoutMs: PI_UPDATE_TIMEOUT_MS, maxOutputLength: PI_UPDATE_OUTPUT_MAX_CHARS };
   }
 
   const pathPi = await runCommand(options.piBin, ["--version"], { timeoutMs: 3000, maxOutputLength: 4000 });
   if (pathPi.exitCode === 0 && !pathPi.timedOut && !pathPi.error) {
-    return { label: "Pi CLI and configured packages", command: options.piBin, args: ["update"], displayCommand: formatCommandForDisplay(options.piBin, ["update"]) };
+    return { label, command: options.piBin, args: updateArgs, displayCommand: formatCommandForDisplay(options.piBin, updateArgs), timeoutMs: PI_UPDATE_TIMEOUT_MS, maxOutputLength: PI_UPDATE_OUTPUT_MAX_CHARS };
   }
 
-  const fallback = await resolvePiCommand(["update"]);
-  return { ...fallback, label: "bundled Pi CLI and configured packages" };
+  const fallback = await resolvePiCommand(updateArgs);
+  return { ...fallback, label: `bundled ${label}`, timeoutMs: PI_UPDATE_TIMEOUT_MS, maxOutputLength: PI_UPDATE_OUTPUT_MAX_CHARS };
 }
 
 function packageNodeModulesPath(nodeModulesRoot, packageName) {
@@ -5401,13 +5404,9 @@ function uniqueUpdateTasks(tasks) {
   return unique;
 }
 
-async function resolveUpdateTasks() {
+async function resolveUpdateTasks({ all = false } = {}) {
   return uniqueUpdateTasks([
-    await resolvePiUpdateCommand(),
-    await currentWebuiPackageUpdateTask(),
-    await agentPackageRootUpdateTask(),
-    await npmGlobalPackageRootUpdateTask(),
-    await bunGlobalPackageRootUpdateTask(),
+    await resolvePiUpdateCommand({ all }),
   ]);
 }
 
@@ -5448,16 +5447,17 @@ function combinedUpdateOutput(results, field) {
     .join("\n\n");
 }
 
-async function runPiUpdateAndPrepareRestart() {
+async function runPiUpdateAndPrepareRestart({ all = false } = {}) {
   if (piUpdateInProgress) throw makeHttpError(409, "A Pi update is already running.");
   piUpdateInProgress = true;
   let restartPrepared = false;
   try {
     const restorableTabs = await restorableTabsForRestart();
-    const updateTasks = await resolveUpdateTasks();
-    if (!updateTasks.length) throw makeHttpError(500, "No Pi/Web UI update commands could be resolved.");
+    const updateTasks = await resolveUpdateTasks({ all });
+    if (!updateTasks.length) throw makeHttpError(500, "No Pi update command could be resolved.");
     const command = updateTasks.map(updateTaskDisplay).join(" && ");
-    recordEvent({ type: "webui_update_started", command, restorableTabCount: restorableTabs.length });
+    const updateLabel = all ? "Pi and package updates" : "Pi update";
+    recordEvent({ type: "webui_update_started", command, updateAll: all, restorableTabCount: restorableTabs.length });
     const results = [];
     for (const task of updateTasks) results.push(await runUpdateTask(task));
 
@@ -5465,9 +5465,9 @@ async function runPiUpdateAndPrepareRestart() {
     updateStatusCacheAt = 0;
     const child = spawnRestartServer(restorableTabs);
     restartPrepared = true;
-    recordEvent({ type: "webui_update_restarting", command, nextWebuiPid: child.pid, restorableTabCount: restorableTabs.length });
+    recordEvent({ type: "webui_update_restarting", command, updateAll: all, nextWebuiPid: child.pid, restorableTabCount: restorableTabs.length });
     return {
-      message: "Pi/Web UI package updates completed. Pi Web UI is restarting.",
+      message: `${updateLabel} completed. Pi Web UI is restarting.`,
       command,
       commands: results.map((result) => ({ label: result.label, command: result.command })),
       stdout: combinedUpdateOutput(results, "stdout"),
@@ -7357,7 +7357,10 @@ const server = createServer(async (req, res) => {
 
     if (url.pathname === "/api/update" && req.method === "POST") {
       requireLocalhostRoute(req, url.pathname);
-      const data = await runPiUpdateAndPrepareRestart();
+      const body = await readJsonBody(req);
+      const queryAll = ["1", "true", "yes", "all"].includes(String(url.searchParams.get("all") || "").toLowerCase());
+      const bodyAll = body?.all === true || String(body?.mode || "").toLowerCase() === "all";
+      const data = await runPiUpdateAndPrepareRestart({ all: queryAll || bodyAll });
       sendJson(res, 200, { ok: true, data });
       setTimeout(() => shutdown("api update"), 20).unref();
       return;

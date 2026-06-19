@@ -140,7 +140,7 @@ Environment variables:
 - Per-tab cwd changes, a clickable footer cwd picker, saved path fast picks, server-persisted fast picks, and restart-safe restoration of open tabs.
 - Detected app runner dropdown for the active tab cwd, including Cargo, Bun, npm/npx/pnpm, Python/uv, Go/Golang, Zig, C/C++, Docker Compose, root/dev/scripts shell scripts, and other common project runners with live output pinned at the top of the terminal. Projects can add browseable custom runners in `.pi-webui-runners.json` with a command (default `./`) plus a relative path to the file to run.
 - Browser support for Pi extension UI prompts, widgets, status updates, `/btw` side-question output widgets with optional context transfer/live steering, browser notifications when a tab needs an extension UI response, and an optional side-panel toggle for agent-done notifications.
-- Localhost-only Pi/Web UI update checks with a top-right update notification and a confirmed **Update & restart** action that runs `pi update` plus all detected local/global Web UI and Pi package-manager updates, then restarts the Web UI server.
+- Localhost-only Pi/Web UI update checks with a top-right update notification and confirmed restart actions: **Update Pi & restart** runs `pi update` for Pi-only updates, while **Update Pi + Packages & Restart** runs `pi update --all` for Pi plus configured packages.
 - Feedback reactions (`👍`, `👎`, `?`) on final assistant output plus tool/bash action cards, which can ask Pi to create or update a LEARNING.
 - Mobile-friendly layout and PWA install support where the browser allows it.
 
@@ -150,7 +150,7 @@ Useful browser endpoints exposed by the local server include:
 - `POST /api/action-feedback?tab=<tabId>` for feedback on final assistant output and action cards.
 - `GET /api/optional-features` for optional companion package install/update status.
 - `POST /api/optional-feature-install` for installing or updating known optional companion packages from the side panel.
-- `GET /api/update-status` and localhost-only `POST /api/update` for checking Pi/Web UI updates and running `pi update` plus all detected local/global Web UI and Pi package-manager updates followed by a Web UI server restart.
+- `GET /api/update-status` and localhost-only `POST /api/update` for checking Pi/Web UI updates and running `pi update` followed by a Web UI server restart. Use `POST /api/update?all=1` to run `pi update --all` for Pi plus configured packages.
 - `GET /api/remote-auth`, `POST /api/remote-auth`, and localhost-only `POST /api/remote-auth/settings` for optional 4-digit PIN authentication when serving non-local browser clients.
 
 For local development, run the checkout helper directly, for example:

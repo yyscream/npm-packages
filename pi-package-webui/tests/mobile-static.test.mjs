@@ -457,7 +457,7 @@ assert.match(server, /cwdExplicit: false/, "server should track whether startup 
 assert.match(server, /return options\.cwdExplicit \? \[await createTab\(\)\] : \[\]/, "server should wait for UI cwd selection when no --cwd is supplied");
 assert.match(server, /async function resolvedPiCliScript\(\)[\s\S]*require\.resolve\.paths\(PI_CODING_AGENT_PACKAGE\)[\s\S]*nodeModulesRoot[\s\S]*dist[\s\S]*cli\.js/, "server should resolve the bundled Pi CLI through Node resolution roots so hoisted global installs can spawn RPC tabs");
 assert.match(server, /const bundledCli = await resolvedPiCliScript\(\)/, "standalone server should prefer the resolved Pi CLI script before falling back to PATH pi");
-assert.match(server, /if \(options\.piBinExplicit\) \{\n\s+const command = await resolvePiCommand\(\["update"\]\)/, "explicit --pi JavaScript launchers should also work for update commands");
+assert.match(server, /if \(options\.piBinExplicit\) \{\n\s+const command = await resolvePiCommand\(updateArgs\)/, "explicit --pi JavaScript launchers should also work for update commands");
 assert.match(app, /serverActionSelect\.addEventListener\("change", updateServerActionButton\)/, "Server action dropdown should control the guarded run button");
 assert.match(app, /runServerActionButton\.addEventListener\("click"[\s\S]*runSelectedServerAction/, "Server action run button should execute the selected action");
 assert.match(app, /api\("\/api\/restart", \{ method: "POST", scoped: false \}\)/, "Restart Server action should call the unscoped restart endpoint");
@@ -467,10 +467,12 @@ assert.match(app, /api\("\/api\/shutdown", \{ method: "POST", scoped: false \}\)
 assert.match(server, /url\.pathname === "\/api\/restart" && req\.method === "POST"/, "server should expose restart endpoint");
 assert.match(server, /PI_WEBUI_RESTORE_TABS: JSON\.stringify\(restorableTabs \|\| \[\]\)/, "server restart should preserve restorable tab metadata");
 assert.match(server, /if \(webuiDevServer\) env\.PI_WEBUI_DEV = "1";/, "server restart should explicitly preserve dev mode");
-assert.match(server, /async function resolveUpdateTasks\(\)[\s\S]*currentWebuiPackageUpdateTask\(\)[\s\S]*agentPackageRootUpdateTask\(\)[\s\S]*npmGlobalPackageRootUpdateTask\(\)[\s\S]*bunGlobalPackageRootUpdateTask\(\)/, "server update should include current, Pi-agent, npm-global, and Bun-global Web UI/Pi package roots");
-assert.match(server, /function packageInstallSpecs\(packageNames\)[\s\S]*`\$\{packageName\}@latest`/, "server package update tasks should force latest Web UI/Pi package specs instead of staying inside stale semver ranges");
-assert.match(app, /Run Pi\/Web UI package updates now\?/, "frontend update confirmation should describe the broader package update set");
-assert.match(readme, /detected local\/global Web UI and Pi package-manager updates/, "README should document that update refreshes local and global Web UI\/Pi package roots");
+assert.match(server, /const updateArgs = all \? \["update", "--all"\] : \["update"\]/, "server update should use pi update by default and pi update --all for package-inclusive updates");
+assert.match(server, /async function resolveUpdateTasks\(\{ all = false \} = \{\}\)[\s\S]*await resolvePiUpdateCommand\(\{ all \}\)/, "server update should resolve a single Pi update command with the selected all mode");
+assert.match(app, /const command = all \? "pi update --all" : "pi update"/, "frontend update confirmation should describe self-only and all update commands");
+assert.match(app, /api\(all \? "\/api\/update\?all=1" : "\/api\/update"/, "frontend all update should call the explicit all-mode endpoint");
+assert.match(html, /<option value="update-all">Update Pi \+ Packages &amp; Restart<\/option>/, "side panel should expose pi update --all as a separate server action");
+assert.match(readme, /`pi update` for Pi-only updates[\s\S]*`pi update --all` for Pi plus configured packages/, "README should document self-only and all update modes");
 assert.match(server, /async function closeNetworkAccess\(\)/, "server should expose a local-only rebind helper for closing network access");
 assert.match(server, /url\.pathname === "\/api\/network\/close" && req\.method === "POST"/, "server should route network close requests");
 assert.match(server, /server\.closeAllConnections\?\.\(\)/, "network rebind should force-close long-lived clients so close-to-localhost can complete");
