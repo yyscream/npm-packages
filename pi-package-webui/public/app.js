@@ -129,6 +129,7 @@ const elements = {
   backgroundChooseButton: $("#backgroundChooseButton"),
   backgroundClearButton: $("#backgroundClearButton"),
   backgroundStatus: $("#backgroundStatus"),
+  networkControlField: $("#networkControlField"),
   networkStatus: $("#networkStatus"),
   remoteAuthToggle: $("#remoteAuthToggle"),
   remoteAuthStatus: $("#remoteAuthStatus"),
@@ -436,6 +437,9 @@ const GIT_INIT_STACK_STORAGE_KEY = "pi-webui-git-init-stack";
 const STATS_WEBUI_STATUS_KEY = "stats-webui";
 const STATS_WEBUI_PAYLOAD_TYPE = "firstpick.pi-extension-stats.overlay";
 const STATS_WEBUI_PAYLOAD_VERSION = 1;
+const REMOTE_WEBUI_CONTROLS_STATUS_KEY = "pi-remote-webui:controls";
+const REMOTE_WEBUI_CONTROLS_PAYLOAD_TYPE = "firstpick.pi-package-remote-webui.controls";
+const REMOTE_WEBUI_CONTROLS_PAYLOAD_VERSION = 1;
 const BTW_WEBUI_STATUS_KEY = "btw-webui";
 const BTW_OUTPUT_WIDGET_KEY = "btw:output";
 const BTW_FOOTER_WIDGET_KEY = "btw:footer";
@@ -3811,6 +3815,11 @@ function setOptionalFeatureDisabled(featureId, disabled) {
     btwWidgetComposerOpen = false;
     btwWidgetInputDraft = "";
   }
+  if (featureId === "remoteWebui") {
+    statusEntries.delete(REMOTE_WEBUI_CONTROLS_STATUS_KEY);
+    statusEntries.delete("pi-remote-webui");
+    widgets.delete("pi-remote-webui");
+  }
   storeDisabledOptionalFeatures();
   renderOptionalFeatureDependentDisplays();
   const tabContext = activeTabContext();
@@ -5976,6 +5985,57 @@ function parseGitFooterWebuiPayloadRaw(raw) {
   } catch {
     return null;
   }
+}
+
+function parseRemoteWebuiControlsPayloadRaw(raw) {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || parsed.type !== REMOTE_WEBUI_CONTROLS_PAYLOAD_TYPE || parsed.version !== REMOTE_WEBUI_CONTROLS_PAYLOAD_VERSION) return null;
+    if (parsed.featureId !== "remoteWebui") return null;
+    const commands = parsed.commands && typeof parsed.commands === "object" ? parsed.commands : {};
+    return {
+      title: cleanFooterPayloadText(parsed.title, "Remote WebUI", 80),
+      description: cleanFooterPayloadText(parsed.description, "Trusted-LAN browser access controlled by the Remote WebUI package.", 240),
+      commands: {
+        open: typeof commands.open === "string" ? commands.open : "/remote",
+        close: typeof commands.close === "string" ? commands.close : "/remote close",
+        refresh: typeof commands.refresh === "string" ? commands.refresh : "/remote refresh",
+        status: typeof commands.status === "string" ? commands.status : "/remote status",
+        authOn: typeof commands.authOn === "string" ? commands.authOn : "/remote auth on",
+        authOff: typeof commands.authOff === "string" ? commands.authOff : "/remote auth off",
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+function remoteWebuiControlsPayload() {
+  if (isOptionalFeatureDisabled("remoteWebui")) return null;
+  return parseRemoteWebuiControlsPayloadRaw(statusEntries.get(REMOTE_WEBUI_CONTROLS_STATUS_KEY));
+}
+
+function remoteWebuiDefaultPortArg() {
+  const port = Number.parseInt(String(latestNetwork?.port || DEFAULT_WEBUI_PORT), 10);
+  return Number.isFinite(port) && port > 0 && port <= 65535 && String(port) !== DEFAULT_WEBUI_PORT ? ` --port ${port}` : "";
+}
+
+function remoteWebuiFallbackCommand(name, fallback) {
+  const portArg = remoteWebuiDefaultPortArg();
+  const commands = {
+    open: `/remote${portArg}`,
+    close: `/remote close${portArg}`,
+    refresh: `/remote refresh${portArg}`,
+    status: `/remote status${portArg}`,
+    authOn: `/remote auth on${portArg}`,
+    authOff: `/remote auth off${portArg}`,
+  };
+  return commands[name] || fallback;
+}
+
+function remoteWebuiCommand(name, fallback) {
+  return remoteWebuiControlsPayload()?.commands?.[name] || remoteWebuiFallbackCommand(name, fallback);
 }
 
 function readCachedGitFooterWebuiPayloadRaw() {
@@ -14475,7 +14535,7 @@ function updateOptionalFeatureAvailability() {
   optionalFeatureAvailability.tuiSkillsCommand = hasLoadedRpcCommand("skills");
   optionalFeatureAvailability.todoProgressWidget = hasAvailableCommand("todo-progress-status") || optionalFeatureAvailability.todoProgressWidget || widgets.has("todo-progress");
   optionalFeatureAvailability.tuiToolsCommand = hasLoadedRpcCommand("tools");
-  optionalFeatureAvailability.remoteWebui = hasAvailableCommand("remote") || optionalFeatureAvailability.remoteWebui || statusEntries.has("pi-remote-webui") || widgets.has("pi-remote-webui");
+  optionalFeatureAvailability.remoteWebui = hasAvailableCommand("remote") || optionalFeatureAvailability.remoteWebui || statusEntries.has("pi-remote-webui") || statusEntries.has(REMOTE_WEBUI_CONTROLS_STATUS_KEY) || widgets.has("pi-remote-webui");
   optionalFeatureAvailability.themeBundle = availableThemes.length > 0;
   requestGitFooterWebuiPayload();
   renderOptionalFeatureControls();
@@ -14632,6 +14692,14 @@ function renderOptionalFeatureControls() {
       hasRemoteWebuiCommand,
       optionalFeatureUnavailableMessage("remoteWebui"),
     );
+  }
+  if (elements.networkControlField) {
+    elements.networkControlField.hidden = !hasRemoteWebuiCommand;
+    elements.networkControlField.classList.toggle("feature-unavailable", !hasRemoteWebuiCommand);
+    const label = elements.networkControlField.querySelector("label");
+    const payload = remoteWebuiControlsPayload();
+    if (label) label.textContent = payload?.title || "Remote WebUI";
+    elements.networkControlField.title = hasRemoteWebuiCommand ? payload?.description || "Remote WebUI controls are provided by @firstpick/pi-package-remote-webui." : optionalFeatureUnavailableMessage("remoteWebui");
   }
 
   renderOptionalFeaturePanel();
@@ -16064,21 +16132,25 @@ async function refreshNetworkStatus() {
   renderNetworkStatus();
 }
 
+async function runRemoteWebuiCommand(command) {
+  const commandName = String(command || "").replace(/^\//, "").split(/\s+/, 1)[0] || "remote";
+  if (!isOptionalFeatureEnabled("remoteWebui") || !hasAvailableCommand(commandName)) {
+    const message = commandUnavailableMessage(commandName);
+    addEvent(message, "warn");
+    refreshCommands(activeTabContext()).catch((error) => addEvent(error.message || String(error), "error"));
+    return false;
+  }
+  await runNativeCommandMenu(command);
+  return true;
+}
+
 async function toggleRemoteAuth() {
   const enable = !latestNetwork?.auth?.enabled;
-  const message = enable
-    ? "Enable remote PIN authentication?\n\nA random 4-digit PIN will be required for non-local browser clients. The PIN is shown in Controls."
-    : "Disable remote PIN authentication?\n\nNon-local browser clients will no longer need a PIN while the network listener is open.";
-  if (!confirm(message)) {
-    renderNetworkStatus();
-    return;
-  }
-
   elements.remoteAuthToggle.disabled = true;
   try {
-    const response = await api("/api/remote-auth/settings", { method: "POST", body: { enabled: enable }, scoped: false });
-    latestNetwork = response.data?.network || { ...(latestNetwork || {}), auth: response.data?.auth };
-    addEvent(enable ? "remote PIN auth enabled" : "remote PIN auth disabled", enable ? "warn" : "info");
+    await runRemoteWebuiCommand(remoteWebuiCommand(enable ? "authOn" : "authOff", enable ? "/remote auth on" : "/remote auth off"));
+    await delay(250);
+    await refreshNetworkStatus();
   } catch (error) {
     addEvent(error.message || String(error), "error");
   } finally {
@@ -16896,35 +16968,15 @@ function scheduleForegroundReconcile(reason = "resume", delay = FOREGROUND_RECON
 }
 
 async function openToNetwork() {
-  if (latestNetwork?.open) {
-    await closeNetworkAccess();
-    return;
-  }
-  if (!confirm(`Open Pi Web UI to your local network?\n\nRemote PIN auth is ${latestNetwork?.auth?.enabled ? "ON" : "OFF"}. The Web UI can control Pi/tools, so only do this on a trusted LAN.`)) return;
-
+  const open = !!latestNetwork?.open;
   elements.openNetworkButton.disabled = true;
-  elements.openNetworkButton.textContent = "Opening…";
+  elements.openNetworkButton.textContent = open ? "Closing…" : "Opening…";
   try {
-    await api("/api/network/open", { method: "POST", scoped: false });
-    latestNetwork = { ...(latestNetwork || {}), opening: true, closing: false };
-    renderNetworkStatus();
-    addEvent("opening webui to local network", "warn");
-    for (let attempt = 0; attempt < 20; attempt++) {
-      await delay(350);
-      try {
-        await refreshNetworkStatus();
-        if (latestNetwork?.open && !latestNetwork?.opening) {
-          const url = latestNetwork.networkUrls?.[0];
-          addEvent(`webui open to local network${url ? `: ${url}` : ""}`, "warn");
-          return;
-        }
-      } catch {
-        // The listener briefly drops while rebinding; retry.
-      }
-    }
+    await runRemoteWebuiCommand(remoteWebuiCommand(open ? "close" : "open", open ? "/remote close" : "/remote"));
+    await delay(350);
     await refreshNetworkStatus();
   } catch (error) {
-    addEvent(error.message, "error");
+    addEvent(error.message || String(error), "error");
   } finally {
     renderNetworkStatus();
   }
@@ -16932,41 +16984,7 @@ async function openToNetwork() {
 
 async function closeNetworkAccess() {
   if (!latestNetwork?.open) return;
-  if (!confirm("Close Pi Web UI network access?\n\nThe local browser can keep using the UI, but LAN clients will disconnect.")) return;
-
-  elements.openNetworkButton.disabled = true;
-  elements.openNetworkButton.textContent = "Closing…";
-  try {
-    await api("/api/network/close", { method: "POST", scoped: false });
-    latestNetwork = { ...(latestNetwork || {}), opening: false, closing: true };
-    renderNetworkStatus();
-    addEvent("closing webui network access", "warn");
-    let refreshFailed = false;
-    for (let attempt = 0; attempt < 20; attempt++) {
-      await delay(350);
-      try {
-        await refreshNetworkStatus();
-        if (!latestNetwork?.open && !latestNetwork?.closing) {
-          addEvent("webui closed to local-only access", "warn");
-          return;
-        }
-      } catch {
-        refreshFailed = true;
-        // Remote tabs will lose access after the listener returns to localhost.
-      }
-    }
-    if (refreshFailed) {
-      latestNetwork = { ...(latestNetwork || {}), open: false, opening: false, closing: false, networkUrls: [] };
-      renderNetworkStatus();
-      addEvent("webui network access closed; reconnect from this machine if this tab loses access", "warn");
-      return;
-    }
-    addEvent("network close requested, but the server still reports network access open", "warn");
-  } catch (error) {
-    addEvent(error.message, "error");
-  } finally {
-    renderNetworkStatus();
-  }
+  await openToNetwork();
 }
 
 function setServerActionStatus(message = "", level = "info") {

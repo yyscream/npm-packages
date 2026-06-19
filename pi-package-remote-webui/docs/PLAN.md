@@ -15,7 +15,7 @@
 
 ### Recommendation
 
-Create `pi-package-remote-webui` as a **thin Pi extension package** that reuses the existing `@firstpick/pi-package-webui` server/UI instead of building a second mobile UI.
+Create `pi-package-remote-webui` as a **thin Pi extension package** that reuses the existing `@firstpick/pi-package-webui` server primitives instead of building a second mobile UI, while owning `/remote` and the browser Remote WebUI control payload.
 
 The package should add one main command:
 
@@ -143,6 +143,8 @@ Use `ctx.ui.setWidget()` so the QR remains visible after the command finishes.
 /remote status
 /remote close
 /remote refresh
+/remote auth on
+/remote auth off
 /remote --port 31500
 /remote --name mobile
 /remote --yes
@@ -156,6 +158,7 @@ Use `ctx.ui.setWidget()` so the QR remains visible after the command finishes.
 | `/remote status` | Show WebUI status, LAN URLs, whether network is open |
 | `/remote close` | Call `/api/network/close`, clear QR widget/status |
 | `/remote refresh` | Re-read LAN URLs and redraw QR |
+| `/remote auth on` / `/remote auth off` | Toggle Remote PIN auth through the remote package-owned control path |
 | `/remote --port 31500` | Use another WebUI port |
 | `/remote --name mobile` | Name the initial WebUI tab |
 | `/remote --yes` | Skip confirmation warning |
@@ -170,18 +173,18 @@ Do **not** put a reverse proxy in front of WebUI for v1, because WebUI currently
 
 ### Required v1 behavior
 
-Before opening the WebUI to LAN, show a confirmation that remote browsers can control the Web UI/Pi session and that Remote PIN auth is off by default unless enabled in Web UI Controls.
+Before opening the WebUI to LAN, show a confirmation that remote browsers can control the Web UI/Pi session and that Remote PIN auth is off by default unless enabled through `/remote auth on` or the Remote WebUI browser controls.
 
 Default should be “No” unless `/remote --yes` is provided.
 
 ### Remote PIN auth
 
-Remote PIN auth is implemented in `pi-package-webui`, not in `/remote`, so the localhost-vs-remote trust semantics remain server-owned:
+Remote PIN auth enforcement remains implemented in `pi-package-webui`, so the localhost-vs-remote trust semantics remain server-owned, but the user-facing controls are owned by this package:
 
-- The Web UI side-panel **Controls → Network → Remote PIN auth** toggle is off by default.
-- Enabling it generates a random 4-digit PIN.
+- Remote PIN auth is off by default.
+- `/remote auth on` generates a random 4-digit PIN; `/remote auth off` disables the gate.
 - Non-local clients are challenged before accessing Web UI routes and APIs.
-- Localhost clients can toggle the setting and see the PIN.
+- Localhost clients can toggle the setting and see the PIN through `/remote status` or the package-owned Remote WebUI browser controls.
 - `/remote` reads the reported auth state from `/api/network` and includes it in the QR widget.
 
 Startup auth is also available through:
@@ -362,6 +365,6 @@ pi install ./pi-package-remote-webui
 - Mobile browser opens existing Pi WebUI.
 - No separate mobile UI is built.
 - `/remote close` closes LAN exposure.
-- User is warned that Remote PIN auth is off by default unless enabled in Web UI Controls.
+- User is warned that Remote PIN auth is off by default unless enabled through `/remote auth on` or the Remote WebUI browser controls.
 - QR/widget output shows Remote PIN auth state and PIN when enabled.
 - Existing WebUI remote trust boundaries remain intact.

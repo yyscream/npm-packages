@@ -4276,6 +4276,9 @@ try {
   process.exit(2);
 }
 
+process.env.PI_WEBUI_HOST = options.host;
+process.env.PI_WEBUI_PORT = String(options.port);
+
 const startupDelayMs = Number.parseInt(process.env.PI_WEBUI_START_DELAY_MS || "", 10);
 delete process.env.PI_WEBUI_START_DELAY_MS;
 if (Number.isFinite(startupDelayMs) && startupDelayMs > 0) {

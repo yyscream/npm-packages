@@ -432,8 +432,9 @@ assert.match(app, /initializeCustomBackground\(\)\.catch/, "startup should resto
 assert.match(app, /Restart Web UI to load themes/, "frontend should explain when a stale server cannot serve the themes endpoint");
 assert.match(app, /themeSelect\.addEventListener\("change"/, "side-panel theme selector should switch themes immediately");
 assert.match(app, /open \? "Close for network" : "Open to network"/, "network button should toggle from open to close action");
-assert.match(app, /remoteAuthToggle: \$\("#remoteAuthToggle"\)/, "Controls should expose the remote PIN auth toggle");
-assert.match(app, /api\("\/api\/remote-auth\/settings", \{ method: "POST"/, "remote PIN auth toggle should call the settings endpoint");
+assert.match(app, /remoteAuthToggle: \$\("#remoteAuthToggle"\)/, "Remote WebUI controls should bind the remote PIN auth toggle");
+assert.match(html, /id="networkControlField"[^>]*hidden/, "Remote WebUI browser controls should be hidden until the optional package is loaded and enabled");
+assert.match(app, /remoteWebuiCommand\(enable \? "authOn" : "authOff"/, "remote PIN auth toggle should dispatch through the Remote WebUI package command");
 assert.match(server, /function webuiSettingsFile\(\)[\s\S]*pi-webui[\s\S]*settings\.json/, "server should persist Web UI settings under a pi-webui settings file");
 assert.match(server, /let persistedRemoteAuthEnabled = await readPersistedRemoteAuthEnabled\(\)/, "server should load the saved Remote PIN auth preference before startup");
 assert.match(server, /if \(remoteAuthStartupEnabled\(\)\) enableRemoteAuth\(remoteAuthStartupReason\(\)\)/, "saved Remote PIN auth preference should enable auth on startup");
@@ -441,7 +442,7 @@ assert.match(server, /await saveRemoteAuthPreference\(true\)/, "enabling Remote 
 assert.match(server, /await saveRemoteAuthPreference\(false\)/, "disabling Remote PIN auth should persist the off preference");
 assert.match(server, /function pinFromHash\(\)[\s\S]*new URLSearchParams\(String\(window\.location\.hash \|\| ""\)\.replace\(\/\^#\/, ""\)\)/, "remote auth page should read QR-provided PINs from the URL fragment");
 assert.match(server, /window\.history\.replaceState\(null, "", window\.location\.pathname \+ \(window\.location\.search \|\| ""\)\)/, "remote auth page should scrub fragment PINs from the address bar before authenticating");
-assert.match(app, /api\("\/api\/network\/close", \{ method: "POST"/, "network close action should call the close endpoint");
+assert.match(app, /remoteWebuiCommand\(open \? "close" : "open"/, "network open\/close button should dispatch through the Remote WebUI package command");
 assert.match(app, /webuiVersionBadge: \$\("#webuiVersionBadge"\)/, "frontend should bind the Control Deck version badge");
 assert.match(app, /webuiDevBadge: \$\("#webuiDevBadge"\)/, "frontend should bind the Control Deck dev badge");
 assert.match(app, /function refreshWebuiVersion\(\)[\s\S]*api\("\/api\/health", \{ scoped: false \}\)[\s\S]*setWebuiVersion\(health\.webuiVersion\)[\s\S]*setWebuiDevServer\(isWebuiDevMetadata\(health\)\)/, "frontend should load Web UI version and dev mode from health metadata");
@@ -626,8 +627,9 @@ assert.match(app, /id: "tuiSkillsCommand"[\s\S]*?@firstpick\/pi-extension-setup-
 assert.match(app, /id: "tuiToolsCommand"[\s\S]*?@firstpick\/pi-extension-tools/, "optional features should include the TUI tools command companion");
 assert.match(app, /id: "remoteWebui"[\s\S]*?@firstpick\/pi-package-remote-webui/, "optional features should include the Remote WebUI companion");
 assert.match(app, /function updateOptionalFeatureAvailability\(\)[\s\S]*hasAvailableCommand\("git-staged-msg"\)[\s\S]*hasAvailableCommand\("release-npm"\)[\s\S]*hasAvailableCommand\("release-aur"\)[\s\S]*hasAvailableCommand\("safety-guard"\)[\s\S]*hasLoadedRpcCommand\("skills"\)[\s\S]*hasAvailableCommand\("todo-progress-status"\)[\s\S]*hasLoadedRpcCommand\("tools"\)[\s\S]*hasAvailableCommand\("remote"\)/, "optional feature detection should call RPC-visible commands directly and distinguish native resource selectors from TUI companions");
-assert.match(app, /hasRemoteWebuiCommand = isOptionalFeatureEnabled\("remoteWebui"\) && hasAvailableCommand\("remote"\)[\s\S]*optionsRemoteButton\.hidden = !hasRemoteWebuiCommand/, "Options menu should show Open Remote only when /remote is loaded and enabled");
+assert.match(app, /hasRemoteWebuiCommand = isOptionalFeatureEnabled\("remoteWebui"\) && hasAvailableCommand\("remote"\)[\s\S]*optionsRemoteButton\.hidden = !hasRemoteWebuiCommand[\s\S]*networkControlField\.hidden = !hasRemoteWebuiCommand/, "Options menu and browser controls should show Remote WebUI only when /remote is loaded and enabled");
 assert.match(app, /if \(key === "pi-remote-webui"\) return "remoteWebui"/, "optional feature handling should recognize Remote WebUI widget events without rendering them as overlays");
+assert.match(app, /REMOTE_WEBUI_CONTROLS_PAYLOAD_TYPE = "firstpick\.pi-package-remote-webui\.controls"/, "Remote WebUI package should announce browser controls through a package-owned status payload");
 assert.match(app, /function combineIdenticalDuplicateCommands\(commands\)[\s\S]*duplicateGroups[\s\S]*duplicateCount: group\.length/, "identical duplicate RPC commands should be combined into one visible command entry");
 assert.match(app, /if \(kind === "prompt" && attachments\.length === 0\) message = resolveRpcSlashCommandMessage\(message\)/, "manual slash prompts should resolve combined duplicate command aliases before reaching Pi RPC");
 assert.match(app, /if \(!isOptionalFeatureEnabled\("todoProgressWidget"\)\) return String\(text \|\| ""\)/, "todo progress line stripping should only run when the todo feature is detected and enabled");

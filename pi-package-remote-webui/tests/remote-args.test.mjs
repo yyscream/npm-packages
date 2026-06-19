@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import {
   DEFAULT_PORT,
+  REMOTE_CONTROLS_PAYLOAD_TYPE,
+  buildRemoteControlsPayload,
   buildRemoteWidgetLines,
   formatStatus,
   generateQrLines,
@@ -44,8 +46,26 @@ test("parseRemoteArgs supports numeric port shortcut", () => {
   });
 });
 
-test("parseRemoteArgs rejects invalid ports and unknown options", () => {
+test("parseRemoteArgs supports Remote PIN auth actions", () => {
+  assert.deepEqual(parseRemoteArgs("auth on --port 31502 --yes"), {
+    action: "auth",
+    port: 31502,
+    name: undefined,
+    yes: true,
+    authEnabled: true,
+  });
+  assert.deepEqual(parseRemoteArgs("auth off"), {
+    action: "auth",
+    port: DEFAULT_PORT,
+    name: undefined,
+    yes: false,
+    authEnabled: false,
+  });
+});
+
+test("parseRemoteArgs rejects invalid ports, auth actions, and unknown options", () => {
   assert.throws(() => parseRemoteArgs("--port 70000"), /port/i);
+  assert.throws(() => parseRemoteArgs("auth maybe"), /Unknown option|requires on or off/);
   assert.throws(() => parseRemoteArgs("--bogus"), /Unknown option/);
 });
 
@@ -87,6 +107,15 @@ test("formatStatus renders offline, online, and auth states", () => {
   });
   assert.match(onlineStatus, /open to LAN/);
   assert.match(onlineStatus, /Remote PIN auth: on · PIN 1234/);
+});
+
+test("buildRemoteControlsPayload declares browser control commands", () => {
+  const payload = buildRemoteControlsPayload({ port: 31503 });
+  assert.equal(payload.type, REMOTE_CONTROLS_PAYLOAD_TYPE);
+  assert.equal(payload.featureId, "remoteWebui");
+  assert.equal(payload.port, 31503);
+  assert.equal(payload.commands.open, "/remote --port 31503");
+  assert.equal(payload.commands.authOn, "/remote auth on --port 31503");
 });
 
 test("buildRemoteWidgetLines includes QR, URL, auth state, and close instruction", () => {
@@ -133,4 +162,11 @@ test("extension asks whether to activate Remote PIN auth while opening /remote",
   assert.match(source, /ctx\.ui\.confirm\("Activate Remote PIN auth\?", AUTH_WARNING\)/);
   assert.match(source, /controller\.setRemoteAuth\(options\.port, true\)/);
   assert.match(source, /prepareNetwork: async \(network: unknown\) => maybeActivateRemoteAuth/);
+});
+
+test("extension publishes package-owned Remote WebUI browser controls in RPC mode", async () => {
+  const source = await readFile(new URL("../index.ts", import.meta.url), "utf8");
+  assert.match(source, /ctx\.mode !== "rpc"/);
+  assert.match(source, /ctx\.ui\.setStatus\(REMOTE_CONTROLS_STATUS_KEY, JSON\.stringify\(buildRemoteControlsPayload/);
+  assert.match(source, /pi\.on\("session_start"[\s\S]*publishRemoteControls/);
 });

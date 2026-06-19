@@ -7,8 +7,11 @@ export const DEFAULT_NETWORK_TIMEOUT_MS = 8_000;
 export const DEFAULT_POLL_MS = 250;
 
 export const REMOTE_WIDGET_KEY = "pi-remote-webui";
+export const REMOTE_CONTROLS_STATUS_KEY = "pi-remote-webui:controls";
+export const REMOTE_CONTROLS_PAYLOAD_TYPE = "firstpick.pi-package-remote-webui.controls";
+export const REMOTE_CONTROLS_PAYLOAD_VERSION = 1;
 
-const ACTIONS = new Set(["open", "status", "close", "refresh"]);
+const ACTIONS = new Set(["open", "status", "close", "refresh", "auth"]);
 
 export function tokenizeArgs(input = "") {
   const tokens = [];
@@ -84,6 +87,16 @@ export function parseRemoteArgs(args = "") {
       actionSeen = true;
       continue;
     }
+    if (options.action === "auth" && options.authEnabled === undefined) {
+      if (["on", "enable", "enabled", "true", "1"].includes(lower)) {
+        options.authEnabled = true;
+        continue;
+      }
+      if (["off", "disable", "disabled", "false", "0"].includes(lower)) {
+        options.authEnabled = false;
+        continue;
+      }
+    }
     if (token === "--yes" || token === "-y") {
       options.yes = true;
       continue;
@@ -116,12 +129,17 @@ export function parseRemoteArgs(args = "") {
     throw new Error(`Unknown option: ${token}`);
   }
 
+  if (options.action === "auth" && options.authEnabled === undefined) {
+    throw new Error("/remote auth requires on or off");
+  }
+
   return options;
 }
 
 export function usage() {
   return [
     "Usage: /remote [status|close|refresh] [port] [--port N] [--name NAME] [--yes]",
+    "       /remote auth <on|off> [port] [--port N] [--yes]",
     "Opens the existing Pi Web UI to a trusted local network and shows a QR code for mobile.",
   ].join("\n");
 }
@@ -370,6 +388,29 @@ export function buildRemoteWidgetLines({ url, qrUrl, qrLines = [], network = {},
   ];
   if (started) lines.push("Started a Pi Web UI server for this session.");
   return lines;
+}
+
+export function buildRemoteControlsPayload({ generatedAt = Date.now(), port = DEFAULT_PORT } = {}) {
+  const parsedPort = Number.parseInt(String(port || DEFAULT_PORT), 10);
+  const safePort = Number.isFinite(parsedPort) && parsedPort > 0 && parsedPort <= 65535 ? parsedPort : DEFAULT_PORT;
+  const portArg = safePort === DEFAULT_PORT ? "" : ` --port ${safePort}`;
+  return {
+    type: REMOTE_CONTROLS_PAYLOAD_TYPE,
+    version: REMOTE_CONTROLS_PAYLOAD_VERSION,
+    featureId: "remoteWebui",
+    generatedAt,
+    title: "Remote WebUI",
+    description: "Open, close, and protect trusted-LAN Web UI access from the remote companion package.",
+    port: safePort,
+    commands: {
+      open: `/remote${portArg}`,
+      close: `/remote close${portArg}`,
+      refresh: `/remote refresh${portArg}`,
+      status: `/remote status${portArg}`,
+      authOn: `/remote auth on${portArg}`,
+      authOff: `/remote auth off${portArg}`,
+    },
+  };
 }
 
 export async function generateQrLines(url, { qrcodeModule } = {}) {

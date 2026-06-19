@@ -2,7 +2,7 @@
 
 Mobile connection helper for [Pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent).
 
-This package adds a `/remote` slash command that reuses the existing `@firstpick/pi-package-webui` server/UI, opens it to a trusted local network, and shows a QR code in Pi so a phone can connect quickly.
+This package adds the `/remote` slash command and Remote WebUI browser controls for `@firstpick/pi-package-webui`. It opens Web UI to a trusted local network, manages Remote PIN auth, and shows a QR code so a phone can connect quickly.
 
 > **Security:** Pi Web UI can control the Web UI/Pi session. `/remote` asks whether to activate Remote PIN authentication before showing the QR code. Use `/remote` only on trusted local networks and close LAN access when done.
 
@@ -35,6 +35,8 @@ Default behavior:
 /remote status
 /remote refresh
 /remote close
+/remote auth on
+/remote auth off
 /remote --port 31500
 /remote --name mobile
 /remote --yes
@@ -46,6 +48,7 @@ Default behavior:
 | `/remote status` | Show Web UI online/network state, LAN URLs, and auth state. |
 | `/remote refresh` | Re-read current LAN URL/auth state and redraw the QR widget. |
 | `/remote close` | Close Web UI LAN exposure and clear the QR widget. |
+| `/remote auth on` / `/remote auth off` | Enable or disable Remote PIN auth through the same package-owned control path used by the Web UI browser controls. |
 | `/remote --port 31500` | Use another Web UI port. |
 | `/remote --name mobile` | Name the initial Web UI tab when this package starts the server. |
 | `/remote --yes` | Skip prompts and activate Remote PIN auth automatically before opening LAN access. |
@@ -58,9 +61,9 @@ Default behavior:
 - `/remote --yes` treats the auth prompt as accepted and activates it automatically.
 - Enabling it generates a random 4-digit PIN.
 - Non-local browser clients must authenticate before reaching Web UI.
-- Localhost clients can always use the UI and toggle the setting.
+- Localhost clients can always use the UI and toggle the setting through `/remote auth on|off` or the optional Remote WebUI side-panel controls.
 
-The `/remote` QR widget shows `Remote PIN auth: off` or `Remote PIN auth: on · PIN 1234` when the Web UI server reports it. When a PIN is available, the QR code targets `/remote-auth#pin=1234` so the phone can authenticate automatically without typing the PIN; the fragment is scrubbed by the auth page before it posts to the server. You can also start Web UI with auth already enabled by using `pi-webui --remote-auth` or `/webui-start --remote-auth` from `@firstpick/pi-package-webui`.
+The `/remote` QR widget shows `Remote PIN auth: off` or `Remote PIN auth: on · PIN 1234` when the Web UI server reports it. When a PIN is available, the QR code targets `/remote-auth#pin=1234` so the phone can authenticate automatically without typing the PIN; the fragment is scrubbed by the auth page before it posts to the server. In Web UI RPC sessions this package also announces a structured Remote WebUI controls payload so the browser can show/hide LAN and PIN controls with the same optional-feature toggle as `/remote`. You can also start Web UI with auth already enabled by using `pi-webui --remote-auth` or `/webui-start --remote-auth` from `@firstpick/pi-package-webui`.
 
 ## Caveat
 
@@ -76,4 +79,4 @@ npm run check
 
 ## Network safety
 
-`/remote` intentionally uses `pi-package-webui`'s direct LAN mode instead of a reverse proxy, preserving Web UI's current localhost-vs-remote trust boundaries. Remote PIN auth remains an explicit Web UI Controls toggle and is a trusted-LAN convenience gate, not hardened multi-user authentication. Use `/remote close` when you are done.
+`/remote` intentionally uses `pi-package-webui`'s direct LAN mode instead of a reverse proxy, preserving Web UI's current localhost-vs-remote trust boundaries. Remote PIN auth remains a package-owned explicit control and a trusted-LAN convenience gate, not hardened multi-user authentication. Use `/remote close` when you are done.

@@ -6,7 +6,7 @@ Local browser UI for [Pi coding agent](https://www.npmjs.com/package/@earendil-w
 
 Pi Web UI gives you a local browser companion for Pi: multi-tab chat, streaming output, model controls, uploads, slash-command helpers, workspace navigation, and optional extension widgets.
 
-> **Security:** Pi Web UI can control the spawned Pi session and run anything that session is allowed to run. It binds to `127.0.0.1` by default. Remote PIN authentication is off by default on first use; enabling it in **Controls → Network → Remote PIN auth** persists that preference for later Web UI starts.
+> **Security:** Pi Web UI can control the spawned Pi session and run anything that session is allowed to run. It binds to `127.0.0.1` by default. Trusted-LAN opening/closing and Remote PIN auth controls are owned by the optional `@firstpick/pi-package-remote-webui` companion; when enabled, Remote PIN auth persists for later Web UI starts.
 
 ## Requirements
 
@@ -134,7 +134,7 @@ Environment variables:
 - Streaming chat transcript with Markdown, thinking output, tool/bash cards, queue and compaction events, edit-and-retry from user prompts, and guarded abort controls that require holding Esc or the Abort button for 3 seconds.
 - Prompt composer with uploads, drag/drop/paste, inline image support, slash-command autocomplete, and `@` file/path references with live suggestions.
 - Browser dialogs for common Pi selectors such as `/model`, `/settings`, `/theme`, `/fork`, `/clone`, `/resume`, `/tree`, `/scoped-models`, `/tools`, and `/skills`.
-- Model, thinking, session, workspace, theme, optional-feature, Codex usage, network, update/restart, event, and notification controls in the side panel.
+- Model, thinking, session, workspace, theme, optional-feature, Codex usage, optional Remote WebUI, update/restart, event, and notification controls in the side panel.
 - Persistent context-window meter with manual compact and auto-compaction controls near the composer.
 - Side-panel theme picker backed by optional `@firstpick/pi-themes-bundle` themes when loaded.
 - Per-tab cwd changes, a clickable footer cwd picker, saved path fast picks, server-persisted fast picks, and restart-safe restoration of open tabs.
@@ -178,7 +178,7 @@ Optional companions:
 - `@firstpick/pi-extension-setup-skills` — TUI `/skills` setup command alongside WebUI-native skill toggles.
 - `@firstpick/pi-extension-todo-progress` — todo-progress rendering.
 - `@firstpick/pi-extension-tools` — TUI `/tools` active-tool manager alongside WebUI-native tool toggles.
-- `@firstpick/pi-package-remote-webui` — `/remote` trusted-LAN QR helper for connecting mobile browsers to Web UI.
+- `@firstpick/pi-package-remote-webui` — `/remote` trusted-LAN QR helper plus the optional browser controls for opening/closing LAN access and Remote PIN auth.
 - `@firstpick/pi-extension-git-footer-status` — richer extension-owned git/footer status, including the structured Web UI footer payload.
 - `@firstpick/pi-extension-stats` — stats commands and status data.
 - `@firstpick/pi-themes-bundle` — Web UI and Pi theme resources.
@@ -208,9 +208,9 @@ This requires `/git-staged-msg` and `/pr` from `@firstpick/pi-prompts-git-pr`; b
 ## Network safety
 
 - Default bind is localhost-only: `127.0.0.1:31415`.
-- The side-panel **Open to network** button rebinds the server to `0.0.0.0`, shows LAN URLs when available, and toggles to "Close for network".
-- The side-panel **Remote PIN auth** toggle is off by default on first use. When enabled, the server saves that preference, generates a fresh random 4-digit PIN for each server start, shows it in Controls and `/webui-status`, and requires it from non-local browser clients.
-- Localhost clients stay frictionless and can toggle Remote PIN auth; changing the toggle persists the preference and disconnects existing event streams so remote clients must re-authenticate after enablement.
+- When `@firstpick/pi-package-remote-webui` is loaded and enabled, the side-panel **Remote WebUI** controls dispatch through `/remote`: opening rebinds the server to `0.0.0.0`, shows LAN URLs when available, and toggles to "Close for network".
+- The optional **Remote PIN auth** toggle is off by default on first use. When enabled through `/remote auth on` or the Remote WebUI controls, the server saves that preference, generates a fresh random 4-digit PIN for each server start, shows it in the Remote WebUI controls and `/webui-status`, and requires it from non-local browser clients.
+- Localhost clients stay frictionless and can toggle Remote PIN auth through the remote companion; changing the toggle persists the preference and disconnects existing event streams so remote clients must re-authenticate after enablement.
 - `--host 0.0.0.0` also exposes the Web UI to the local network; pass `--remote-auth` to start with PIN auth already enabled.
 - Any connected browser client with access (and the PIN, if enabled) can control Pi and run Web UI bash actions as the Web UI process user.
 - Remote PIN auth is a simple trusted-LAN HTTP gate, not hardened multi-user authentication; do not expose it to untrusted networks.
@@ -222,5 +222,5 @@ This requires `/git-staged-msg` and `/pr` from `@firstpick/pi-prompts-git-pr`; b
 - **`/webui-start` is missing:** restart Pi after installing the package.
 - **Wrong port or existing server:** use `/webui-status detailed`, or start on another port with `/webui-start --port 31500`.
 - **Optional feature is disabled or missing:** check the side panel, install the companion package if needed, then run `/reload` in the active Pi tab.
-- **Remote browser asks for a PIN:** read it from **Controls → Network → Remote PIN auth**, `/webui-status`, or the local Web UI server log. Disable the toggle from localhost to remove the PIN gate.
+- **Remote browser asks for a PIN:** read it from the optional **Remote WebUI** side-panel controls, `/webui-status`, `/remote status`, or the local Web UI server log. Disable the toggle from localhost to remove the PIN gate.
 - **PWA install or notifications are unavailable:** use `localhost` or HTTPS; browser support varies on LAN HTTP URLs.

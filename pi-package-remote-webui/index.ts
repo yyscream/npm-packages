@@ -4,10 +4,13 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import type { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
+  DEFAULT_PORT,
+  REMOTE_CONTROLS_STATUS_KEY,
   REMOTE_WIDGET_KEY,
   RemoteWebuiController,
+  buildRemoteControlsPayload,
   buildRemoteWidgetLines,
   closeRemoteWebui,
   formatStatus,
@@ -44,10 +47,11 @@ const AUTH_WARNING = [
 type WebuiChild = ChildProcessByStdio<null, Readable, Readable>;
 
 type RemoteOptions = {
-  action: "open" | "status" | "close" | "refresh";
+  action: "open" | "status" | "close" | "refresh" | "auth";
   port: number;
   name?: string;
   yes: boolean;
+  authEnabled?: boolean;
 };
 
 type RemoteNetworkStatus = {
@@ -153,6 +157,21 @@ async function spawnWebui(options: RemoteOptions, ctx: ExtensionCommandContext):
 
 function setRemoteStatus(ctx: ExtensionCommandContext, text?: string): void {
   ctx.ui.setStatus(REMOTE_WIDGET_KEY, text);
+}
+
+function configuredWebuiPort(): number {
+  const parsed = Number.parseInt(String(process.env.PI_WEBUI_PORT || ""), 10);
+  return Number.isFinite(parsed) && parsed > 0 && parsed <= 65535 ? parsed : DEFAULT_PORT;
+}
+
+function publishRemoteControls(ctx: ExtensionContext, port = configuredWebuiPort()): void {
+  if (ctx.mode !== "rpc") return;
+  ctx.ui.setStatus(REMOTE_CONTROLS_STATUS_KEY, JSON.stringify(buildRemoteControlsPayload({ port })));
+}
+
+function clearRemoteControls(ctx: ExtensionContext): void {
+  if (ctx.mode !== "rpc") return;
+  ctx.ui.setStatus(REMOTE_CONTROLS_STATUS_KEY, undefined);
 }
 
 function clearRemoteWidget(ctx: ExtensionCommandContext): void {
@@ -274,6 +293,36 @@ async function handleClose(options: RemoteOptions, ctx: ExtensionCommandContext,
   }
 }
 
+async function confirmRemoteAuthChange(options: RemoteOptions, ctx: ExtensionCommandContext): Promise<boolean> {
+  if (options.yes === true) return true;
+  if (!ctx.hasUI) throw new Error("/remote auth requires confirmation. Re-run with /remote auth on|off --yes in non-interactive modes.");
+  const enabling = options.authEnabled === true;
+  const message = enabling
+    ? "Enable Remote PIN auth?\n\nA random 4-digit PIN will be required for non-local browser clients. /remote QR codes can embed the PIN for automatic mobile sign-in."
+    : "Disable Remote PIN auth?\n\nNon-local browser clients will no longer need a PIN while LAN access is open. Only do this on a trusted local network.";
+  return await ctx.ui.confirm(enabling ? "Enable Remote PIN auth?" : "Disable Remote PIN auth?", message);
+}
+
+async function handleAuth(options: RemoteOptions, ctx: ExtensionCommandContext, controller: RemoteWebuiController): Promise<void> {
+  if (options.authEnabled !== true && options.authEnabled !== false) throw new Error("/remote auth requires on or off");
+  if (!(await confirmRemoteAuthChange(options, ctx))) {
+    ctx.ui.notify("Remote PIN auth change cancelled.", "info");
+    return;
+  }
+
+  setRemoteStatus(ctx, options.authEnabled ? "enabling remote PIN auth…" : "disabling remote PIN auth…");
+  try {
+    await controller.setRemoteAuth(options.port, options.authEnabled);
+    const status = await controller.status(options.port);
+    if (status.online && status.network?.open && status.url && /^https?:\/\//i.test(status.url)) {
+      await renderRemoteWidget(ctx, { url: status.url, network: status.network, started: false });
+    }
+    ctx.ui.notify(formatStatus(status), status.online ? "info" : "warning");
+  } finally {
+    setRemoteStatus(ctx, undefined);
+  }
+}
+
 async function handleOpen(options: RemoteOptions, ctx: ExtensionCommandContext, controller: RemoteWebuiController): Promise<void> {
   if (!(await confirmRemoteOpen(options, ctx))) {
     ctx.ui.notify("Remote WebUI cancelled; LAN access was not opened.", "info");
@@ -291,6 +340,14 @@ async function handleOpen(options: RemoteOptions, ctx: ExtensionCommandContext, 
 }
 
 export default function remoteWebuiExtension(pi: ExtensionAPI) {
+  pi.on("session_start", (_event, ctx) => {
+    publishRemoteControls(ctx);
+  });
+
+  pi.on("session_shutdown", (_event, ctx) => {
+    clearRemoteControls(ctx);
+  });
+
   pi.registerCommand("remote", {
     description: "Open Pi Web UI to a trusted LAN and show a mobile QR code",
     handler: async (args, ctx) => {
@@ -302,6 +359,7 @@ export default function remoteWebuiExtension(pi: ExtensionAPI) {
         return;
       }
 
+      publishRemoteControls(ctx, options.port);
       const controller = new RemoteWebuiController();
       try {
         if (options.action === "status") {
@@ -314,6 +372,10 @@ export default function remoteWebuiExtension(pi: ExtensionAPI) {
         }
         if (options.action === "close") {
           await handleClose(options, ctx, controller);
+          return;
+        }
+        if (options.action === "auth") {
+          await handleAuth(options, ctx, controller);
           return;
         }
         await handleOpen(options, ctx, controller);
