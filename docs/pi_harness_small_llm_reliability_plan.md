@@ -23,7 +23,7 @@ This plan should be implemented as a **TypeScript Pi extension package**, not as
 
 Implement the smallest useful reliability layer first:
 
-- [x] Extension package `pi-extension-reliability-harness` with `package.json`, `index.ts`, `README.md`, and `LICENSE`.
+- [x] Extension package `pi-extension-small-modal-reliability` with `package.json`, `index.ts`, `README.md`, and `LICENSE`.
 - [x] Opt-in activation via `--reliability` or `/reliability on`; no surprise default behavior for existing sessions.
 - [x] `TaskState` persisted as JSON under `.pi/tasks/{task_id}/state.json` plus session custom-entry pointers for resume.
 - [x] Deterministic initial plan generation with a model-editable plan update tool.
@@ -45,7 +45,7 @@ Implement the smallest useful reliability layer first:
 ### Implemented MVP Files
 
 ```text
-pi-extension-reliability-harness/
+pi-extension-small-modal-reliability/
   package.json
   index.ts
   README.md
@@ -830,7 +830,7 @@ Track:
 
 ## Minimal MVP
 
-Completed and extended in `pi-extension-reliability-harness`:
+Completed and extended in `pi-extension-small-modal-reliability`:
 
 1. [x] `TaskState`
 2. [x] Plan creation
@@ -855,7 +855,7 @@ This MVP already solves the most common small-model failures.
 ## Suggested File Structure
 
 ```text
-pi-extension-reliability-harness/
+pi-extension-small-modal-reliability/
   package.json
   index.ts
   README.md

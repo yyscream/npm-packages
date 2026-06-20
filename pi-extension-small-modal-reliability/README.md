@@ -1,11 +1,11 @@
-# @firstpick/pi-extension-reliability-harness
+# @firstpick/pi-extension-small-modal-reliability
 
 Small-LLM reliability layer for Pi. It keeps deterministic task state outside the model, injects a compact goal/plan reminder before every LLM call, blocks exact repeat loops, writes a scratchpad, and requires evidence-based verification before completion claims.
 
 ## Enable
 
 ```bash
-pi -e ./pi-extension-reliability-harness/index.ts --reliability
+pi -e ./pi-extension-small-modal-reliability/index.ts --reliability
 ```
 
 Or inside Pi:
