@@ -516,6 +516,8 @@ const STREAM_OUTPUT_TOOLCALL_GUARD_MS = 220;
 const STREAM_OUTPUT_MIN_VISIBLE_MS = 900;
 const TOOL_LIVE_UPDATE_THROTTLE_MS = 80;
 const UNEXPOSED_THINKING_TEXT = "No thinking content was exposed by the provider.";
+const THINKING_FORMAT_OPEN_TAG_REGEX = /^<think\b[^>]*>/i;
+const THINKING_FORMAT_CLOSE_TAG_REGEX = /<\/think\s*>/i;
 const TODO_PROGRESS_LINE_REGEX = /^\s*(?:(?:[-*]|\d+[.)])\s*)?\[(?: |x|X|-)\]\s+.+$/;
 const TODO_PROGRESS_PARTIAL_LINE_REGEX = /^\s*(?:(?:[-*]|\d+[.)])\s*)?\[(?: |x|X|-)?\]?\s*.*$/;
 const CHAT_SCROLL_KEYS = new Set(["ArrowDown", "ArrowUp", "End", "Home", "PageDown", "PageUp", " "]);
@@ -13446,6 +13448,72 @@ function visibleThinkingText(text) {
   return value;
 }
 
+function isPartialThinkingFormatOpenTag(text) {
+  const value = String(text || "").trimStart().toLowerCase();
+  if (!value) return false;
+  if ("<think>".startsWith(value)) return true;
+  return /^<think\b[^>]*$/i.test(value);
+}
+
+function stripPartialThinkingFormatClose(text) {
+  const value = String(text || "");
+  const lower = value.toLowerCase();
+  const start = lower.lastIndexOf("</");
+  if (start < 0) return value;
+  const partial = lower.slice(start).trimEnd();
+  return "</think>".startsWith(partial) ? value.slice(0, start) : value;
+}
+
+function stripThinkingFormatOutputSeparator(text) {
+  return String(text || "").replace(/^(?:[ \t]*\r?\n)+/, "").replace(/^[ \t]+/, "");
+}
+
+function joinedThinkingFormatParts(parts) {
+  return parts.map((part) => String(part || "")).filter((part) => part.length > 0).join("\n\n");
+}
+
+function splitThinkingFormatText(text, { streaming = false } = {}) {
+  let rest = String(text ?? "").trimStart();
+  if (!rest) return null;
+  if (!THINKING_FORMAT_OPEN_TAG_REGEX.test(rest)) {
+    return streaming && isPartialThinkingFormatOpenTag(rest)
+      ? { hasThinkingFormat: true, thinkingText: "", finalText: "", complete: false }
+      : null;
+  }
+
+  const thinkingParts = [];
+  while (THINKING_FORMAT_OPEN_TAG_REGEX.test(rest)) {
+    const open = THINKING_FORMAT_OPEN_TAG_REGEX.exec(rest);
+    const afterOpen = rest.slice(open[0].length);
+    const close = THINKING_FORMAT_CLOSE_TAG_REGEX.exec(afterOpen);
+    if (!close) {
+      thinkingParts.push(streaming ? stripPartialThinkingFormatClose(afterOpen) : afterOpen);
+      return { hasThinkingFormat: true, thinkingText: joinedThinkingFormatParts(thinkingParts), finalText: "", complete: false };
+    }
+
+    thinkingParts.push(afterOpen.slice(0, close.index));
+    rest = afterOpen.slice(close.index + close[0].length);
+    const next = rest.trimStart();
+    if (THINKING_FORMAT_OPEN_TAG_REGEX.test(next)) {
+      rest = next;
+      continue;
+    }
+    break;
+  }
+
+  return {
+    hasThinkingFormat: true,
+    thinkingText: joinedThinkingFormatParts(thinkingParts),
+    finalText: stripThinkingFormatOutputSeparator(rest),
+    complete: true,
+  };
+}
+
+function appendThinkingFormatDisplayMessages(displayMessages, base, parsed) {
+  const thinking = visibleThinkingText(parsed?.thinkingText || "");
+  if (thinking) displayMessages.push({ ...base, role: "thinking", title: "thinking", content: thinking, thinking });
+}
+
 function isAssistantToolCallPart(part) {
   return !!(part && typeof part === "object" && (part.type === "toolCall" || part.toolCall));
 }
@@ -13495,6 +13563,13 @@ function assistantDisplayMessages(message) {
   const base = { timestamp: message.timestamp };
   const content = message.content;
   if (typeof content === "string") {
+    const parsed = splitThinkingFormatText(content);
+    if (parsed?.hasThinkingFormat) {
+      const displayMessages = [];
+      appendThinkingFormatDisplayMessages(displayMessages, base, parsed);
+      if (parsed.finalText.trim()) displayMessages.push({ ...message, title: "final output", content: parsed.finalText });
+      return displayMessages;
+    }
     return content.trim() ? [{ ...message, title: "final output" }] : [];
   }
   if (!Array.isArray(content)) {
@@ -13517,6 +13592,16 @@ function assistantDisplayMessages(message) {
       const toolCallId = assistantToolCallId(part);
       displayMessages.push({ ...base, role: "toolCall", title: `tool call: ${toolName}`, toolName, toolCallId, arguments: args, content: args });
       continue;
+    }
+    const primitiveText = part !== undefined && part !== null && typeof part !== "object" ? String(part) : "";
+    const textForThinkingFormat = primitiveText || (part && typeof part === "object" && (part.type === "text" || typeof part.text === "string") ? assistantTextPartText(part) || part.text : "");
+    if (textForThinkingFormat) {
+      const parsed = splitThinkingFormatText(textForThinkingFormat);
+      if (parsed?.hasThinkingFormat) {
+        appendThinkingFormatDisplayMessages(displayMessages, base, parsed);
+        if (parsed.finalText.trim() && !assistantHasToolCallAfter(content, index)) finalParts.push(part && typeof part === "object" ? { ...part, type: "text", text: parsed.finalText } : { type: "text", text: parsed.finalText });
+        continue;
+      }
     }
     const finalPart = assistantFinalOutputPart(part);
     if (finalPart) {
@@ -16683,6 +16768,12 @@ function removeStreamBubble() {
   renderRunIndicator({ scroll: false });
 }
 
+function streamRenderableAssistantText() {
+  const assistantText = stripTodoProgressLines(streamRawText, { streaming: true });
+  const parsed = splitThinkingFormatText(assistantText, { streaming: true });
+  return parsed?.hasThinkingFormat ? stripTodoProgressLines(parsed.finalText, { streaming: true }) : assistantText;
+}
+
 function scheduleStreamBubbleHide() {
   if (!streamBubble) return;
   const visibleForMs = streamBubbleVisibleSince ? performance.now() - streamBubbleVisibleSince : STREAM_OUTPUT_MIN_VISIBLE_MS;
@@ -16690,16 +16781,27 @@ function scheduleStreamBubbleHide() {
   clearTimeout(streamBubbleHideTimer);
   streamBubbleHideTimer = setTimeout(() => {
     streamBubbleHideTimer = null;
-    if (stripTodoProgressLines(streamRawText, { streaming: true }) || !streamBubble) return;
+    if (streamRenderableAssistantText() || !streamBubble) return;
     removeStreamBubble();
   }, delayMs);
 }
 
+function syncStreamingThinkingFormat(assistantText) {
+  const parsed = splitThinkingFormatText(assistantText, { streaming: true });
+  if (!parsed?.hasThinkingFormat) return null;
+  const thinking = visibleThinkingText(parsed.thinkingText);
+  if (thinking) setStreamingThinkingText(thinking);
+  if (parsed.complete && streamThinkingBubble) streamThinkingBubble.classList.add("complete");
+  return parsed;
+}
+
 function renderStreamingAssistantText() {
   const assistantText = stripTodoProgressLines(streamRawText, { streaming: true });
-  if (assistantText) {
+  const thinkingFormat = syncStreamingThinkingFormat(assistantText);
+  const finalText = thinkingFormat?.hasThinkingFormat ? stripTodoProgressLines(thinkingFormat.finalText, { streaming: true }) : assistantText;
+  if (finalText) {
     ensureStreamBubble();
-    renderStreamingMarkdown(streamText, assistantText);
+    renderStreamingMarkdown(streamText, finalText);
   } else {
     scheduleStreamBubbleHide();
   }
@@ -16793,26 +16895,39 @@ function assistantStreamingMessage(event) {
   return partial?.role === "assistant" ? partial : null;
 }
 
-function assistantTextFromMessage(message) {
+function assistantTextFromMessage(message, { streaming = false } = {}) {
+  void streaming;
   const content = message?.content;
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return null;
   const parts = [];
   for (let index = 0; index < content.length; index += 1) {
     const part = content[index];
-    const text = assistantTextPartText(part);
+    const text = assistantTextPartText(part) || (part && typeof part === "object" && typeof part.text === "string" ? part.text : part !== undefined && part !== null && typeof part !== "object" ? String(part) : "");
     if (text && !assistantHasToolCallAfter(content, index)) parts.push(text);
   }
   return parts.length ? parts.join("\n\n") : "";
 }
 
-function assistantThinkingTextFromMessage(message) {
+function assistantThinkingTextFromMessage(message, { streaming = false } = {}) {
   const content = message?.content;
+  if (typeof content === "string") {
+    const parsed = splitThinkingFormatText(content, { streaming });
+    return parsed?.hasThinkingFormat ? visibleThinkingText(parsed.thinkingText) : null;
+  }
   if (!Array.isArray(content)) return null;
-  const parts = content
-    .filter((part) => part && typeof part === "object" && (part.type === "thinking" || typeof part.thinking === "string"))
-    .map((part) => visibleThinkingText(assistantThinkingText(part)))
-    .filter((text) => text.trim());
+  const parts = [];
+  for (const part of content) {
+    if (part && typeof part === "object" && (part.type === "thinking" || typeof part.thinking === "string")) {
+      const thinking = visibleThinkingText(assistantThinkingText(part));
+      if (thinking.trim()) parts.push(thinking);
+      continue;
+    }
+    const text = assistantTextPartText(part) || (part && typeof part === "object" && typeof part.text === "string" ? part.text : part !== undefined && part !== null && typeof part !== "object" ? String(part) : "");
+    const parsed = splitThinkingFormatText(text, { streaming });
+    const thinking = parsed?.hasThinkingFormat ? visibleThinkingText(parsed.thinkingText) : "";
+    if (thinking.trim()) parts.push(thinking);
+  }
   return parts.length ? parts.join("\n\n") : "";
 }
 
@@ -16826,7 +16941,7 @@ function setStreamingThinkingText(text) {
 
 function syncStreamingThinkingFromMessage(event, { placeholder = "" } = {}) {
   if (!thinkingOutputVisible) return true;
-  const text = assistantThinkingTextFromMessage(assistantStreamingMessage(event));
+  const text = assistantThinkingTextFromMessage(assistantStreamingMessage(event), { streaming: true });
   if (text === null) return false;
   return setStreamingThinkingText(text || placeholder);
 }
@@ -16848,13 +16963,13 @@ function handleMessageUpdate(event) {
     }
     scrollChatToBottom();
   } else if (update.type === "thinking_end") {
-    const finalThinking = assistantThinkingTextFromMessage(assistantStreamingMessage(event)) || thinkingDeltaText(update);
+    const finalThinking = assistantThinkingTextFromMessage(assistantStreamingMessage(event), { streaming: true }) || thinkingDeltaText(update);
     if (finalThinking) setStreamingThinkingText(finalThinking);
     streamThinkingBubble?.classList.add("complete");
     setRunIndicatorActivity("Finished thinking; waiting for the next output or action…", { scroll: false });
   } else if (update.type === "text_delta" || update.type === "text_end") {
     const delta = update.type === "text_delta" ? update.delta || "" : "";
-    const partialText = assistantTextFromMessage(assistantStreamingMessage(event));
+    const partialText = assistantTextFromMessage(assistantStreamingMessage(event), { streaming: true });
     if (typeof partialText === "string") streamRawText = partialText;
     else if (update.type === "text_end" && typeof update.content === "string") streamRawText = update.content;
     else streamRawText += delta;
