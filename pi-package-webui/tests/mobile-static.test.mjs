@@ -53,7 +53,8 @@ assert.match(html, /id="sidePanelBackdrop"/, "mobile side panel needs an overlay
 assert.match(html, /<strong class="side-panel-title">[\s\S]*Control Deck[\s\S]*id="webuiVersionBadge"[\s\S]*id="webuiDevBadge"/, "Control Deck title should expose Web UI version and dev badges");
 assert.doesNotMatch(html, /id="sessionLine"/, "Control Deck title should not show verbose session status metadata");
 assert.match(html, /id="themeSelect"/, "side panel should expose a theme selector");
-assert.match(html, /<label for="themeSelect">Theme<\/label>/, "theme selector should be labeled in side-panel controls");
+assert.match(html, /<label for="themeSelect"[^>]*id="themeControlLabel"[^>]*>Theme<\/label>/, "theme selector should be labeled in side-panel controls");
+assert.match(html, /id="themeSearchInput"[\s\S]*id="themeSelect"[\s\S]*id="themeSearchResults"/, "side-panel theme selector should expose searchable theme results");
 assert.match(html, /id="backgroundInput"[^>]*type="file"[^>]*accept="image\/png,image\/jpeg,image\/webp,image\/gif"/, "side panel should expose an image picker for custom backgrounds");
 assert.match(html, /id="backgroundClearButton"[\s\S]*?>×<\/button>/, "side-panel background control should expose an X remove button");
 assert.match(html, /id="serverActionSelect"[\s\S]*<option value="restart">Restart Server<\/option>[\s\S]*<option value="stop">Stop Server<\/option>/, "side panel should expose restart and stop server actions in a dropdown");
@@ -343,8 +344,10 @@ assert.match(css, /\.footer-changed-file\.modified \.footer-changed-file-status 
 assert.match(css, /\.footer-git-extra \.footer-meta-value \{[\s\S]*?color:\s*var\(--ctp-sky\)[\s\S]*?font-weight:\s*900/, "git-footer extras value should be bright enough to read at footer size");
 assert.match(css, /\.footer-metric-action,\n\.footer-meta-action \{[\s\S]*?position:\s*relative;[\s\S]*?border-color:\s*rgba\(148, 226, 213, 0\.26\)/, "clickable footer boxes should have a subtle always-visible highlight");
 assert.doesNotMatch(css, /\.footer-(?:metric|meta)-action::after/, "clickable footer boxes should not show a corner indicator dot");
-assert.match(css, /\.extension-dialog\.git-changes-dialog \{[\s\S]*?--git-changes-dialog-size:[\s\S]*?width:\s*var\(--git-changes-dialog-size\)[\s\S]*?height:\s*var\(--git-changes-dialog-size\)[\s\S]*?aspect-ratio:\s*1 \/ 1/, "git changes modal should override the base dialog with a square wide diff layout");
+assert.match(css, /\.extension-dialog\.git-changes-dialog \{[\s\S]*?--git-changes-dialog-width:[\s\S]*?--git-changes-dialog-height:[\s\S]*?width:\s*var\(--git-changes-dialog-width\)[\s\S]*?height:\s*var\(--git-changes-dialog-height\)/, "git changes modal should override the base dialog with a wide bounded diff layout");
+assert.match(css, /\.git-changes-body \{[\s\S]*?align-content:\s*start/, "git changes modal should keep summary and file content packed at the top of the scroller");
 assert.match(css, /\.git-current-file-header \{[\s\S]*?position:\s*sticky[\s\S]*?top:\s*-0\.72rem/, "git changes modal should keep a sticky current-file header inside the diff scroller");
+assert.match(css, /\.git-changes-file-list \{[\s\S]*?grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/, "git changes modal should show changed-file jump buttons in two columns without horizontal scrolling");
 assert.match(css, /\.git-diff-grid \{[\s\S]*?grid-template-columns:\s*3\.8rem minmax\(22rem, 1fr\) 3\.8rem minmax\(22rem, 1fr\)/, "git changes modal should render a side-by-side diff grid");
 assert.match(html, /id="gitChangesDialog"[\s\S]*id="gitChangesRefreshButton"[\s\S]*id="gitChangesPullButton"[\s\S]*id="gitChangesBody"/, "git changes modal should expose refresh, pull controls, and a diff body");
 assert.match(app, /chip\.key === "changes"[\s\S]*?options\.onClick = openGitChangesDialog/, "footer CHANGES chip should open the git changes modal");
@@ -354,6 +357,8 @@ assert.match(app, /function gitDiffDisplayLine\(row, side\)[\s\S]*`-\$\{text\}`[
 assert.match(app, /function gitUntrackedEntryToDiffFile\(entry\)[\s\S]*?renderRowLimit:\s*Number\.POSITIVE_INFINITY[\s\S]*?type: "added"/, "untracked files should render as complete added-file diffs without the row preview cap");
 assert.match(app, /async function loadMissingGitUntrackedContent\(entry[\s\S]*?\/api\/git-changes\/untracked-file\?path=/, "untracked path-only payloads should fetch complete file contents instead of rendering as empty files");
 assert.match(app, /function updateGitChangesCurrentFileHeader\(\)[\s\S]*?querySelectorAll\("\.git-diff-file\[data-git-diff-file\]"\)/, "git changes modal should derive the sticky current-file header from visible file cards");
+assert.match(app, /function renderGitChangesFileList\(parsedSections, untracked\)[\s\S]*dataset\.gitChangesJumpFile = item\.path[\s\S]*git-changes-file-jump-meta/, "git changes modal should render jump buttons for each changed file");
+assert.match(app, /gitChangesBody\?\.addEventListener\("click"[\s\S]*data-git-changes-jump-file[\s\S]*scrollIntoView\(\{ block: "start", behavior: "smooth" \}\)/, "git changes file jump buttons should scroll to their diff cards");
 assert.match(server, /async function readGitUntrackedEntry\(root, file\)[\s\S]*?content: binary \? "" : buffer\.toString\("utf8"\)/, "server should include complete text contents for untracked files");
 assert.match(server, /url\.pathname === "\/api\/git-changes\/untracked-file" && req\.method === "GET"/, "server should expose a focused untracked-file content endpoint for stale path-only payload fallbacks");
 assert.match(server, /async function readGitChanges\(cwd\)[\s\S]*?const diffArgs = \["diff", "--no-ext-diff"[\s\S]*?"--unified=0"[\s\S]*?\["diff", "--cached"/, "server should collect compact staged and unstaged git diffs for the changes modal");
@@ -664,7 +669,7 @@ assert.match(app, /const GIT_WORKFLOW_MANUAL_BRANCH_TOOLTIP = \[[\s\S]*"Manual P
 assert.match(app, /addGitWorkflowAction\("Manual branch", \(\) => createGitPrBranchManually\(\), "", false, GIT_WORKFLOW_MANUAL_BRANCH_TOOLTIP\)/, "Manual branch should render with its tooltip");
 assert.match(app, /function renderGitWorkflowManualCommitInput\(\{ appendCommitButton = true \} = \{\}\)[\s\S]*git-workflow-message-input[\s\S]*Commit input[\s\S]*commitGitWorkflow\("input", tabId\)/, "Message stage should render a manual commit message input with a Commit input action");
 assert.match(app, /gitWorkflow\.step === "generate"\) \{\n\s+const commitInputButton = renderGitWorkflowManualCommitInput\(\{ appendCommitButton: false \}\);[\s\S]*addGitWorkflowAction\("Preview current message files"[\s\S]*gitWorkflowActions\.append\(commitInputButton\)/, "Message process stage should place Commit input immediately after Preview current message files");
-assert.match(app, /renderGitWorkflowManualCommitInput\(\);[\s\S]*addGitWorkflowAction\("Commit short"/, "Commit choice stage should keep manual commit input before generated commit choices");
+assert.match(app, /gitWorkflow\.step === "message"\) \{[\s\S]*const commitInputButton = renderGitWorkflowManualCommitInput\(\{ appendCommitButton: false \}\);[\s\S]*addGitWorkflowAction\("Regenerate"[\s\S]*gitWorkflowActions\.append\(commitInputButton\)/, "Commit choice stage should place Commit input immediately after Regenerate");
 assert.match(app, /async function commitGitWorkflow\(variant[\s\S]*variant === "input"[\s\S]*message: inputMessage/, "Commit input should send the typed message to the git workflow commit API");
 assert.match(app, /const donePatch = variant === "input"[\s\S]*message: true, commit: true/, "Commit input should mark both message and commit workflow processes done");
 assert.match(server, /\["short", "long", "input"\][\s\S]*cleanGitCommitMessageInput\(body\.message\)[\s\S]*git commit -m <input message>/, "server should accept typed git workflow commit messages");
@@ -782,6 +787,8 @@ assert.match(app, /Abort requested/, "abort feedback should clarify that Web UI 
 assert.match(app, /const ABORT_LONG_PRESS_MS = 3000/, "Abort long-press timing should be explicit");
 assert.match(app, /const ABORT_LONG_PRESS_TICK_MS = 100/, "Abort hold countdown should update visibly while held");
 assert.match(app, /const ABORT_LONG_PRESS_RELEASE_GRACE_MS = 350/, "Escape release cancellation should be debounced to ignore spurious keyup during key repeat");
+assert.match(app, /let escapeAbortHoldSuppressesDoubleEscape = false/, "Escape abort hold should track suppression separately from abort button UI state");
+assert.match(app, /function shouldSuppressEmptyPromptEscapeAction\(\)[\s\S]*escapeAbortHoldSuppressesDoubleEscape[\s\S]*suppressEmptyPromptEscapeUntil/, "Escape abort hold should suppress the empty-prompt double-Escape action until keyup or grace expiry");
 assert.match(app, /function isAbortLongPressActive\(\) \{\n\s+return abortLongPressStartedAt > 0;\n\}/, "Abort hold state should stay active from its monotonic start time, not timer id truthiness");
 assert.match(app, /async function abortActiveRun\(\{ source = "button" \} = \{\}\)/, "Abort should be centralized for button, Esc, and long-press triggers");
 assert.match(app, /elements\.abortButton\.addEventListener\("pointerdown", startAbortLongPress\)/, "Abort should support pointer long-press");
@@ -789,8 +796,9 @@ assert.match(app, /else if \(!event\.repeat\) startAbortLongPress\(event, \{ sou
 assert.match(app, /if \(isAbortLongPressActive\(\)\) \{\n\s+resumeAbortLongPressAffordance\(\);\n\s+return true;\n\s+\}\n\s+resetAbortLongPressAffordance\(\);/, "repeat or duplicate start events should resume instead of restart an in-progress abort countdown");
 assert.match(app, /abortLongPressDeadlineAt = abortLongPressStartedAt \+ ABORT_LONG_PRESS_MS/, "Abort hold countdown should use an immutable deadline for display and completion");
 assert.match(app, /function completeAbortLongPress\(\)[\s\S]*?if \(abortLongPressReleasePending\) return;[\s\S]*?if \(isAbortAvailable\(\)\) abortActiveRun\(\{ source \}\);[\s\S]*?else \{\n\s+resetAbortLongPressAffordance\(\);\n\s+updateComposerModeButtons\(\);\n\s+\}/, "completed abort holds should abort only when no release is pending and reset cleanly if the run already stopped");
+assert.match(app, /if \(shouldSuppressEmptyPromptEscapeAction\(\)\) \{\n\s+event\.preventDefault\(\);\n\s+return;\n\s+\}\n\s+if \(event\.repeat\)/, "completed Escape abort holds should suppress trailing Escape events before double-Escape handling");
 assert.match(app, /if \(event\.repeat\) \{\n\s+event\.preventDefault\(\);\n\s+return;\n\s+\}\n\s+if \(document\.activeElement === elements\.promptInput[\s\S]*doubleEscapeAction/, "held Escape key-repeat should not trigger the double-Escape action");
-assert.match(app, /window\.addEventListener\("keyup"[\s\S]*abortLongPressSource === "escape"[\s\S]*scheduleAbortLongPressReleaseReset/, "releasing Escape should debounce-cancel a pending guarded abort hold");
+assert.match(app, /window\.addEventListener\("keyup"[\s\S]*abortLongPressSource === "escape"[\s\S]*scheduleAbortLongPressReleaseReset[\s\S]*finishEscapeAbortHoldSuppression\(\)/, "releasing Escape should debounce-cancel a pending guarded abort hold and re-enable double-Escape after a grace window");
 assert.match(app, /function resumeAbortLongPressAffordance\(\)[\s\S]*clearAbortLongPressResetTimer\(\);\n\s+abortLongPressReleasePending = false;\n\s+tickAbortLongPressAffordance\(\);/, "new Escape keydown events should cancel pending release resets without restarting countdown");
 assert.match(app, /function addAbortTranscriptNotice\(/, "abort button should render a transcript-visible aborted notice");
 assert.match(app, /this transcript marks the run as aborted/, "abort notice should clearly mark the agent output as aborted");

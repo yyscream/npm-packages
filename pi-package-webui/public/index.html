@@ -333,8 +333,10 @@
             <div id="sidePanelSectionControls" class="side-panel-section-content" hidden>
               <div class="side-panel-controls">
                 <div class="control-field">
-                  <label for="modelSelect">Model</label>
+                  <label id="modelControlLabel" for="modelSelect" title="Open or close model search" tabindex="0">Model</label>
+                  <input id="modelSearchInput" class="model-search-input" type="search" placeholder="Search models…" autocomplete="off" spellcheck="false" hidden />
                   <select id="modelSelect" title="Model"></select>
+                  <div id="modelSearchResults" class="model-search-results" role="listbox" aria-label="Model search results" hidden></div>
                   <button id="setModelButton" type="button">Set model</button>
                 </div>
                 <div class="control-field">
@@ -368,8 +370,10 @@
                   <div id="terminalTabsLayoutStatus" class="terminal-tabs-layout-status toggle-control-hint">Top bar</div>
                 </div>
                 <div class="control-field">
-                  <label for="themeSelect">Theme</label>
+                  <label for="themeSelect" id="themeControlLabel" title="Open or close theme search" tabindex="0">Theme</label>
+                  <input id="themeSearchInput" class="model-search-input theme-search-input" type="search" placeholder="Search themes…" autocomplete="off" spellcheck="false" hidden />
                   <select id="themeSelect" title="Theme"></select>
+                  <div id="themeSearchResults" class="model-search-results theme-search-results" role="listbox" aria-label="Theme search results" hidden></div>
                 </div>
                 <div class="control-field background-control-field">
                   <label for="backgroundInput">Background</label>

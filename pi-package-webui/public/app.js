@@ -117,6 +117,9 @@ const elements = {
   gitChangesRefreshButton: $("#gitChangesRefreshButton"),
   gitChangesPullButton: $("#gitChangesPullButton"),
   gitChangesCloseButton: $("#gitChangesCloseButton"),
+  modelControlLabel: $("#modelControlLabel"),
+  modelSearchInput: $("#modelSearchInput"),
+  modelSearchResults: $("#modelSearchResults"),
   modelSelect: $("#modelSelect"),
   setModelButton: $("#setModelButton"),
   thinkingSelect: $("#thinkingSelect"),
@@ -125,6 +128,9 @@ const elements = {
   thinkingVisibilityStatus: $("#thinkingVisibilityStatus"),
   terminalTabsLayoutSelect: $("#terminalTabsLayoutSelect"),
   terminalTabsLayoutStatus: $("#terminalTabsLayoutStatus"),
+  themeControlLabel: $("#themeControlLabel"),
+  themeSearchInput: $("#themeSearchInput"),
+  themeSearchResults: $("#themeSearchResults"),
   themeSelect: $("#themeSelect"),
   backgroundInput: $("#backgroundInput"),
   backgroundChooseButton: $("#backgroundChooseButton"),
@@ -349,6 +355,7 @@ let thinkingOutputVisible = true;
 let terminalTabsLayout = "top";
 let webuiSettings = {};
 let busyPromptBehavior = "followUp";
+let composerModeRenderSignature = "";
 let autocompleteMaxVisible = 12;
 let doubleEscapeAction = "none";
 let treeFilterMode = "default";
@@ -405,6 +412,8 @@ let abortLongPressDeadlineAt = 0;
 let abortLongPressSource = "long-press";
 let abortLongPressReleasePending = false;
 let abortLongPressHandled = false;
+let escapeAbortHoldSuppressesDoubleEscape = false;
+let suppressEmptyPromptEscapeUntil = 0;
 const dialogQueue = [];
 const SIDE_PANEL_STORAGE_KEY = "pi-webui-side-panel-collapsed";
 const SIDE_PANEL_SECTION_STORAGE_KEY = "pi-webui-side-panel-sections-collapsed";
@@ -491,6 +500,7 @@ const RUN_INDICATOR_STATE_RECHECK_MS = 5000;
 const ABORT_LONG_PRESS_MS = 3000;
 const ABORT_LONG_PRESS_TICK_MS = 100;
 const ABORT_LONG_PRESS_RELEASE_GRACE_MS = 350;
+const EMPTY_PROMPT_ESCAPE_AFTER_ABORT_GRACE_MS = 1000;
 const STREAM_OUTPUT_HIDE_DELAY_MS = 300;
 const STREAM_OUTPUT_TOOLCALL_GUARD_MS = 220;
 const STREAM_OUTPUT_MIN_VISIBLE_MS = 900;
@@ -931,6 +941,37 @@ function deferChatFollowScrollDuringPointerActivation({ force = false } = {}) {
   if (force || !shouldDeferUiRenderForPointerActivation()) return false;
   deferredChatFollowScroll = true;
   return true;
+}
+
+function isInteractiveDropdownOpen() {
+  return Boolean(
+    document.body.classList.contains("composer-actions-open")
+      || publishMenuOpen
+      || nativeCommandMenuOpen
+      || appRunnerMenuOpen
+      || optionsMenuOpen
+      || busyPromptBehaviorMenuOpen
+      || newTabMenuOpen
+      || isFooterPickerOpen()
+      || elements.commandSuggest?.hidden === false
+      || elements.modelSearchInput?.hidden === false
+      || elements.themeSearchInput?.hidden === false,
+  );
+}
+
+function deferChatFollowScrollDuringInteractiveDropdown({ force = false } = {}) {
+  if (force || !isInteractiveDropdownOpen()) return false;
+  deferredChatFollowScroll = true;
+  return true;
+}
+
+function scheduleDeferredUiFlushAfterDropdownClose() {
+  if (!deferredChatFollowScroll && deferredUiRenderCallbacks.size === 0) return;
+  const flush = () => {
+    if (!isInteractiveDropdownOpen()) flushDeferredUiRenders();
+  };
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(flush);
+  else setTimeout(flush, 0);
 }
 
 function flushDeferredUiRenders() {
@@ -1954,7 +1995,10 @@ function setBusyPromptBehaviorMenuOpen(open, { focusCurrent = false } = {}) {
   elements.busyPromptBehaviorTag?.setAttribute("aria-expanded", busyPromptBehaviorMenuOpen ? "true" : "false");
   elements.busyPromptBehaviorTag?.classList.toggle("menu-open", busyPromptBehaviorMenuOpen);
   if (elements.busyPromptBehaviorMenu) elements.busyPromptBehaviorMenu.hidden = !busyPromptBehaviorMenuOpen;
-  if (!busyPromptBehaviorMenuOpen) return;
+  if (!busyPromptBehaviorMenuOpen) {
+    scheduleDeferredUiFlushAfterDropdownClose();
+    return;
+  }
   renderBusyPromptBehaviorMenu();
   if (focusCurrent) {
     requestAnimationFrame(() => {
@@ -2025,6 +2069,7 @@ function setComposerActionsOpen(open) {
     setBusyPromptBehaviorMenuOpen(false);
   }
   scheduleMobileDropdownScrollBoundsUpdate();
+  if (!shouldOpen) scheduleDeferredUiFlushAfterDropdownClose();
 }
 
 function isUserBashActive(tabId = activeTabId) {
@@ -2069,6 +2114,18 @@ function resizePromptInput() {
 function updateComposerModeButtons() {
   const runActive = isRunActive();
   const abortAvailable = isAbortAvailable();
+  const abortHoldSnapshot = isAbortLongPressActive();
+  const nextSignature = [
+    activeTabGeneration,
+    runActive ? "run" : "idle",
+    abortAvailable ? "abort" : "no-abort",
+    abortHoldSnapshot ? `hold:${abortLongPressLabel()}` : "no-hold",
+    abortRequestInFlight ? "aborting" : "ready",
+    busyPromptBehavior,
+  ].join("|");
+  if (nextSignature === composerModeRenderSignature) return;
+  composerModeRenderSignature = nextSignature;
+
   const target = runActive ? elements.composerRow : elements.composerActionsPanel;
   const before = runActive ? elements.abortButton : null;
   for (const button of [elements.steerButton, elements.followUpButton]) {
@@ -2083,9 +2140,11 @@ function updateComposerModeButtons() {
   if (abortHoldActive) {
     renderAbortLongPressAffordance();
   } else {
-    elements.abortButton.textContent = abortRequestInFlight ? "Aborting…" : "Abort";
-    elements.abortButton.title = abortAvailable ? abortButtonReadyTitle() : "Abort is available while Pi is running";
-    elements.abortButton.setAttribute("aria-label", elements.abortButton.title);
+    const abortText = abortRequestInFlight ? "Aborting…" : "Abort";
+    const abortTitle = abortAvailable ? abortButtonReadyTitle() : "Abort is available while Pi is running";
+    if (elements.abortButton.textContent !== abortText) elements.abortButton.textContent = abortText;
+    if (elements.abortButton.title !== abortTitle) elements.abortButton.title = abortTitle;
+    if (elements.abortButton.getAttribute("aria-label") !== abortTitle) elements.abortButton.setAttribute("aria-label", abortTitle);
   }
   renderBusyPromptBehaviorTag();
   document.body.classList.toggle("pi-run-active", runActive || abortAvailable);
@@ -4063,6 +4122,79 @@ function applyTheme(theme, { persist = false, announce = false } = {}) {
   if (announce) addEvent(`theme changed to ${theme.label || displayThemeName(theme.name) || theme.name}`);
 }
 
+function themeDisplayLabel(theme) {
+  return theme?.label || displayThemeName(theme?.name) || theme?.name || "";
+}
+
+function themeSearchText(theme) {
+  return [themeDisplayLabel(theme), theme?.name, theme?.author].filter(Boolean).join(" ");
+}
+
+function renderThemeSearchResults(themes = []) {
+  if (!elements.themeSearchResults) return;
+  elements.themeSearchResults.replaceChildren();
+  if (elements.themeSearchInput?.hidden) return;
+  if (!themes.length) {
+    elements.themeSearchResults.append(make("div", "model-search-empty", "No themes match the search"));
+    elements.themeSearchResults.hidden = false;
+    return;
+  }
+  for (const theme of themes) {
+    const selected = theme.name === currentThemeName;
+    const button = make("button", `model-search-result theme-search-result${selected ? " active" : ""}`);
+    button.type = "button";
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", String(selected));
+    button.title = themeSearchText(theme);
+    button.append(make("span", "model-search-result-main", themeDisplayLabel(theme)));
+    button.addEventListener("click", () => {
+      if (elements.themeSelect) elements.themeSelect.value = theme.name;
+      setThemeByName(theme.name, { persist: true, announce: true }).catch((error) => addEvent(error.message || String(error), "error"));
+    });
+    elements.themeSearchResults.append(button);
+  }
+  elements.themeSearchResults.hidden = false;
+}
+
+function populateThemeSelect(themes = availableThemes, query = "") {
+  if (!elements.themeSelect) return [];
+  const normalizedQuery = String(query || "").trim().toLowerCase();
+  const matchingThemes = themes.filter((theme) => !normalizedQuery || themeSearchText(theme).toLowerCase().includes(normalizedQuery));
+  renderThemeSearchResults(matchingThemes);
+  return matchingThemes;
+}
+
+function showThemeSearchInput({ focus = true } = {}) {
+  if (!elements.themeSearchInput) return;
+  elements.themeSearchInput.hidden = false;
+  elements.themeSearchResults.hidden = false;
+  elements.themeSelect.classList.add("model-select-expanded");
+  populateThemeSelect(availableThemes, elements.themeSearchInput.value);
+  if (focus) {
+    requestAnimationFrame(() => {
+      elements.themeSearchInput.focus();
+      elements.themeSearchInput.select();
+    });
+  }
+}
+
+function hideThemeSearchInput() {
+  if (!elements.themeSearchInput) return;
+  elements.themeSearchInput.hidden = true;
+  elements.themeSearchInput.value = "";
+  if (elements.themeSearchResults) {
+    elements.themeSearchResults.hidden = true;
+    elements.themeSearchResults.replaceChildren();
+  }
+  elements.themeSelect?.classList.remove("model-select-expanded");
+  scheduleDeferredUiFlushAfterDropdownClose();
+}
+
+function toggleThemeSearchInput() {
+  if (elements.themeSearchInput?.hidden) showThemeSearchInput();
+  else hideThemeSearchInput();
+}
+
 function renderThemeSelect({ unavailableLabel = "Theme bundle unavailable" } = {}) {
   if (!elements.themeSelect) return;
   elements.themeSelect.replaceChildren();
@@ -4087,6 +4219,7 @@ function renderThemeSelect({ unavailableLabel = "Theme bundle unavailable" } = {
     elements.themeSelect.append(option);
   }
   elements.themeSelect.value = currentThemeName;
+  populateThemeSelect(availableThemes, elements.themeSearchInput?.value || "");
 }
 
 async function setThemeByName(name, options = {}) {
@@ -4095,6 +4228,7 @@ async function setThemeByName(name, options = {}) {
   if (!theme) return;
   currentThemeName = theme.name;
   if (elements.themeSelect && elements.themeSelect.value !== theme.name) elements.themeSelect.value = theme.name;
+  populateThemeSelect(availableThemes, elements.themeSearchInput?.value || "");
   setCustomBackgroundRecord(null);
   customBackgroundLoading = true;
   applyTheme(theme, options);
@@ -4795,6 +4929,7 @@ function setNewTabMenuOpen(open) {
   elements.newTabButton?.setAttribute("aria-expanded", newTabMenuOpen ? "true" : "false");
   elements.newTabButton?.classList.toggle("menu-open", newTabMenuOpen);
   elements.newTabMenu?.classList.toggle("open", newTabMenuOpen);
+  if (!newTabMenuOpen) scheduleDeferredUiFlushAfterDropdownClose();
 }
 
 function openNewTabMenu() {
@@ -6671,9 +6806,36 @@ function renderGitUntrackedSection(untracked) {
   return wrapper;
 }
 
+function renderGitChangesFileList(parsedSections, untracked) {
+  const items = [];
+  for (const entry of parsedSections || []) {
+    for (const file of entry.files || []) {
+      items.push({ path: file.path || "diff", stats: file.statsText || `+${file.additions || 0} −${file.deletions || 0}`, section: entry.section?.label || "Diff" });
+    }
+  }
+  for (const entry of untracked || []) {
+    items.push({ path: entry.path, stats: entry.binary ? "binary" : "new", section: "Untracked" });
+  }
+  if (!items.length) return null;
+  const list = make("nav", "git-changes-file-list");
+  list.setAttribute("aria-label", "Changed files");
+  list.append(make("span", "git-changes-file-list-label", `${items.length} file${items.length === 1 ? "" : "s"}`));
+  for (const item of items) {
+    const button = make("button", "git-changes-file-jump");
+    button.type = "button";
+    button.dataset.gitChangesJumpFile = item.path;
+    button.title = `${item.section}: ${item.path}`;
+    button.append(make("span", "git-changes-file-jump-name", item.path), make("span", "git-changes-file-jump-meta", `${item.section} · ${item.stats}`));
+    list.append(button);
+  }
+  return list;
+}
+
 function renderGitCurrentFileHeader() {
-  const header = make("div", "git-current-file-header");
-  header.append(make("span", "git-current-file-label", "Current file"), make("span", "git-current-file-name", "—"));
+  const header = make("button", "git-current-file-header");
+  header.type = "button";
+  header.title = "Collapse or expand the current file diff";
+  header.append(make("span", "git-current-file-label", "Current file"), make("span", "git-current-file-name", "—"), make("span", "git-current-file-toggle", "Toggle"));
   return header;
 }
 
@@ -6700,7 +6862,10 @@ function updateGitChangesCurrentFileHeader() {
     if (rect.top <= markerY) current = file;
     else break;
   }
-  name.textContent = current?.dataset.gitDiffFile || "—";
+  const currentPath = current?.dataset.gitDiffFile || "—";
+  name.textContent = currentPath;
+  header.dataset.gitCurrentFile = currentPath;
+  header.setAttribute("aria-expanded", String(current?.open !== false));
 }
 
 function gitChangesGeneratedLabel(data) {
@@ -6757,7 +6922,11 @@ function renderGitChangesDialog() {
     .filter((entry) => entry.files.length > 0);
   const untracked = gitUntrackedEntries(data.untracked);
   const hasVisibleFiles = parsedSections.length > 0 || untracked.length > 0;
-  if (hasVisibleFiles) body.append(renderGitCurrentFileHeader());
+  if (hasVisibleFiles) {
+    const fileList = renderGitChangesFileList(parsedSections, untracked);
+    if (fileList) body.append(fileList);
+    body.append(renderGitCurrentFileHeader());
+  }
   for (const entry of parsedSections) body.append(renderGitDiffSection(entry.section, entry.files));
   if (untracked.length) body.append(renderGitUntrackedSection(untracked));
   if (!hasVisibleFiles) {
@@ -7006,10 +7175,66 @@ function renderContextMeter() {
   root.replaceChildren(summary, meter, actions);
 }
 
-function dashboardMetric(label, value, detail = "") {
-  const item = make("div", "workspace-dashboard-metric");
-  item.append(make("span", "workspace-dashboard-metric-label", label), make("strong", undefined, value || "—"));
-  if (detail) item.append(make("span", "workspace-dashboard-metric-detail", detail));
+function compactDashboardText(value, maxLength = 34) {
+  const text = String(value || "").trim();
+  if (!text || text.length <= maxLength) return text;
+  const available = Math.max(8, maxLength - 1);
+  const headLength = Math.max(4, Math.ceil(available * 0.58));
+  const tailLength = Math.max(4, available - headLength);
+  return `${text.slice(0, headLength)}…${text.slice(-tailLength)}`;
+}
+
+function compactDashboardPath(value, maxLength = 52) {
+  const text = normalizeDisplayPath(value || "").trim();
+  if (!text || text.length <= maxLength) return text;
+  const segments = text.split("/").filter(Boolean);
+  if (segments.length >= 3) {
+    const tail = `…/${segments.slice(-3).join("/")}`;
+    if (tail.length <= maxLength) return tail;
+  }
+  return compactDashboardText(text, maxLength);
+}
+
+function contextDashboardTone(snapshot) {
+  if (!snapshot) return "muted";
+  if (typeof snapshot.percent !== "number") return "neutral";
+  if (snapshot.percent >= 85) return "danger";
+  if (snapshot.percent >= 70) return "warning";
+  return "ok";
+}
+
+function dashboardSessionSummary() {
+  const rawSession = currentState?.sessionName || currentState?.sessionId || "";
+  const rawFile = currentState?.sessionFile || "in-memory";
+  const sessionLabel = rawSession ? compactDashboardText(rawSession, 28) : "loading…";
+  const fileLabel = rawFile === "in-memory" ? rawFile : compactDashboardPath(rawFile, 58);
+  return {
+    value: sessionLabel,
+    detail: fileLabel,
+    title: [rawSession || "Session loading…", rawFile].filter(Boolean).join("\n"),
+  };
+}
+
+function dashboardMetric(label, value, detail = "", options = {}) {
+  const tone = options.tone || "neutral";
+  const item = make("div", `workspace-dashboard-metric tone-${tone}${options.meterSnapshot ? " with-meter" : ""}`);
+  const valueText = value || "—";
+  const title = options.title || [label, valueText, detail].filter(Boolean).join(" · ");
+  item.title = title;
+  item.setAttribute("aria-label", title);
+
+  const icon = make("span", "workspace-dashboard-metric-icon", options.icon || "•");
+  icon.setAttribute("aria-hidden", "true");
+  const copy = make("span", "workspace-dashboard-metric-copy");
+  copy.append(make("span", "workspace-dashboard-metric-label", label), make("strong", undefined, valueText));
+  if (detail) copy.append(make("span", "workspace-dashboard-metric-detail", detail));
+  item.append(icon, copy);
+
+  if (options.meterSnapshot) {
+    const meter = make("span", "workspace-dashboard-mini-meter");
+    appendContextMeterFill(meter, options.meterSnapshot);
+    item.append(meter);
+  }
   return item;
 }
 
@@ -7028,11 +7253,30 @@ function renderWorkspaceDashboard() {
   const snapshot = contextUsageSnapshot();
   const workspaceLabel = latestWorkspace?.displayCwd || (tab?.cwd ? normalizeDisplayPath(tab.cwd) : "Choose or create a tab to start");
   const queueCount = Number(currentState?.pendingMessageCount || 0) || 0;
+  const tabIndicatorState = tab ? tabIndicator(tab) : null;
+  const sessionSummary = dashboardSessionSummary();
+  const modelLabel = currentState?.model ? shortModelLabel(currentState.model) : "loading…";
+  const queueDetail = queueCount === 0 ? "idle" : queueCount === 1 ? "pending message" : "pending messages";
   root.replaceChildren();
 
   const header = make("div", "workspace-dashboard-header");
   const title = make("div", "workspace-dashboard-title");
-  title.append(make("span", "workspace-dashboard-kicker", "Workspace"), make("h2", undefined, tab?.title || "Pi Web UI"), make("p", "muted", workspaceLabel));
+  const heading = make("h2", undefined, tab?.title || "Pi Web UI");
+  heading.title = tab?.title || "Pi Web UI";
+  const cwd = make("p", "workspace-dashboard-cwd muted", workspaceLabel);
+  cwd.title = workspaceLabel;
+  const meta = make("div", "workspace-dashboard-title-meta");
+  if (tabIndicatorState) {
+    const statusChip = make("span", `workspace-dashboard-chip activity-${tabIndicatorState.state}`);
+    statusChip.title = tabIndicatorState.label;
+    statusChip.append(make("span", "workspace-dashboard-chip-dot", tabIndicatorState.glyph), make("span", undefined, tabIndicatorState.label));
+    meta.append(statusChip);
+  }
+  meta.append(
+    make("span", "workspace-dashboard-chip", `${tabs.length} tab${tabs.length === 1 ? "" : "s"}`),
+    make("span", `workspace-dashboard-chip ${queueCount ? "attention" : ""}`.trim(), queueCount ? `${queueCount} queued` : "queue clear"),
+  );
+  title.append(make("span", "workspace-dashboard-kicker", "Workspace"), heading, cwd, meta);
   const actions = make("div", "workspace-dashboard-actions");
   actions.append(
     dashboardAction("Command palette", () => openCommandPalette(), "primary"),
@@ -7045,24 +7289,45 @@ function renderWorkspaceDashboard() {
 
   const metrics = make("div", "workspace-dashboard-metrics");
   metrics.append(
-    dashboardMetric("Model", currentState?.model ? shortModelLabel(currentState.model) : "loading…", currentState?.thinkingLevel ? `thinking ${currentState.thinkingLevel}` : ""),
-    dashboardMetric("Context", contextUsageDisplay(snapshot), contextUsageDetail(snapshot)),
-    dashboardMetric("Session", currentState?.sessionName || currentState?.sessionId || "loading…", currentState?.sessionFile || "in-memory"),
-    dashboardMetric("Queue", `${queueCount}`, queueCount === 1 ? "pending message" : "pending messages"),
+    dashboardMetric("Model", modelLabel, currentState?.thinkingLevel ? `thinking ${currentState.thinkingLevel}` : "ready", {
+      icon: "◌",
+      tone: currentState?.model ? "neutral" : "muted",
+      title: currentState?.model ? shortModelLabel(currentState.model) : "Model loading…",
+    }),
+    dashboardMetric("Context", contextUsageDisplay(snapshot), contextUsageDetail(snapshot), {
+      icon: "◐",
+      tone: contextDashboardTone(snapshot),
+      meterSnapshot: snapshot,
+    }),
+    dashboardMetric("Session", sessionSummary.value, sessionSummary.detail, {
+      icon: "#",
+      tone: currentState?.sessionId || currentState?.sessionName ? "neutral" : "muted",
+      title: sessionSummary.title,
+    }),
+    dashboardMetric("Queue", `${queueCount}`, queueDetail, {
+      icon: queueCount ? "↳" : "✓",
+      tone: queueCount ? "warning" : "ok",
+    }),
   );
 
   const tabsPanel = make("div", "workspace-dashboard-tabs");
-  tabsPanel.append(make("span", "workspace-dashboard-tabs-title", `Open tabs (${tabs.length})`));
+  const tabsHeader = make("div", "workspace-dashboard-tabs-header");
+  tabsHeader.append(
+    make("span", "workspace-dashboard-tabs-title", `Open tabs (${tabs.length})`),
+    make("span", "workspace-dashboard-tabs-hint", tabs.length ? "Click a tab to switch" : "No tabs yet"),
+  );
+  tabsPanel.append(tabsHeader);
   const tabList = make("div", "workspace-dashboard-tab-list");
   for (const item of tabs.slice(0, 8)) {
     const indicator = tabIndicator(item);
     const button = make("button", `workspace-dashboard-tab activity-${indicator.state}${item.id === activeTabId ? " active" : ""}`);
     button.type = "button";
-    button.title = `${item.title} · ${indicator.label}`;
-    button.append(make("span", "workspace-dashboard-tab-dot", indicator.glyph), make("span", undefined, item.title));
+    button.title = `${item.title} · ${indicator.label}${item.cwd ? ` · ${normalizeDisplayPath(item.cwd)}` : ""}`;
+    button.append(make("span", "workspace-dashboard-tab-dot", indicator.glyph), make("span", "workspace-dashboard-tab-label", item.title));
     button.addEventListener("click", () => switchTab(item.id));
     tabList.append(button);
   }
+  if (!tabs.length) tabList.append(make("span", "workspace-dashboard-tab-empty", "Create a tab to start a workspace."));
   if (tabs.length > 8) tabList.append(make("span", "workspace-dashboard-tab-more", `+${tabs.length - 8} more`));
   tabsPanel.append(tabList);
 
@@ -7070,6 +7335,7 @@ function renderWorkspaceDashboard() {
 }
 
 function setFooterModelPickerOpen(open) {
+  const wasOpen = footerModelPickerOpen;
   footerModelPickerOpen = !!open;
   if (footerModelPickerOpen) {
     footerThinkingPickerOpen = false;
@@ -7085,9 +7351,11 @@ function setFooterModelPickerOpen(open) {
   document.body.classList.toggle("footer-model-picker-open", isFooterPickerOpen());
   renderFooter();
   updateFooterModelPickerPosition();
+  if (wasOpen && !footerModelPickerOpen) scheduleDeferredUiFlushAfterDropdownClose();
 }
 
 function setFooterThinkingPickerOpen(open) {
+  const wasOpen = footerThinkingPickerOpen;
   footerThinkingPickerOpen = !!open;
   if (footerThinkingPickerOpen) {
     footerModelPickerOpen = false;
@@ -7103,6 +7371,7 @@ function setFooterThinkingPickerOpen(open) {
   document.body.classList.toggle("footer-model-picker-open", isFooterPickerOpen());
   renderFooter();
   updateFooterModelPickerPosition();
+  if (wasOpen && !footerThinkingPickerOpen) scheduleDeferredUiFlushAfterDropdownClose();
 }
 
 function normalizeFooterGitBranches(data = {}) {
@@ -7172,6 +7441,7 @@ async function loadFooterBranchPicker(tabContext = activeTabContext()) {
 }
 
 function setFooterBranchPickerOpen(open) {
+  const wasOpen = footerBranchPickerOpen;
   footerBranchPickerOpen = !!open;
   if (footerBranchPickerOpen) {
     footerModelPickerOpen = false;
@@ -7189,6 +7459,7 @@ function setFooterBranchPickerOpen(open) {
   document.body.classList.toggle("footer-model-picker-open", isFooterPickerOpen());
   renderFooter();
   updateFooterModelPickerPosition();
+  if (wasOpen && !footerBranchPickerOpen) scheduleDeferredUiFlushAfterDropdownClose();
 }
 
 function pathLooksInside(parentPath, childPath) {
@@ -10634,10 +10905,11 @@ function renderGitWorkflow() {
       addGitWorkflowAction("Create PR", () => createGitPrBranch(), "primary", false, GIT_WORKFLOW_CREATE_PR_TOOLTIP);
       addGitWorkflowAction("Manual branch", () => createGitPrBranchManually(), "", false, GIT_WORKFLOW_MANUAL_BRANCH_TOOLTIP);
     }
-    renderGitWorkflowManualCommitInput();
+    const commitInputButton = renderGitWorkflowManualCommitInput({ appendCommitButton: false });
     addGitWorkflowAction("Commit short", () => commitGitWorkflow("short"), gitWorkflow.prMode ? "primary" : "", false);
     addGitWorkflowAction("Commit long", () => commitGitWorkflow("long"), gitWorkflow.prMode ? "primary" : "", false);
     addGitWorkflowAction("Regenerate", () => runGitMessagePrompt(), "", false);
+    elements.gitWorkflowActions.append(commitInputButton);
   } else if (gitWorkflow.step === "branchNaming") {
     addGitWorkflowAction("Refresh branch name", () => loadGitWorkflowBranchName({ requireFresh: true }), "", false);
     addGitWorkflowAction("Manual branch", () => createGitPrBranchManually(), "", !!gitWorkflow.busy, GIT_WORKFLOW_MANUAL_BRANCH_TOOLTIP);
@@ -13843,12 +14115,17 @@ function renderRunIndicator({ scroll = false } = {}) {
 }
 
 function setRunIndicatorActivity(activity, { active = true, scroll = true } = {}) {
+  const wasLocallyActive = runIndicatorLocallyActive;
+  const previousActivity = runIndicatorActivity;
+  const hadRunIndicatorBubble = runIndicatorBubble?.parentElement === elements.chat;
   if (active) {
     runIndicatorLocallyActive = true;
     if (!runIndicatorStartedAt) runIndicatorStartedAt = performance.now();
   }
   runIndicatorActivity = activity || runIndicatorActivity || "Waiting for output or action…";
-  renderRunIndicator({ scroll });
+  const needsRender = scroll || !hadRunIndicatorBubble || wasLocallyActive !== runIndicatorLocallyActive || previousActivity !== runIndicatorActivity;
+  if (needsRender) renderRunIndicator({ scroll });
+  else if (runIndicatorIsActive()) startRunIndicatorTicker();
   updateComposerModeButtons();
   if (active) scheduleRunIndicatorGraceCheck();
 }
@@ -14286,6 +14563,7 @@ function scheduleChatFollowScroll() {
 
 function scrollChatToBottom({ force = false } = {}) {
   if (deferChatFollowScrollDuringPointerActivation({ force })) return;
+  if (deferChatFollowScrollDuringInteractiveDropdown({ force })) return;
   if (force) autoFollowChat = true;
   if (!autoFollowChat) {
     updateJumpToLatestButton();
@@ -14382,6 +14660,7 @@ function setPublishMenuOpen(open) {
   elements.publishButton.classList.toggle("menu-open", publishMenuOpen);
   elements.publishButton.parentElement?.classList.toggle("open", publishMenuOpen);
   scheduleMobileDropdownScrollBoundsUpdate();
+  if (!publishMenuOpen) scheduleDeferredUiFlushAfterDropdownClose();
 }
 
 function setNativeCommandMenuOpen(open) {
@@ -14390,6 +14669,7 @@ function setNativeCommandMenuOpen(open) {
   elements.nativeCommandMenuButton.classList.toggle("menu-open", nativeCommandMenuOpen);
   elements.nativeCommandMenuButton.parentElement?.classList.toggle("open", nativeCommandMenuOpen);
   scheduleMobileDropdownScrollBoundsUpdate();
+  if (!nativeCommandMenuOpen) scheduleDeferredUiFlushAfterDropdownClose();
 }
 
 function setAppRunnerMenuOpen(open) {
@@ -14398,6 +14678,7 @@ function setAppRunnerMenuOpen(open) {
   elements.appRunnerMenuButton?.classList.toggle("menu-open", appRunnerMenuOpen);
   elements.appRunnerMenuButton?.parentElement?.classList.toggle("open", appRunnerMenuOpen);
   scheduleMobileDropdownScrollBoundsUpdate();
+  if (!appRunnerMenuOpen) scheduleDeferredUiFlushAfterDropdownClose();
 }
 
 function setOptionsMenuOpen(open) {
@@ -14406,6 +14687,7 @@ function setOptionsMenuOpen(open) {
   elements.optionsMenuButton.classList.toggle("menu-open", optionsMenuOpen);
   elements.optionsMenuButton.parentElement?.classList.toggle("open", optionsMenuOpen);
   scheduleMobileDropdownScrollBoundsUpdate();
+  if (!optionsMenuOpen) scheduleDeferredUiFlushAfterDropdownClose();
 }
 
 function optionalFeatureIdForCommand(name) {
@@ -16003,7 +16285,6 @@ function handleMessageUpdate(event) {
       if (streamThinking?.textContent === "Thinking…") streamThinking.textContent = "";
       if (streamThinking) streamThinking.textContent += delta;
     }
-    renderFooter();
     scrollChatToBottom();
   } else if (update.type === "thinking_end") {
     const finalThinking = assistantThinkingTextFromMessage(assistantStreamingMessage(event)) || thinkingDeltaText(update);
@@ -16019,7 +16300,8 @@ function handleMessageUpdate(event) {
     setRunIndicatorActivity("Writing response…", { scroll: false });
     if (streamToolCallSeen || streamBubble) renderStreamingAssistantText();
     else scheduleStreamingAssistantTextRender();
-    renderFooter();
+    // Streaming output must stay transcript-local. Full footer/status
+    // reconciliation happens on message/state refreshes, not per token.
     scrollChatToBottom();
   } else if (update.type === "toolcall_start") {
     streamToolCallSeen = true;
@@ -16313,17 +16595,110 @@ async function refreshModels(tabContext = activeTabContext()) {
   footerScopedModelPatterns = scopedModelPatterns;
   footerScopedModelSource = scopedModelSource;
   if (scopedModelError) addEvent(`failed to load scoped models: ${scopedModelError.message}`, "warn");
-  elements.modelSelect.replaceChildren();
-  for (const model of models) {
-    const option = document.createElement("option");
-    option.value = JSON.stringify({ provider: model.provider, modelId: model.id });
-    option.textContent = `${model.provider}/${model.id}${model.name ? ` · ${model.name}` : ""}`;
-    elements.modelSelect.append(option);
-  }
+  populateModelSelect(models, elements.modelSearchInput?.value || "");
   syncModelSelectToState();
   renderFooter();
   renderFeedbackTray();
   if (elements.commandPaletteDialog?.open) renderCommandPalette({ preserveScroll: true });
+}
+
+function modelSelectOptionText(model) {
+  return `${model.provider}/${model.id}${model.name ? ` · ${model.name}` : ""}`;
+}
+
+function modelSelectValue(model) {
+  return JSON.stringify({ provider: model.provider, modelId: model.id });
+}
+
+function modelSearchDisplayParts(model) {
+  const id = `${model.provider}/${model.id}`;
+  const name = String(model.name || "").trim();
+  if (!name) return { primary: id, secondary: "" };
+  const match = name.match(/^(.*?)(\s+\([^)]+\))$/);
+  return { primary: (match?.[1] || name).trim(), secondary: `${id}${match?.[2] || ""}` };
+}
+
+function renderModelSearchResults(models = []) {
+  if (!elements.modelSearchResults) return;
+  elements.modelSearchResults.replaceChildren();
+  if (elements.modelSearchInput?.hidden) return;
+  if (!models.length) {
+    elements.modelSearchResults.append(make("div", "model-search-empty", "No models match the search"));
+    elements.modelSearchResults.hidden = false;
+    return;
+  }
+  for (const model of models) {
+    const value = modelSelectValue(model);
+    const selected = elements.modelSelect?.value === value;
+    const button = make("button", `model-search-result${selected ? " active" : ""}`);
+    button.type = "button";
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", String(selected));
+    button.title = modelSelectOptionText(model);
+    const display = modelSearchDisplayParts(model);
+    button.append(
+      make("span", "model-search-result-main", display.primary),
+      make("span", "model-search-result-name", display.secondary),
+    );
+    button.addEventListener("click", () => {
+      if (elements.modelSelect) elements.modelSelect.value = value;
+      renderModelSearchResults(models);
+    });
+    button.addEventListener("dblclick", () => elements.setModelButton?.click());
+    elements.modelSearchResults.append(button);
+  }
+  elements.modelSearchResults.hidden = false;
+}
+
+function populateModelSelect(models = availableModels, query = "") {
+  if (!elements.modelSelect) return;
+  const previousValue = elements.modelSelect.value;
+  const normalizedQuery = String(query || "").trim().toLowerCase();
+  const matchingModels = models.filter((model) => !normalizedQuery || modelSelectOptionText(model).toLowerCase().includes(normalizedQuery));
+  elements.modelSelect.replaceChildren();
+  for (const model of matchingModels) {
+    const option = document.createElement("option");
+    option.value = modelSelectValue(model);
+    option.textContent = modelSelectOptionText(model);
+    elements.modelSelect.append(option);
+  }
+  if (!matchingModels.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "No models match the search";
+    option.disabled = true;
+    elements.modelSelect.append(option);
+  }
+  if (previousValue && [...elements.modelSelect.options].some((option) => option.value === previousValue)) elements.modelSelect.value = previousValue;
+  renderModelSearchResults(matchingModels);
+}
+
+function showModelSearchInput({ focus = true } = {}) {
+  if (!elements.modelSearchInput) return;
+  elements.modelSearchInput.hidden = false;
+  elements.modelSearchResults.hidden = false;
+  elements.modelSelect.classList.add("model-select-expanded");
+  populateModelSelect(availableModels, elements.modelSearchInput.value);
+  if (focus) {
+    requestAnimationFrame(() => {
+      elements.modelSearchInput.focus();
+      elements.modelSearchInput.select();
+    });
+  }
+}
+
+function hideModelSearchInput() {
+  if (!elements.modelSearchInput) return;
+  elements.modelSearchInput.hidden = true;
+  elements.modelSearchInput.value = "";
+  if (elements.modelSearchResults) {
+    elements.modelSearchResults.hidden = true;
+    elements.modelSearchResults.replaceChildren();
+  }
+  elements.modelSelect?.classList.remove("model-select-expanded");
+  populateModelSelect(availableModels, "");
+  syncModelSelectToState();
+  scheduleDeferredUiFlushAfterDropdownClose();
 }
 
 function syncModelSelectToState() {
@@ -16332,6 +16707,7 @@ function syncModelSelectToState() {
   for (const option of elements.modelSelect.options) {
     if (option.value === value) {
       elements.modelSelect.value = value;
+      renderModelSearchResults(availableModels.filter((model) => !elements.modelSearchInput?.value.trim() || modelSelectOptionText(model).toLowerCase().includes(elements.modelSearchInput.value.trim().toLowerCase())));
       break;
     }
   }
@@ -16521,6 +16897,7 @@ function hideCommandSuggestions() {
   pathSuggestions = [];
   suggestionMode = "none";
   commandSuggestIndex = 0;
+  scheduleDeferredUiFlushAfterDropdownClose();
 }
 
 function setActiveCommandSuggestion(index) {
@@ -18311,6 +18688,25 @@ function abortButtonReadyTitle() {
   return `Hold Esc or the Abort button for ${abortButtonHoldSeconds()} seconds to abort the active Pi run`;
 }
 
+function suppressEmptyPromptEscapeAction({ untilKeyup = false, graceMs = EMPTY_PROMPT_ESCAPE_AFTER_ABORT_GRACE_MS } = {}) {
+  lastEmptyPromptEscapeTime = 0;
+  suppressEmptyPromptEscapeUntil = Math.max(suppressEmptyPromptEscapeUntil, Date.now() + graceMs);
+  if (untilKeyup) escapeAbortHoldSuppressesDoubleEscape = true;
+}
+
+function finishEscapeAbortHoldSuppression() {
+  if (!escapeAbortHoldSuppressesDoubleEscape) return;
+  escapeAbortHoldSuppressesDoubleEscape = false;
+  suppressEmptyPromptEscapeAction();
+}
+
+function shouldSuppressEmptyPromptEscapeAction() {
+  if (escapeAbortHoldSuppressesDoubleEscape) return true;
+  if (suppressEmptyPromptEscapeUntil > Date.now()) return true;
+  suppressEmptyPromptEscapeUntil = 0;
+  return false;
+}
+
 function clearAbortLongPressResetTimer() {
   clearTimeout(abortLongPressResetTimer);
   abortLongPressResetTimer = null;
@@ -18352,6 +18748,7 @@ function completeAbortLongPress() {
   if (!isAbortLongPressActive()) return;
   if (abortLongPressReleasePending) return;
   const source = abortLongPressSource;
+  if (source === "escape") suppressEmptyPromptEscapeAction({ untilKeyup: true });
   clearAbortLongPressResetTimer();
   clearAbortLongPressCompletionTimers();
   abortLongPressHandled = true;
@@ -18439,6 +18836,7 @@ async function abortActiveRun({ source = "button" } = {}) {
 function startAbortLongPress(event, { source = "long-press" } = {}) {
   if (!isAbortAvailable() || abortRequestInFlight) return false;
   if (source !== "escape" && event?.button !== undefined && event.button !== 0) return false;
+  if (source === "escape") suppressEmptyPromptEscapeAction({ untilKeyup: true, graceMs: ABORT_LONG_PRESS_MS + EMPTY_PROMPT_ESCAPE_AFTER_ABORT_GRACE_MS });
   if (isAbortLongPressActive()) {
     resumeAbortLongPressAffordance();
     return true;
@@ -18492,6 +18890,41 @@ elements.compactButton.addEventListener("click", async () => {
   setComposerActionsOpen(false);
   await requestManualCompaction({ triggerButton: elements.compactButton });
 });
+function toggleModelSearchInput() {
+  if (elements.modelSearchInput?.hidden) showModelSearchInput();
+  else hideModelSearchInput();
+}
+
+elements.modelControlLabel?.addEventListener("click", (event) => {
+  event.preventDefault();
+  toggleModelSearchInput();
+});
+elements.modelControlLabel?.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  event.preventDefault();
+  toggleModelSearchInput();
+});
+elements.modelSelect?.addEventListener("pointerdown", (event) => {
+  if (!elements.modelSearchInput || !elements.modelSearchInput.hidden) return;
+  event.preventDefault();
+  showModelSearchInput();
+});
+elements.modelSelect?.addEventListener("focus", () => showModelSearchInput());
+elements.modelSearchInput?.addEventListener("input", () => {
+  populateModelSelect(availableModels, elements.modelSearchInput.value);
+  syncModelSelectToState();
+});
+elements.modelSearchInput?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    elements.setModelButton?.click();
+  } else if (event.key === "Escape") {
+    elements.modelSearchInput.value = "";
+    populateModelSelect(availableModels, "");
+    syncModelSelectToState();
+    elements.modelSearchInput.focus();
+  }
+});
 elements.setModelButton.addEventListener("click", async () => {
   if (!elements.modelSelect.value) return;
   const tabContext = activeTabContext();
@@ -18523,6 +18956,33 @@ elements.setThinkingButton.addEventListener("click", async () => {
     }
   } catch (error) {
     if (isCurrentTabContext(tabContext)) addEvent(error.message, "error");
+  }
+});
+elements.themeControlLabel?.addEventListener("click", (event) => {
+  event.preventDefault();
+  toggleThemeSearchInput();
+});
+elements.themeControlLabel?.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  event.preventDefault();
+  toggleThemeSearchInput();
+});
+elements.themeSelect?.addEventListener("pointerdown", (event) => {
+  if (!elements.themeSearchInput || !elements.themeSearchInput.hidden) return;
+  event.preventDefault();
+  showThemeSearchInput();
+});
+elements.themeSelect?.addEventListener("focus", () => showThemeSearchInput());
+elements.themeSearchInput?.addEventListener("input", () => populateThemeSelect(availableThemes, elements.themeSearchInput.value));
+elements.themeSearchInput?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    const [theme] = populateThemeSelect(availableThemes, elements.themeSearchInput.value);
+    if (theme) setThemeByName(theme.name, { persist: true, announce: true }).catch((error) => addEvent(error.message || String(error), "error"));
+  } else if (event.key === "Escape") {
+    elements.themeSearchInput.value = "";
+    populateThemeSelect(availableThemes, "");
+    elements.themeSearchInput.focus();
   }
 });
 elements.themeSelect.addEventListener("change", () => {
@@ -18877,6 +19337,10 @@ window.addEventListener("keydown", (event) => {
     else if (!event.repeat) startAbortLongPress(event, { source: "escape" });
     return;
   }
+  if (shouldSuppressEmptyPromptEscapeAction()) {
+    event.preventDefault();
+    return;
+  }
   if (event.repeat) {
     event.preventDefault();
     return;
@@ -18893,17 +19357,39 @@ window.addEventListener("keydown", (event) => {
   }
 });
 window.addEventListener("keyup", (event) => {
-  if (event.key === "Escape" && abortLongPressSource === "escape") scheduleAbortLongPressReleaseReset();
+  if (event.key !== "Escape") return;
+  if (abortLongPressSource === "escape") scheduleAbortLongPressReleaseReset();
+  finishEscapeAbortHoldSuppression();
 }, { capture: true });
 window.addEventListener("blur", () => {
   if (abortLongPressSource === "escape") scheduleAbortLongPressReleaseReset();
   else resetAbortLongPressAffordance();
+  finishEscapeAbortHoldSuppression();
 });
 
 elements.gitChangesRefreshButton?.addEventListener("click", refreshGitChangesDialog);
 elements.gitChangesPullButton?.addEventListener("click", () => pullGitChangesDialog().catch((error) => addEvent(error.message || String(error), "error")));
 elements.gitChangesCloseButton?.addEventListener("click", closeGitChangesDialog);
 elements.gitChangesBody?.addEventListener("scroll", updateGitChangesCurrentFileHeader, { passive: true });
+elements.gitChangesBody?.addEventListener("click", (event) => {
+  const currentHeader = event.target.closest(".git-current-file-header[data-git-current-file]");
+  if (currentHeader) {
+    const path = currentHeader.dataset.gitCurrentFile || "";
+    const file = elements.gitChangesBody?.querySelector(`.git-diff-file[data-git-diff-file=\"${CSS.escape(path)}\"]`);
+    if (!file) return;
+    file.open = !file.open;
+    updateGitChangesCurrentFileHeader();
+    return;
+  }
+  const button = event.target.closest("[data-git-changes-jump-file]");
+  if (!button) return;
+  const path = button.dataset.gitChangesJumpFile || "";
+  const file = elements.gitChangesBody?.querySelector(`.git-diff-file[data-git-diff-file=\"${CSS.escape(path)}\"]`);
+  if (!file) return;
+  file.open = true;
+  file.scrollIntoView({ block: "start", behavior: "smooth" });
+  requestAnimationFrame(updateGitChangesCurrentFileHeader);
+});
 elements.gitChangesDialog?.addEventListener("cancel", (event) => {
   event.preventDefault();
   closeGitChangesDialog();
