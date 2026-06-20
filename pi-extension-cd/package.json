@@ -1,0 +1,34 @@
+{
+  "name": "@firstpick/pi-extension-cd",
+  "version": "0.1.0",
+  "description": "A Pi /cd command with ranked directory suggestions, persistent history, and aliases.",
+  "license": "MIT",
+  "homepage": "https://github.com/Firstp1ck/npm-packages/tree/main/pi-extension-cd#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Firstp1ck/npm-packages.git",
+    "directory": "pi-extension-cd"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "extension",
+    "cd",
+    "directory-history"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ]
+}

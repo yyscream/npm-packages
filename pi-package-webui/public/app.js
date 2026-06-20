@@ -524,6 +524,7 @@ const widgets = new Map();
 const todoProgressWidgetExpandedByTab = new Map();
 const releaseNpmOutputExpandedByTab = new Map();
 const appRunnerDataByTab = new Map();
+const appRunnerInputDraftByRun = new Map();
 const liveToolRuns = new Map();
 const liveToolCards = new Map();
 const liveToolRenderQueue = new Map();
@@ -2705,6 +2706,88 @@ function triggerNativeDownload(download) {
   anchor.click();
   anchor.remove();
   return true;
+}
+
+function isStandalonePwaWindow() {
+  return window.matchMedia?.("(display-mode: standalone)")?.matches === true || window.navigator.standalone === true;
+}
+
+function alternateLoopbackBrowserUrl(value) {
+  const url = safeHttpUrl(value);
+  if (!url) return "";
+  try {
+    const parsed = new URL(url);
+    const hostname = parsed.hostname.toLowerCase();
+    if (hostname === "127.0.0.1" || hostname === "[::1]" || hostname === "::1") parsed.hostname = "localhost";
+    else if (hostname === "localhost") parsed.hostname = "127.0.0.1";
+    else return "";
+    return parsed.href;
+  } catch {
+    return "";
+  }
+}
+
+function nativeDownloadOpenUrl(download, { externalBrowser = false } = {}) {
+  const rawUrl = download?.openUrl || download?.url;
+  const url = safeHttpUrl(rawUrl);
+  if (!url) return "";
+  let openUrl = url;
+  if (!download?.openUrl) {
+    try {
+      const inlineUrl = new URL(url);
+      inlineUrl.searchParams.set("disposition", "inline");
+      openUrl = inlineUrl.href;
+    } catch {
+      openUrl = url;
+    }
+  }
+  return externalBrowser && isStandalonePwaWindow() ? alternateLoopbackBrowserUrl(openUrl) || openUrl : openUrl;
+}
+
+function openNativeDownloadInBrowser(download) {
+  const url = nativeDownloadOpenUrl(download, { externalBrowser: true });
+  if (!url) return false;
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.target = "_blank";
+  anchor.rel = "noopener";
+  anchor.hidden = true;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  return true;
+}
+
+function openNativeExportDownloadPrompt(download) {
+  const url = nativeDownloadOpenUrl(download, { externalBrowser: true });
+  if (!url) return false;
+  const fileName = String(download?.fileName || "session export");
+  openNativeCommandDialog({ title: "/export", message: "Session export is ready." });
+  elements.nativeCommandBody.append(
+    make("p", "native-command-note", `File: ${fileName}`),
+    make("p", "native-command-note muted", "Open it in your browser, or cancel and use the transcript download URL later."),
+  );
+  elements.nativeCommandActions.replaceChildren();
+  addNativeCommandAction("Cancel", closeNativeCommandDialog);
+  addNativeCommandAction("Copy URL", async () => {
+    try {
+      await copyText(url);
+      addEvent("copied export browser URL", "info");
+    } catch (error) {
+      addEvent(`copy export URL failed: ${error.message || String(error)}`, "error");
+    }
+  });
+  addNativeCommandAction("Open in browser", () => {
+    if (openNativeDownloadInBrowser(download)) addEvent(`opened export: ${fileName}`, "info");
+    else addEvent("could not open export URL", "error");
+    closeNativeCommandDialog();
+  }, "primary");
+  return true;
+}
+
+function handleNativeDownloadResponse(download, command) {
+  if (String(command || "").toLowerCase() === "export") return openNativeExportDownloadPrompt(download);
+  return triggerNativeDownload(download);
 }
 
 async function copyServerStartCommand() {
@@ -6447,29 +6530,90 @@ function renderGitFooterPayloadMeta(chip, tab) {
   return chip.contextUsage ? applyFooterContextUsage(node, chip.contextUsage) : node;
 }
 
+// Shape key for a footer chip with the frequently-changing fields removed, so
+// live streaming metrics (token counts, tok/s, cost, context %) can be updated
+// in place without tearing down the footer DOM (and any open dropdown inside it).
+function gitFooterChipShapeKey(chip) {
+  const shape = {};
+  for (const [key, value] of Object.entries(chip || {})) {
+    if (key === "value") continue;
+    if (key === "contextUsage") {
+      shape.contextUsage = value ? true : false;
+      continue;
+    }
+    shape[key] = value;
+  }
+  return JSON.stringify(shape);
+}
+
+function gitFooterPickerStateKey() {
+  return `${footerModelPickerOpen ? 1 : 0}|${footerThinkingPickerOpen ? 1 : 0}|${footerBranchPickerOpen ? 1 : 0}|${mobileFooterExpanded ? 1 : 0}`;
+}
+
+function updateGitFooterChipNodeValue(node, chip, valueSelector) {
+  if (!node) return;
+  const valueNode = node.querySelector(valueSelector);
+  if (valueNode && valueNode.textContent !== String(chip.value ?? "")) valueNode.textContent = String(chip.value ?? "");
+  if (chip.contextUsage) applyFooterContextUsage(node, chip.contextUsage);
+}
+
+let gitFooterRenderCache = null;
+
+function invalidateGitFooterRenderCache() {
+  gitFooterRenderCache = null;
+}
+
 function renderGitFooterPayload(payload) {
   const tab = activeTab();
+  const pickerKey = gitFooterPickerStateKey();
+  const mainKeys = payload.main.map(gitFooterChipShapeKey);
+  const metaKeys = payload.meta.map(gitFooterChipShapeKey);
+
+  // Fast path: only live metric values changed. Update text in place instead of
+  // rebuilding the footer so buttons do not flicker and an open dropdown is not
+  // destroyed/recreated/repositioned during streaming.
+  const cache = gitFooterRenderCache;
+  if (
+    cache &&
+    elements.statusBar.classList.contains("statusbar-git-footer") &&
+    cache.pickerKey === pickerKey &&
+    cache.mainKeys.length === mainKeys.length &&
+    cache.metaKeys.length === metaKeys.length &&
+    cache.mainKeys.every((key, index) => key === mainKeys[index]) &&
+    cache.metaKeys.every((key, index) => key === metaKeys[index]) &&
+    cache.mainNodes.every((node) => node.isConnected) &&
+    cache.metaNodes.every((node) => node.isConnected)
+  ) {
+    payload.main.forEach((chip, index) => updateGitFooterChipNodeValue(cache.mainNodes[index], chip, ".footer-metric-value"));
+    payload.meta.forEach((chip, index) => updateGitFooterChipNodeValue(cache.metaNodes[index], chip, ".footer-meta-value"));
+    if (isFooterPickerOpen()) updateFooterModelPickerPosition();
+    return;
+  }
+
   hideFooterTooltip();
   elements.statusBar.replaceChildren();
   elements.statusBar.classList.remove("statusbar-tui-footer");
   elements.statusBar.classList.add("statusbar-git-footer");
   document.body.classList.toggle("footer-model-picker-open", isFooterPickerOpen());
 
+  const mainNodes = payload.main.map(renderGitFooterPayloadMetric);
   const row1 = make("div", "footer-line footer-line-main");
-  row1.append(...payload.main.map(renderGitFooterPayloadMetric));
+  row1.append(...mainNodes);
 
   const footerToggle = make("button", "footer-details-toggle", mobileFooterExpanded ? "Less" : "Details");
   footerToggle.type = "button";
   footerToggle.setAttribute("aria-expanded", mobileFooterExpanded ? "true" : "false");
   footerToggle.addEventListener("click", () => setMobileFooterExpanded(!mobileFooterExpanded));
 
+  const metaNodes = payload.meta.map((chip) => renderGitFooterPayloadMeta(chip, tab));
   const row2 = make("div", "footer-line footer-line-meta");
-  row2.append(...payload.meta.map((chip) => renderGitFooterPayloadMeta(chip, tab)), footerToggle);
+  row2.append(...metaNodes, footerToggle);
 
   elements.statusBar.append(row1, row2);
   if (footerModelPickerOpen) elements.statusBar.append(renderFooterModelPicker());
   if (footerThinkingPickerOpen) elements.statusBar.append(renderFooterThinkingPicker());
   if (footerBranchPickerOpen) elements.statusBar.append(renderFooterBranchPicker());
+  gitFooterRenderCache = { pickerKey, mainKeys, metaKeys, mainNodes, metaNodes };
   setMobileFooterExpanded(mobileFooterExpanded);
   updateFooterModelPickerPosition();
 }
@@ -7024,6 +7168,7 @@ function gitFooterFallbackMessage() {
 }
 
 function renderMinimalFooter() {
+  invalidateGitFooterRenderCache();
   hideFooterTooltip();
   const tab = activeTab();
   const workspaceLabel = latestWorkspace?.displayCwd || (tab?.cwd ? normalizeDisplayPath(tab.cwd) : "loading…");
@@ -7245,6 +7390,8 @@ function dashboardAction(label, handler, className = "") {
   return button;
 }
 
+let workspaceDashboardSignature = null;
+
 function renderWorkspaceDashboard() {
   if (deferUiRenderDuringPointerActivation("workspace-dashboard", renderWorkspaceDashboard)) return;
   const root = elements.workspaceDashboard;
@@ -7257,6 +7404,27 @@ function renderWorkspaceDashboard() {
   const sessionSummary = dashboardSessionSummary();
   const modelLabel = currentState?.model ? shortModelLabel(currentState.model) : "loading…";
   const queueDetail = queueCount === 0 ? "idle" : queueCount === 1 ? "pending message" : "pending messages";
+
+  // Skip rebuilding the dashboard (and its buttons) when nothing it shows has
+  // changed. Extension status pushes during streaming would otherwise rebuild
+  // every workspace button on each token, causing flicker.
+  const signature = JSON.stringify({
+    title: tab?.title || "Pi Web UI",
+    workspaceLabel,
+    tabIndicatorState,
+    tabsLength: tabs.length,
+    queueCount,
+    modelLabel,
+    modelTitle: currentState?.model ? shortModelLabel(currentState.model) : "Model loading…",
+    thinking: currentState?.thinkingLevel || "",
+    context: { display: contextUsageDisplay(snapshot), detail: contextUsageDetail(snapshot), tone: contextDashboardTone(snapshot) },
+    session: sessionSummary,
+    activeTabId,
+    tabs: tabs.slice(0, 8).map((item) => ({ id: item.id, title: item.title, state: tabIndicator(item).state, active: item.id === activeTabId, cwd: item.cwd ? normalizeDisplayPath(item.cwd) : "" })),
+    overflow: tabs.length > 8 ? tabs.length - 8 : 0,
+  });
+  if (signature === workspaceDashboardSignature && root.childElementCount > 0) return;
+  workspaceDashboardSignature = signature;
   root.replaceChildren();
 
   const header = make("div", "workspace-dashboard-header");
@@ -8980,9 +9148,67 @@ async function clearAppRunner() {
   }
 }
 
+async function sendAppRunnerInput(run, form, { closeStdin = false } = {}) {
+  const tabContext = activeTabContext();
+  const input = form?.querySelector?.(".app-runner-stdin-input");
+  if (!tabContext.tabId || !input || !appRunnerIsRunning(run)) return;
+  const draftKey = appRunnerInputDraftKey(run);
+  const text = input.value || "";
+  const buttons = [...form.querySelectorAll("button")];
+  buttons.forEach((button) => { button.disabled = true; });
+  try {
+    const response = await api("/api/app-runner/input", { method: "POST", body: { text, newline: !closeStdin || Boolean(text), closeStdin }, tabId: tabContext.tabId });
+    if (!isCurrentTabContext(tabContext)) return;
+    appRunnerInputDraftByRun.set(draftKey, "");
+    input.value = "";
+    setAppRunnerData(tabContext.tabId, response.data || {});
+    renderAppRunnerControls();
+    renderWidgets();
+    addEvent(closeStdin ? "sent app runner EOF" : text ? "sent app runner input" : "sent app runner Enter", "info");
+  } catch (error) {
+    if (isCurrentTabContext(tabContext)) addEvent(`app runner input failed: ${error.message || String(error)}`, "error");
+  } finally {
+    buttons.forEach((button) => { button.disabled = false; });
+  }
+}
+
+function appRunnerOutputLines(run) {
+  const lines = Array.isArray(run?.lines) ? [...run.lines] : [];
+  if (appRunnerIsRunning(run) && run?.pendingLine) lines.push(run.pendingLine);
+  return lines;
+}
+
 function appRunnerOutputText(run) {
-  const lines = Array.isArray(run?.lines) ? run.lines : [];
-  return lines.join("\n").trimEnd();
+  return appRunnerOutputLines(run).join("\n").trimEnd();
+}
+
+function appRunnerInputDraftKey(run) {
+  return run?.id || run?.runnerId || "active";
+}
+
+function captureAppRunnerInputFocus() {
+  const input = document.activeElement;
+  if (!input?.classList?.contains("app-runner-stdin-input")) return null;
+  return {
+    runId: input.dataset.runId || "",
+    value: input.value || "",
+    selectionStart: input.selectionStart ?? input.value.length,
+    selectionEnd: input.selectionEnd ?? input.value.length,
+  };
+}
+
+function restoreAppRunnerInputFocus(state) {
+  if (!state?.runId) return;
+  const input = document.querySelector(".app-runner-stdin-input");
+  if (!input || input.dataset.runId !== state.runId) return;
+  appRunnerInputDraftByRun.set(state.runId, state.value);
+  input.value = state.value;
+  try {
+    input.focus({ preventScroll: true });
+    input.setSelectionRange(state.selectionStart, state.selectionEnd);
+  } catch {
+    input.focus();
+  }
 }
 
 async function copyAppRunnerOutput(run) {
@@ -9359,6 +9585,7 @@ function renderAppRunnerInfoDialog() {
     "Detection is scoped to the active terminal tab's current working directory.",
     "Only commands/files that exist and runner binaries available on this system are shown.",
     "Starting a runner keeps live output pinned above the chat/terminal area.",
+    "While a runner is active, the widget can send line-oriented stdin to interactive scripts.",
     "Only one app runner can be active per tab; Close/Stop terminates the process/server.",
   ]) howList.append(make("li", "", line));
   how.append(howList);
@@ -9383,6 +9610,42 @@ function closeAppRunnerInfoDialog() {
   if (elements.appRunnerInfoDialog?.open) elements.appRunnerInfoDialog.close();
 }
 
+function renderAppRunnerInputForm(run) {
+  if (!appRunnerIsRunning(run)) return null;
+  const key = appRunnerInputDraftKey(run);
+  const form = make("form", "app-runner-stdin-form");
+  form.dataset.runId = key;
+  const input = make("textarea", "app-runner-stdin-input");
+  input.rows = 1;
+  input.value = appRunnerInputDraftByRun.get(key) || "";
+  input.placeholder = run.stdinClosed ? "stdin is closed" : "Send stdin… Enter sends, Shift+Enter inserts a newline";
+  input.disabled = run.stdinClosed === true;
+  input.dataset.runId = key;
+  input.setAttribute("aria-label", "Send input to app runner stdin");
+  input.addEventListener("input", () => { appRunnerInputDraftByRun.set(key, input.value); });
+  input.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.shiftKey) return;
+    event.preventDefault();
+    form.requestSubmit();
+  });
+  const send = make("button", "release-npm-action app-runner-stdin-send", input.value ? "Send input" : "Send Enter");
+  send.type = "submit";
+  send.disabled = run.stdinClosed === true;
+  send.title = run.stdinClosed ? (run.stdinError || "App runner stdin is closed") : "Send this text followed by Enter to the running app runner";
+  const eof = make("button", "release-npm-action app-runner-stdin-eof", "EOF");
+  eof.type = "button";
+  eof.disabled = run.stdinClosed === true;
+  eof.title = run.stdinClosed ? (run.stdinError || "App runner stdin is closed") : "Close stdin after optionally sending the current text";
+  eof.addEventListener("click", () => sendAppRunnerInput(run, form, { closeStdin: true }));
+  input.addEventListener("input", () => { send.textContent = input.value ? "Send input" : "Send Enter"; });
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    sendAppRunnerInput(run, form);
+  });
+  form.append(input, send, eof);
+  return form;
+}
+
 function renderAppRunnerWidget() {
   const data = activeAppRunnerData();
   const run = data.activeRun;
@@ -9399,14 +9662,15 @@ function renderAppRunnerWidget() {
   const elapsed = appRunnerElapsedLabel(run);
   header.append(titleWrap);
 
-  const lines = Array.isArray(run.lines) && run.lines.length ? run.lines : [run.displayCommand ? `$ ${run.displayCommand}` : "Waiting for app runner output..."];
-  const streamHeader = releaseNpmStreamHeader(running ? "Live app output" : "App output", run.lineCount || lines.length, { live: running });
+  const outputLines = appRunnerOutputLines(run);
+  const lines = outputLines.length ? outputLines : [run.displayCommand ? `$ ${run.displayCommand}` : "Waiting for app runner output..."];
+  const streamHeader = releaseNpmStreamHeader(running ? "Live app output" : "App output", Math.max(run.lineCount || 0, lines.length), { live: running });
   const terminal = make("div", "release-npm-terminal");
   terminal.setAttribute("role", "log");
   terminal.setAttribute("aria-live", running ? "polite" : "off");
   for (const line of lines) appendReleaseNpmTerminalLine(terminal, line);
 
-  const controlParts = [run.displayCommand, run.cwd, run.truncated ? "output truncated" : ""].map(cleanStatusText).filter(Boolean);
+  const controlParts = [run.displayCommand, run.cwd, run.truncated ? "output truncated" : "", run.stdinError ? `stdin: ${run.stdinError}` : ""].map(cleanStatusText).filter(Boolean);
   const controls = make("div", "release-npm-controls app-runner-output-controls");
   const actions = make("div", "app-runner-output-actions");
   const closeButton = appRunnerActionButton("Close", running ? stopAppRunner : clearAppRunner, running ? "danger app-runner-close-action" : "app-runner-close-action");
@@ -9421,11 +9685,14 @@ function renderAppRunnerWidget() {
     if (canRunAgain) actions.append(appRunnerActionButton("Run again", () => runAppRunner(run.runnerId)));
     actions.append(appRunnerActionButton("Clear", clearAppRunner));
   }
+  const inputForm = running ? renderAppRunnerInputForm(run) : null;
   const pills = make("div", "app-runner-output-pills");
   if (run.kind) pills.append(make("span", "release-npm-pill", run.kind));
   pills.append(make("span", `release-npm-pill app-runner-status ${run.status || "running"}`.trim(), status));
   if (elapsed) pills.append(make("span", "release-npm-pill elapsed", elapsed));
-  controls.append(actions, pills, make("span", "app-runner-output-meta", controlParts.join(" · ")));
+  controls.append(actions);
+  if (inputForm) controls.append(inputForm);
+  controls.append(pills, make("span", "app-runner-output-meta", controlParts.join(" · ")));
   const outputDetails = renderReleaseNpmOutputDetails(`app-runner:${run.id || run.runnerId || "active"}`, streamHeader, terminal, controls);
   node.append(header, outputDetails);
   requestAnimationFrame(() => { if (outputDetails.open) terminal.scrollTop = terminal.scrollHeight; });
@@ -10182,6 +10449,7 @@ function mirrorRemoteWebuiWidgetToTranscript(widgetKey, lines = [], request = {}
 
 function renderWidgets() {
   if (deferUiRenderDuringPointerActivation("widgets", renderWidgets)) return;
+  const appRunnerInputFocus = captureAppRunnerInputFocus();
   elements.widgetArea.replaceChildren();
   const releaseOutput = renderReleaseNpmOutputWidget();
   if (releaseOutput) elements.widgetArea.append(releaseOutput);
@@ -10215,6 +10483,7 @@ function renderWidgets() {
     node.textContent = `${key}\n${cleanLines.join("\n")}`;
     elements.widgetArea.append(node);
   }
+  restoreAppRunnerInputFocus(appRunnerInputFocus);
 }
 
 function setGitWorkflow(patch, { tabId = activeTabId } = {}) {
@@ -14454,8 +14723,8 @@ function applyNativeSlashCommandEffects(response, message, tabContext = activeTa
     });
   }
 
-  if (data.download && triggerNativeDownload(data.download)) {
-    addEvent(`download started: ${data.download.fileName || data.download.url}`, "info");
+  if (data.download && handleNativeDownloadResponse(data.download, data.command)) {
+    addEvent(data.command === "export" ? `export ready: ${data.download.fileName || data.download.url}` : `download started: ${data.download.fileName || data.download.url}`, "info");
   }
 
   const cards = Array.isArray(data.cards) && data.cards.length ? data.cards : null;
@@ -15187,7 +15456,7 @@ function nativeSelectorMatches(item, query) {
     .some((value) => String(value).toLowerCase().includes(needle));
 }
 
-function renderNativeSelectorItems(items, { emptyText = "No choices.", onSelect, activeId } = {}) {
+function renderNativeSelectorItems(items, { emptyText = "No choices.", onSelect, activeId, numbered = false } = {}) {
   const query = elements.nativeCommandSearch.value.trim();
   const filtered = items.filter((item) => nativeSelectorMatches(item, query));
   elements.nativeCommandBody.replaceChildren();
@@ -15196,13 +15465,13 @@ function renderNativeSelectorItems(items, { emptyText = "No choices.", onSelect,
     return;
   }
   const list = make("div", "native-selector-list");
-  for (const item of filtered) {
+  for (const [index, item] of filtered.entries()) {
     const button = make("button", `native-selector-item${item.id === activeId ? " active" : ""}`);
     button.type = "button";
-    if (item.depth !== undefined) button.style.setProperty("--tree-depth", String(item.depth));
     button.disabled = item.disabled === true;
     button.addEventListener("click", () => onSelect?.(item));
     const title = make("span", "native-selector-title");
+    if (numbered) title.append(make("span", "native-selector-index", `${index + 1}.`));
     title.append(make("strong", undefined, item.label || item.id || "choice"));
     if (item.badge) {
       const badgeState = String(item.badge).toLowerCase();
@@ -15772,7 +16041,6 @@ async function openNativeTreeSelector() {
       description: node.text || "",
       meta: `${node.timestamp || ""}${node.childCount ? ` · ${node.childCount} child${node.childCount === 1 ? "" : "ren"}` : ""}`,
       badge: node.currentLeaf ? "leaf" : "",
-      depth: node.depth || 0,
       node,
     }));
     const navigate = async (item) => {
@@ -15795,7 +16063,7 @@ async function openNativeTreeSelector() {
       }
     };
     const render = () => {
-      renderNativeSelectorItems(toItems(), { emptyText: "No session tree entries match this filter.", onSelect: navigate });
+      renderNativeSelectorItems(toItems(), { emptyText: "No session tree entries match this filter.", onSelect: navigate, numbered: true });
       elements.nativeCommandBody.prepend(options);
     };
     filterField.select.addEventListener("change", () => {
@@ -16618,8 +16886,20 @@ function modelSearchDisplayParts(model) {
   return { primary: (match?.[1] || name).trim(), secondary: `${id}${match?.[2] || ""}` };
 }
 
+let modelSearchResultsSignature = null;
+
 function renderModelSearchResults(models = []) {
   if (!elements.modelSearchResults) return;
+  // Skip redundant rebuilds (e.g. extension status pushes during streaming that
+  // funnel through renderStatus -> syncModelSelectToState) so the Controls-panel
+  // model list does not flicker or drop an in-progress interaction.
+  const signature = JSON.stringify({
+    hidden: !!elements.modelSearchInput?.hidden,
+    selected: elements.modelSelect?.value || "",
+    models: models.map((model) => `${modelSelectValue(model)}\u0000${modelSelectOptionText(model)}`),
+  });
+  if (signature === modelSearchResultsSignature) return;
+  modelSearchResultsSignature = signature;
   elements.modelSearchResults.replaceChildren();
   if (elements.modelSearchInput?.hidden) return;
   if (!models.length) {
@@ -17866,6 +18146,15 @@ function handleExtensionUiRequest(request) {
       if (statusKey === STATS_WEBUI_STATUS_KEY) handleStatsWebuiStatus(request.statusText);
       if (statusKey === BTW_WEBUI_STATUS_KEY) handleBtwWebuiStatus(request.statusText);
       updateOptionalFeatureAvailability();
+      if (statusKey === GIT_FOOTER_WEBUI_STATUS_KEY) {
+        if (currentState?.isStreaming || runIndicatorLocallyActive) return;
+        if (isInteractiveDropdownOpen()) {
+          deferredUiRenderCallbacks.set("footer", renderFooter);
+          return;
+        }
+        renderFooter();
+        return;
+      }
       renderStatus();
       return;
     }

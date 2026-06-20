@@ -148,10 +148,14 @@ assert.match(server, /url\.pathname\.startsWith\("\/api\/native-download\/"\) &&
 assert.match(server, /case "export": \{\n\s+return handleNativeExportCommand\(tab, parsed\.args, req\);\n\s+\}/, "native /export should route through the native command adapter");
 assert.match(server, /tab\.rpc\.send\(\{ type: "export_html", outputPath \}\)/, "no-path /export should use RPC export_html into a controlled temp path");
 assert.match(server, /registerNativeDownload\(exportedPath/, "no-path /export should return a short-lived browser download token");
+assert.match(server, /openUrl: record\.contentType === MIME_TYPES\.get\("\.html"\)/, "HTML native downloads should expose a browser-open URL");
+assert.match(server, /url\.searchParams\.get\("disposition"\) === "inline"/, "native download endpoint should support inline HTML rendering");
 assert.match(server, /copyFile\(sessionFile, targetPath\)/, "explicit .jsonl /export should copy the active session file");
 assert.match(app, /function triggerNativeDownload\(download\)/, "frontend should know how to trigger native command downloads");
 assert.match(app, /function applyNativeSlashCommandEffects\(response, message, tabContext/, "frontend should apply centralized native slash-command adapter effects");
-assert.match(app, /data\.download && triggerNativeDownload\(data\.download\)/, "frontend should handle download responses from native commands");
+assert.match(app, /data\.download && handleNativeDownloadResponse\(data\.download, data\.command\)/, "frontend should route native downloads through command-specific handling");
+assert.match(app, /function openNativeExportDownloadPrompt\(download\)[\s\S]*Open in browser/, "frontend should ask Web UI users to open /export results in the browser");
+assert.match(app, /function alternateLoopbackBrowserUrl\(value\)[\s\S]*hostname === "localhost"[\s\S]*127\.0\.0\.1/, "PWA export opens should escape same-origin app scope via alternate loopback host");
 assert.match(app, /for \(const warning of response\.warnings/, "frontend should surface remote bash trust warnings");
 assert.match(server, /case "\/api\/bash": \{[\s\S]*?return \{ type: "bash", command, excludeFromContext: body\.excludeFromContext === true \}/, "server should expose RPC bash with include/exclude context semantics");
 assert.match(server, /case "\/api\/abort-bash":[\s\S]*?return \{ type: "abort_bash" \}/, "server should expose abort_bash for user bash cancellation");

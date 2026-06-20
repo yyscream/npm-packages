@@ -177,6 +177,7 @@ const APP_RUNNER_DETECTION_TIMEOUT_MS = 1_200;
 const APP_RUNNER_COMMAND_CACHE_TTL_MS = 30_000;
 const APP_RUNNER_OUTPUT_LINE_LIMIT = 1_000;
 const APP_RUNNER_OUTPUT_MAX_CHARS = 240_000;
+const APP_RUNNER_INPUT_MAX_CHARS = 16_000;
 const APP_RUNNER_STOP_GRACE_MS = 2_500;
 const APP_RUNNER_PYTHON_ENTRIES = ["Main.py", "main.py", "src/main.py", "src/Main.py", "app.py", "src/app.py"];
 const APP_RUNNER_JS_ENTRIES = ["main.js", "src/main.js", "index.js", "src/index.js", "server.js", "src/server.js", "app.js", "src/app.js"];
@@ -838,10 +839,18 @@ function safeDownloadFileName(name, fallback = "pi-export") {
   return (text || fallback).slice(0, 180);
 }
 
-function contentDispositionAttachment(fileName) {
+function contentDispositionHeader(fileName, disposition = "attachment") {
   const safeName = safeDownloadFileName(fileName);
   const asciiName = safeName.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
-  return `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(safeName)}`;
+  return `${disposition}; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(safeName)}`;
+}
+
+function contentDispositionAttachment(fileName) {
+  return contentDispositionHeader(fileName, "attachment");
+}
+
+function contentDispositionInline(fileName) {
+  return contentDispositionHeader(fileName, "inline");
 }
 
 function registerNativeDownload(filePath, { fileName, contentType, command = "native" } = {}) {
@@ -856,15 +865,17 @@ function registerNativeDownload(filePath, { fileName, contentType, command = "na
     expiresAt,
   };
   nativeDownloadTokens.set(token, record);
+  const url = `/api/native-download/${encodeURIComponent(token)}`;
   return {
-    url: `/api/native-download/${encodeURIComponent(token)}`,
+    url,
+    openUrl: record.contentType === MIME_TYPES.get(".html") ? `${url}?disposition=inline` : undefined,
     fileName: record.fileName,
     contentType: record.contentType,
     expiresAt: new Date(expiresAt).toISOString(),
   };
 }
 
-async function sendNativeDownload(res, token) {
+async function sendNativeDownload(res, token, { inline = false } = {}) {
   pruneNativeDownloadTokens();
   const item = nativeDownloadTokens.get(token);
   if (!item) throw makeHttpError(404, "Download token expired or not found");
@@ -873,10 +884,11 @@ async function sendNativeDownload(res, token) {
     nativeDownloadTokens.delete(token);
     throw makeHttpError(404, "Download file expired or not found");
   }
+  const canRenderInline = inline === true && item.contentType === MIME_TYPES.get(".html");
   res.writeHead(200, {
     "content-type": item.contentType,
     "content-length": String(fileStats.size),
-    "content-disposition": contentDispositionAttachment(item.fileName),
+    "content-disposition": canRenderInline ? contentDispositionInline(item.fileName) : contentDispositionAttachment(item.fileName),
     "cache-control": "no-store",
     "x-content-type-options": "nosniff",
   });
@@ -2274,6 +2286,11 @@ async function detectAppRunners(tab) {
     .map(publicAppRunner);
 }
 
+function appRunnerPendingLine(run) {
+  if (!run || run.status !== "running") return "";
+  return [run.stdoutRemainder, run.stderrRemainder].map((part) => String(part || "")).filter(Boolean).join("");
+}
+
 function publicAppRunnerState(run) {
   if (!run) return null;
   return {
@@ -2295,6 +2312,11 @@ function publicAppRunnerState(run) {
     truncated: run.truncated === true,
     lineCount: run.lineCount || run.lines?.length || 0,
     lines: Array.isArray(run.lines) ? [...run.lines] : [],
+    pendingLine: appRunnerPendingLine(run),
+    stdinClosed: run.stdinClosed === true,
+    stdinError: run.stdinError || "",
+    stdinWrites: run.stdinWrites || 0,
+    lastStdinAt: run.lastStdinAt || "",
   };
 }
 
@@ -2398,6 +2420,7 @@ function finishAppRunner(tab, run, patch = {}) {
   run.error = patch.error;
   run.status = patch.error ? "error" : patch.exitCode === 0 ? "done" : "failed";
   run.child = null;
+  run.stdinClosed = true;
   run.stopping = false;
   appendAppRunnerLine(run, `# ${appRunnerStatusLabel(run)} after ${Math.max(0, Math.round((Date.parse(run.endedAt) - Date.parse(run.startedAt)) / 1000))}s`);
   if (patch.error) appendAppRunnerLine(run, `# ${patch.error}`);
@@ -2405,6 +2428,45 @@ function finishAppRunner(tab, run, patch = {}) {
   clearTimeout(tab.appRunnerBroadcastTimer);
   tab.appRunnerBroadcastTimer = null;
   broadcastAppRunnerState(tab);
+}
+
+function normalizeAppRunnerInputText(value) {
+  const text = String(value ?? "");
+  if (text.includes("\0")) throw makeHttpError(400, "App runner input cannot contain null bytes");
+  if (text.length > APP_RUNNER_INPUT_MAX_CHARS) throw makeHttpError(413, `App runner input is too long; limit is ${APP_RUNNER_INPUT_MAX_CHARS} characters`);
+  return text;
+}
+
+function sendAppRunnerInput(tab, value, { appendNewline = true, closeStdin = false } = {}) {
+  const run = tab?.appRunner;
+  if (!run || run.status !== "running") throw makeHttpError(409, "No app runner is running in this tab");
+  const stdin = run.child?.stdin;
+  if (!stdin || stdin.destroyed || stdin.writableEnded || run.stdinClosed === true) throw makeHttpError(409, "App runner stdin is closed");
+  const text = normalizeAppRunnerInputText(value);
+  const chunk = `${text}${appendNewline === false ? "" : "\n"}`;
+  if (!chunk && !closeStdin) throw makeHttpError(400, "App runner input is empty");
+  let buffered = false;
+  try {
+    if (closeStdin) {
+      if (chunk) stdin.end(chunk, "utf8");
+      else stdin.end();
+      run.stdinClosed = true;
+    } else {
+      buffered = stdin.write(chunk, "utf8") === false;
+    }
+  } catch (error) {
+    run.stdinClosed = true;
+    run.stdinError = sanitizeError(error);
+    throw makeHttpError(409, `App runner stdin write failed: ${run.stdinError}`);
+  }
+  run.stdinWrites = (run.stdinWrites || 0) + 1;
+  run.lastStdinAt = new Date().toISOString();
+  const closeSuffix = closeStdin ? " and closed" : "";
+  if (chunk) appendAppRunnerLine(run, text ? `# stdin sent (${text.length} char${text.length === 1 ? "" : "s"})${closeSuffix}` : `# stdin sent (Enter)${closeSuffix}`);
+  else appendAppRunnerLine(run, "# stdin closed (EOF)");
+  recordEvent({ type: "webui_app_runner_stdin", tabId: tab.id, tabTitle: tab.title, command: run.displayCommand, chars: text.length, newline: appendNewline !== false, closed: closeStdin === true });
+  scheduleAppRunnerBroadcast(tab);
+  return { cwd: tab.cwd, activeRun: publicAppRunnerState(run), inputBuffered: buffered };
 }
 
 async function startAppRunner(tab, runnerId) {
@@ -2427,12 +2489,14 @@ async function startAppRunner(tab, runnerId) {
     lines: [],
     lineCount: 0,
     outputChars: 0,
+    stdinClosed: false,
+    stdinWrites: 0,
   };
   appendAppRunnerLine(run, `$ ${run.displayCommand}`);
   const child = spawn(run.command, run.args, {
     cwd: run.cwd,
     env: process.env,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
     detached: process.platform !== "win32",
   });
@@ -2440,6 +2504,18 @@ async function startAppRunner(tab, runnerId) {
   run.pid = child.pid;
   tab.appRunner = run;
 
+  child.stdin?.on("error", (error) => {
+    run.stdinClosed = true;
+    run.stdinError = sanitizeError(error);
+    if (run.status === "running") {
+      appendAppRunnerLine(run, `# stdin error: ${run.stdinError}`);
+      scheduleAppRunnerBroadcast(tab);
+    }
+  });
+  child.stdin?.on("close", () => {
+    run.stdinClosed = true;
+    if (run.status === "running") scheduleAppRunnerBroadcast(tab);
+  });
   child.stdout.on("data", (chunk) => appendAppRunnerChunk(tab, run, chunk, "stdout"));
   child.stderr.on("data", (chunk) => appendAppRunnerChunk(tab, run, chunk, "stderr"));
   child.on("error", (error) => finishAppRunner(tab, run, { error: sanitizeError(error) }));
@@ -6544,7 +6620,7 @@ async function handleNativeExportCommand(tab, args, req) {
     return respondNative("export", {
       status: "succeeded",
       level: "info",
-      message: `Exported current session to HTML.\nDownload: ${download.fileName}\nLink expires: ${download.expiresAt}`,
+      message: `Exported current session to HTML.\nDownload: ${download.fileName}\nOpen it in your browser when prompted.\nOpen URL: ${download.openUrl || download.url}\nDownload URL: ${download.url}\nLink expires: ${download.expiresAt}`,
       download,
       result: response.data,
       refresh: ["state"],
@@ -7304,7 +7380,9 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname.startsWith("/api/native-download/") && req.method === "GET") {
-      await sendNativeDownload(res, decodeURIComponent(url.pathname.slice("/api/native-download/".length)));
+      await sendNativeDownload(res, decodeURIComponent(url.pathname.slice("/api/native-download/".length)), {
+        inline: url.searchParams.get("disposition") === "inline",
+      });
       return;
     }
 
@@ -7396,6 +7474,14 @@ const server = createServer(async (req, res) => {
       const body = await readJsonBody(req);
       const tab = getRequestedTab(req, url, body);
       sendJson(res, 200, { ok: true, data: await startAppRunner(tab, String(body.runnerId || body.id || "")) });
+      return;
+    }
+
+    if (url.pathname === "/api/app-runner/input" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const tab = getRequestedTab(req, url, body);
+      const text = Object.prototype.hasOwnProperty.call(body, "text") ? body.text : body.input;
+      sendJson(res, 200, { ok: true, data: sendAppRunnerInput(tab, text, { appendNewline: body.newline !== false, closeStdin: body.closeStdin === true || body.close === true }) });
       return;
     }
 

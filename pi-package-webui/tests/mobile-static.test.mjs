@@ -390,7 +390,8 @@ assert.match(css, /\.extension-dialog[\s\S]*?max-height:\s*calc\(var\(--visual-v
 assert.match(css, /\.extension-dialog[\s\S]*?inset:\s*auto 0 0 0/, "mobile dialogs should behave like bottom sheets");
 assert.match(css, /#dialogMessage \{[\s\S]*?white-space:\s*pre-wrap/, "extension dialog messages should preserve multiline prompts");
 assert.match(css, /\.native-command-dialog \{[\s\S]*?width:\s*min\(56rem/, "native slash selector dialog should have roomy desktop layout");
-assert.match(css, /\.native-selector-item \{[\s\S]*?--tree-depth/, "native slash selector choices should support tree indentation");
+assert.doesNotMatch(css, /--tree-depth/, "native slash selector choices should not indent tree entries by depth");
+assert.match(css, /\.native-selector-index \{[\s\S]*?font-variant-numeric:\s*tabular-nums/, "native tree selector choices should use numeric prefixes");
 assert.match(css, /\.native-selector-badge\.native-selector-badge-pi-native[\s\S]*?color:\s*var\(--ctp-blue\)/, "Tools Setup should distinguish Pi native tools with a Pi Native tag");
 assert.match(css, /\.native-selector-badge\.native-selector-badge-external[\s\S]*?color:\s*var\(--ctp-mauve\)/, "Tools Setup should distinguish external tools with an External tag");
 assert.match(css, /\.native-settings-grid,[\s\S]*?\.native-tree-options \{[\s\S]*?grid-template-columns:/, "native settings and tree selector options should use responsive grids");
@@ -687,11 +688,13 @@ assert.doesNotMatch(app, /gitWorkflowVisibleTabId|Workflow belongs to/, "guided 
 assert.match(app, /function renderReleaseNpmOutputWidget\(\)/, "release-npm live output should use a specialized Web UI renderer");
 assert.match(app, /async function refreshAppRunners\(tabContext = activeTabContext\(\)\)/, "frontend should load detected app runners for the active tab cwd");
 assert.match(app, /function renderAppRunnerWidget\(\)/, "frontend should render app runner output in the shared top widget area");
+assert.match(app, /function renderAppRunnerInputForm\(run\)[\s\S]*app-runner-stdin-input[\s\S]*Send stdin/, "frontend should let running app runners receive line-oriented stdin");
 assert.match(app, /function appRunnerFailureState\(runnerId, error[\s\S]*failed to start app runner/, "frontend should render visible app-runner start failures instead of only logging them");
 assert.match(app, /appRunnerCustomFeedback[\s\S]*Custom app runner was not saved/, "custom app-runner save failures should be shown inline in the dialog");
 assert.match(server, /function customAppRunnerUnavailableReason\(projectRoot, runner\)[\s\S]*Command is not available/, "server should explain why saved custom app runners are unavailable");
 assert.match(server, /url\.pathname === "\/api\/app-runners" && req\.method === "GET"/, "server should expose detected app runners for the active tab cwd");
 assert.match(server, /url\.pathname === "\/api\/app-runner" && req\.method === "POST"/, "server should start selected app runners directly");
+assert.match(server, /url\.pathname === "\/api\/app-runner\/input" && req\.method === "POST"[\s\S]*sendAppRunnerInput/, "server should accept stdin for running app runners");
 assert.match(server, /function addGoRunner\(runners, cwd\)[\s\S]*Go\/Golang app entry/, "server should detect Go\/Golang app runners");
 assert.match(server, /function addZigRunner\(runners, cwd\)[\s\S]*zig build run[\s\S]*zig run/, "server should detect Zig build and entry-file runners");
 assert.match(server, /function addCppRunners\(runners, cwd\)[\s\S]*C\/C\+\+ CMake executable target[\s\S]*language: "C\+\+"/, "server should detect C\/C++ CMake and entry-file runners");
@@ -906,6 +909,7 @@ assert.match(app, /function openNativeResumeSelector\(scope = "current"\)[\s\S]*
 assert.match(app, /\/api\/session-rename/, "native /resume selector should rename session metadata");
 assert.match(app, /\/api\/session-delete/, "native /resume selector should delete sessions with confirmation");
 assert.match(app, /function openNativeTreeSelector\(\)[\s\S]*?\/api\/session-tree[\s\S]*?\/api\/tree-navigate/, "native /tree selector should list tree entries and navigate through the backend helper");
+assert.match(app, /renderNativeSelectorItems\(toItems\(\), \{ emptyText: "No session tree entries match this filter\.", onSelect: navigate, numbered: true \}\)/, "native /tree selector should number entries instead of indenting by depth");
 assert.match(app, /async function openNativeAuthSelector\(mode\)[\s\S]*?\/api\/auth-providers[\s\S]*?Browser login is not implemented yet/, "native /login should list provider status without browser credential entry");
 assert.match(app, /\/api\/auth-logout[\s\S]*?confirmed: true/, "native /logout should remove stored credentials through a confirmed localhost-only endpoint");
 assert.match(app, /const HIDDEN_COMMAND_NAMES = new Set\(\["webui-tree-navigate", "webui-helper"\]\)/, "internal Web UI helper commands should stay out of command pickers");
@@ -1130,7 +1134,9 @@ assert.match(server, /case "session": \{[\s\S]*?formatSessionOutput\(tab, state\
 assert.match(server, /case "copy": \{[\s\S]*?get_last_assistant_text[\s\S]*?copyText: text/, "native /copy should return text for browser clipboard handling");
 assert.match(server, /case "export": \{[\s\S]*?handleNativeExportCommand\(tab, parsed\.args, req\)/, "native /export should run through the Web UI export helper");
 assert.match(server, /url\.pathname\.startsWith\("\/api\/native-download\/"\) && req\.method === "GET"/, "native /export should expose short-lived opaque download URLs");
-assert.match(app, /function triggerNativeDownload\(download\)/, "frontend should auto-start native command downloads");
+assert.match(app, /function triggerNativeDownload\(download\)/, "frontend should be able to start native command downloads");
+assert.match(app, /function openNativeExportDownloadPrompt\(download\)/, "frontend should prompt before opening /export HTML in the browser");
+assert.match(app, /function alternateLoopbackBrowserUrl\(value\)/, "frontend should avoid reopening exports inside the installed PWA when possible");
 assert.match(app, /function safeHttpUrl\(value/, "frontend should validate server-provided URLs through a shared helper");
 assert.match(app, /const url = safeHttpUrl\(download\?\.url\)/, "native downloads must reject non-http(s) URL schemes");
 assert.match(app, /const href = safeHttpUrl\(url\);/, "network status links must reject non-http(s) URL schemes");

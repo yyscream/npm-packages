@@ -3121,6 +3121,59 @@ button.git-workflow-step:hover:not(:disabled) {
   padding-inline: 0.82rem;
   font-weight: 900;
 }
+.app-runner-stdin-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  flex: 1 1 100%;
+  gap: 0.48rem;
+  align-items: stretch;
+  min-width: 0;
+}
+.app-runner-stdin-input {
+  min-height: 2.28rem;
+  max-height: min(16dvh, 7rem);
+  padding: 0.58rem 0.66rem;
+  resize: vertical;
+  border: 1px solid rgba(166, 227, 161, 0.28);
+  border-radius: 0.68rem;
+  color: rgba(var(--ctp-text-rgb), 0.96);
+  background: rgba(var(--ctp-crust-rgb), 0.72);
+  box-shadow: inset 0 1px 0 rgba(var(--ctp-text-rgb), 0.04);
+  font: inherit;
+  line-height: 1.35;
+}
+.app-runner-stdin-input:focus {
+  outline: 2px solid rgba(166, 227, 161, 0.62);
+  outline-offset: 0.12rem;
+  border-color: rgba(166, 227, 161, 0.54);
+}
+.app-runner-stdin-input:disabled {
+  opacity: 0.58;
+  cursor: not-allowed;
+}
+.app-runner-stdin-send,
+.app-runner-stdin-eof {
+  min-width: 6.8rem;
+  color: var(--ctp-green);
+  border-color: rgba(166, 227, 161, 0.34);
+}
+.app-runner-stdin-eof {
+  min-width: 4.2rem;
+  color: var(--ctp-yellow);
+  border-color: rgba(249, 226, 175, 0.34);
+}
+.app-runner-stdin-send:not(:disabled):hover,
+.app-runner-stdin-send:not(:disabled):focus-visible {
+  color: #11111b;
+  border-color: transparent;
+  background: linear-gradient(120deg, var(--ctp-green), var(--ctp-blue));
+}
+.app-runner-stdin-eof:not(:disabled):hover,
+.app-runner-stdin-eof:not(:disabled):focus-visible {
+  color: #11111b;
+  border-color: transparent;
+  background: linear-gradient(120deg, var(--ctp-yellow), var(--ctp-peach));
+}
 .app-runner-output-meta {
   flex: 1 1 16rem;
   min-width: min(100%, 12rem);
@@ -6123,7 +6176,7 @@ button.composer-skill-tag:focus-visible {
   gap: 0.18rem;
   justify-items: stretch;
   width: 100%;
-  padding: 0.62rem 0.72rem 0.62rem calc(0.72rem + (var(--tree-depth, 0) * 1rem));
+  padding: 0.62rem 0.72rem;
   text-align: left;
   border-color: rgba(180, 190, 254, 0.16);
   background: rgba(var(--ctp-surface-rgb), 0.36);
@@ -6144,6 +6197,13 @@ button.composer-skill-tag:focus-visible {
   gap: 0.45rem;
   align-items: center;
   color: var(--text);
+}
+.native-selector-index {
+  min-width: 2.4ch;
+  color: var(--ctp-sapphire);
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 .native-selector-badge {
   padding: 0.1rem 0.38rem;
@@ -7402,12 +7462,15 @@ button.composer-skill-tag:focus-visible {
   .native-settings-grid,
   .native-tree-options { grid-template-columns: 1fr; }
   .app-runner-custom-item,
-  .app-runner-custom-path-row { grid-template-columns: 1fr; }
+  .app-runner-custom-path-row,
+  .app-runner-stdin-form { grid-template-columns: 1fr; }
   .app-runner-custom-item-actions,
   .app-runner-custom-form-actions { justify-content: stretch; }
   .app-runner-custom-item-actions button,
   .app-runner-custom-form-actions button,
-  .app-runner-custom-browse { width: 100%; }
+  .app-runner-custom-browse,
+  .app-runner-stdin-send,
+  .app-runner-stdin-eof { width: 100%; }
   .path-picker-current-row,
   .path-picker-create-row,
   .path-picker-search-row { grid-template-columns: 1fr; }

@@ -313,6 +313,61 @@ try {
   assert.match((customRunState.body?.data?.activeRun?.lines || []).join("\n"), /custom runner ok/, "custom runner output should be captured");
   await request("127.0.0.1", "/api/app-runner/clear", { method: "POST", body: { tab: tabId } });
 
+  await writeFile(path.join(cwd, "interactive-runner.mjs"), [
+    "import readline from 'node:readline';",
+    "const rl = readline.createInterface({ input: process.stdin, output: process.stdout });",
+    "console.log('interactive ready');",
+    "rl.question('name? ', (answer) => {",
+    "  console.log(`hello ${answer}`);",
+    "  rl.close();",
+    "});",
+    "",
+  ].join("\n"));
+  const savedInteractiveRunner = await request("127.0.0.1", "/api/app-runner-config", {
+    method: "POST",
+    body: { tab: tabId, runner: { label: "Interactive node", command: process.execPath, path: "interactive-runner.mjs" } },
+    timeoutMs: 10_000,
+  });
+  assert.equal(savedInteractiveRunner.status, 200, `saving an interactive custom runner should succeed: ${savedInteractiveRunner.body?.error || ""}`);
+  const interactiveRunner = savedInteractiveRunner.body?.data?.runners?.find((runner) => runner.custom === true && runner.label === "Interactive node");
+  assert.ok(interactiveRunner?.id, "interactive custom runner should appear in detected app runners");
+  const interactiveRunStart = await request("127.0.0.1", "/api/app-runner", {
+    method: "POST",
+    body: { tab: tabId, runnerId: interactiveRunner.id },
+    timeoutMs: 10_000,
+  });
+  assert.equal(interactiveRunStart.status, 200, `interactive runner start should return ok: ${interactiveRunStart.body?.error || ""}`);
+  let interactiveRunState = interactiveRunStart;
+  for (let attempt = 0; attempt < 50; attempt++) {
+    interactiveRunState = await request("127.0.0.1", `/api/app-runners?tab=${encodeURIComponent(tabId)}`, { timeoutMs: 5_000 });
+    const output = [
+      ...(interactiveRunState.body?.data?.activeRun?.lines || []),
+      interactiveRunState.body?.data?.activeRun?.pendingLine || "",
+    ].join("\n");
+    if (/name\?/.test(output)) break;
+    await delay(100);
+  }
+  assert.match([
+    ...(interactiveRunState.body?.data?.activeRun?.lines || []),
+    interactiveRunState.body?.data?.activeRun?.pendingLine || "",
+  ].join("\n"), /name\?/, "interactive app runner should expose a prompt without waiting for a newline");
+  const interactiveInput = await request("127.0.0.1", "/api/app-runner/input", {
+    method: "POST",
+    body: { tab: tabId, text: "webui", closeStdin: true },
+    timeoutMs: 10_000,
+  });
+  assert.equal(interactiveInput.status, 200, `interactive app runner input should be accepted: ${interactiveInput.body?.error || ""}`);
+  for (let attempt = 0; attempt < 50; attempt++) {
+    if (interactiveRunState.body?.data?.activeRun?.status && interactiveRunState.body.data.activeRun.status !== "running") break;
+    await delay(100);
+    interactiveRunState = await request("127.0.0.1", `/api/app-runners?tab=${encodeURIComponent(tabId)}`, { timeoutMs: 5_000 });
+  }
+  assert.equal(interactiveRunState.body?.data?.activeRun?.status, "done", "interactive custom runner should finish after stdin");
+  const interactiveOutput = (interactiveRunState.body?.data?.activeRun?.lines || []).join("\n");
+  assert.match(interactiveOutput, /hello webui/, "interactive custom runner should receive stdin from the app-runner input endpoint");
+  assert.match(interactiveOutput, /# stdin sent \(5 chars\) and closed/, "app runner output should show that stdin was sent without echoing the input text itself");
+  await request("127.0.0.1", "/api/app-runner/clear", { method: "POST", body: { tab: tabId } });
+
   await writeFile(path.join(cwd, ".pi-webui-runners.json"), `${JSON.stringify({
     version: 1,
     runners: [{ id: "broken-custom", label: "Broken custom", command: "definitely-missing-pi-webui-runner", path: "custom-runner.mjs" }],
