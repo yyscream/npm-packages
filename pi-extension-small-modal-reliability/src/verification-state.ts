@@ -23,6 +23,44 @@ function latestVerification(state: TaskState, criterion: string): VerificationRe
   return [...state.verification].reverse().find((record) => normalizeCriterion(record.criterion) === key);
 }
 
+function tokenSet(value: string): Set<string> {
+  return new Set(normalizeCriterion(value).split(/\s+/).filter((token) => token.length > 2));
+}
+
+function tokenOverlapScore(candidate: string, target: string): number {
+  const candidateTokens = tokenSet(candidate);
+  const targetTokens = tokenSet(target);
+  if (candidateTokens.size === 0 || targetTokens.size === 0) return 0;
+  let overlap = 0;
+  for (const token of candidateTokens) if (targetTokens.has(token)) overlap += 1;
+  return overlap / Math.min(candidateTokens.size, targetTokens.size);
+}
+
+export function resolveVerificationCriterion(state: TaskState, criterion: string): string {
+  const key = normalizeCriterion(criterion);
+  const exact = state.success_criteria.find((candidate) => normalizeCriterion(candidate) === key);
+  if (exact) return exact;
+
+  const contains = state.success_criteria.find((candidate) => {
+    const candidateKey = normalizeCriterion(candidate);
+    return candidateKey.includes(key) || key.includes(candidateKey);
+  });
+  if (contains) return contains;
+
+  if (state.success_criteria.length === 1) return state.success_criteria[0];
+
+  const unresolved = computeVerification(state).filter((item) => item.status !== "passed");
+  if (unresolved.length === 1) return unresolved[0].criterion;
+
+  const scored = state.success_criteria
+    .map((candidate) => ({ candidate, score: tokenOverlapScore(criterion, candidate) }))
+    .sort((a, b) => b.score - a.score);
+  const best = scored[0];
+  if (best && best.score >= 0.6) return best.candidate;
+
+  return criterion;
+}
+
 export function computeVerification(state: TaskState): VerificationRecord[] {
   const timestamp = nowIso();
   return state.success_criteria.map((criterion) => {
@@ -44,7 +82,7 @@ export function mergeVerificationEvidence(state: TaskState, evidence: Array<{ cr
   for (const item of evidence) {
     if (!item.criterion || !item.status) continue;
     addOrUpdateVerification(state, {
-      criterion: item.criterion,
+      criterion: resolveVerificationCriterion(state, item.criterion),
       status: item.status,
       evidence: truncate(item.evidence || "Evidence recorded by model.", 800),
       remaining_work: truncate(item.remainingWork || (item.status === "passed" ? "" : "Additional verification or fixes required."), 800),
@@ -73,6 +111,7 @@ export function markTaskCompleteIfVerified(state: TaskState): boolean {
   state.completed_steps = state.plan.map((step) => step.step_id);
   state.status = "complete";
   state.current_phase = "complete";
+  state.current_step_id = state.plan.at(-1)?.step_id ?? state.current_step_id;
   return true;
 }
 

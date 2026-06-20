@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import reliabilityHarnessExtension from "../index.ts";
-import { buildContextHeader, createTaskState, normalizeConfig, parseVerificationResult, redactSensitiveText, runOfflineReliabilityEvaluation, truncateRawLog } from "../src/core.ts";
+import { addOrUpdateVerification, buildContextHeader, createTaskState, markTaskCompleteIfVerified, normalizeConfig, parseVerificationResult, redactSensitiveText, runOfflineReliabilityEvaluation, truncateRawLog } from "../src/core.ts";
 import { buildDryRunOrchestration, parseVerificationEvidenceFromText, parseWorkerResultFromText } from "../src/orchestration.ts";
 
 function createHarness(cwd, options = {}) {
@@ -105,7 +105,7 @@ test("creates task state, scratchpad, and context header", async () => {
     const contextResults = await harness.emit("context", { messages: [{ role: "user", content: "hello" }] });
     const injectedMessages = contextResults.at(-1)?.messages ?? [];
     assert.equal(injectedMessages.length, 2);
-    assert.match(JSON.stringify(injectedMessages.at(-1)), /RELIABILITY HARNESS ACTIVE/);
+    assert.match(JSON.stringify(injectedMessages.at(-1)), /RELIABILITY (LITE|HARNESS) ACTIVE/);
 
     const [taskId] = taskIds(cwd);
     assert.ok(taskId);
@@ -113,6 +113,77 @@ test("creates task state, scratchpad, and context header", async () => {
     assert.equal(state.normalized_goal, "implement login flow");
     assert.ok(state.plan.length >= 4);
     assert.match(readFileSync(join(cwd, ".pi", "tasks", taskId, "scratchpad.md"), "utf8"), /Task Scratchpad/);
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+test("new session starts armed instead of auto-resuming latest task", async () => {
+  const cwd = tempCwd();
+  try {
+    const original = createHarness(cwd, { flags: { reliability: true } });
+    await original.emit("session_start", { reason: "startup" });
+    await original.commands.get("reliability").handler("on previous live task", original.ctx);
+    assert.equal(taskIds(cwd).length, 1);
+
+    const fresh = createHarness(cwd, { flags: { reliability: true } });
+    await fresh.emit("session_start", { reason: "new" });
+    await fresh.commands.get("reliability").handler("status", fresh.ctx);
+    assert.match(fresh.notifications.at(-1).message, /waiting for the next task/);
+    assert.doesNotMatch(fresh.notifications.at(-1).message, /previous live task/);
+    assert.deepEqual(fresh.widgets.get("reliability-harness"), ["Reliability harness armed for next task"]);
+
+    const resumed = createHarness(cwd);
+    resumed.entries.push(original.entries.at(-1));
+    await resumed.emit("session_start", { reason: "resume" });
+    await resumed.commands.get("reliability").handler("status", resumed.ctx);
+    assert.match(resumed.notifications.at(-1).message, /previous live task/);
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+test("adaptive default keeps simple tasks in lite mode", async () => {
+  const cwd = tempCwd();
+  try {
+    const harness = createHarness(cwd);
+    await harness.emit("session_start");
+    await harness.commands.get("reliability").handler("on create a tiny file", harness.ctx);
+    const before = await harness.emit("before_agent_start", { prompt: "create a tiny file", systemPrompt: "sys" });
+    assert.match(before.at(-1).systemPrompt, /RELIABILITY LITE INSTRUCTIONS/);
+    assert.doesNotMatch(before.at(-1).systemPrompt, /SUPERVISOR \/ WORKER SPLIT/);
+
+    const contextResults = await harness.emit("context", { messages: [] });
+    assert.match(JSON.stringify(contextResults.at(-1).messages), /RELIABILITY LITE ACTIVE/);
+    await harness.commands.get("reliability").handler("status", harness.ctx);
+    assert.match(harness.notifications.at(-1).message, /mode lite/);
+
+    await assert.rejects(
+      harness.tools.get("reliability_submit_worker_result").execute("worker-in-lite", {
+        step_id: "S1",
+        action_taken: "tried worker ceremony",
+        result: "not allowed",
+        status: "complete",
+      }, undefined, undefined, harness.ctx),
+      /disabled in lite mode/,
+    );
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+test("adaptive mode escalates long work to supervised mode", async () => {
+  const cwd = tempCwd();
+  try {
+    const harness = createHarness(cwd);
+    await harness.emit("session_start");
+    const prompt = "Refactor the authentication module, update tests, migrate related configuration, document the changes, and verify the full test suite without breaking existing behavior.";
+    await harness.commands.get("reliability").handler(`on ${prompt}`, harness.ctx);
+    const before = await harness.emit("before_agent_start", { prompt, systemPrompt: "sys" });
+    assert.match(before.at(-1).systemPrompt, /RELIABILITY HARNESS INSTRUCTIONS/);
+    assert.match(before.at(-1).systemPrompt, /SUPERVISOR \/ WORKER SPLIT/);
+    await harness.commands.get("reliability").handler("status", harness.ctx);
+    assert.match(harness.notifications.at(-1).message, /mode supervised/);
   } finally {
     cleanup(cwd);
   }
@@ -194,12 +265,36 @@ test("builds compact and delta context headers", () => {
   }
 });
 
+test("verified complete task points at final plan step", () => {
+  const cwd = tempCwd();
+  try {
+    const config = normalizeConfig({ profile: "balanced" });
+    const task = createTaskState(cwd, "verify final pointer", undefined, config);
+    addOrUpdateVerification(task, {
+      criterion: task.success_criteria[0],
+      status: "passed",
+      evidence: "Unit test recorded explicit evidence.",
+      source: "model",
+      updated_at: new Date().toISOString(),
+    });
+
+    assert.equal(markTaskCompleteIfVerified(task), true);
+    assert.equal(task.status, "complete");
+    assert.equal(task.current_phase, "complete");
+    assert.equal(task.current_step_id, "S4");
+    assert.equal(task.plan.at(-1).status, "complete");
+  } finally {
+    cleanup(cwd);
+  }
+});
+
 test("supervisor worker contract accepts current step result", async () => {
   const cwd = tempCwd();
   try {
     const harness = createHarness(cwd);
     await harness.emit("session_start");
     await harness.commands.get("reliability").handler("on supervisor worker split", harness.ctx);
+    await harness.commands.get("reliability").handler("mode supervised", harness.ctx);
     await harness.emit("before_agent_start", { prompt: "supervisor worker split", systemPrompt: "sys" });
 
     const decision = await harness.tools.get("reliability_supervisor_decision").execute("tool", {}, undefined, undefined, harness.ctx);
@@ -220,6 +315,119 @@ test("supervisor worker contract accepts current step result", async () => {
     const state = JSON.parse(readFileSync(join(cwd, ".pi", "tasks", taskId, "state.json"), "utf8"));
     assert.ok(state.completed_steps.includes(stepId));
     assert.ok(state.files_touched.includes("README.md"));
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+test("worker result accepts step advanced by progress tool", async () => {
+  const cwd = tempCwd();
+  try {
+    const harness = createHarness(cwd);
+    await harness.emit("session_start");
+    await harness.commands.get("reliability").handler("on create live-test.txt and verify", harness.ctx);
+    await harness.commands.get("reliability").handler("mode supervised", harness.ctx);
+    await harness.emit("before_agent_start", { prompt: "create live-test.txt and verify", systemPrompt: "sys" });
+
+    await harness.tools.get("reliability_record_progress").execute("progress", {
+      step_id: "S1",
+      step_status: "complete",
+      known_fact: "Task goal and success criteria are clear.",
+    }, undefined, undefined, harness.ctx);
+
+    const result = await harness.tools.get("reliability_submit_worker_result").execute("worker", {
+      step_id: "S2",
+      action_taken: "Created live-test.txt",
+      result: "File contains ok.",
+      status: "complete",
+      files_changed: ["live-test.txt"],
+      next_recommendation: "Verify by reading live-test.txt back.",
+    }, undefined, undefined, harness.ctx);
+
+    assert.match(result.content[0].text, /Worker result accepted for S2/);
+    const [taskId] = taskIds(cwd);
+    const state = JSON.parse(readFileSync(join(cwd, ".pi", "tasks", taskId, "state.json"), "utf8"));
+    assert.ok(state.completed_steps.includes("S1"));
+    assert.ok(state.completed_steps.includes("S2"));
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+test("blocks verification/report step completion until explicit evidence is recorded", async () => {
+  const cwd = tempCwd();
+  const goal = "Create live-test.txt containing exactly ok, then verify it by reading it back before final answer.";
+  try {
+    const harness = createHarness(cwd);
+    await harness.emit("session_start");
+    await harness.commands.get("reliability").handler(`on ${goal}`, harness.ctx);
+    await harness.commands.get("reliability").handler("mode supervised", harness.ctx);
+    await harness.emit("before_agent_start", { prompt: goal, systemPrompt: "sys" });
+
+    await harness.tools.get("reliability_record_progress").execute("progress", {
+      step_id: "S1",
+      step_status: "complete",
+      known_fact: "Task goal and success criteria are clear.",
+    }, undefined, undefined, harness.ctx);
+
+    await harness.tools.get("reliability_submit_worker_result").execute("worker-s2", {
+      step_id: "S2",
+      action_taken: "Created live-test.txt",
+      result: "File contains ok.",
+      status: "complete",
+      files_changed: ["live-test.txt"],
+      next_recommendation: "Read live-test.txt back to verify exact contents.",
+    }, undefined, undefined, harness.ctx);
+
+    await assert.rejects(
+      harness.tools.get("reliability_verify_completion").execute("verify-missing-evidence", {}, undefined, undefined, harness.ctx),
+      (error) => {
+        assert.match(error.message, /Missing explicit verification evidence: 0 failed and 1 unknown verification criteria remain/);
+        assert.doesNotMatch(error.message, /UNKNOWN:/);
+        return true;
+      },
+    );
+
+    await assert.rejects(
+      harness.tools.get("reliability_submit_worker_result").execute("worker-s3-missing-evidence", {
+        step_id: "S3",
+        action_taken: "Read live-test.txt",
+        result: "Read output was ok.",
+        status: "complete",
+      }, undefined, undefined, harness.ctx),
+      (error) => {
+        assert.match(error.message, /Cannot mark S3 complete while 0 failed and 1 unknown verification criteria remain/);
+        assert.doesNotMatch(error.message, /UNKNOWN:/);
+        return true;
+      },
+    );
+
+    const verification = await harness.tools.get("reliability_verify_completion").execute("verify-paraphrased-evidence", {
+      evidence: [{
+        criterion: "live-test.txt was read",
+        status: "passed",
+        evidence: "Read live-test.txt returned exactly ok.",
+      }],
+    }, undefined, undefined, harness.ctx);
+    assert.match(verification.content[0].text, /PASSED:/);
+    assert.match(verification.content[0].text, new RegExp(goal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+    const s3 = await harness.tools.get("reliability_submit_worker_result").execute("worker-s3", {
+      step_id: "S3",
+      action_taken: "Recorded explicit verification evidence.",
+      result: "Success criterion passed.",
+      status: "complete",
+      next_recommendation: "Report outcome to the user.",
+    }, undefined, undefined, harness.ctx);
+    assert.match(s3.content[0].text, /Worker result accepted for S3/);
+
+    const s4 = await harness.tools.get("reliability_submit_worker_result").execute("worker-s4", {
+      step_id: "S4",
+      action_taken: "Prepared final report.",
+      result: "Ready to summarize file creation and verification evidence.",
+      status: "complete",
+    }, undefined, undefined, harness.ctx);
+    assert.match(s4.content[0].text, /Worker result accepted for S4/);
   } finally {
     cleanup(cwd);
   }

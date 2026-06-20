@@ -1,4 +1,4 @@
-import type { ContextHeaderMode, OrchestrationMode, ReliabilityConfig, ReliabilityProfile, ReliabilityRole } from "./types.ts";
+import type { ContextHeaderMode, OrchestrationMode, ReliabilityConfig, ReliabilityProfile, ReliabilityRole, ReliabilitySupervisionMode } from "./types.ts";
 import { DEFAULT_CONFIG, PROFILE_DEFAULTS } from "./types.ts";
 
 export function normalizeProfile(value: unknown): ReliabilityProfile {
@@ -11,6 +11,10 @@ export function normalizeContextMode(value: unknown, fallback: ContextHeaderMode
 
 export function normalizeOrchestrationMode(value: unknown, fallback: OrchestrationMode): OrchestrationMode {
   return value === "prompt" || value === "separate-model" ? value : fallback;
+}
+
+export function normalizeSupervisionMode(value: unknown, fallback: ReliabilitySupervisionMode): ReliabilitySupervisionMode {
+  return value === "adaptive" || value === "lite" || value === "supervised" ? value : fallback;
 }
 
 function normalizeRoleModels(value: unknown): Partial<Record<ReliabilityRole, string>> {
@@ -47,6 +51,7 @@ export function normalizeConfig(input: Partial<ReliabilityConfig>): ReliabilityC
     ...input,
     profile,
     contextMode: normalizeContextMode(input.contextMode, profileDefaults.contextMode),
+    supervisionMode: normalizeSupervisionMode(input.supervisionMode, profileDefaults.supervisionMode),
     storeRawToolLogs: input.storeRawToolLogs === true,
     maxRepeatedAction: Math.max(2, Math.min(10, Math.trunc(Number(maxRepeatedActionSource) || profileDefaults.maxRepeatedAction))),
     contextBudgetChars: Math.max(1800, Math.min(20000, Math.trunc(Number(contextBudgetSource) || profileDefaults.contextBudgetChars))),

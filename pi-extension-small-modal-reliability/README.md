@@ -22,6 +22,7 @@ Or inside Pi:
 /reliability resume <task_id_prefix>
 /reliability archive <task_id_prefix>
 /reliability profile strict|balanced|relaxed
+/reliability mode adaptive|lite|supervised
 /reliability context full|compact|delta
 /reliability orchestrate [--run]
 /reliability scratchpad
@@ -29,7 +30,7 @@ Or inside Pi:
 /reliability reset
 ```
 
-The extension is opt-in by default. It stores task files under:
+The extension is opt-in by default. The default balanced profile uses adaptive supervision: simple tasks start in lite mode (task state + verification gate only), while long/multi-step work, tool errors, repeated-action blocking, strict profile, orchestration, or unsupported completion claims escalate to supervised worker-step mode. It stores task files under:
 
 ```text
 .pi/tasks/{task_id}/state.json

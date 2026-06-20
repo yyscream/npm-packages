@@ -60,12 +60,13 @@ export function buildWorkerContractPrompt(decision: SupervisorDecision): string 
     `Worker goal: ${decision.worker_goal}`,
     `Expected output: ${decision.expected_output}`,
     `Verification required: ${decision.verification_required ? "yes" : "no"}`,
+    decision.verification_required ? "Verification rule: before completing verification/reporting work or making a final completion claim, call reliability_verify_completion with explicit PASSED/FAILED/UNKNOWN evidence for each criterion." : undefined,
     decision.constraints.length ? `Constraints: ${decision.constraints.join("; ")}` : "Constraints: stay on the user's task and avoid unrelated work.",
     `Next action: ${decision.next_action}`,
     "",
     "When this step is complete, blocked, or failed, call reliability_submit_worker_result with the worker contract fields.",
     "[/SUPERVISOR / WORKER SPLIT]",
-  ].join("\n");
+  ].filter((line): line is string => typeof line === "string").join("\n");
 }
 
 export function applyWorkerResult(state: TaskState, result: WorkerResultInput): void {

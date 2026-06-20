@@ -7,6 +7,7 @@ export type VerificationStatus = "passed" | "failed" | "unknown";
 export type ReliabilityProfile = "strict" | "balanced" | "relaxed";
 export type ContextHeaderMode = "full" | "compact" | "delta";
 export type OrchestrationMode = "prompt" | "separate-model";
+export type ReliabilitySupervisionMode = "adaptive" | "lite" | "supervised";
 export type ReliabilityRole = "supervisor" | "worker" | "verifier";
 
 export type PlanStep = {
@@ -86,6 +87,7 @@ export type ReliabilityConfig = {
   scratchpadEnabled: boolean;
   contextBudgetChars: number;
   contextMode: ContextHeaderMode;
+  supervisionMode: ReliabilitySupervisionMode;
   progressWidget: boolean;
   storeRawToolLogs: boolean;
   rawLogMaxChars: number;
@@ -178,6 +180,7 @@ export const PROFILE_DEFAULTS: Record<ReliabilityProfile, Omit<ReliabilityConfig
     scratchpadEnabled: true,
     contextBudgetChars: DEFAULT_CONTEXT_BUDGET_CHARS,
     contextMode: "full",
+    supervisionMode: "supervised",
     progressWidget: true,
     storeRawToolLogs: false,
     rawLogMaxChars: DEFAULT_RAW_LOG_MAX_CHARS,
@@ -193,6 +196,7 @@ export const PROFILE_DEFAULTS: Record<ReliabilityProfile, Omit<ReliabilityConfig
     scratchpadEnabled: true,
     contextBudgetChars: DEFAULT_CONTEXT_BUDGET_CHARS,
     contextMode: "compact",
+    supervisionMode: "adaptive",
     progressWidget: true,
     storeRawToolLogs: false,
     rawLogMaxChars: DEFAULT_RAW_LOG_MAX_CHARS,
@@ -208,6 +212,7 @@ export const PROFILE_DEFAULTS: Record<ReliabilityProfile, Omit<ReliabilityConfig
     scratchpadEnabled: true,
     contextBudgetChars: DEFAULT_CONTEXT_BUDGET_CHARS,
     contextMode: "delta",
+    supervisionMode: "lite",
     progressWidget: true,
     storeRawToolLogs: false,
     rawLogMaxChars: DEFAULT_RAW_LOG_MAX_CHARS,

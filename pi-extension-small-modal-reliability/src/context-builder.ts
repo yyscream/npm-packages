@@ -33,6 +33,26 @@ function compactPlan(state: TaskState): string[] {
   return state.plan.map((step) => `${step.step_id}:${step.status}:${step.title}`);
 }
 
+function liteHeaderLines(state: TaskState, config: ReliabilityConfig): string[] {
+  const verification = computeVerification(state);
+  const lines = [
+    "[RELIABILITY LITE ACTIVE]",
+    `Mode: lite (${config.profile}, ${config.contextMode})`,
+    `Task: ${state.task_id}`,
+    `Goal: ${state.normalized_goal}`,
+    `Status: ${state.status}`,
+    "Success criteria:",
+    ...state.success_criteria.map((item) => `- ${item}`),
+    "Verification:",
+    ...verification.map((item) => `- ${item.status.toUpperCase()}: ${item.criterion}`),
+  ];
+  if (state.errors.length) lines.push("Recent errors:", ...state.errors.slice(-3).map((item) => `- ${item}`));
+  if (state.loop_warnings.length) lines.push("Loop warnings:", ...state.loop_warnings.slice(-3).map((item) => `- ${item}`));
+  lines.push("Rule: work normally; call reliability_verify_completion with evidence before claiming completion.");
+  lines.push("[/RELIABILITY LITE ACTIVE]");
+  return lines;
+}
+
 function truncateHeader(header: string, state: TaskState, config: ReliabilityConfig): string {
   if (header.length <= config.contextBudgetChars) return header;
   return `${header.slice(0, config.contextBudgetChars - 120)}\n… [reliability header truncated to budget; inspect ${scratchpadPathFor(state.cwd, state.task_id)} if needed]\n[/RELIABILITY HARNESS ACTIVE]`;
@@ -40,6 +60,9 @@ function truncateHeader(header: string, state: TaskState, config: ReliabilityCon
 
 export function buildContextHeader(state: TaskState, config: ReliabilityConfig, previous?: ContextSnapshot): ContextHeaderResult {
   const snapshot = createContextSnapshot(state);
+  if (config.supervisionMode === "lite") {
+    return { header: truncateHeader(liteHeaderLines(state, config).join("\n"), state, config), snapshot };
+  }
   const current = getStep(state, state.current_step_id);
   const verification = computeVerification(state);
   const lines = [

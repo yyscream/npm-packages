@@ -4,7 +4,7 @@ import { assistantHasToolCall, assistantText } from "./utils.ts";
 import { computeVerification, formatVerification } from "./verification-state.ts";
 
 function assistantClaimsCompletion(text: string): boolean {
-  return /\b(done|complete|completed|implemented|fixed|finished|resolved)\b/i.test(text)
+  return /\b(done|complete|completed|implemented|fixed|finished|resolved|verified|validated|created)\b/i.test(text)
     && !/\b(partial|partially|not complete|remaining|unknown|cannot verify|unverified)\b/i.test(text);
 }
 

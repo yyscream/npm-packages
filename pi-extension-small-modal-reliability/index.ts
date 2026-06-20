@@ -30,13 +30,13 @@ import {
   getStep,
   isTaskArchived,
   listTaskStates,
-  loadLatestTaskState,
   loadTaskState,
   markTaskCompleteIfVerified,
   mergeVerificationEvidence,
   normalizeConfig,
   normalizeContextMode,
   normalizeProfile,
+  normalizeSupervisionMode,
   nowIso,
   persistExtensionState,
   persistedPointerFromSession,
@@ -69,6 +69,7 @@ import type { SupervisorDecision, WorkerResultInput } from "./src/supervisor.ts"
 import type {
   ContextSnapshot,
   ReliabilityConfig,
+  ReliabilitySupervisionMode,
   StepStatus,
   TaskStatus,
   TaskState,
@@ -80,6 +81,7 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
   let config: ReliabilityConfig = { ...DEFAULT_CONFIG };
   let enabled = false;
   let activeTask: TaskState | undefined;
+  let activeSupervisionMode: Extract<ReliabilitySupervisionMode, "lite" | "supervised"> = "lite";
   const completionGatePromptedTaskIds = new Set<string>();
   const contextSnapshots = new Map<string, ContextSnapshot>();
   const supervisorDecisions = new Map<string, SupervisorDecision>();
@@ -89,13 +91,70 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
       activeTask = createTaskState(ctx.cwd, prompt, ctx.sessionManager.getSessionFile(), config);
       saveTaskState(activeTask, "task_created");
       persistExtensionState(pi, enabled, activeTask);
-      updateUi(ctx, enabled, activeTask, config);
+      updateUi(ctx, enabled, activeTask, runtimeConfig());
       return activeTask;
     }
 
     addUniqueBounded(activeTask.known_facts, `User update: ${truncate(prompt, 240)}`, MAX_FACTS);
     saveTaskState(activeTask, "user_update_recorded");
     return activeTask;
+  };
+
+  const runtimeConfig = (): ReliabilityConfig => ({ ...config, supervisionMode: activeSupervisionMode });
+
+  const taskLooksLongOrMultiStep = (prompt: string): boolean => {
+    const words = prompt.trim().split(/\s+/).filter(Boolean).length;
+    const lines = prompt.split(/\r?\n/).filter((line) => line.trim().length > 0);
+    const bulletLines = lines.filter((line) => /^\s*[-*\d.)]+\s+/.test(line)).length;
+    return words >= 90
+      || lines.length >= 5
+      || bulletLines >= 2
+      || /\b(refactor|migrate|architecture|multi[- ]step|long[- ]running|investigate|debug|fix failing|test suite|implement feature|several|multiple)\b/i.test(prompt);
+  };
+
+  const chooseSupervisionMode = (state: TaskState | undefined, prompt = ""): Extract<ReliabilitySupervisionMode, "lite" | "supervised"> => {
+    if (config.supervisionMode === "lite") return "lite";
+    if (config.supervisionMode === "supervised" || config.profile === "strict") return "supervised";
+    if (state?.errors.length || state?.loop_warnings.length || state?.status === "blocked" || state?.status === "failed") return "supervised";
+    if (prompt && taskLooksLongOrMultiStep(prompt)) return "supervised";
+    return activeSupervisionMode === "supervised" ? "supervised" : "lite";
+  };
+
+  const setSupervisionModeForTask = (state: TaskState | undefined, prompt = ""): void => {
+    activeSupervisionMode = chooseSupervisionMode(state, prompt);
+  };
+
+  const escalateSupervision = (ctx: ExtensionContext, state: TaskState, reason: string): void => {
+    if (config.supervisionMode === "lite" || activeSupervisionMode === "supervised") return;
+    activeSupervisionMode = "supervised";
+    addUniqueBounded(state.decisions, `Escalated to supervised reliability mode: ${truncate(reason, 220)}`, MAX_FACTS);
+    updateUi(ctx, enabled, state, runtimeConfig());
+  };
+
+  const refreshSupervisorDecision = (state: TaskState): SupervisorDecision => {
+    const decision = buildSupervisorDecision(state, runtimeConfig());
+    supervisorDecisions.set(state.task_id, decision);
+    return decision;
+  };
+
+  const isVerificationOrReportStep = (state: TaskState, stepId: string): boolean => {
+    const step = getStep(state, stepId);
+    const title = step?.title.toLowerCase() ?? "";
+    return title.includes("verify") || title.includes("verification") || title.includes("report") || stepId === "S3" || stepId === "S4";
+  };
+
+  const assertVerificationAllowsCompletion = (state: TaskState, stepId: string): void => {
+    if (!config.requireVerification || !isVerificationOrReportStep(state, stepId)) return;
+    const verification = computeVerification(state);
+    const failed = verification.filter((item) => item.status === "failed").length;
+    const unknown = verification.filter((item) => item.status === "unknown").length;
+    if (failed === 0 && unknown === 0) return;
+    const message = `Cannot mark ${stepId} complete while ${failed} failed and ${unknown} unknown verification criteria remain. Call reliability_verify_completion with explicit evidence first, or submit status "blocked".`;
+    addUniqueBounded(state.open_questions, message, MAX_FACTS);
+    pushBounded(state.errors, message, MAX_ERRORS);
+    saveTaskState(state, "verification_gate_blocked_worker_completion");
+    const criteria = verification.filter((item) => item.status !== "passed").map((item) => `- ${item.criterion}`).join("\n");
+    throw new Error(criteria ? `${message}\nUnresolved criteria:\n${criteria}` : message);
   };
 
   pi.registerFlag("reliability", {
@@ -105,8 +164,8 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("reliability", {
-    description: "Reliability harness control: on [goal] | off | status | reset | scratchpad | verify | suggest | eval | tasks | resume <id> | archive <id> | profile <strict|balanced|relaxed> | context <full|compact|delta> | orchestrate [--run]",
-    getArgumentCompletions: (prefix) => ["on", "off", "status", "reset", "scratchpad", "verify", "suggest", "eval", "tasks", "resume", "archive", "profile", "context", "orchestrate"]
+    description: "Reliability harness control: on [goal] | off | status | reset | scratchpad | verify | suggest | eval | tasks | resume <id> | archive <id> | profile <strict|balanced|relaxed> | mode <adaptive|lite|supervised> | context <full|compact|delta> | orchestrate [--run]",
+    getArgumentCompletions: (prefix) => ["on", "off", "status", "reset", "scratchpad", "verify", "suggest", "eval", "tasks", "resume", "archive", "profile", "mode", "context", "orchestrate"]
       .filter((item) => item.startsWith(prefix))
       .map((item) => ({ value: item, label: item })),
     handler: async (args, ctx) => {
@@ -118,10 +177,13 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
         enabled = true;
         if (restText) {
           activeTask = createTaskState(ctx.cwd, restText, ctx.sessionManager.getSessionFile(), config);
+          setSupervisionModeForTask(activeTask, restText);
           saveTaskState(activeTask, "task_created_from_command");
+        } else {
+          setSupervisionModeForTask(activeTask);
         }
         persistExtensionState(pi, enabled, activeTask);
-        updateUi(ctx, enabled, activeTask, config);
+        updateUi(ctx, enabled, activeTask, runtimeConfig());
         ctx.ui.notify(activeTask ? `Reliability harness enabled for task ${activeTask.task_id}` : "Reliability harness enabled for the next task.", "success");
         return;
       }
@@ -129,15 +191,16 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
       if (command === "off") {
         enabled = false;
         persistExtensionState(pi, enabled, activeTask);
-        updateUi(ctx, enabled, activeTask, config);
+        updateUi(ctx, enabled, activeTask, runtimeConfig());
         ctx.ui.notify("Reliability harness disabled.", "info");
         return;
       }
 
       if (command === "reset") {
         activeTask = undefined;
+        setSupervisionModeForTask(undefined);
         persistExtensionState(pi, enabled, activeTask);
-        updateUi(ctx, enabled, activeTask, config);
+        updateUi(ctx, enabled, activeTask, runtimeConfig());
         ctx.ui.notify("Reliability harness task reset. Existing .pi/tasks files were left intact.", "warning");
         return;
       }
@@ -160,7 +223,7 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
         activeTask.verification = [...activeTask.verification, ...report.filter((item) => !explicitVerificationFor(activeTask!, item.criterion))].slice(-50);
         saveTaskState(activeTask, "manual_verification_report");
         ctx.ui.notify(formatVerification(report), "info");
-        updateUi(ctx, enabled, activeTask, config);
+        updateUi(ctx, enabled, activeTask, runtimeConfig());
         return;
       }
 
@@ -200,8 +263,9 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
         }
         activeTask = resolution.state;
         enabled = true;
+        setSupervisionModeForTask(activeTask);
         persistExtensionState(pi, enabled, activeTask);
-        updateUi(ctx, enabled, activeTask, config);
+        updateUi(ctx, enabled, activeTask, runtimeConfig());
         ctx.ui.notify(`Resumed reliability task ${activeTask.task_id}: ${activeTask.normalized_goal}`, "success");
         return;
       }
@@ -215,7 +279,7 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
         archiveTask(ctx.cwd, resolution.state.task_id);
         if (activeTask?.task_id === resolution.state.task_id) activeTask = undefined;
         persistExtensionState(pi, enabled, activeTask);
-        updateUi(ctx, enabled, activeTask, config);
+        updateUi(ctx, enabled, activeTask, runtimeConfig());
         ctx.ui.notify(`Archived reliability task ${resolution.state.task_id}.`, "info");
         return;
       }
@@ -230,12 +294,31 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
           ctx.ui.notify("Usage: /reliability profile strict|balanced|relaxed", "warning");
           return;
         }
-        config = normalizeConfig({ ...config, profile, maxRepeatedAction: undefined, contextMode: undefined });
+        config = normalizeConfig({ ...config, profile, maxRepeatedAction: undefined, contextMode: undefined, supervisionMode: undefined });
+        setSupervisionModeForTask(activeTask);
         setScratchpadWritesEnabled(config.scratchpadEnabled);
         if (activeTask) activeTask.counters.repeated_action_limit = config.maxRepeatedAction;
         contextSnapshots.clear();
-        updateUi(ctx, enabled, activeTask, config);
-        ctx.ui.notify(`Reliability profile set to ${config.profile} (repeat limit ${config.maxRepeatedAction}, context ${config.contextMode}).`, "success");
+        updateUi(ctx, enabled, activeTask, runtimeConfig());
+        ctx.ui.notify(`Reliability profile set to ${config.profile} (mode ${config.supervisionMode}, active ${activeSupervisionMode}, repeat limit ${config.maxRepeatedAction}, context ${config.contextMode}).`, "success");
+        return;
+      }
+
+      if (command === "mode") {
+        if (!restText) {
+          ctx.ui.notify(`Reliability supervision mode: ${config.supervisionMode} (active ${activeSupervisionMode}). Use /reliability mode adaptive|lite|supervised`, "info");
+          return;
+        }
+        const supervisionMode = normalizeSupervisionMode(restText, config.supervisionMode);
+        if (supervisionMode !== restText) {
+          ctx.ui.notify("Usage: /reliability mode adaptive|lite|supervised", "warning");
+          return;
+        }
+        config = normalizeConfig({ ...config, supervisionMode });
+        setSupervisionModeForTask(activeTask);
+        contextSnapshots.clear();
+        updateUi(ctx, enabled, activeTask, runtimeConfig());
+        ctx.ui.notify(`Reliability supervision mode set to ${config.supervisionMode} (active ${activeSupervisionMode}).`, "success");
         return;
       }
 
@@ -251,7 +334,7 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
         }
         config = normalizeConfig({ ...config, contextMode });
         contextSnapshots.clear();
-        updateUi(ctx, enabled, activeTask, config);
+        updateUi(ctx, enabled, activeTask, runtimeConfig());
         ctx.ui.notify(`Reliability context mode set to ${config.contextMode}.`, "success");
         return;
       }
@@ -261,9 +344,11 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
           ctx.ui.notify("No active reliability task.", "warning");
           return;
         }
+        escalateSupervision(ctx, activeTask, "orchestration requested");
         const shouldRun = rest.includes("--run");
         if (!shouldRun || config.orchestrationMode !== "separate-model") {
           const dryRun = buildDryRunOrchestration(activeTask, config);
+          supervisorDecisions.set(activeTask.task_id, dryRun.decision);
           ctx.ui.notify(
             `${formatOrchestrationResult(dryRun)}\n\nCurrent orchestrationMode: ${config.orchestrationMode}. Set \"orchestrationMode\": \"separate-model\" in .pi/reliability.json and pass --run to execute subprocess roles.`,
             "info",
@@ -278,7 +363,8 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
           return;
         }
         const result = await runSeparateModelOrchestration(activeTask, config);
-        const expectedStepId = supervisorDecisions.get(activeTask.task_id)?.step_id ?? activeTask.current_step_id;
+        supervisorDecisions.set(activeTask.task_id, result.decision);
+        const expectedStepId = result.decision.step_id;
         if (result.workerResult && result.workerResult.step_id === expectedStepId) {
           applyWorkerResult(activeTask, result.workerResult);
         } else if (result.workerResult) {
@@ -286,18 +372,18 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
         }
         mergeVerificationEvidence(activeTask, result.verificationEvidence);
         saveTaskState(activeTask, "separate_model_orchestration");
-        updateUi(ctx, enabled, activeTask, config);
+        updateUi(ctx, enabled, activeTask, runtimeConfig());
         ctx.ui.notify(formatOrchestrationResult(result), result.errors.length ? "warning" : "success");
         return;
       }
 
       if (command === "status" || !commandRaw) {
-        ctx.ui.notify(formatStatus(activeTask, enabled, config), "info");
-        updateUi(ctx, enabled, activeTask, config);
+        ctx.ui.notify(formatStatus(activeTask, enabled, runtimeConfig()), "info");
+        updateUi(ctx, enabled, activeTask, runtimeConfig());
         return;
       }
 
-      ctx.ui.notify("Usage: /reliability on [goal] | off | status | reset | scratchpad | verify | suggest | eval [--write] | tasks [--all] | resume <task_id> | archive <task_id> | profile strict|balanced|relaxed | context full|compact|delta | orchestrate [--run]", "warning");
+      ctx.ui.notify("Usage: /reliability on [goal] | off | status | reset | scratchpad | verify | suggest | eval [--write] | tasks [--all] | resume <task_id> | archive <task_id> | profile strict|balanced|relaxed | mode adaptive|lite|supervised | context full|compact|delta | orchestrate [--run]", "warning");
     },
   });
 
@@ -312,7 +398,7 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
     parameters: Type.Object({}),
     async execute() {
       return {
-        content: [{ type: "text", text: formatStatus(activeTask, enabled, config) }],
+        content: [{ type: "text", text: formatStatus(activeTask, enabled, runtimeConfig()) }],
         details: { enabled, task: activeTask },
       };
     },
@@ -347,7 +433,7 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
     description: "Create or revise the harness plan for the active task.",
     promptSnippet: "Revise the current task plan with explicit steps and verification fields.",
     promptGuidelines: [
-      "Use reliability_set_plan when the default reliability plan is too vague or when failures require a revised strategy.",
+      "Use reliability_set_plan only in supervised reliability mode when the default plan is too vague or failures require a revised strategy.",
     ],
     parameters: Type.Object({
       replace: Type.Optional(Type.Boolean({ description: "Replace the current plan. Defaults to true." })),
@@ -367,7 +453,7 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
       activeTask.status = "executing";
       selectNextStep(activeTask);
       saveTaskState(activeTask, "plan_updated_by_tool");
-      updateUi(ctx, enabled, activeTask, config);
+      updateUi(ctx, enabled, activeTask, runtimeConfig());
       return {
         content: [{ type: "text", text: `Updated reliability plan with ${activeTask.plan.length} step(s). Current step: ${activeTask.current_step_id}` }],
         details: { plan: activeTask.plan },
@@ -381,7 +467,7 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
     description: "Record meaningful facts, decisions, errors, next actions, touched files, or step status changes in task state.",
     promptSnippet: "Record task progress, facts, decisions, errors, and step status in the harness state.",
     promptGuidelines: [
-      "Use reliability_record_progress after meaningful progress, a decision, an error, a blocker, or a step-status change.",
+      "Use reliability_record_progress after meaningful progress, a decision, an error, a blocker, or a step-status change; in lite mode, use it sparingly.",
     ],
     parameters: Type.Object({
       step_id: Type.Optional(Type.String()),
@@ -405,10 +491,11 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
       if (params.next_action) activeTask.next_action = truncate(params.next_action, 300);
       for (const file of params.files_touched ?? []) addUniqueBounded(activeTask.files_touched, file, 120);
       selectNextStep(activeTask);
+      refreshSupervisorDecision(activeTask);
       saveTaskState(activeTask, "progress_recorded_by_tool");
-      updateUi(ctx, enabled, activeTask, config);
+      updateUi(ctx, enabled, activeTask, runtimeConfig());
       return {
-        content: [{ type: "text", text: `Recorded reliability progress. ${formatStatus(activeTask, enabled, config)}` }],
+        content: [{ type: "text", text: `Recorded reliability progress. ${formatStatus(activeTask, enabled, runtimeConfig())}` }],
         details: { task: activeTask },
       };
     },
@@ -420,13 +507,12 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
     description: "Inspect the deterministic supervisor's current worker-step decision.",
     promptSnippet: "Inspect the current supervisor-selected worker step and contract.",
     promptGuidelines: [
-      "Use reliability_supervisor_decision when you need the current supervisor-selected worker step or contract.",
+      "Use reliability_supervisor_decision only in supervised reliability mode when you need the current supervisor-selected worker step or contract.",
     ],
     parameters: Type.Object({}),
     async execute() {
       if (!activeTask) throw new Error("No active reliability task. Enable /reliability on or start a task first.");
-      const decision = buildSupervisorDecision(activeTask, config);
-      supervisorDecisions.set(activeTask.task_id, decision);
+      const decision = refreshSupervisorDecision(activeTask);
       return {
         content: [{ type: "text", text: buildWorkerContractPrompt(decision) }],
         details: { decision },
@@ -440,7 +526,7 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
     description: "Submit the focused worker result for the current supervisor-selected step.",
     promptSnippet: "Submit a structured worker result for the current supervisor-selected step.",
     promptGuidelines: [
-      "Use reliability_submit_worker_result when the current worker step is complete, blocked, or failed.",
+      "Use reliability_submit_worker_result only in supervised reliability mode when the current worker step is complete, blocked, or failed; do not use it in lite mode.",
     ],
     parameters: Type.Object({
       step_id: Type.String({ description: "Supervisor-selected step id." }),
@@ -453,16 +539,19 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       if (!activeTask) throw new Error("No active reliability task. Enable /reliability on or start a task first.");
+      if (activeSupervisionMode !== "supervised") {
+        throw new Error("reliability_submit_worker_result is disabled in lite mode. Work normally, record major progress only if useful, and call reliability_verify_completion with evidence before final completion claims. Use /reliability mode supervised for supervisor/worker step contracts.");
+      }
       const result = params as WorkerResultInput;
-      const expected = supervisorDecisions.get(activeTask.task_id)?.step_id ?? activeTask.current_step_id;
+      const expected = refreshSupervisorDecision(activeTask).step_id;
       if (result.step_id !== expected) {
         throw new Error(`Worker result step_id ${result.step_id} does not match supervisor-selected step ${expected}.`);
       }
+      if (result.status === "complete") assertVerificationAllowsCompletion(activeTask, result.step_id);
       applyWorkerResult(activeTask, result);
-      const nextDecision = buildSupervisorDecision(activeTask, config);
-      supervisorDecisions.set(activeTask.task_id, nextDecision);
+      const nextDecision = refreshSupervisorDecision(activeTask);
       saveTaskState(activeTask, "worker_result_submitted");
-      updateUi(ctx, enabled, activeTask, config);
+      updateUi(ctx, enabled, activeTask, runtimeConfig());
       return {
         content: [{ type: "text", text: `Worker result accepted for ${result.step_id}. Next supervisor decision:\n${buildWorkerContractPrompt(nextDecision)}` }],
         details: { workerResult: result, supervisorDecision: nextDecision, taskStatus: activeTask.status },
@@ -489,8 +578,34 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       if (!activeTask) throw new Error("No active reliability task. Enable /reliability on or start a task first.");
-      mergeVerificationEvidence(activeTask, params.evidence as Array<{ criterion?: string; status?: VerificationStatus; evidence?: string; remainingWork?: string }> | undefined);
+      const evidenceInput = params.evidence as Array<{ criterion?: string; status?: VerificationStatus; evidence?: string; remainingWork?: string }> | undefined;
+      const hasExplicitEvidence = Array.isArray(evidenceInput) && evidenceInput.length > 0;
+      if (!hasExplicitEvidence) {
+        const unresolved = computeVerification(activeTask);
+        const failed = unresolved.filter((item) => item.status === "failed").length;
+        const unknown = unresolved.filter((item) => item.status === "unknown").length;
+        if (failed > 0 || unknown > 0) {
+          const message = `Missing explicit verification evidence: ${failed} failed and ${unknown} unknown verification criteria remain. Call reliability_verify_completion with evidence[] entries for each criterion, using status passed, failed, or unknown.`;
+          addUniqueBounded(activeTask.open_questions, message, MAX_FACTS);
+          pushBounded(activeTask.errors, message, MAX_ERRORS);
+          saveTaskState(activeTask, "verification_missing_evidence");
+          updateUi(ctx, enabled, activeTask, runtimeConfig());
+          const criteria = unresolved.filter((item) => item.status !== "passed").map((item) => `- ${item.criterion}`).join("\n");
+          throw new Error(criteria ? `${message}\nUnresolved criteria:\n${criteria}` : message);
+        }
+      }
+      mergeVerificationEvidence(activeTask, evidenceInput);
       const report = computeVerification(activeTask);
+      const missingExplicitEvidence = report.filter((item) => item.source === "harness" && item.status === "unknown");
+      if (missingExplicitEvidence.length > 0) {
+        const criteria = missingExplicitEvidence.map((item) => `- ${item.criterion}`).join("\n");
+        const message = `Verification evidence did not resolve ${missingExplicitEvidence.length} criteria. Use evidence[] entries whose criterion exactly matches each unresolved success criterion:\n${criteria}`;
+        addUniqueBounded(activeTask.open_questions, message, MAX_FACTS);
+        pushBounded(activeTask.errors, message, MAX_ERRORS);
+        saveTaskState(activeTask, "verification_unresolved_after_evidence");
+        updateUi(ctx, enabled, activeTask, runtimeConfig());
+        throw new Error(message);
+      }
       if (params.markComplete) {
         for (const item of report) addOrUpdateVerification(activeTask, item);
         markTaskCompleteIfVerified(activeTask);
@@ -498,7 +613,7 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
         for (const item of report) addOrUpdateVerification(activeTask, item);
       }
       saveTaskState(activeTask, "verification_recorded_by_tool");
-      updateUi(ctx, enabled, activeTask, config);
+      updateUi(ctx, enabled, activeTask, runtimeConfig());
       return {
         content: [{ type: "text", text: formatVerification(computeVerification(activeTask)) }],
         details: { verification: activeTask.verification, status: activeTask.status },
@@ -511,24 +626,31 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
     setScratchpadWritesEnabled(config.scratchpadEnabled);
     const saved = persistedPointerFromSession(ctx);
     enabled = Boolean(pi.getFlag("reliability") || saved?.enabled || config.enabled);
-    activeTask = loadTaskState(ctx.cwd, saved?.taskId) ?? (enabled ? loadLatestTaskState(ctx.cwd) : undefined);
+    activeTask = loadTaskState(ctx.cwd, saved?.taskId);
     if (activeTask && (activeTask.status === "complete" || activeTask.status === "failed" || isTaskArchived(ctx.cwd, activeTask.task_id))) {
       activeTask = undefined;
     }
-    updateUi(ctx, enabled, activeTask, config);
+    setSupervisionModeForTask(activeTask);
+    updateUi(ctx, enabled, activeTask, runtimeConfig());
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
     if (!enabled) return;
     const state = ensureTask(ctx, event.prompt);
-    selectNextStep(state);
-    const supervisorDecision = buildSupervisorDecision(state, config);
-    supervisorDecisions.set(state.task_id, supervisorDecision);
+    setSupervisionModeForTask(state, event.prompt);
+    let extraPrompt: string;
+    if (activeSupervisionMode === "supervised") {
+      selectNextStep(state);
+      const supervisorDecision = refreshSupervisorDecision(state);
+      extraPrompt = `[RELIABILITY HARNESS INSTRUCTIONS]\nA deterministic reliability harness is active in supervised mode. Treat its task state, plan, loop warnings, and verification records as the source of truth. Keep each action tied to the current step. Use reliability_set_plan to revise plans, reliability_record_progress to persist facts/decisions/errors, reliability_submit_worker_result to complete the current worker step, and reliability_verify_completion before final completion claims. If evidence is missing, say Unknown rather than inventing success.\n[/RELIABILITY HARNESS INSTRUCTIONS]\n\n${buildWorkerContractPrompt(supervisorDecision)}`;
+    } else {
+      extraPrompt = "[RELIABILITY LITE INSTRUCTIONS]\nA lightweight reliability harness is active. Work normally and avoid supervisor/worker ceremony. Do not call reliability_submit_worker_result unless a later prompt explicitly switches to supervised mode. Call reliability_verify_completion with concrete evidence before claiming completion. Use reliability_record_progress only for major milestones, errors, or decisions.\n[/RELIABILITY LITE INSTRUCTIONS]";
+    }
     saveTaskState(state, "before_agent_start");
-    updateUi(ctx, enabled, state, config);
+    updateUi(ctx, enabled, state, runtimeConfig());
 
     return {
-      systemPrompt: `${event.systemPrompt}\n\n[RELIABILITY HARNESS INSTRUCTIONS]\nA deterministic reliability harness is active. Treat its task state, plan, loop warnings, and verification records as the source of truth. Keep each action tied to the current step. Use reliability_set_plan to revise plans, reliability_record_progress to persist facts/decisions/errors, reliability_submit_worker_result to complete the current worker step, and reliability_verify_completion before final completion claims. If evidence is missing, say Unknown rather than inventing success.\n[/RELIABILITY HARNESS INSTRUCTIONS]\n\n${buildWorkerContractPrompt(supervisorDecision)}`,
+      systemPrompt: `${event.systemPrompt}\n\n${extraPrompt}`,
     };
   });
 
@@ -536,7 +658,7 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
     if (!enabled || !activeTask) return;
     activeTask.counters.context_injections += 1;
     const previousSnapshot = contextSnapshots.get(activeTask.task_id);
-    const { header, snapshot } = buildContextHeader(activeTask, config, previousSnapshot);
+    const { header, snapshot } = buildContextHeader(activeTask, runtimeConfig(), previousSnapshot);
     contextSnapshots.set(activeTask.task_id, snapshot);
     saveTaskState(activeTask, "context_header_injected");
     return {
@@ -570,25 +692,27 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
       pushBounded(activeTask.loop_warnings, reason, MAX_ERRORS);
       activeTask.status = "blocked";
       setStepStatus(activeTask, activeTask.current_step_id, "blocked");
+      escalateSupervision(ctx, activeTask, "repeated tool action was blocked");
       saveTaskState(activeTask, "loop_detected_blocked_tool_call");
-      updateUi(ctx, enabled, activeTask, config);
+      updateUi(ctx, enabled, activeTask, runtimeConfig());
       ctx.ui.notify(reason, "warning");
       return { block: true, reason };
     }
 
     recordToolCall(activeTask, event.toolCallId, event.toolName, event.input);
     saveTaskState(activeTask, "tool_call_recorded");
-    updateUi(ctx, enabled, activeTask, config);
+    updateUi(ctx, enabled, activeTask, runtimeConfig());
   });
 
   pi.on("tool_result", async (event, ctx) => {
     if (!enabled || !activeTask) return;
     const summary = summarizeToolResult(event);
     updateToolResult(activeTask, event.toolCallId, event.toolName, event.input, event.isError === true, summary, contentToText(event.content), config);
+    if (event.isError === true) escalateSupervision(ctx, activeTask, `${event.toolName} returned an error`);
     if (activeTask.status === "blocked" && event.isError !== true) activeTask.status = "executing";
     selectNextStep(activeTask);
     saveTaskState(activeTask, "tool_result_recorded");
-    updateUi(ctx, enabled, activeTask, config);
+    updateUi(ctx, enabled, activeTask, runtimeConfig());
   });
 
   pi.on("message_end", async (event, ctx) => {
@@ -601,14 +725,15 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
     const completionGate = evaluateCompletionGate(activeTask, text, assistantHasToolCall(event.message), config);
     if (completionGate.triggered) {
       addUniqueBounded(activeTask.open_questions, completionGate.message, MAX_FACTS);
+      escalateSupervision(ctx, activeTask, "completion was claimed before verification passed");
       if (ctx.hasUI) ctx.ui.notify(completionGate.message, completionGate.strict ? "error" : "warning");
-      if (completionGate.strict && !completionGatePromptedTaskIds.has(activeTask.task_id)) {
+      if ((completionGate.strict || config.supervisionMode === "adaptive") && !completionGatePromptedTaskIds.has(activeTask.task_id)) {
         completionGatePromptedTaskIds.add(activeTask.task_id);
         pi.sendUserMessage(buildCompletionGatePrompt(activeTask, completionGate), { deliverAs: "followUp" });
       }
     }
     saveTaskState(activeTask, "assistant_message_recorded");
-    updateUi(ctx, enabled, activeTask, config);
+    updateUi(ctx, enabled, activeTask, runtimeConfig());
   });
 
   pi.on("agent_end", async (_event, ctx) => {
@@ -620,7 +745,7 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
       ctx.ui.notify(`Reliability task verified complete: ${activeTask.task_id}`, "success");
     }
     saveTaskState(activeTask, "agent_end");
-    updateUi(ctx, enabled, activeTask, config);
+    updateUi(ctx, enabled, activeTask, runtimeConfig());
   });
 
   pi.on("session_shutdown", async () => {
