@@ -3155,40 +3155,43 @@ async function runGitReadCommand(root, args, { timeoutMs = GIT_CHANGES_COMMAND_T
   throw new Error(String(message).trim());
 }
 
-function gitBranchFromStatus(statusText) {
-  const branchLine = String(statusText || "").split(/\r?\n/).find((line) => line.startsWith("## ")) || "";
-  return branchLine.slice(3).trim().replace(/\.\.\..*$/, "") || "detached";
+function gitBranchFromPorcelainStatus(statusText) {
+  for (const line of String(statusText || "").split(/\r?\n/)) {
+    if (!line.startsWith("# branch.head ")) continue;
+    const branch = line.slice("# branch.head ".length).trim();
+    return branch && branch !== "(detached)" ? branch : "detached";
+  }
+  return "detached";
 }
 
-function gitDivergenceFromBranchStatus(line) {
-  const details = String(line || "").match(/\[(.+)\]\s*$/)?.[1] || "";
-  const ahead = Number.parseInt(details.match(/ahead\s+(\d+)/i)?.[1] || "0", 10) || 0;
-  const behind = Number.parseInt(details.match(/behind\s+(\d+)/i)?.[1] || "0", 10) || 0;
-  return { ahead, behind };
+function addGitPorcelainTrackedSummary(summary, xy) {
+  const x = xy?.[0] || ".";
+  const y = xy?.[1] || ".";
+  if (x !== ".") summary.staged += 1;
+  if (y !== ".") summary.unstaged += 1;
 }
 
-function summarizeGitShortStatus(statusText) {
+function summarizeGitPorcelainStatus(statusText) {
   const summary = { staged: 0, unstaged: 0, untracked: 0, conflicted: 0, ahead: 0, behind: 0 };
   for (const line of String(statusText || "").split(/\r?\n/)) {
     if (!line) continue;
-    if (line.startsWith("## ")) {
-      const divergence = gitDivergenceFromBranchStatus(line);
-      summary.ahead = divergence.ahead;
-      summary.behind = divergence.behind;
+    if (line.startsWith("# branch.ab ")) {
+      const match = line.match(/\+(\d+)\s+-(\d+)/);
+      if (match) {
+        summary.ahead = Number.parseInt(match[1] || "0", 10) || 0;
+        summary.behind = Number.parseInt(match[2] || "0", 10) || 0;
+      }
       continue;
     }
-    const x = line[0] || " ";
-    const y = line[1] || " ";
-    if (x === "?" && y === "?") {
-      summary.untracked += 1;
+    if (line.startsWith("1 ") || line.startsWith("2 ")) {
+      addGitPorcelainTrackedSummary(summary, line.split(" ")[1] || "..");
       continue;
     }
-    if (x === "U" || y === "U" || (x === "A" && y === "A") || (x === "D" && y === "D")) {
+    if (line.startsWith("u ")) {
       summary.conflicted += 1;
       continue;
     }
-    if (x && x !== " ") summary.staged += 1;
-    if (y && y !== " ") summary.unstaged += 1;
+    if (line.startsWith("? ")) summary.untracked += 1;
   }
   return summary;
 }
@@ -3293,20 +3296,21 @@ async function pullGitChanges(cwd) {
 async function readGitChanges(cwd) {
   const root = await getGitRoot(cwd);
   const diffArgs = ["diff", "--no-ext-diff", "--no-color", "--find-renames", "--unified=0", "--src-prefix=a/", "--dst-prefix=b/"];
-  const [statusText, unstagedDiff, stagedDiff, untrackedText] = await Promise.all([
+  const [statusText, porcelainStatusText, unstagedDiff, stagedDiff, untrackedText] = await Promise.all([
     runGitReadCommand(root, ["status", "--short", "--branch", "--untracked-files=all"], { maxOutputLength: 120_000 }),
+    runGitReadCommand(root, ["status", "--porcelain=2", "--branch", "--untracked-files=all"], { maxOutputLength: 120_000 }),
     runGitReadCommand(root, diffArgs),
     runGitReadCommand(root, ["diff", "--cached", "--no-ext-diff", "--no-color", "--find-renames", "--unified=0", "--src-prefix=a/", "--dst-prefix=b/"]),
     runGitReadCommand(root, ["ls-files", "--others", "--exclude-standard"], { maxOutputLength: 120_000 }),
   ]);
-  const summary = summarizeGitShortStatus(statusText);
+  const summary = summarizeGitPorcelainStatus(porcelainStatusText);
   const incoming = await readGitIncomingChanges(root, summary);
   const untrackedFiles = untrackedText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const untracked = await readGitUntrackedEntries(root, untrackedFiles);
   return {
     cwd,
     root,
-    branch: gitBranchFromStatus(statusText),
+    branch: gitBranchFromPorcelainStatus(porcelainStatusText),
     generatedAt: new Date().toISOString(),
     summary,
     remote: incoming.remote,

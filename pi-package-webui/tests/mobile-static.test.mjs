@@ -357,6 +357,7 @@ assert.match(app, /function updateGitChangesCurrentFileHeader\(\)[\s\S]*?querySe
 assert.match(server, /async function readGitUntrackedEntry\(root, file\)[\s\S]*?content: binary \? "" : buffer\.toString\("utf8"\)/, "server should include complete text contents for untracked files");
 assert.match(server, /url\.pathname === "\/api\/git-changes\/untracked-file" && req\.method === "GET"/, "server should expose a focused untracked-file content endpoint for stale path-only payload fallbacks");
 assert.match(server, /async function readGitChanges\(cwd\)[\s\S]*?const diffArgs = \["diff", "--no-ext-diff"[\s\S]*?"--unified=0"[\s\S]*?\["diff", "--cached"/, "server should collect compact staged and unstaged git diffs for the changes modal");
+assert.match(server, /\["status", "--porcelain=2", "--branch", "--untracked-files=all"\][\s\S]*?summarizeGitPorcelainStatus\(porcelainStatusText\)/, "server should derive behind/ahead from locale-independent porcelain status so the Pull button activates after fetch");
 assert.match(server, /async function readGitIncomingChanges\(root, summary\)[\s\S]*?"HEAD\.\.@\{upstream\}"/, "server should collect incoming upstream diffs when remote commits are behind");
 assert.match(server, /url\.pathname === "\/api\/git-changes" && req\.method === "GET"/, "server should expose GET /api/git-changes for the changes modal");
 assert.match(server, /url\.pathname === "\/api\/git-changes\/pull" && req\.method === "POST"[\s\S]*?pullGitChanges\(tab\.cwd\)/, "server should expose POST /api/git-changes/pull for the changes modal Pull button");

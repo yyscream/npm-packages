@@ -37,6 +37,22 @@ async function request(host, pathname, { method = "GET", body, timeoutMs = 5_000
   return { status: response.status, body: payload };
 }
 
+function runGitFixture(args, cwd, message) {
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: "Pi WebUI Test",
+      GIT_AUTHOR_EMAIL: "pi-webui-test@example.invalid",
+      GIT_COMMITTER_NAME: "Pi WebUI Test",
+      GIT_COMMITTER_EMAIL: "pi-webui-test@example.invalid",
+    },
+  });
+  assert.equal(result.status, 0, `${message}\n$ git ${args.join(" ")}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  return result.stdout.trim();
+}
+
 const cwd = await mkdtemp(path.join(tmpdir(), "pi-webui-http-harness-"));
 const settingsFile = path.join(cwd, "webui-settings.json");
 await chmod(fakePi, 0o755);
@@ -151,6 +167,47 @@ try {
     const gitMain = await request("127.0.0.1", "/api/git-workflow/main-branch", { method: "POST", body: { tab: tabId } });
     assert.equal(gitMain.status, 200);
     assert.equal(gitMain.body?.ok, true, "main branch endpoint should rename the branch");
+
+    const remoteFixtureRoot = await mkdtemp(path.join(tmpdir(), "pi-webui-git-remote-"));
+    const remoteBare = path.join(remoteFixtureRoot, "origin.git");
+    const localRepo = path.join(remoteFixtureRoot, "local");
+    const remoteWork = path.join(remoteFixtureRoot, "remote-work");
+    runGitFixture(["init", "--bare", remoteBare], remoteFixtureRoot, "remote fixture should initialize a bare origin");
+    runGitFixture(["init", localRepo], remoteFixtureRoot, "remote fixture should initialize a local repo");
+    runGitFixture(["config", "user.name", "Pi WebUI Test"], localRepo, "local repo should set a user name");
+    runGitFixture(["config", "user.email", "pi-webui-test@example.invalid"], localRepo, "local repo should set a user email");
+    await writeFile(path.join(localRepo, "incoming.txt"), "base\n");
+    runGitFixture(["add", "incoming.txt"], localRepo, "local repo should stage base content");
+    runGitFixture(["commit", "-m", "base"], localRepo, "local repo should commit base content");
+    runGitFixture(["branch", "-M", "main"], localRepo, "local repo should rename main branch");
+    runGitFixture(["remote", "add", "origin", remoteBare], localRepo, "local repo should add bare origin");
+    runGitFixture(["push", "-u", "origin", "main"], localRepo, "local repo should push main to bare origin");
+    runGitFixture(["symbolic-ref", "HEAD", "refs/heads/main"], remoteBare, "bare origin should advertise main as HEAD");
+    runGitFixture(["clone", remoteBare, remoteWork], remoteFixtureRoot, "remote worktree should clone bare origin");
+    runGitFixture(["config", "user.name", "Pi WebUI Test"], remoteWork, "remote worktree should set a user name");
+    runGitFixture(["config", "user.email", "pi-webui-test@example.invalid"], remoteWork, "remote worktree should set a user email");
+    await writeFile(path.join(remoteWork, "incoming.txt"), "base\nremote one\n");
+    runGitFixture(["commit", "-am", "remote one"], remoteWork, "remote worktree should commit first incoming change");
+    await writeFile(path.join(remoteWork, "incoming.txt"), "base\nremote one\nremote two\n");
+    runGitFixture(["commit", "-am", "remote two"], remoteWork, "remote worktree should commit second incoming change");
+    runGitFixture(["push", "origin", "main"], remoteWork, "remote worktree should push incoming commits");
+    runGitFixture(["fetch", "origin"], localRepo, "local repo should fetch incoming commits");
+
+    const remoteTab = await request("127.0.0.1", "/api/tabs", { method: "POST", body: { cwd: localRepo, title: "remote-behind-fixture" } });
+    assert.equal(remoteTab.status, 201);
+    const remoteTabId = remoteTab.body?.data?.tab?.id;
+    assert.ok(remoteTabId, "remote fixture tab should have an id");
+    const incomingChanges = await request("127.0.0.1", `/api/git-changes?tab=${encodeURIComponent(remoteTabId)}`);
+    assert.equal(incomingChanges.status, 200);
+    assert.equal(incomingChanges.body?.ok, true, "git changes endpoint should load a fetched-behind repo");
+    assert.equal(incomingChanges.body?.data?.summary?.behind, 2, "git changes endpoint should report two fetched commits behind");
+    assert.equal(incomingChanges.body?.data?.remote?.canPull, true, "git changes endpoint should mark fetched commits as pullable");
+    assert.ok(incomingChanges.body?.data?.sections?.some((section) => section.key === "incoming"), "git changes endpoint should include an incoming diff section");
+
+    const pullIncoming = await request("127.0.0.1", "/api/git-changes/pull", { method: "POST", body: { tab: remoteTabId }, timeoutMs: 20_000 });
+    assert.equal(pullIncoming.status, 200);
+    assert.equal(pullIncoming.body?.ok, true, "pull endpoint should fast-forward fetched incoming commits");
+    assert.equal(pullIncoming.body?.data?.changes?.summary?.behind, 0, "pull endpoint should refresh changes with no remote commits left behind");
 
     const gitRemote = await request("127.0.0.1", "/api/git-workflow/remote", { method: "POST", body: { username: "Firstp1ck", repoName: "pi-webui-http-harness", tab: tabId } });
     assert.equal(gitRemote.status, 200);
