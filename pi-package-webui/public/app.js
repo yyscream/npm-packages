@@ -518,6 +518,7 @@ const TOOL_LIVE_UPDATE_THROTTLE_MS = 80;
 const UNEXPOSED_THINKING_TEXT = "No thinking content was exposed by the provider.";
 const THINKING_FORMAT_OPEN_TAG_REGEX = /^<think\b[^>]*>/i;
 const THINKING_FORMAT_CLOSE_TAG_REGEX = /<\/think\s*>/i;
+const CHANNEL_THINKING_FORMAT_OPEN_TAG_REGEX = /^<\|([a-z][\w-]*)>/i;
 const TODO_PROGRESS_LINE_REGEX = /^\s*(?:(?:[-*]|\d+[.)])\s*)?\[(?: |x|X|-)\]\s+.+$/;
 const TODO_PROGRESS_PARTIAL_LINE_REGEX = /^\s*(?:(?:[-*]|\d+[.)])\s*)?\[(?: |x|X|-)?\]?\s*.*$/;
 const CHAT_SCROLL_KEYS = new Set(["ArrowDown", "ArrowUp", "End", "Home", "PageDown", "PageUp", " "]);
@@ -13448,20 +13449,26 @@ function visibleThinkingText(text) {
   return value;
 }
 
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function isPartialThinkingFormatOpenTag(text) {
   const value = String(text || "").trimStart().toLowerCase();
   if (!value) return false;
   if ("<think>".startsWith(value)) return true;
+  if (value === "<|" || /^<\|[a-z][\w-]*$/i.test(value)) return true;
   return /^<think\b[^>]*$/i.test(value);
 }
 
-function stripPartialThinkingFormatClose(text) {
+function stripPartialThinkingFormatClose(text, closeTag = "</think>") {
   const value = String(text || "");
   const lower = value.toLowerCase();
-  const start = lower.lastIndexOf("</");
+  const expected = String(closeTag || "").toLowerCase();
+  const start = lower.lastIndexOf("<");
   if (start < 0) return value;
   const partial = lower.slice(start).trimEnd();
-  return "</think>".startsWith(partial) ? value.slice(0, start) : value;
+  return expected.startsWith(partial) ? value.slice(0, start) : value;
 }
 
 function stripThinkingFormatOutputSeparator(text) {
@@ -13472,29 +13479,40 @@ function joinedThinkingFormatParts(parts) {
   return parts.map((part) => String(part || "")).filter((part) => part.length > 0).join("\n\n");
 }
 
+function thinkingFormatOpenMatch(text) {
+  const value = String(text || "");
+  const think = THINKING_FORMAT_OPEN_TAG_REGEX.exec(value);
+  if (think) return { raw: think[0], closeRegex: THINKING_FORMAT_CLOSE_TAG_REGEX, closeTag: "</think>" };
+  const channel = CHANNEL_THINKING_FORMAT_OPEN_TAG_REGEX.exec(value);
+  if (!channel) return null;
+  const name = channel[1];
+  return { raw: channel[0], closeRegex: new RegExp(`<${escapeRegExp(name)}\\|>`, "i"), closeTag: `<${name}|>` };
+}
+
 function splitThinkingFormatText(text, { streaming = false } = {}) {
   let rest = String(text ?? "").trimStart();
   if (!rest) return null;
-  if (!THINKING_FORMAT_OPEN_TAG_REGEX.test(rest)) {
+  if (!thinkingFormatOpenMatch(rest)) {
     return streaming && isPartialThinkingFormatOpenTag(rest)
       ? { hasThinkingFormat: true, thinkingText: "", finalText: "", complete: false }
       : null;
   }
 
   const thinkingParts = [];
-  while (THINKING_FORMAT_OPEN_TAG_REGEX.test(rest)) {
-    const open = THINKING_FORMAT_OPEN_TAG_REGEX.exec(rest);
-    const afterOpen = rest.slice(open[0].length);
-    const close = THINKING_FORMAT_CLOSE_TAG_REGEX.exec(afterOpen);
+  let open = thinkingFormatOpenMatch(rest);
+  while (open) {
+    const afterOpen = rest.slice(open.raw.length);
+    const close = open.closeRegex.exec(afterOpen);
     if (!close) {
-      thinkingParts.push(streaming ? stripPartialThinkingFormatClose(afterOpen) : afterOpen);
+      thinkingParts.push(streaming ? stripPartialThinkingFormatClose(afterOpen, open.closeTag) : afterOpen);
       return { hasThinkingFormat: true, thinkingText: joinedThinkingFormatParts(thinkingParts), finalText: "", complete: false };
     }
 
     thinkingParts.push(afterOpen.slice(0, close.index));
     rest = afterOpen.slice(close.index + close[0].length);
     const next = rest.trimStart();
-    if (THINKING_FORMAT_OPEN_TAG_REGEX.test(next)) {
+    open = thinkingFormatOpenMatch(next);
+    if (open) {
       rest = next;
       continue;
     }
