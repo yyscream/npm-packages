@@ -11,6 +11,7 @@ SCRIPTS_DIR = SKILL_DIR / "scripts"
 BUILD_INDEX = SCRIPTS_DIR / "build_repo_index.py"
 EXTRACT_HANDOFF = SCRIPTS_DIR / "extract_explorer_handoff.py"
 VALIDATE_HANDOFF = SCRIPTS_DIR / "validate_handoff.py"
+SUMMARIZE_REPORTS = SCRIPTS_DIR / "summarize_effectiveness_reports.py"
 
 
 def _env():
@@ -57,6 +58,14 @@ class RepoExplorerTests(unittest.TestCase):
         self.assertIn("writeEffectivenessReport", source)
         self.assertIn("repo-explorer-effectiveness-", source)
         self.assertIn("effectiveness_report", source)
+        self.assertIn('"--budget", budget', source)
+        self.assertIn('"--include-evidence", includeEvidence ? "true" : "false"', source)
+        self.assertIn("## Model-Visible Output", source)
+        self.assertIn("## Explorer Limitations", source)
+        self.assertIn("## Target Repository Risks", source)
+        self.assertIn("## Tracking Metadata", source)
+        self.assertIn("## Improvement Signals", source)
+        self.assertIn("## Downstream Feedback Capture", source)
 
     def test_skill_documents_effectiveness_report_requirement(self):
         source = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
@@ -325,7 +334,7 @@ class RepoExplorerTests(unittest.TestCase):
             validation = _run([VALIDATE_HANDOFF, "--input", "-"], input_text=json.dumps(handoff))
             self.assertTrue(json.loads(validation.stdout)["valid"])
 
-    def test_extraction_reports_symbol_budget_trimming(self):
+    def test_extraction_records_omitted_symbol_budget_without_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "fixture"
             (repo / "src").mkdir(parents=True)
@@ -351,9 +360,150 @@ class RepoExplorerTests(unittest.TestCase):
             error_codes = {item["code"] for item in handoff["errors"]}
 
             self.assertEqual(len(handoff["relevant_symbols"]), 30)
-            self.assertIn("budget_exceeded", error_codes)
+            self.assertEqual(handoff["omitted"]["relevant_symbols"], 5)
+            self.assertIn("budget", handoff["omitted"]["reasons"])
+            self.assertNotIn("budget_exceeded", error_codes)
             validation = _run([VALIDATE_HANDOFF, "--input", "-"], input_text=json.dumps(handoff))
             self.assertTrue(json.loads(validation.stdout)["valid"])
+
+    def test_compact_no_evidence_uses_budget_and_records_omissions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "fixture"
+            (repo / "src").mkdir(parents=True)
+            (repo / "src" / "auth.ts").write_text(
+                "\n".join(f"export function authThing{i}() {{ return {i}; }}" for i in range(35)),
+                encoding="utf-8",
+            )
+
+            index_path = repo / "index.json"
+            _build_index(repo, index_path)
+            result = _run([
+                EXTRACT_HANDOFF,
+                "--index",
+                index_path,
+                "--goal",
+                "find auth functions",
+                "--depth",
+                "standard",
+                "--budget",
+                "compact",
+                "--include-evidence",
+                "false",
+                "--target-paths",
+                repo,
+            ])
+            handoff = json.loads(result.stdout)
+            error_codes = {item["code"] for item in handoff["errors"]}
+
+            self.assertLessEqual(len(handoff["key_files"]), 8)
+            self.assertLessEqual(len(handoff["relevant_symbols"]), 12)
+            self.assertGreater(len(handoff["relevant_symbols"]), 0)
+            self.assertEqual(handoff["evidence"], [])
+            self.assertGreater(handoff["omitted"]["relevant_symbols"], 0)
+            self.assertGreater(handoff["omitted"]["evidence"], 0)
+            self.assertIn("user-did-not-request-evidence", handoff["omitted"]["reasons"])
+            self.assertNotIn("budget_exceeded", error_codes)
+            validation = _run([VALIDATE_HANDOFF, "--input", "-"], input_text=json.dumps(handoff))
+            self.assertTrue(json.loads(validation.stdout)["valid"])
+
+    def test_trace_goal_with_no_dependency_edges_records_explorer_limitation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "fixture"
+            (repo / "src").mkdir(parents=True)
+            (repo / "src" / "auth.ts").write_text(
+                "export function loginUser() { return true; }\n",
+                encoding="utf-8",
+            )
+
+            index_path = repo / "index.json"
+            _build_index(repo, index_path)
+            result = _run([
+                EXTRACT_HANDOFF,
+                "--index",
+                index_path,
+                "--goal",
+                "trace auth flow wiring",
+                "--depth",
+                "standard",
+                "--budget",
+                "compact",
+                "--include-evidence",
+                "false",
+                "--target-paths",
+                repo,
+            ])
+            handoff = json.loads(result.stdout)
+            limitation_codes = {item["code"] for item in handoff["explorer_limitations"]}
+
+            self.assertEqual(handoff["dependency_map"], [])
+            self.assertIn("dependency_trace_empty", limitation_codes)
+            validation = _run([VALIDATE_HANDOFF, "--input", "-"], input_text=json.dumps(handoff))
+            self.assertTrue(json.loads(validation.stdout)["valid"])
+
+    def test_effectiveness_summary_script_creates_improvement_markdown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reports_dir = Path(tmp) / "reports"
+            reports_dir.mkdir()
+            (reports_dir / "repo-explorer-effectiveness-2026-06-20T00-00-00-000Z-demo.md").write_text(
+                "# Repo Explorer Effectiveness Report\n\n"
+                "- Generated: 2026-06-20T00:00:00Z\n"
+                "- Status: completed\n"
+                "- Assessment: partial\n"
+                "- Goal: trace auth flow\n\n"
+                "## Run Configuration\n\n"
+                "- Depth: standard\n"
+                "- Budget: compact\n"
+                "- Evidence requested in tool output: no\n\n"
+                "## Effectiveness Signals\n\n"
+                "- Handoff validation: valid\n"
+                "- Key files found: 8\n"
+                "- Relevant symbols found: 12\n"
+                "- Dependency edges found: 0\n"
+                "- Evidence snippets collected: 0\n\n"
+                "## Omitted Items\n\n"
+                "- Key files omitted: 3\n"
+                "- Symbols omitted: 10\n"
+                "- Dependency edges omitted: 0\n"
+                "- Evidence omitted: 12\n"
+                "- Omission reasons: budget, symbol-diversity, user-did-not-request-evidence\n\n"
+                "## Improvement Signals\n\n"
+                "- dependency_trace_empty\n"
+                "- high_symbol_omission\n\n"
+                "## Explorer Limitations\n\n"
+                "- [medium] dependency_trace_empty: no dependency edges\n",
+                encoding="utf-8",
+            )
+            (reports_dir / "repo-explorer-effectiveness-2026-06-19T00-00-00-000Z-legacy.md").write_text(
+                "# Repo Explorer Effectiveness Report\n\n"
+                "- Generated: 2026-06-19T00:00:00Z\n"
+                "- Status: completed\n"
+                "- Assessment: partial\n"
+                "- Goal: find auth flow\n\n"
+                "## Run Configuration\n\n"
+                "- Depth: standard\n"
+                "- Budget: compact\n"
+                "- Evidence requested in tool output: no\n\n"
+                "## Effectiveness Signals\n\n"
+                "- Handoff validation: valid\n"
+                "- Key files found: 25\n"
+                "- Relevant symbols found: 30\n"
+                "- Dependency edges found: 0\n"
+                "- Evidence snippets collected: 5\n\n"
+                "## Risks and Errors\n\n"
+                "- budget_exceeded: relevant_symbols trimmed to 30\n",
+                encoding="utf-8",
+            )
+            output = Path(tmp) / "summary.md"
+
+            result = _run([SUMMARIZE_REPORTS, "--reports-dir", reports_dir, "--output", output])
+            summary = output.read_text(encoding="utf-8")
+
+            self.assertIn(str(output), result.stdout)
+            self.assertIn("Reports parsed: 2", summary)
+            self.assertIn("dependency_trace_empty", summary)
+            self.assertIn("legacy_budget_exceeded", summary)
+            self.assertIn("P1: improve dependency/call tracing", summary)
+            self.assertIn("## Recommended Backlog", summary)
 
 
 if __name__ == "__main__":

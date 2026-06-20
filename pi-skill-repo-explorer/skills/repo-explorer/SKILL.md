@@ -28,7 +28,7 @@ If the request is natural language, infer these fields before proceeding.
 
 ### Step 2: Prefer Native Tool When Available
 
-If the `repo_explorer_explore` tool is available, call it first with `budget: "compact"`. It wraps index refresh/build, extraction, validation, and compact output in one tool call.
+If the `repo_explorer_explore` tool is available, call it first with `budget: "compact"` and `includeEvidence: false` unless exact snippets are needed. It wraps index refresh/build, budget-aware extraction, validation, report writing, and compact output in one tool call.
 
 Use the script workflow below only when the native tool is unavailable or you need to debug the helper scripts directly.
 
@@ -68,6 +68,8 @@ python3 ./scripts/extract_explorer_handoff.py \
   --index data/<repo-name>-index.json \
   --goal "<goal>" \
   --depth standard \
+  --budget compact \
+  --include-evidence false \
   --target-paths "<target_path>" \
   > /tmp/repo-explorer-handoff.json
 ```
@@ -91,9 +93,20 @@ If the native `repo_explorer_explore` tool is used, it writes this report automa
 The report must summarize:
 
 - target path, goal, depth, budget, and whether evidence was requested
-- validation status and counts for indexed files, key files, symbols, dependencies, risks, errors, and evidence
+- tracking metadata: schema version, goal category, trace-goal flag, target repo key, and report purpose
+- validation status and counts for indexed files, key files, symbols, dependencies, explorer limitations, target repository risks, errors, and evidence
+- model-visible output counts, approximate output size, omitted item counts, and omission reasons
+- improvement signals, improvement candidates, and downstream feedback placeholders for manual post-run notes
 - an effectiveness assessment: `effective`, `partial`, `needs-follow-up`, or `failed`
-- rationale plus any risks, errors, validation failures, or invocation failure details
+- rationale plus split sections for explorer limitations, target repository risks, errors, validation failures, or invocation failure details
+
+To roll up many per-invocation reports into an improvement Markdown summary, run:
+
+```bash
+python3 ./scripts/summarize_effectiveness_reports.py \
+  --reports-dir . \
+  --output repo-explorer-effectiveness-summary.md
+```
 
 ### Step 6: Return
 
@@ -110,6 +123,8 @@ The caller provides (explicitly or inferred from natural language):
   "goal": "string — what the caller needs to understand",
   "target_paths": ["string — absolute path(s) to explore"],
   "depth": "shallow | standard | deep",
+  "budget": "optional — compact | normal | full",
+  "includeEvidence": "optional boolean — collect snippet bodies only when needed",
   "constraints": {
     "languages": ["optional — filter by language"],
     "include_patterns": ["optional — glob patterns to include"],
@@ -199,6 +214,20 @@ Return exactly this structure. All fields are required unless marked optional.
       "code": "string — error code (insufficient_scope | index_stale | no_match | redacted_secret | budget_exceeded)",
       "message": "string — human-readable explanation"
     }
+  ],
+  "omitted": {
+    "key_files": "optional number — ranked file candidates omitted by budget",
+    "relevant_symbols": "optional number — ranked symbol candidates omitted by budget/diversity caps",
+    "dependency_map": "optional number — dependency edges omitted by budget",
+    "evidence": "optional number — evidence snippets omitted by budget or because evidence was not requested",
+    "reasons": ["optional strings such as budget, symbol-diversity, user-did-not-request-evidence"]
+  },
+  "explorer_limitations": [
+    {
+      "code": "optional string — machine-readable limitation code, e.g. dependency_trace_empty",
+      "message": "optional string — human-readable limitation",
+      "severity": "optional high | medium | low"
+    }
   ]
 }
 ```
@@ -216,7 +245,7 @@ These limits are non-negotiable and enforced by the handoff validator:
 | `risks_and_unknowns` | 10 | Only substantive risks, not trivial warnings |
 | `next_actions_for_caller` | 8 | Actionable and specific |
 
-If raw exploration yields more items than the limit, rank by relevance to the stated goal and keep only the top items. Add a `budget_exceeded` error entry noting what was trimmed.
+If raw exploration yields more items than the active budget or hard limit, rank by relevance to the stated goal, keep only the top items, and record counts/reasons in top-level `omitted` metadata. Use `budget_exceeded` only for legacy compatibility or when truncation itself prevents a useful handoff; ordinary bounded omission is not an explorer error.
 
 ## Redaction Rules
 
@@ -235,7 +264,7 @@ Replace any matches with `[REDACTED]` and add a `redacted_secret` error entry.
 | `index_stale` | Index is older than 24 hours; results may be outdated |
 | `no_match` | No files or symbols match the exploration goal |
 | `redacted_secret` | Sensitive values were found and redacted |
-| `budget_exceeded` | Results were trimmed to fit hard limits |
+| `budget_exceeded` | Legacy/blocking truncation case; ordinary bounded omission should be recorded in `omitted` instead |
 
 ## Safety
 

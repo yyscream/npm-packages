@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import reliabilityHarnessExtension from "../index.ts";
-import { addOrUpdateVerification, buildContextHeader, createTaskState, markTaskCompleteIfVerified, normalizeConfig, parseVerificationResult, redactSensitiveText, runOfflineReliabilityEvaluation, truncateRawLog } from "../src/core.ts";
+import { addOrUpdateVerification, buildContextHeader, createPlanModeRun, createTaskState, extractPlanModeProgress, markTaskCompleteIfVerified, nextPlanModePhaseAfterAgent, normalizeConfig, parseVerificationResult, redactSensitiveText, runOfflineReliabilityEvaluation, truncateRawLog } from "../src/core.ts";
 import { buildDryRunOrchestration, parseVerificationEvidenceFromText, parseWorkerResultFromText } from "../src/orchestration.ts";
 
 function createHarness(cwd, options = {}) {
@@ -16,6 +16,7 @@ function createHarness(cwd, options = {}) {
   const sentUserMessages = [];
   const statuses = new Map();
   const widgets = new Map();
+  const newSessions = [];
 
   const pi = {
     registerFlag() {},
@@ -46,6 +47,32 @@ function createHarness(cwd, options = {}) {
     cwd,
     hasUI: true,
     isProjectTrusted: () => true,
+    waitForIdle: async () => {},
+    async newSession(options = {}) {
+      const sessionEntries = [];
+      const sessionFile = join(cwd, `mock-new-session-${newSessions.length + 1}.jsonl`);
+      const sessionManager = {
+        appendCustomEntry(customType, data) {
+          sessionEntries.push({ type: "custom", customType, data });
+          return `custom-${sessionEntries.length}`;
+        },
+      };
+      await options.setup?.(sessionManager);
+      const sentUserMessagesForSession = [];
+      const nextCtx = {
+        ...ctx,
+        sessionManager: {
+          getBranch: () => sessionEntries,
+          getSessionFile: () => sessionFile,
+        },
+        sendUserMessage: async (content, sendOptions) => {
+          sentUserMessagesForSession.push({ content, options: sendOptions });
+        },
+      };
+      await options.withSession?.(nextCtx);
+      newSessions.push({ sessionFile, entries: sessionEntries, sentUserMessages: sentUserMessagesForSession });
+      return { cancelled: false };
+    },
     sessionManager: {
       getBranch: () => entries,
       getSessionFile: () => join(cwd, "mock-session.jsonl"),
@@ -76,7 +103,7 @@ function createHarness(cwd, options = {}) {
     return results;
   };
 
-  return { commands, tools, emit, ctx, entries, notifications, sentUserMessages, statuses, widgets };
+  return { commands, tools, emit, ctx, entries, notifications, sentUserMessages, statuses, widgets, newSessions };
 }
 
 function tempCwd() {
@@ -138,6 +165,63 @@ test("new session starts armed instead of auto-resuming latest task", async () =
     await resumed.emit("session_start", { reason: "resume" });
     await resumed.commands.get("reliability").handler("status", resumed.ctx);
     assert.match(resumed.notifications.at(-1).message, /previous live task/);
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+test("plan mode command starts exploration in a fresh session with markdown artifacts", async () => {
+  const cwd = tempCwd();
+  try {
+    const harness = createHarness(cwd);
+    await harness.emit("session_start");
+    await harness.commands.get("reliability").handler("--mode plan-on implement a plan-mode feature", harness.ctx);
+
+    assert.equal(harness.newSessions.length, 1);
+    const kickoff = harness.newSessions[0].sentUserMessages[0].content;
+    assert.match(kickoff, /Phase: EXPLORE/);
+    assert.match(kickoff, /01-exploration\.md/);
+
+    const [taskId] = taskIds(cwd);
+    assert.ok(taskId);
+    assert.match(readFileSync(join(cwd, ".pi", "tasks", taskId, "plan-mode", "01-exploration.md"), "utf8"), /Status: TODO/);
+    assert.match(readFileSync(join(cwd, ".pi", "tasks", taskId, "plan-mode", "02-implementation-plan.md"), "utf8"), /## Progress/);
+    assert.ok(harness.statuses.has("reliability-plan-mode"));
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+test("plan mode verification failure creates failure artifact and reopens plan progress", () => {
+  const cwd = tempCwd();
+  try {
+    const config = normalizeConfig({ profile: "balanced" });
+    const task = createTaskState(cwd, "fix verification failure", undefined, config);
+    const run = createPlanModeRun(task);
+    writeFileSync(run.artifacts.plan, [
+      "# Detailed Implementation Plan",
+      "",
+      "Status: IN_PROGRESS",
+      "",
+      "## Progress",
+      "- [x] Implement the feature",
+    ].join("\n"));
+    writeFileSync(run.artifacts.verification, [
+      "# Plan Mode Verification",
+      "",
+      "Status: FAILED",
+      "",
+      "Tests failed with one assertion error.",
+    ].join("\n"));
+    run.phase = "verify";
+
+    const decision = nextPlanModePhaseAfterAgent(run);
+    const progress = extractPlanModeProgress(readFileSync(run.artifacts.plan, "utf8"));
+
+    assert.equal(decision.phase, "implement");
+    assert.equal(progress.open, 1);
+    assert.match(readFileSync(run.artifacts.plan, "utf8"), /Verification remediation/);
+    assert.ok(readdirSync(run.artifacts.failuresDir).some((name) => name.endsWith(".md")));
   } finally {
     cleanup(cwd);
   }

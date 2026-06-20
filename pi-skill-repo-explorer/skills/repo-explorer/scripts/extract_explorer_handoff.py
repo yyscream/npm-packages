@@ -8,7 +8,9 @@ Usage:
     python3 extract_explorer_handoff.py \
         --index data/repo-index.json \
         --goal "find the authentication flow" \
-        --depth standard
+        --depth standard \
+        --budget compact \
+        --include-evidence false
 
 Output: JSON handoff to stdout (pipe to validate_handoff.py to verify).
 """
@@ -17,6 +19,7 @@ import argparse
 import json
 import re
 import sys
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
@@ -27,6 +30,36 @@ HARD_LIMITS = {
     "evidence": 15,
     "risks_and_unknowns": 10,
     "next_actions_for_caller": 8,
+}
+
+BUDGET_LIMITS = {
+    "compact": {
+        "key_files": 8,
+        "relevant_symbols": 12,
+        "dependency_map": 6,
+        "evidence": 2,
+        "symbols_per_file": 4,
+    },
+    "normal": {
+        "key_files": 15,
+        "relevant_symbols": 18,
+        "dependency_map": 10,
+        "evidence": 4,
+        "symbols_per_file": 6,
+    },
+    "full": {
+        "key_files": HARD_LIMITS["key_files"],
+        "relevant_symbols": HARD_LIMITS["relevant_symbols"],
+        "dependency_map": HARD_LIMITS["dependency_map"],
+        "evidence": HARD_LIMITS["evidence"],
+        "symbols_per_file": HARD_LIMITS["relevant_symbols"],
+    },
+}
+
+TRACE_GOAL_TERMS = {
+    "flow", "flows", "trace", "traces", "tracing", "call", "calls", "called",
+    "wire", "wired", "wiring", "implementation", "path", "imports", "import",
+    "dependency", "dependencies", "route", "routes",
 }
 
 SECRET_PATTERNS = [
@@ -134,6 +167,43 @@ def confidence_reason(confidence: str, score: float, has_goal_keywords: bool) ->
     if confidence == "medium":
         return "Medium confidence: lexical or contextual match to the exploration goal."
     return "Low confidence: weak match included to preserve nearby repository context."
+
+
+def parse_bool(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"Expected boolean value, got: {value}")
+
+
+def limits_for_budget(depth: str, budget: str, include_evidence: bool) -> dict:
+    limits = dict(BUDGET_LIMITS.get(budget, BUDGET_LIMITS["full"]))
+    depth_key_limit = {"shallow": 10, "standard": HARD_LIMITS["key_files"], "deep": HARD_LIMITS["key_files"]}.get(depth, HARD_LIMITS["key_files"])
+    depth_evidence_limit = {"shallow": 0, "standard": 5, "deep": 10}.get(depth, 5)
+
+    limits["key_files"] = min(limits["key_files"], depth_key_limit, HARD_LIMITS["key_files"])
+    limits["relevant_symbols"] = min(limits["relevant_symbols"], HARD_LIMITS["relevant_symbols"])
+    limits["dependency_map"] = min(limits["dependency_map"], HARD_LIMITS["dependency_map"])
+    limits["evidence"] = min(limits["evidence"], depth_evidence_limit, HARD_LIMITS["evidence"])
+
+    if depth == "shallow":
+        limits["relevant_symbols"] = 0
+        limits["dependency_map"] = 0
+    if not include_evidence:
+        limits["evidence"] = 0
+
+    return limits
+
+
+def add_omitted_reason(omitted: dict, reason: str) -> None:
+    if reason not in omitted["reasons"]:
+        omitted["reasons"].append(reason)
+
+
+def is_trace_goal(goal: str) -> bool:
+    return bool(set(goal_keywords(goal)) & TRACE_GOAL_TERMS)
 
 
 def content_keyword_score(file_entry: dict, keywords: set[str]) -> float:
@@ -259,10 +329,19 @@ def extract_evidence_snippet(file_path: str, line_start: int, max_lines: int = 2
         return None
 
 
-def build_handoff(index: dict, goal: str, depth: str, target_paths: list[str]) -> dict:
+def build_handoff(index: dict, goal: str, depth: str, target_paths: list[str], budget: str = "full", include_evidence: bool = True) -> dict:
     keywords = goal_keywords(goal)
     files = index.get("files", [])
+    limits = limits_for_budget(depth, budget, include_evidence)
     errors = []
+    explorer_limitations = []
+    omitted = {
+        "key_files": 0,
+        "relevant_symbols": 0,
+        "dependency_map": 0,
+        "evidence": 0,
+        "reasons": [],
+    }
     had_redaction = False
 
     index_age = 0
@@ -283,14 +362,12 @@ def build_handoff(index: dict, goal: str, depth: str, target_paths: list[str]) -
     scored_files = [(f, score_file(f, keywords)) for f in files]
     scored_files.sort(key=lambda x: -x[1])
 
-    depth_file_limit = {"shallow": 10, "standard": 25, "deep": 25}.get(depth, 25)
-    top_files = scored_files[:depth_file_limit]
     min_file_score = 0.1 if not keywords else {"shallow": 2.0, "standard": 2.0, "deep": 1.0}.get(depth, 2.0)
+    file_candidates = [(f, score) for f, score in scored_files if score >= min_file_score]
+    selected_file_entries = file_candidates[:limits["key_files"]]
 
     key_files = []
-    for f, score in top_files:
-        if score < min_file_score:
-            continue
+    for f, score in selected_file_entries:
         relevance = "high" if score >= 5.0 else "medium"
         confidence = confidence_label(score, high=7.0, medium=3.0)
         key_files.append({
@@ -303,25 +380,37 @@ def build_handoff(index: dict, goal: str, depth: str, target_paths: list[str]) -
             "confidence_reason": confidence_reason(confidence, score, bool(keywords)),
         })
 
-    if len(key_files) > HARD_LIMITS["key_files"]:
-        key_files = key_files[:HARD_LIMITS["key_files"]]
-        errors.append({
-            "code": "budget_exceeded",
-            "message": f"key_files trimmed to {HARD_LIMITS['key_files']}",
-        })
+    omitted["key_files"] = max(0, len(file_candidates) - len(key_files))
+    if omitted["key_files"]:
+        add_omitted_reason(omitted, "budget")
 
     all_symbols = []
-    for f, _ in top_files:
+    seen_symbol_candidates = set()
+    for f, _ in selected_file_entries:
         for sym in f.get("symbols", []):
             sym_score = score_symbol(sym, f, keywords)
+            candidate_key = (f.get("relative_path", f.get("path", "")), sym.get("name", ""), sym.get("line_start", sym.get("line", 0)))
+            if candidate_key in seen_symbol_candidates:
+                continue
+            seen_symbol_candidates.add(candidate_key)
             all_symbols.append((sym, f, sym_score))
 
     all_symbols.sort(key=lambda x: -x[2])
 
+    min_symbol_score = 0.1 if not keywords else {"shallow": 99.0, "standard": 3.0, "deep": 1.0}.get(depth, 3.0)
+    if budget == "compact" and keywords:
+        min_symbol_score += 0.5
+    symbol_candidates = [(sym, f, score) for sym, f, score in all_symbols if score >= min_symbol_score]
+
     relevant_symbols = []
-    min_symbol_score = 0.1 if not keywords else {"shallow": 3.0, "standard": 3.0, "deep": 1.0}.get(depth, 3.0)
-    for sym, f, score in all_symbols:
-        if score < min_symbol_score:
+    symbol_counts_by_file = Counter()
+    symbol_limit = limits["relevant_symbols"]
+    per_file_limit = limits["symbols_per_file"]
+    for sym, f, score in symbol_candidates:
+        if len(relevant_symbols) >= symbol_limit:
+            break
+        file_key = f.get("path", "")
+        if symbol_counts_by_file[file_key] >= per_file_limit:
             continue
         kind = normalize_symbol_kind(sym.get("kind", ""))
         line_start = sym.get("line_start", sym.get("line", 0))
@@ -337,41 +426,40 @@ def build_handoff(index: dict, goal: str, depth: str, target_paths: list[str]) -
             "confidence": confidence,
             "confidence_reason": confidence_reason(confidence, score, bool(keywords)),
         })
-        if len(relevant_symbols) >= HARD_LIMITS["relevant_symbols"]:
-            errors.append({
-                "code": "budget_exceeded",
-                "message": f"relevant_symbols trimmed to {HARD_LIMITS['relevant_symbols']}",
-            })
-            break
+        symbol_counts_by_file[file_key] += 1
+
+    omitted["relevant_symbols"] = max(0, len(symbol_candidates) - len(relevant_symbols))
+    if omitted["relevant_symbols"]:
+        add_omitted_reason(omitted, "budget")
+        if per_file_limit < HARD_LIMITS["relevant_symbols"]:
+            add_omitted_reason(omitted, "symbol-diversity")
 
     evidence = []
-    evidence_count = 0
-    evidence_limit = {"shallow": 0, "standard": 5, "deep": 10}.get(depth, 5)
-    for sym, f, score in all_symbols[:HARD_LIMITS["evidence"]]:
-        if evidence_count >= evidence_limit:
-            break
-        if score < 3.0:
-            continue
-        line_start = sym.get("line_start", sym.get("line", 1))
-        snippet = extract_evidence_snippet(f["path"], line_start)
-        if snippet:
-            snippet, was_redacted = redact_secrets(snippet)
-            if was_redacted:
-                had_redaction = True
-            confidence = confidence_label(score, high=6.0, medium=3.0)
-            snippet_line_end = min(line_start + snippet.count("\n"), f.get("lines", line_start))
-            evidence.append({
-                "file": f["path"],
-                "line_start": line_start,
-                "line_end": snippet_line_end,
-                "snippet": snippet,
-                "context": f"Definition of {sym['name']} — relevant to: {goal}",
-                "confidence": confidence,
-                "confidence_reason": confidence_reason(confidence, score, bool(keywords)),
-            })
-            evidence_count += 1
-            if evidence_count >= HARD_LIMITS["evidence"]:
+    evidence_candidates = [(sym, f, score) for sym, f, score in symbol_candidates if score >= 3.0]
+    if include_evidence and limits["evidence"] > 0:
+        for sym, f, score in evidence_candidates:
+            if len(evidence) >= limits["evidence"]:
                 break
+            line_start = sym.get("line_start", sym.get("line", 1))
+            snippet = extract_evidence_snippet(f["path"], line_start)
+            if snippet:
+                snippet, was_redacted = redact_secrets(snippet)
+                if was_redacted:
+                    had_redaction = True
+                confidence = confidence_label(score, high=6.0, medium=3.0)
+                snippet_line_end = min(line_start + snippet.count("\n"), f.get("lines", line_start))
+                evidence.append({
+                    "file": f["path"],
+                    "line_start": line_start,
+                    "line_end": snippet_line_end,
+                    "snippet": snippet,
+                    "context": f"Definition of {sym['name']} — relevant to: {goal}",
+                    "confidence": confidence,
+                    "confidence_reason": confidence_reason(confidence, score, bool(keywords)),
+                })
+    omitted["evidence"] = max(0, len(evidence_candidates) - len(evidence))
+    if omitted["evidence"]:
+        add_omitted_reason(omitted, "user-did-not-request-evidence" if not include_evidence else "budget")
 
     if had_redaction:
         errors.append({
@@ -379,14 +467,11 @@ def build_handoff(index: dict, goal: str, depth: str, target_paths: list[str]) -
             "message": "Sensitive values were found and redacted in evidence snippets.",
         })
 
-    dep_map = []
+    dep_candidates = []
     seen_deps = set()
-    key_file_paths = {f["path"] for f in key_files}
+    key_file_paths = {item["path"] for item in key_files}
     rel_paths = {normalize_rel_path(f.get("relative_path", "")) for f in files}
-    if depth == "shallow":
-        top_files_for_dependencies = []
-    else:
-        top_files_for_dependencies = top_files[:HARD_LIMITS["dependency_map"]]
+    top_files_for_dependencies = [] if depth == "shallow" else selected_file_entries
     for f, _ in top_files_for_dependencies:
         if key_file_paths and f["path"] not in key_file_paths:
             continue
@@ -408,8 +493,11 @@ def build_handoff(index: dict, goal: str, depth: str, target_paths: list[str]) -
             ]
         elif lang in ("typescript", "javascript"):
             import_patterns = [
-                re.compile(r"""^\s*import\s+.*?from\s+['"]([^'"]+)['"]"""),
-                re.compile(r"""^\s*(?:const|let|var)\s+.*?=\s*require\s*\(\s*['"]([^'"]+)['"]\s*\)"""),
+                re.compile(r"""\bimport(?:\s+type)?\s+.*?\s+from\s+['"]([^'"]+)['"]"""),
+                re.compile(r"""\bimport\s+['"]([^'"]+)['"]"""),
+                re.compile(r"""\bexport\s+.*?\s+from\s+['"]([^'"]+)['"]"""),
+                re.compile(r"""\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)"""),
+                re.compile(r"""\b(?:const|let|var)\s+.*?=\s*require\s*\(\s*['"]([^'"]+)['"]\s*\)"""),
             ]
         elif lang == "rust":
             import_patterns = [
@@ -421,9 +509,11 @@ def build_handoff(index: dict, goal: str, depth: str, target_paths: list[str]) -
                 re.compile(r"""^\s*"([^"]+)"\s*$"""),
             ]
 
-        for line in content.splitlines()[:200]:
+        lines = content.splitlines()
+        dep_scan_lines = lines if len(lines) <= 1000 else lines[:300]
+        for line in dep_scan_lines:
             for pat in import_patterns:
-                m = pat.match(line)
+                m = pat.search(line)
                 if m:
                     target = m.group(1)
                     source_rel = normalize_rel_path(f.get("relative_path", f["path"]))
@@ -434,14 +524,23 @@ def build_handoff(index: dict, goal: str, depth: str, target_paths: list[str]) -
                     key = (source_rel, display_target)
                     if key not in seen_deps:
                         seen_deps.add(key)
-                        dep_map.append({
+                        dep_candidates.append({
                             "source": source_rel,
                             "target": display_target,
                             "kind": "import",
                         })
 
-    if len(dep_map) > HARD_LIMITS["dependency_map"]:
-        dep_map = dep_map[:HARD_LIMITS["dependency_map"]]
+    dep_map = dep_candidates[:limits["dependency_map"]]
+    omitted["dependency_map"] = max(0, len(dep_candidates) - len(dep_map))
+    if omitted["dependency_map"]:
+        add_omitted_reason(omitted, "budget")
+
+    if is_trace_goal(goal) and depth != "shallow" and not dep_map:
+        explorer_limitations.append({
+            "code": "dependency_trace_empty",
+            "message": "Trace-oriented goal produced no dependency edges; imports may be dynamic, call-based, external-only, or below the relevance threshold.",
+            "severity": "medium",
+        })
 
     risks = []
     role_breakdown = index.get("role_breakdown", {})
@@ -473,9 +572,15 @@ def build_handoff(index: dict, goal: str, depth: str, target_paths: list[str]) -
             "target_agent": None,
             "priority": "high",
         })
+    if explorer_limitations:
+        next_actions.append({
+            "action": "Inspect explorer limitations and use targeted reads/searches for any missing traces",
+            "target_agent": None,
+            "priority": "medium",
+        })
     if risks:
         next_actions.append({
-            "action": "Address identified risks before proceeding with implementation",
+            "action": "Address identified target repository risks before proceeding with implementation",
             "target_agent": None,
             "priority": "medium",
         })
@@ -501,19 +606,22 @@ def build_handoff(index: dict, goal: str, depth: str, target_paths: list[str]) -
         "relevant_symbols": relevant_symbols,
         "dependency_map": dep_map,
         "risks_and_unknowns": risks,
-        "next_actions_for_caller": next_actions,
+        "next_actions_for_caller": next_actions[:HARD_LIMITS["next_actions_for_caller"]],
         "evidence": evidence,
         "errors": errors,
+        "omitted": omitted,
+        "explorer_limitations": explorer_limitations,
     }
 
     return handoff
-
 
 def main():
     parser = argparse.ArgumentParser(description="Extract explorer handoff from index")
     parser.add_argument("--index", required=True, help="Path to repo index JSON")
     parser.add_argument("--goal", required=True, help="Exploration goal")
     parser.add_argument("--depth", default="standard", choices=["shallow", "standard", "deep"])
+    parser.add_argument("--budget", default="full", choices=["compact", "normal", "full"], help="Extraction budget. Defaults to full for script compatibility; native tool passes compact by default.")
+    parser.add_argument("--include-evidence", type=parse_bool, default=True, help="Whether to collect evidence snippets. Use false to avoid snippet reads.")
     parser.add_argument("--target-paths", nargs="*", default=[], help="Target paths explored")
     args = parser.parse_args()
 
@@ -536,7 +644,7 @@ def main():
     index = json.loads(index_path.read_text(encoding="utf-8"))
     target_paths = args.target_paths or [index.get("repo_path", "")]
 
-    handoff = build_handoff(index, args.goal, args.depth, target_paths)
+    handoff = build_handoff(index, args.goal, args.depth, target_paths, args.budget, args.include_evidence)
     handoff["index_info"]["index_path"] = str(index_path)
 
     print(json.dumps(handoff, indent=2, ensure_ascii=False))

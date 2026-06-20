@@ -23,6 +23,9 @@ Or inside Pi:
 /reliability archive <task_id_prefix>
 /reliability profile strict|balanced|relaxed
 /reliability mode adaptive|lite|supervised
+/reliability --mode plan-on [goal]
+/reliability --mode plan-off
+/reliability --mode plan-status
 /reliability context full|compact|delta
 /reliability orchestrate [--run]
 /reliability scratchpad
@@ -36,7 +39,29 @@ The extension is opt-in by default. The default balanced profile uses adaptive s
 .pi/tasks/{task_id}/state.json
 .pi/tasks/{task_id}/scratchpad.md
 .pi/tasks/{task_id}/state-events.jsonl
+.pi/tasks/{task_id}/plan-mode/01-exploration.md
+.pi/tasks/{task_id}/plan-mode/02-implementation-plan.md
+.pi/tasks/{task_id}/plan-mode/03-summary.md
+.pi/tasks/{task_id}/plan-mode/04-verification.md
+.pi/tasks/{task_id}/plan-mode/05-final-report.md
+.pi/tasks/{task_id}/plan-mode/failures/*.md
 ```
+
+## Plan mode
+
+`/reliability --mode plan-on [goal]` starts a single-model, fresh-session planning workflow. If a goal is provided, the extension creates a task immediately, writes plan-mode Markdown templates, starts a new session, and prompts the model to create `01-exploration.md`. Without a goal, plan mode is armed for the next user prompt.
+
+The workflow chains through fresh sessions using durable Markdown artifacts instead of subagents:
+
+1. explore necessary context into `01-exploration.md`;
+2. create a detailed checklist plan in `02-implementation-plan.md`;
+3. implement one open checklist item per fresh session, updating progress, implementation log, and deviations;
+4. when all tracked items are closed, summarize into `03-summary.md`;
+5. verify from the summary into `04-verification.md`;
+6. if verification fails, create one Markdown failure file per issue under `failures/`, reopen/add plan checklist items, and loop back to implementation;
+7. when verification passes, write `05-final-report.md` and report to the user.
+
+Use `/reliability --mode plan-off` to stop the workflow and `/reliability --mode plan-status` to inspect artifact paths and progress.
 
 ## Model-facing tools
 
@@ -245,6 +270,7 @@ Save it as `.pi/reliability.json` in a trusted project. `orchestrationMode` defa
 - Optional separate-model orchestration can run supervisor, worker, and verifier roles as separate `pi --mode json --no-session` subprocesses.
 - Offline reliability evaluation reports deterministic harness metrics with `/reliability eval [--write]`.
 - Task list/resume/archive/eval UX is available from `/reliability` commands.
+- Plan mode can split exploration, planning, one-step implementation, summary, verification, failure remediation, and final reporting across fresh sessions using durable Markdown artifacts.
 
 ## Development
 
@@ -260,6 +286,7 @@ src/evaluation.ts               # Offline deterministic reliability evaluation m
 src/loop-detector.ts            # Repeated-tool-call loop detection
 src/orchestration.ts            # Separate-model role prompts, subprocess runner, and result parsing
 src/paths.ts                    # Task-local path helpers
+src/plan-mode.ts                # Fresh-session Markdown plan workflow orchestration
 src/planner.ts                  # Goal extraction, default plan, and step transitions
 src/progress-ui.ts              # Status text and widget updates
 src/redaction.ts                # Secret redaction and raw-log truncation helpers

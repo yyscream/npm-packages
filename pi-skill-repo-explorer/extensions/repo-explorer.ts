@@ -98,8 +98,8 @@ async function ensureReadableDirectory(targetPath: string, cwd: string): Promise
 
 function limitsFor(budget: Budget, includeEvidence: boolean) {
 	if (budget === "full") return { files: 25, symbols: 30, deps: 20, evidence: includeEvidence ? 15 : 0 };
-	if (budget === "normal") return { files: 15, symbols: 15, deps: 10, evidence: includeEvidence ? 3 : 0 };
-	return { files: 8, symbols: 8, deps: 6, evidence: includeEvidence ? 2 : 0 };
+	if (budget === "normal") return { files: 15, symbols: 18, deps: 10, evidence: includeEvidence ? 4 : 0 };
+	return { files: 8, symbols: 12, deps: 6, evidence: includeEvidence ? 2 : 0 };
 }
 
 function safeTimestamp(date: Date): string {
@@ -121,16 +121,80 @@ function markdownList(items: string[], fallback = "- None"): string {
 	return items.length > 0 ? items.map((item) => `- ${redactReportText(item)}`).join("\n") : fallback;
 }
 
+function goalTokens(goal: string): Set<string> {
+	return new Set(String(goal ?? "").toLowerCase().match(/[a-z0-9_]+/g) ?? []);
+}
+
+function classifyGoal(goal: string): string {
+	const tokens = goalTokens(goal);
+	if (["trace", "flow", "flows", "wiring", "wire", "dependency", "dependencies", "call", "calls", "route", "routes"].some((token) => tokens.has(token))) return "trace";
+	if (["review", "audit", "evaluate", "check", "quality"].some((token) => tokens.has(token))) return "review";
+	if (["modify", "implement", "change", "fix", "add", "update"].some((token) => tokens.has(token))) return "change-planning";
+	if (["map", "structure", "architecture", "overview"].some((token) => tokens.has(token))) return "mapping";
+	if (["find", "locate", "where"].some((token) => tokens.has(token))) return "lookup";
+	return "general";
+}
+
+function isTraceGoal(goal: string): boolean {
+	return classifyGoal(goal) === "trace";
+}
+
+function collectImprovementSignals(options: EffectivenessReportOptions, handoff: any, validation: any): string[] {
+	const errors = handoff?.errors ?? [];
+	const explorerLimitations = handoff?.explorer_limitations ?? [];
+	const omitted = handoff?.omitted ?? {};
+	const targetRisks = handoff?.risks_and_unknowns ?? [];
+	const keyFiles = handoff?.key_files ?? [];
+	const symbols = handoff?.relevant_symbols ?? [];
+	const deps = handoff?.dependency_map ?? [];
+	const reasons = Array.isArray(omitted.reasons) ? omitted.reasons : [];
+	const errorCodes = new Set(errors.map((item: any) => item?.code).filter(Boolean));
+	const limitationCodes = new Set(explorerLimitations.map((item: any) => item?.code).filter(Boolean));
+	const signals: string[] = [];
+
+	if (options.status === "failed") signals.push("invocation_failed");
+	if (validation?.valid === false) signals.push("validation_failed");
+	if (errorCodes.has("no_match")) signals.push("no_match");
+	if (errorCodes.has("index_stale")) signals.push("stale_index");
+	if (limitationCodes.has("dependency_trace_empty")) signals.push("dependency_trace_empty");
+	if (isTraceGoal(options.params.goal) && options.depth !== "shallow" && deps.length === 0) signals.push("trace_goal_zero_dependencies");
+	if (Number(omitted.key_files ?? 0) > Math.max(5, keyFiles.length)) signals.push("high_key_file_omission");
+	if (Number(omitted.relevant_symbols ?? 0) > Math.max(5, symbols.length)) signals.push("high_symbol_omission");
+	if (Number(omitted.dependency_map ?? 0) > 0) signals.push("dependency_omission");
+	if (Number(omitted.evidence ?? 0) > 0 && !options.includeEvidence) signals.push("evidence_lazy_by_request");
+	if (reasons.includes("symbol-diversity")) signals.push("symbol_diversity_cap_applied");
+	if (targetRisks.some((item: any) => String(item?.description ?? "").toLowerCase().includes("no test"))) signals.push("target_repo_no_tests");
+
+	return Array.from(new Set(signals));
+}
+
+function improvementCandidates(signals: string[]): string[] {
+	const candidates: string[] = [];
+	const has = (signal: string) => signals.includes(signal);
+	if (has("invocation_failed") || has("validation_failed")) candidates.push("P0: inspect failed invocation/validation and add a regression fixture for the failing report shape.");
+	if (has("no_match")) candidates.push("P0: improve goal keyword expansion, repository scope hints, or fallback structure-first results for no-match cases.");
+	if (has("dependency_trace_empty") || has("trace_goal_zero_dependencies")) candidates.push("P1: improve dependency/call tracing for trace-oriented goals, including dynamic imports, re-exports, and call graph extraction.");
+	if (has("high_symbol_omission") || has("symbol_diversity_cap_applied")) candidates.push("P1: tune symbol ranking/diversity so compact reports keep only the most goal-relevant symbols.");
+	if (has("high_key_file_omission")) candidates.push("P1: tune file ranking or ask callers for narrower target paths when many candidate files are omitted.");
+	if (has("dependency_omission")) candidates.push("P2: expose dependency omission details or raise dependency budget for dependency-heavy goals.");
+	if (has("stale_index")) candidates.push("P1: force refresh or surface clearer stale-index recovery guidance.");
+	if (has("evidence_lazy_by_request")) candidates.push("Info: evidence was intentionally lazy; request includeEvidence=true if exact snippets are needed.");
+	if (has("target_repo_no_tests")) candidates.push("Target risk: repository has no tests; this is not an explorer failure but should be visible to the caller.");
+	return candidates.length > 0 ? candidates : ["No immediate explorer improvement signal; use downstream feedback fields if the handoff still missed useful files."];
+}
+
 function assessEffectiveness(status: ReportStatus, handoff?: any, validation?: any): { label: string; rationale: string[] } {
 	if (status === "failed") {
 		return { label: "failed", rationale: ["The invocation failed before a validated handoff could be returned."] };
 	}
 
 	const errors = handoff?.errors ?? [];
-	const risks = handoff?.risks_and_unknowns ?? [];
 	const keyFiles = handoff?.key_files ?? [];
 	const symbols = handoff?.relevant_symbols ?? [];
+	const explorerLimitations = handoff?.explorer_limitations ?? [];
+	const targetRisks = handoff?.risks_and_unknowns ?? [];
 	const errorCodes = new Set(errors.map((item: any) => item?.code).filter(Boolean));
+	const meaningfulErrors = errors.filter((item: any) => item?.code !== "budget_exceeded");
 	const rationale: string[] = [];
 
 	if (!validation?.valid) {
@@ -143,17 +207,32 @@ function assessEffectiveness(status: ReportStatus, handoff?: any, validation?: a
 		return { label: "needs-follow-up", rationale };
 	}
 
+	if (errorCodes.has("index_stale")) {
+		rationale.push("The index is stale enough that follow-up exploration should refresh before relying on the handoff.");
+		return { label: "needs-follow-up", rationale };
+	}
+
 	if (keyFiles.length === 0 && symbols.length === 0) {
 		rationale.push("No key files or symbols were identified, which limits downstream usefulness.");
 		return { label: "partial", rationale };
 	}
 
-	if (errorCodes.size > 0 || risks.some((item: any) => item?.severity === "high")) {
-		rationale.push("The handoff is valid but includes errors or high-severity risks that the caller should inspect.");
+	if (explorerLimitations.some((item: any) => item?.severity === "high")) {
+		rationale.push("A high-severity explorer limitation was reported; inspect before relying on the handoff.");
+		return { label: "needs-follow-up", rationale };
+	}
+
+	if (meaningfulErrors.length > 0 || explorerLimitations.length > 0) {
+		rationale.push("The handoff is valid but includes explorer errors or limitations that may require targeted follow-up.");
 		return { label: "partial", rationale };
 	}
 
-	rationale.push("The handoff validated and identified goal-relevant files or symbols without blocking errors.");
+	if (targetRisks.length > 0) {
+		rationale.push("The handoff validated and identified goal-relevant files or symbols; target repository risks are reported separately.");
+		return { label: "effective", rationale };
+	}
+
+	rationale.push("The handoff validated and identified goal-relevant files or symbols without blocking explorer errors.");
 	return { label: "effective", rationale };
 }
 
@@ -162,10 +241,25 @@ function formatEffectivenessReport(options: EffectivenessReportOptions): string 
 	const validation = options.validation ?? {};
 	const assessment = assessEffectiveness(options.status, handoff, validation);
 	const errors = handoff.errors ?? [];
-	const risks = handoff.risks_and_unknowns ?? [];
+	const targetRisks = handoff.risks_and_unknowns ?? [];
+	const explorerLimitations = handoff.explorer_limitations ?? [];
 	const validationErrors = validation.errors ?? [];
+	const omitted = handoff.omitted ?? {};
+	const keyFiles = handoff.key_files ?? [];
+	const symbols = handoff.relevant_symbols ?? [];
+	const deps = handoff.dependency_map ?? [];
+	const evidence = handoff.evidence ?? [];
+	const limits = limitsFor(options.budget, options.includeEvidence);
 	const targetPath = options.repoPath ?? cleanInputPath(options.params.targetPath);
 	const runSeconds = Math.max(0, (options.completedAt.getTime() - options.startedAt.getTime()) / 1000).toFixed(2);
+	const modelVisibleText = options.status === "completed" ? formatHandoff(handoff, targetPath, options.budget, options.includeEvidence, validation) : "";
+	const omittedCount = (field: string) => Math.max(0, Number(omitted?.[field] ?? 0));
+	const totalWithOmitted = (current: number, field: string) => current + omittedCount(field);
+	const shown = (current: number, limit: number) => Math.min(current, limit);
+	const goalCategory = classifyGoal(options.params.goal);
+	const improvementSignals = collectImprovementSignals(options, handoff, validation);
+	const candidates = improvementCandidates(improvementSignals);
+	const targetKey = cacheKey(targetPath);
 
 	const lines: string[] = [
 		"# Repo Explorer Effectiveness Report",
@@ -177,6 +271,14 @@ function formatEffectivenessReport(options: EffectivenessReportOptions): string 
 		`- Target path: \`${redactReportText(targetPath)}\``,
 		`- Goal: ${redactReportText(options.params.goal)}`,
 		"",
+		"## Tracking Metadata",
+		"",
+		"- Tracking schema: repo-explorer-effectiveness/v2",
+		`- Goal category: ${goalCategory}`,
+		`- Trace-oriented goal: ${isTraceGoal(options.params.goal) ? "yes" : "no"}`,
+		`- Target repo key: ${redactReportText(targetKey)}`,
+		`- Report purpose: per-invocation evidence plus improvement-signal capture`,
+		"",
 		"## Run Configuration",
 		"",
 		`- Depth: ${options.depth}`,
@@ -187,21 +289,62 @@ function formatEffectivenessReport(options: EffectivenessReportOptions): string 
 		"",
 		`- Handoff validation: ${validation.valid === true ? "valid" : validation.valid === false ? "invalid" : "not available"}`,
 		`- Files indexed: ${handoff.index_info?.files_indexed ?? "not available"}`,
-		`- Key files found: ${(handoff.key_files ?? []).length}`,
-		`- Relevant symbols found: ${(handoff.relevant_symbols ?? []).length}`,
-		`- Dependency edges found: ${(handoff.dependency_map ?? []).length}`,
-		`- Evidence snippets collected: ${(handoff.evidence ?? []).length}`,
-		`- Risks reported: ${risks.length}`,
+		`- Key files found: ${keyFiles.length}`,
+		`- Relevant symbols found: ${symbols.length}`,
+		`- Dependency edges found: ${deps.length}`,
+		`- Evidence snippets collected: ${evidence.length}`,
+		`- Explorer limitations reported: ${explorerLimitations.length}`,
+		`- Target repository risks reported: ${targetRisks.length}`,
 		`- Errors reported: ${errors.length}`,
+		"",
+		"## Model-Visible Output",
+		"",
+		`- Key files shown: ${shown(keyFiles.length, limits.files)}/${totalWithOmitted(keyFiles.length, "key_files")}`,
+		`- Symbols shown: ${shown(symbols.length, limits.symbols)}/${totalWithOmitted(symbols.length, "relevant_symbols")}`,
+		`- Dependency edges shown: ${shown(deps.length, limits.deps)}/${totalWithOmitted(deps.length, "dependency_map")}`,
+		`- Evidence snippets shown: ${shown(evidence.length, limits.evidence)}/${totalWithOmitted(evidence.length, "evidence")}`,
+		`- Approx output chars: ${modelVisibleText.length || "not available"}`,
+		"",
+		"## Omitted Items",
+		"",
+		`- Key files omitted: ${omittedCount("key_files")}`,
+		`- Symbols omitted: ${omittedCount("relevant_symbols")}`,
+		`- Dependency edges omitted: ${omittedCount("dependency_map")}`,
+		`- Evidence omitted: ${omittedCount("evidence")}`,
+		`- Omission reasons: ${Array.isArray(omitted.reasons) && omitted.reasons.length > 0 ? omitted.reasons.map(redactReportText).join(", ") : "None"}`,
+		"",
+		"## Improvement Signals",
+		"",
+		markdownList(improvementSignals),
+		"",
+		"## Improvement Candidates",
+		"",
+		markdownList(candidates),
+		"",
+		"## Downstream Feedback Capture",
+		"",
+		"- Downstream files touched: unknown",
+		"- Top-ranked file used: unknown",
+		"- Manual search needed after handoff: unknown",
+		"- Missed files: unknown",
+		"- False-positive files: unknown",
+		"- User correction or note: unknown",
 		"",
 		"## Assessment Rationale",
 		"",
 		markdownList(assessment.rationale),
 		"",
-		"## Risks and Errors",
+		"## Explorer Limitations",
+		"",
+		markdownList(explorerLimitations.map((item: any) => `[${item?.severity ?? "unknown"}] ${item?.code ?? "unknown"}: ${item?.message ?? "Unnamed limitation"}`)),
+		"",
+		"## Target Repository Risks",
+		"",
+		markdownList(targetRisks.map((item: any) => `[${item?.severity ?? "unknown"}] ${item?.description ?? "Unnamed risk"}`)),
+		"",
+		"## Errors and Validation",
 		"",
 		markdownList([
-			...risks.map((item: any) => `[${item?.severity ?? "unknown"}] ${item?.description ?? "Unnamed risk"}`),
 			...errors.map((item: any) => `${item?.code ?? "unknown"}: ${item?.message ?? "Unnamed error"}`),
 			...validationErrors.map((item: any) => `validation: ${item}`),
 		]),
@@ -229,9 +372,11 @@ function formatHandoff(handoff: any, repoRoot: string, budget: Budget, includeEv
 	const keyFiles = handoff.key_files ?? [];
 	const symbols = handoff.relevant_symbols ?? [];
 	const deps = handoff.dependency_map ?? [];
-	const risks = handoff.risks_and_unknowns ?? [];
+	const targetRisks = handoff.risks_and_unknowns ?? [];
+	const explorerLimitations = handoff.explorer_limitations ?? [];
 	const errors = handoff.errors ?? [];
 	const evidence = handoff.evidence ?? [];
+	const omitted = handoff.omitted ?? {};
 
 	lines.push(`repo_explorer_explore: ${validation?.valid ? "valid" : "invalid"} handoff`);
 	lines.push(`goal: ${handoff.request?.goal ?? ""}`);
@@ -257,9 +402,14 @@ function formatHandoff(handoff: any, repoRoot: string, budget: Budget, includeEv
 		for (const item of deps.slice(0, limits.deps)) lines.push(`- ${item.source} -> ${item.target} (${item.kind})`);
 	}
 
-	if (risks.length > 0) {
-		lines.push("\nrisks:");
-		for (const item of risks.slice(0, 5)) lines.push(`- [${item.severity}] ${item.description}`);
+	if (explorerLimitations.length > 0) {
+		lines.push("\nexplorer_limitations:");
+		for (const item of explorerLimitations.slice(0, 5)) lines.push(`- [${item.severity}] ${item.code}: ${item.message}`);
+	}
+
+	if (targetRisks.length > 0) {
+		lines.push("\ntarget_risks:");
+		for (const item of targetRisks.slice(0, 5)) lines.push(`- [${item.severity}] ${item.description}`);
 	}
 
 	if (errors.length > 0) {
@@ -276,6 +426,18 @@ function formatHandoff(handoff: any, repoRoot: string, budget: Budget, includeEv
 			lines.push(String(item.snippet ?? "").split(/\r?\n/).slice(0, 12).join("\n"));
 			lines.push("```");
 		}
+	}
+
+	const omittedEntries = [
+		["key_files", omitted.key_files],
+		["symbols", omitted.relevant_symbols],
+		["dependencies", omitted.dependency_map],
+		["evidence", omitted.evidence],
+	].filter(([, value]) => Number(value ?? 0) > 0);
+	if (omittedEntries.length > 0) {
+		lines.push("\nomitted:");
+		for (const [label, value] of omittedEntries) lines.push(`- ${label}: ${value}`);
+		if (Array.isArray(omitted.reasons) && omitted.reasons.length > 0) lines.push(`- reasons: ${omitted.reasons.join(", ")}`);
 	}
 
 	if (budget !== "full") lines.push("\nUse budget='normal'/'full' or includeEvidence=true only when more detail is needed.");
@@ -328,6 +490,8 @@ export default function repoExplorerExtension(pi: ExtensionAPI): void {
 					"--index", indexPath,
 					"--goal", params.goal,
 					"--depth", depth,
+					"--budget", budget,
+					"--include-evidence", includeEvidence ? "true" : "false",
 					"--target-paths", repoPath,
 				], signal);
 				await writeFile(handoffPath, extract.stdout, "utf8");

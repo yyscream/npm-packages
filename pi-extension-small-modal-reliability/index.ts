@@ -1,5 +1,5 @@
 import { StringEnum } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 import {
@@ -8,6 +8,7 @@ import {
   MAX_ERRORS,
   MAX_FACTS,
   MAX_HISTORY,
+  PLAN_MODE_CUSTOM_STATE_TYPE,
   StepStatusSchema,
   TaskStatusSchema,
   VerificationStatusSchema,
@@ -39,6 +40,8 @@ import {
   normalizeSupervisionMode,
   nowIso,
   persistExtensionState,
+  persistedPlanModePointerFromSession,
+  planModePointer,
   persistedPointerFromSession,
   pushBounded,
   readProjectConfig,
@@ -46,6 +49,7 @@ import {
   replacePlan,
   resolveTaskQuery,
   runOfflineReliabilityEvaluation,
+  savePlanModeRun,
   saveTaskState,
   scratchpadPathFor,
   selectNextStep,
@@ -55,13 +59,21 @@ import {
   stableStringify,
   summarizeToolResult,
   suggestVerificationCommands,
+  taskDir,
   toolHistoryForHash,
   truncate,
+  updatePlanModeUi,
   updateToolResult,
   updateUi,
   writeEvaluationReport,
   writeScratchpad,
   hashToolCall,
+  buildPlanModePhasePrompt,
+  createPlanModeRun,
+  formatPlanModeStatus,
+  loadPlanModeRun,
+  nextPlanModePhaseAfterAgent,
+  persistPlanModePointer,
 } from "./src/core.ts";
 import { buildDryRunOrchestration, formatOrchestrationResult, runSeparateModelOrchestration } from "./src/orchestration.ts";
 import { applyWorkerResult, buildSupervisorDecision, buildWorkerContractPrompt } from "./src/supervisor.ts";
@@ -73,6 +85,7 @@ import type {
   StepStatus,
   TaskStatus,
   TaskState,
+  PlanModeRun,
   ToolHistoryItem,
   VerificationStatus,
 } from "./src/core.ts";
@@ -85,6 +98,9 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
   const completionGatePromptedTaskIds = new Set<string>();
   const contextSnapshots = new Map<string, ContextSnapshot>();
   const supervisorDecisions = new Map<string, SupervisorDecision>();
+  let planModeArmed = false;
+  let activePlanModeRun: PlanModeRun | undefined;
+  let planModeContinuationQueued = false;
 
   const ensureTask = (ctx: ExtensionContext, prompt: string): TaskState => {
     if (!activeTask || activeTask.status === "complete" || activeTask.status === "failed") {
@@ -157,6 +173,124 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
     throw new Error(criteria ? `${message}\nUnresolved criteria:\n${criteria}` : message);
   };
 
+  const persistPlanModeState = (): void => {
+    persistPlanModePointer(pi, activePlanModeRun, planModeArmed);
+  };
+
+  const refreshAllUi = (ctx: ExtensionContext): void => {
+    updateUi(ctx, enabled, activeTask, runtimeConfig());
+    updatePlanModeUi(ctx, activePlanModeRun, planModeArmed);
+  };
+
+  const stopPlanMode = (ctx: ExtensionContext, reason = "disabled"): void => {
+    planModeArmed = false;
+    planModeContinuationQueued = false;
+    if (activePlanModeRun) {
+      activePlanModeRun.enabled = false;
+      activePlanModeRun.phase = reason === "complete" ? "complete" : "stopped";
+      activePlanModeRun.last_issue = reason;
+      savePlanModeRun(activePlanModeRun);
+    }
+    persistPlanModeState();
+    updatePlanModeUi(ctx, activePlanModeRun, false);
+    if (reason !== "complete") activePlanModeRun = undefined;
+  };
+
+  const appendPlanModeSessionState = (sessionManager: { appendCustomEntry: (customType: string, data?: unknown) => string }, run: PlanModeRun): void => {
+    sessionManager.appendCustomEntry(CUSTOM_STATE_TYPE, {
+      enabled: true,
+      taskId: run.task_id,
+      taskDir: taskDir(run.cwd, run.task_id),
+      updatedAt: nowIso(),
+    });
+    sessionManager.appendCustomEntry(PLAN_MODE_CUSTOM_STATE_TYPE, planModePointer(run, false));
+  };
+
+  const launchPlanModePhase = async (ctx: ExtensionCommandContext, run: PlanModeRun): Promise<void> => {
+    savePlanModeRun(run);
+    persistExtensionState(pi, true, activeTask);
+    persistPlanModeState();
+    const prompt = buildPlanModePhasePrompt(run);
+    const parentSession = ctx.sessionManager.getSessionFile();
+    await ctx.waitForIdle();
+    const result = await ctx.newSession({
+      parentSession,
+      setup: async (sessionManager) => {
+        appendPlanModeSessionState(sessionManager, run);
+      },
+      withSession: async (nextCtx) => {
+        await nextCtx.sendUserMessage(prompt);
+      },
+    });
+    if (result.cancelled) {
+      run.last_issue = "New session creation was cancelled.";
+      savePlanModeRun(run);
+      persistPlanModeState();
+    }
+  };
+
+  const startPlanModeForGoal = async (ctx: ExtensionCommandContext, goal: string): Promise<void> => {
+    enabled = true;
+    activeTask = createTaskState(ctx.cwd, goal, ctx.sessionManager.getSessionFile(), config);
+    activeSupervisionMode = "supervised";
+    saveTaskState(activeTask, "plan_mode_task_created");
+    activePlanModeRun = createPlanModeRun(activeTask);
+    planModeArmed = false;
+    planModeContinuationQueued = false;
+    persistExtensionState(pi, enabled, activeTask);
+    persistPlanModeState();
+    refreshAllUi(ctx);
+    ctx.ui.notify(`Reliability plan mode started for task ${activeTask.task_id}. Launching exploration in a fresh session.`, "success");
+    await launchPlanModePhase(ctx, activePlanModeRun);
+  };
+
+  const continuePlanMode = async (ctx: ExtensionCommandContext, runId?: string): Promise<void> => {
+    planModeContinuationQueued = false;
+    if (!activePlanModeRun && activeTask) activePlanModeRun = loadPlanModeRun(ctx.cwd, activeTask.task_id);
+    if (!activePlanModeRun || (runId && activePlanModeRun.run_id !== runId)) {
+      ctx.ui.notify("No matching active reliability plan-mode run.", "warning");
+      return;
+    }
+    if (!activePlanModeRun.enabled) {
+      ctx.ui.notify(formatPlanModeStatus(activePlanModeRun, planModeArmed), "info");
+      return;
+    }
+    activePlanModeRun.iteration += 1;
+    if (activePlanModeRun.iteration > activePlanModeRun.max_iterations) {
+      activePlanModeRun.enabled = false;
+      activePlanModeRun.phase = "stopped";
+      activePlanModeRun.last_issue = `Stopped after ${activePlanModeRun.max_iterations} plan-mode iterations to avoid an uncontrolled loop.`;
+      savePlanModeRun(activePlanModeRun);
+      persistPlanModeState();
+      updatePlanModeUi(ctx, activePlanModeRun, false);
+      ctx.ui.notify(activePlanModeRun.last_issue, "error");
+      return;
+    }
+
+    const decision = nextPlanModePhaseAfterAgent(activePlanModeRun);
+    activePlanModeRun.phase = decision.phase;
+    activePlanModeRun.last_issue = decision.issue;
+    savePlanModeRun(activePlanModeRun);
+    persistPlanModeState();
+    updatePlanModeUi(ctx, activePlanModeRun, false);
+
+    if (decision.complete || activePlanModeRun.phase === "complete") {
+      stopPlanMode(ctx, "complete");
+      ctx.ui.notify(`Reliability plan mode complete.\n${formatPlanModeStatus(activePlanModeRun, false)}`, "success");
+      return;
+    }
+
+    await launchPlanModePhase(ctx, activePlanModeRun);
+  };
+
+  const queuePlanModeContinuation = (): void => {
+    if (!activePlanModeRun?.enabled || planModeContinuationQueued) return;
+    if (activePlanModeRun.phase === "complete" || activePlanModeRun.phase === "stopped") return;
+    planModeContinuationQueued = true;
+    persistPlanModeState();
+    pi.sendUserMessage(`/reliability --mode plan-continue ${activePlanModeRun.run_id}`, { deliverAs: "followUp" });
+  };
+
   pi.registerFlag("reliability", {
     description: "Enable the small-LLM reliability harness for this session",
     type: "boolean",
@@ -164,14 +298,51 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("reliability", {
-    description: "Reliability harness control: on [goal] | off | status | reset | scratchpad | verify | suggest | eval | tasks | resume <id> | archive <id> | profile <strict|balanced|relaxed> | mode <adaptive|lite|supervised> | context <full|compact|delta> | orchestrate [--run]",
-    getArgumentCompletions: (prefix) => ["on", "off", "status", "reset", "scratchpad", "verify", "suggest", "eval", "tasks", "resume", "archive", "profile", "mode", "context", "orchestrate"]
+    description: "Reliability harness control: on [goal] | off | status | reset | scratchpad | verify | suggest | eval | tasks | resume <id> | archive <id> | profile <strict|balanced|relaxed> | mode <adaptive|lite|supervised> | --mode plan-on|plan-off|plan-status | context <full|compact|delta> | orchestrate [--run]",
+    getArgumentCompletions: (prefix) => ["on", "off", "status", "reset", "scratchpad", "verify", "suggest", "eval", "tasks", "resume", "archive", "profile", "mode", "--mode", "context", "orchestrate"]
       .filter((item) => item.startsWith(prefix))
       .map((item) => ({ value: item, label: item })),
     handler: async (args, ctx) => {
       const [commandRaw, ...rest] = args.trim().split(/\s+/).filter(Boolean);
-      const command = (commandRaw ?? "status").toLowerCase();
+      let command = (commandRaw ?? "status").toLowerCase();
+      if (command === "--mode") command = "mode";
       const restText = rest.join(" ").trim();
+      const modeValue = command === "mode" ? rest[0]?.toLowerCase() : undefined;
+      const modeRestText = command === "mode" ? rest.slice(1).join(" ").trim() : "";
+
+      if (modeValue?.startsWith("plan-")) {
+        if (modeValue === "plan-on") {
+          if (modeRestText) {
+            await startPlanModeForGoal(ctx, modeRestText);
+            return;
+          }
+          enabled = true;
+          planModeArmed = true;
+          activePlanModeRun = undefined;
+          planModeContinuationQueued = false;
+          persistExtensionState(pi, enabled, activeTask);
+          persistPlanModeState();
+          refreshAllUi(ctx);
+          ctx.ui.notify("Reliability plan mode armed. Send the task goal as your next prompt, or use `/reliability --mode plan-on <goal>` to start immediately in a fresh session.", "success");
+          return;
+        }
+        if (modeValue === "plan-off") {
+          stopPlanMode(ctx, "disabled");
+          ctx.ui.notify("Reliability plan mode disabled.", "info");
+          return;
+        }
+        if (modeValue === "plan-status") {
+          ctx.ui.notify(formatPlanModeStatus(activePlanModeRun, planModeArmed), "info");
+          updatePlanModeUi(ctx, activePlanModeRun, planModeArmed);
+          return;
+        }
+        if (modeValue === "plan-continue") {
+          await continuePlanMode(ctx, modeRestText || undefined);
+          return;
+        }
+        ctx.ui.notify("Usage: /reliability --mode plan-on [goal] | plan-off | plan-status", "warning");
+        return;
+      }
 
       if (command === "on") {
         enabled = true;
@@ -183,24 +354,26 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
           setSupervisionModeForTask(activeTask);
         }
         persistExtensionState(pi, enabled, activeTask);
-        updateUi(ctx, enabled, activeTask, runtimeConfig());
+        refreshAllUi(ctx);
         ctx.ui.notify(activeTask ? `Reliability harness enabled for task ${activeTask.task_id}` : "Reliability harness enabled for the next task.", "success");
         return;
       }
 
       if (command === "off") {
         enabled = false;
+        stopPlanMode(ctx, "disabled");
         persistExtensionState(pi, enabled, activeTask);
-        updateUi(ctx, enabled, activeTask, runtimeConfig());
+        refreshAllUi(ctx);
         ctx.ui.notify("Reliability harness disabled.", "info");
         return;
       }
 
       if (command === "reset") {
+        stopPlanMode(ctx, "reset");
         activeTask = undefined;
         setSupervisionModeForTask(undefined);
         persistExtensionState(pi, enabled, activeTask);
-        updateUi(ctx, enabled, activeTask, runtimeConfig());
+        refreshAllUi(ctx);
         ctx.ui.notify("Reliability harness task reset. Existing .pi/tasks files were left intact.", "warning");
         return;
       }
@@ -378,12 +551,12 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
       }
 
       if (command === "status" || !commandRaw) {
-        ctx.ui.notify(formatStatus(activeTask, enabled, runtimeConfig()), "info");
-        updateUi(ctx, enabled, activeTask, runtimeConfig());
+        ctx.ui.notify(`${formatStatus(activeTask, enabled, runtimeConfig())}\n\n${formatPlanModeStatus(activePlanModeRun, planModeArmed)}`, "info");
+        refreshAllUi(ctx);
         return;
       }
 
-      ctx.ui.notify("Usage: /reliability on [goal] | off | status | reset | scratchpad | verify | suggest | eval [--write] | tasks [--all] | resume <task_id> | archive <task_id> | profile strict|balanced|relaxed | mode adaptive|lite|supervised | context full|compact|delta | orchestrate [--run]", "warning");
+      ctx.ui.notify("Usage: /reliability on [goal] | off | status | reset | scratchpad | verify | suggest | eval [--write] | tasks [--all] | resume <task_id> | archive <task_id> | profile strict|balanced|relaxed | mode adaptive|lite|supervised | --mode plan-on [goal]|plan-off|plan-status | context full|compact|delta | orchestrate [--run]", "warning");
     },
   });
 
@@ -398,8 +571,8 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
     parameters: Type.Object({}),
     async execute() {
       return {
-        content: [{ type: "text", text: formatStatus(activeTask, enabled, runtimeConfig()) }],
-        details: { enabled, task: activeTask },
+        content: [{ type: "text", text: `${formatStatus(activeTask, enabled, runtimeConfig())}\n\n${formatPlanModeStatus(activePlanModeRun, planModeArmed)}` }],
+        details: { enabled, task: activeTask, planMode: activePlanModeRun, planModeArmed },
       };
     },
   });
@@ -625,17 +798,35 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
     config = normalizeConfig({ ...readProjectConfig(ctx) });
     setScratchpadWritesEnabled(config.scratchpadEnabled);
     const saved = persistedPointerFromSession(ctx);
-    enabled = Boolean(pi.getFlag("reliability") || saved?.enabled || config.enabled);
-    activeTask = loadTaskState(ctx.cwd, saved?.taskId);
+    const savedPlan = persistedPlanModePointerFromSession(ctx);
+    planModeArmed = Boolean(savedPlan?.armed);
+    planModeContinuationQueued = false;
+    activePlanModeRun = loadPlanModeRun(ctx.cwd, savedPlan?.taskId);
+    enabled = Boolean(pi.getFlag("reliability") || saved?.enabled || savedPlan?.enabled || config.enabled);
+    activeTask = loadTaskState(ctx.cwd, saved?.taskId ?? savedPlan?.taskId);
     if (activeTask && (activeTask.status === "complete" || activeTask.status === "failed" || isTaskArchived(ctx.cwd, activeTask.task_id))) {
       activeTask = undefined;
     }
     setSupervisionModeForTask(activeTask);
-    updateUi(ctx, enabled, activeTask, runtimeConfig());
+    if (activePlanModeRun?.enabled) activeSupervisionMode = "supervised";
+    refreshAllUi(ctx);
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
     if (!enabled) return;
+    if (planModeArmed && !activePlanModeRun) {
+      activeTask = createTaskState(ctx.cwd, event.prompt, ctx.sessionManager.getSessionFile(), config);
+      activeSupervisionMode = "supervised";
+      saveTaskState(activeTask, "plan_mode_task_created_from_prompt");
+      activePlanModeRun = createPlanModeRun(activeTask);
+      planModeArmed = false;
+      persistExtensionState(pi, enabled, activeTask);
+      persistPlanModeState();
+      refreshAllUi(ctx);
+      return {
+        systemPrompt: `${event.systemPrompt}\n\n${buildPlanModePhasePrompt(activePlanModeRun)}`,
+      };
+    }
     const state = ensureTask(ctx, event.prompt);
     setSupervisionModeForTask(state, event.prompt);
     let extraPrompt: string;
@@ -647,7 +838,7 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
       extraPrompt = "[RELIABILITY LITE INSTRUCTIONS]\nA lightweight reliability harness is active. Work normally and avoid supervisor/worker ceremony. Do not call reliability_submit_worker_result unless a later prompt explicitly switches to supervised mode. Call reliability_verify_completion with concrete evidence before claiming completion. Use reliability_record_progress only for major milestones, errors, or decisions.\n[/RELIABILITY LITE INSTRUCTIONS]";
     }
     saveTaskState(state, "before_agent_start");
-    updateUi(ctx, enabled, state, runtimeConfig());
+    refreshAllUi(ctx);
 
     return {
       systemPrompt: `${event.systemPrompt}\n\n${extraPrompt}`,
@@ -722,18 +913,20 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
     activeTask.counters.model_responses += 1;
     const text = assistantText(event.message);
     if (text) addUniqueBounded(activeTask.known_facts, `Assistant response: ${truncate(text, 260)}`, MAX_FACTS);
-    const completionGate = evaluateCompletionGate(activeTask, text, assistantHasToolCall(event.message), config);
-    if (completionGate.triggered) {
-      addUniqueBounded(activeTask.open_questions, completionGate.message, MAX_FACTS);
-      escalateSupervision(ctx, activeTask, "completion was claimed before verification passed");
-      if (ctx.hasUI) ctx.ui.notify(completionGate.message, completionGate.strict ? "error" : "warning");
-      if ((completionGate.strict || config.supervisionMode === "adaptive") && !completionGatePromptedTaskIds.has(activeTask.task_id)) {
-        completionGatePromptedTaskIds.add(activeTask.task_id);
-        pi.sendUserMessage(buildCompletionGatePrompt(activeTask, completionGate), { deliverAs: "followUp" });
+    if (!activePlanModeRun?.enabled) {
+      const completionGate = evaluateCompletionGate(activeTask, text, assistantHasToolCall(event.message), config);
+      if (completionGate.triggered) {
+        addUniqueBounded(activeTask.open_questions, completionGate.message, MAX_FACTS);
+        escalateSupervision(ctx, activeTask, "completion was claimed before verification passed");
+        if (ctx.hasUI) ctx.ui.notify(completionGate.message, completionGate.strict ? "error" : "warning");
+        if ((completionGate.strict || config.supervisionMode === "adaptive") && !completionGatePromptedTaskIds.has(activeTask.task_id)) {
+          completionGatePromptedTaskIds.add(activeTask.task_id);
+          pi.sendUserMessage(buildCompletionGatePrompt(activeTask, completionGate), { deliverAs: "followUp" });
+        }
       }
     }
     saveTaskState(activeTask, "assistant_message_recorded");
-    updateUi(ctx, enabled, activeTask, runtimeConfig());
+    refreshAllUi(ctx);
   });
 
   pi.on("agent_end", async (_event, ctx) => {
@@ -745,10 +938,12 @@ export default function reliabilityHarnessExtension(pi: ExtensionAPI): void {
       ctx.ui.notify(`Reliability task verified complete: ${activeTask.task_id}`, "success");
     }
     saveTaskState(activeTask, "agent_end");
-    updateUi(ctx, enabled, activeTask, runtimeConfig());
+    refreshAllUi(ctx);
+    queuePlanModeContinuation();
   });
 
   pi.on("session_shutdown", async () => {
     if (activeTask) saveTaskState(activeTask, "session_shutdown");
+    if (activePlanModeRun) savePlanModeRun(activePlanModeRun);
   });
 }

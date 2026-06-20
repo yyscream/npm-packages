@@ -304,6 +304,37 @@ def validate_field_types(data: dict) -> list[str]:
         if "code" in item and item["code"] not in VALID_ERROR_CODES:
             errors.append(f"errors[{i}].code has invalid value: {item['code']}")
 
+    if "omitted" in data:
+        omitted = data["omitted"]
+        if not isinstance(omitted, dict):
+            errors.append("omitted must be an object when present")
+        else:
+            for field in ("key_files", "relevant_symbols", "dependency_map", "evidence"):
+                if field in omitted and (not is_int(omitted[field]) or omitted[field] < 0):
+                    errors.append(f"omitted.{field} must be a non-negative integer")
+            if "reasons" in omitted:
+                if not isinstance(omitted["reasons"], list):
+                    errors.append("omitted.reasons must be a list")
+                else:
+                    for i, reason in enumerate(omitted["reasons"]):
+                        if not isinstance(reason, str):
+                            errors.append(f"omitted.reasons[{i}] must be a string")
+
+    if "explorer_limitations" in data:
+        limitations = data["explorer_limitations"]
+        if not isinstance(limitations, list):
+            errors.append("explorer_limitations must be a list when present")
+        else:
+            for i, item in enumerate(limitations):
+                if not isinstance(item, dict):
+                    errors.append("explorer_limitations items must be objects")
+                    continue
+                require_string(item, "code", "explorer_limitations", i)
+                require_string(item, "message", "explorer_limitations", i)
+                require_string(item, "severity", "explorer_limitations", i)
+                if "severity" in item and item["severity"] not in VALID_SEVERITIES:
+                    errors.append(f"explorer_limitations[{i}].severity has invalid value: {item['severity']}")
+
     return errors
 
 
@@ -352,6 +383,8 @@ def main():
             "evidence": len(data.get("evidence", [])),
             "risks_and_unknowns": len(data.get("risks_and_unknowns", [])),
             "next_actions_for_caller": len(data.get("next_actions_for_caller", [])),
+            "explorer_limitations": len(data.get("explorer_limitations", [])),
+            "omitted": data.get("omitted", {}),
         },
     }
 

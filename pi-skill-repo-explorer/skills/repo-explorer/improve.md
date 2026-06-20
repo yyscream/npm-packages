@@ -20,13 +20,22 @@
 - Fixed evidence `line_end` to describe the actual emitted snippet range.
 - Documented concrete `shallow`/`standard`/`deep` semantics in `SKILL.md`.
 
+### Added on 2026-06-20 effectiveness implementation
+
+- Propagated native tool `budget` and `includeEvidence` into `extract_explorer_handoff.py`.
+- Added script-level `--budget compact|normal|full` and `--include-evidence true|false` controls.
+- Added top-level `omitted` accounting metadata for files, symbols, dependencies, evidence, and omission reasons.
+- Stopped treating ordinary symbol-budget truncation as a `budget_exceeded` error.
+- Split report semantics into explorer limitations vs target repository risks, with model-visible output counts and omitted counts.
+- Added compact/no-evidence, omitted-budget, and dependency-trace-limitation regression tests.
+- Added report-level tracking metadata, explicit improvement signals/candidates, downstream feedback placeholders, and `summarize_effectiveness_reports.py` for Markdown rollups.
+
 ### Still open
 
 - Add Tree-sitter or AST-backed parsing where available, with regex fallback.
 - Reduce path repetition in the raw handoff schema (`repo_root`, relative paths, or path IDs), not just in the native tool's compact formatter.
-- Add script-level `--budget` / `--max-output-chars` and top-level `omitted` accounting metadata.
 - Add call-graph extraction, not just import dependency mapping.
-- Make risk reporting more goal-specific instead of mostly test-coverage based.
+- Make risk reporting more goal-specific beyond dependency-trace limitations and test-coverage heuristics.
 - Validate against a real TS/React repo and a real Python repo, not only fixtures and this package.
 
 ## Current assessment
