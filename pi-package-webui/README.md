@@ -119,34 +119,68 @@ PI_WEBUI_PI_BIN=/path/to/pi pi-webui --no-session
 
 Environment variables:
 
-- `PI_WEBUI_HOST`
-- `PI_WEBUI_PORT`
-- `PI_WEBUI_PI_BIN`
-- `PI_WEBUI_REMOTE_AUTH=1` to start with remote PIN authentication enabled
-- `PI_WEBUI_SETTINGS_FILE=/path/to/settings.json` to override where Web UI stores persisted settings such as the Remote PIN auth preference
+- `PI_WEBUI_HOST` and `PI_WEBUI_PORT` set the default bind address.
+- `PI_WEBUI_PI_BIN=/path/to/pi` selects the Pi executable when `--pi` is not passed.
+- `PI_WEBUI_REMOTE_AUTH=1` starts with Remote PIN authentication enabled.
+- `PI_WEBUI_SETTINGS_FILE=/path/to/settings.json` overrides persisted Web UI settings such as the Remote PIN auth preference.
+- `PI_WEBUI_OPTIONAL_FEATURE_INSTALL_ROOT=/path/to/package-root` overrides the npm prefix used for optional companion installs.
+- `PI_WEBUI_FAST_PICKS_FILE=/path/to/paths.json` overrides saved cwd fast-pick storage.
+- `PI_WEBUI_NPM_BIN=/path/to/npm` selects the npm executable used by optional feature install/update actions.
 
 ## Main features
 
 - Pathless `pi-webui` startup: the server opens first, then the browser prompts for the first terminal CWD.
-- Multi-tab Pi sessions with isolated processes, working directories, prompt drafts, activity state, and a workspace dashboard for common actions.
-- Unified command palette (`Ctrl/Cmd+K`) for commands, tabs, models, sessions, settings, and frequent Web UI actions.
+- Multi-tab Pi sessions with isolated processes, working directories, prompt drafts, activity state, per-tab settings, and a workspace dashboard for common actions.
+- Unified command palette (`Ctrl/Cmd+K`) for commands, tabs, models, sessions, settings, app controls, and frequent Web UI actions.
 - Automatic tab naming from the first prompt, with `--name <name>` still available for an explicit initial tab name.
-- Streaming chat transcript with Markdown, thinking output, tool/bash cards, queue and compaction events, edit-and-retry from user prompts, and guarded abort controls that require holding Esc or the Abort button for 3 seconds.
-- Prompt composer with uploads, drag/drop/paste, inline image support, slash-command autocomplete, and `@` file/path references with live suggestions.
-- Browser dialogs for common Pi selectors such as `/model`, `/settings`, `/theme`, `/fork`, `/clone`, `/resume`, `/tree`, `/scoped-models`, `/tools`, and `/skills`.
-- Model, thinking, session, workspace, theme, optional-feature, Codex usage, optional Remote WebUI, update/restart, event, and notification controls in the side panel.
-- Persistent context-window meter with manual compact and auto-compaction controls near the composer.
+- Streaming chat transcript with Markdown, thinking output, tool/bash cards, queue and compaction events, edit-and-retry from user prompts, transcript search, copy buttons, and guarded abort controls that require holding Esc or the Abort button for 3 seconds.
+- Prompt composer with uploads, drag/drop/paste, inline image support, generated text attachments for long input or clipboard text, editable text attachments, slash-command autocomplete, and `@` file/path references with live suggestions.
+- Leading `!` and `!!` user-bash commands from the composer, serialized per tab; `!` keeps output in the next model context and `!!` excludes it.
+- Browser-native Pi dialogs for `/model`, `/settings`, `/theme`, `/fork`, `/clone`, `/name`, `/resume`, `/tree`, `/login`, `/logout`, `/scoped-models`, `/tools`, and `/skills`, plus native-command adapter output for `/copy`, `/session`, `/new`, `/compact`, `/reload`, and `/export`.
+- Runtime `/tools` and `/skills` selectors backed by the hidden Web UI RPC helper; skill toggles persist on the session branch, disabled skills are removed from the system prompt, and tracked `SKILL.md` files can be opened/edited from skill tags.
+- Session resume/switch, metadata rename, and localhost-only safe delete with active/open-tab/session-directory guards.
+- Model, thinking, session, workspace, theme, optional-feature, Codex usage, optional Remote WebUI, update/restart/stop, event, notification, thinking-visibility, terminal-tab-layout, and custom-background controls in collapsible side-panel sections.
+- Persistent context-window meter with manual compact and auto-compaction controls near the composer; side-panel thinking changes made while a tab is busy are queued for the next prompt.
 - Side-panel theme picker backed by optional `@firstpick/pi-themes-bundle` themes when loaded.
-- Per-tab cwd changes, a clickable footer cwd picker, saved path fast picks, server-persisted fast picks, and restart-safe restoration of open tabs.
+- Per-tab cwd changes, a clickable footer cwd picker, directory creation/search in the picker, saved path fast picks, server-persisted fast picks, and restart-safe restoration of open tabs.
 - Detected app runner dropdown for the active tab cwd, including Cargo, Bun, npm/npx/pnpm, Python/uv, Go/Golang, Zig, C/C++, Docker Compose, root/dev/scripts shell scripts, and other common project runners with live output pinned at the top of the terminal. Running app runners expose line-oriented stdin in the widget for interactive scripts. Projects can add browseable custom runners in `.pi-webui-runners.json` with a command (default `./`) plus a relative path to the file to run.
+- Guided Git workflow for existing repos and new repos: initialize, create README/.gitignore, initial commit, rename to `main`, add a GitHub remote, pull fetched incoming changes, stage, generate or type commit messages, push, and optionally create a PR.
 - Browser support for Pi extension UI prompts, widgets, status updates, `/btw` side-question output widgets with optional context transfer/live steering, browser notifications when a tab needs an extension UI response, and an optional side-panel toggle for agent-done notifications.
 - Localhost-only Pi/Web UI update checks with a top-right update notification and confirmed restart actions: **Update Pi & restart** runs `pi update` for Pi-only updates, while **Update Pi + Packages & Restart** runs `pi update --all` for Pi plus configured packages.
 - Feedback reactions (`👍`, `👎`, `?`) on final assistant output plus tool/bash action cards, which can ask Pi to create or update a LEARNING.
-- Mobile-friendly layout and PWA install support where the browser allows it.
+- Mobile-friendly layout, PWA install support where the browser allows it, backend-offline recovery, and a dedicated server-restart overlay while confirmed restart/update actions run.
 
-## v0.4.8 feature gallery
+## Native Pi command coverage
 
-These screenshots show the v0.4.8 Web UI surfaces. Unless noted otherwise, actions apply to the active tab and its current working directory.
+Web UI keeps a packaged parity matrix at `dev/docs/WEBUI_TUI_NATIVE_PARITY.json` and exposes it at `GET /api/native-parity`.
+
+| Status | Commands and behavior |
+| --- | --- |
+| Implemented | `/model`, `/settings`, `/tools`, `/skills`, `/copy`, `/name`, `/session`, `/clone`, `/logout`, `/new`, `/compact`, and `/reload` use browser-native dialogs or structured native-command cards. |
+| Degraded / browser-specific | `/theme` changes the browser Web UI theme only; `/scoped-models` points to the footer scoped-model picker; `/export` supports no-path HTML downloads plus explicit new `.html`/`.jsonl` server paths; `/hotkeys` lists Web UI shortcuts; `/fork`, `/tree`, `/login`, and `/resume` have browser flows with documented gaps. |
+| Unsupported in Web UI | `/import`, `/share`, `/changelog`, and `/quit` return structured unavailable output instead of raw HTTP errors. |
+
+Sensitive native flows use shared trust-boundary guards: localhost-only APIs, trusted-context checks for LAN clients, confirmation-oriented dialogs, and session-directory confinement for session file operations.
+
+## Keyboard shortcuts
+
+| Shortcut | Action |
+| --- | --- |
+| `Ctrl/Cmd+K` | Open the command palette. |
+| `Ctrl/Cmd+L` | Open the model selector. |
+| `Ctrl/Cmd+P` / `Shift+Ctrl/Cmd+P` | Cycle scoped or available models forward/backward. |
+| `Shift+Tab` | Cycle thinking effort. |
+| `Ctrl/Cmd+T` | Toggle thinking-output visibility. |
+| `Ctrl/Cmd+O` | Toggle global expansion for tool and bash output cards. |
+| `Alt+Enter` | Queue the composer as a follow-up. |
+| `Alt+Up` | Restore the latest observed steering/follow-up queue snapshot into the composer. |
+| hold `Esc` | Abort active user bash first, then active agent work. |
+| `Ctrl/Cmd+C` in an empty, focused composer | Clear the prompt. |
+| `Ctrl/Cmd+F` | Search the transcript. |
+
+## Feature gallery (screenshots from v0.4.8)
+
+These screenshots show the v0.4.8 Web UI surfaces. Current implementations include the additional native-command, shortcut, attachment, Git, app-runner, server-control, and safety features documented above. Unless noted otherwise, actions apply to the active tab and its current working directory.
 
 ### Main window
 
@@ -269,12 +303,25 @@ These screenshots show the v0.4.8 Web UI surfaces. Unless noted otherwise, actio
 
 Useful browser endpoints exposed by the local server include:
 
+- `GET /api/health` and `GET /api/webui-status?detailed=1` for server health, network exposure, tabs, sessions, models/providers, update state, and recent events.
+- `GET /api/tabs`, `POST /api/tabs`, `PATCH /api/tabs/<tabId>`, and tab close/delete routes for multi-tab lifecycle management.
+- `GET /api/messages?tab=<tabId>&since=<index>` for transcript snapshots or delta refreshes.
+- `POST /api/prompt`, `POST /api/follow-up`, `POST /api/steer`, `POST /api/bash`, `POST /api/abort`, and `POST /api/abort-bash` for tab-scoped Pi interaction.
+- `POST /api/attachments` for uploaded/generated prompt attachments and inline images.
 - `GET /api/path-suggestions?tab=<tabId>&query=<path>` for `@` file/path references with live suggestions.
+- `GET /api/path-fast-picks` and `POST /api/path-fast-picks` for server-persisted cwd fast picks.
+- `GET /api/native-parity` for the packaged native TUI/Web UI parity matrix.
+- `GET /api/settings`, `POST /api/settings`, `GET /api/tools`, `POST /api/tools`, `GET /api/skills`, and `POST /api/skills` for browser-native Pi settings/tool/skill selectors.
+- `GET /api/skill-file` and localhost-only `POST /api/skill-file` for guarded `SKILL.md` editing from tracked skill tags.
+- `GET /api/sessions`, `GET /api/session-tree`, `POST /api/switch-session`, `POST /api/session-rename`, and localhost-only `POST /api/session-delete` for resume/tree/session metadata flows.
+- `GET /api/auth-providers` and localhost-only `POST /api/auth-logout` for provider-auth status and stored-credential removal.
+- `GET /api/app-runners`, `POST /api/app-runner`, `POST /api/app-runner/input`, `POST /api/app-runner/stop`, `GET/POST/DELETE /api/app-runner-config`, and `GET /api/app-runner-files` for detected and custom project runners.
+- `GET /api/git-changes`, `POST /api/git-changes/pull`, `GET /api/git-branches`, `POST /api/git-branch`, and `/api/git-workflow/*` for browser Git status, diff, branch, init, commit, push, and PR helpers.
 - `POST /api/action-feedback?tab=<tabId>` for feedback on final assistant output and action cards.
 - `GET /api/optional-features` for optional companion package install/update status.
 - `POST /api/optional-feature-install` for installing or updating known optional companion packages from the side panel.
-- `GET /api/update-status` and localhost-only `POST /api/update` for checking Pi/Web UI updates and running `pi update` followed by a Web UI server restart. Use `POST /api/update?all=1` to run `pi update --all` for Pi plus configured packages.
-- `GET /api/remote-auth`, `POST /api/remote-auth`, and localhost-only `POST /api/remote-auth/settings` for optional 4-digit PIN authentication when serving non-local browser clients.
+- `GET /api/update-status`, localhost-only `POST /api/restart`, and localhost-only `POST /api/update` for checking Pi/Web UI updates and restarting the Web UI. Use `POST /api/update?all=1` to run `pi update --all` for Pi plus configured packages.
+- `GET /api/network`, localhost-only `POST /api/network/open`, localhost-only `POST /api/network/close`, `GET /api/remote-auth`, `POST /api/remote-auth`, and localhost-only `POST /api/remote-auth/settings` for trusted-LAN exposure and optional 4-digit PIN authentication when serving non-local browser clients.
 
 For local development, run the checkout helper directly, for example:
 
@@ -308,19 +355,32 @@ Optional companions:
 
 ## Guided Git workflow
 
-The Git workflow button runs local git commands in the active Pi working directory:
+The Git workflow button runs local git commands in the active Pi working directory. It now covers both empty/new projects and existing repositories.
 
-1. `git add .`
-2. Send `/git-staged-msg` to Pi
-3. Read the generated commit message files from `dev/COMMIT/`
-4. Commit with the selected generated message, or type a manual message in the Message stage and use **Commit input**
-5. Run `git push`
+For a new project, the browser flow can:
+
+1. Run `git init` when the active cwd is not yet a repository.
+2. Check for `README.md` and `.gitignore`.
+3. Create and stage starter `README.md`/`.gitignore` files without overwriting existing files.
+4. Create an initial commit.
+5. Rename the branch to `main`.
+6. Add a GitHub remote from a confirmed `owner/repo`.
+7. Push the initialized branch when you confirm the remote target.
+
+For an existing repository, the workflow can:
+
+1. Show staged, unstaged, untracked, and fetched incoming changes.
+2. Fast-forward pull fetched incoming commits when the repository is safely behind.
+3. Run `git add .`.
+4. Send `/git-staged-msg` to Pi and read generated commit message files from `dev/COMMIT/`.
+5. Use a generated short/long message, a generated single-file default such as `updated file.txt`, or a manual **Commit input** message.
+6. Run `git push`.
 
 After the message is generated, **Create PR** asks Pi to generate `dev/COMMIT/staged-branch-name.txt`, lets you confirm or edit the `type/feature-name` branch, then switches with `git switch -c` before committing. In PR mode, choose **Commit short**, **Commit long**, or type a message and use **Commit input**, then **Push and Create PR** pushes the branch, sends `/pr`, shows the generated `dev/PR/<branch>.md` description for editing/confirmation, and creates the pull request with `gh pr create`. Use **Manual branch** to skip agent branch-name generation and type the branch directly.
 
-Use the workflow process buttons to jump directly to **Stage**, **Message**, **Commit**, or **Push** when earlier work was already completed manually. Selecting **Message** lets you either run `/git-staged-msg` or type a commit message and use **Commit input** directly. Selecting **Commit** loads the current generated files from `dev/COMMIT/` before enabling the commit choices. A yellow dot means that process was selected or is available but its action has not completed in this workflow; green means the process action completed.
+Use the workflow process buttons to jump directly to **Initialize**, **Stage**, **Message**, **Commit**, **Push**, or PR steps when earlier work was already completed manually. Selecting **Message** lets you either run `/git-staged-msg` or type a commit message and use **Commit input** directly. Selecting **Commit** loads the current generated files from `dev/COMMIT/` before enabling the commit choices. A yellow dot means that process was selected or is available but its action has not completed in this workflow; green means the process action completed.
 
-This requires `/git-staged-msg` and `/pr` from `@firstpick/pi-prompts-git-pr`; branch-name generation uses `/git-branch-name` when available and otherwise sends an equivalent inline prompt. Creating the PR also requires an authenticated GitHub CLI (`gh`). Review the generated commit message, branch name, and PR description before committing, pushing, or creating a PR.
+This requires `/git-staged-msg` and `/pr` from `@firstpick/pi-prompts-git-pr`; branch-name generation uses `/git-branch-name` when available and otherwise sends an equivalent inline prompt. Creating the PR also requires an authenticated GitHub CLI (`gh`). Review the generated commit message, branch name, remote URL, and PR description before committing, pushing, or creating a PR.
 
 ## Mobile and PWA notes
 
