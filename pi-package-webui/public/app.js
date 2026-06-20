@@ -141,6 +141,13 @@ const elements = {
   remoteAuthToggle: $("#remoteAuthToggle"),
   remoteAuthStatus: $("#remoteAuthStatus"),
   openNetworkButton: $("#openNetworkButton"),
+  remoteQrDialog: $("#remoteQrDialog"),
+  remoteQrMessage: $("#remoteQrMessage"),
+  remoteQrBody: $("#remoteQrBody"),
+  remoteQrCopyButton: $("#remoteQrCopyButton"),
+  remoteQrOpenButton: $("#remoteQrOpenButton"),
+  remoteQrCloseButton: $("#remoteQrCloseButton"),
+  remoteQrCloseMenuButton: $("#remoteQrCloseMenuButton"),
   serverActionSelect: $("#serverActionSelect"),
   runServerActionButton: $("#runServerActionButton"),
   serverActionStatus: $("#serverActionStatus"),
@@ -322,6 +329,9 @@ let btwWidgetInputDraft = "";
 let btwWidgetFocusAfterRender = false;
 let latestWorkspace = null;
 let latestNetwork = null;
+let latestRemoteWebuiQrUrl = "";
+let remoteQrAutoPopupShown = false;
+let networkStatusLoaded = false;
 let webuiVersion = "";
 let webuiDevServer = false;
 let latestCodexUsage = null;
@@ -4660,7 +4670,7 @@ function restoreActiveDraft() {
 
 function focusPromptInput({ defer = false } = {}) {
   const focus = () => {
-    if (!elements.promptInput || elements.dialog.open || elements.pathPickerDialog.open || elements.gitChangesDialog?.open || elements.commandPaletteDialog?.open || elements.editRetryDialog?.open || elements.nativeCommandDialog.open || elements.appRunnerInfoDialog?.open || elements.promptListDialog?.open || elements.attachmentTextDialog?.open || elements.skillEditorDialog?.open || document.visibilityState === "hidden") return;
+    if (!elements.promptInput || elements.dialog.open || elements.pathPickerDialog.open || elements.gitChangesDialog?.open || elements.commandPaletteDialog?.open || elements.editRetryDialog?.open || elements.nativeCommandDialog.open || elements.remoteQrDialog?.open || elements.appRunnerInfoDialog?.open || elements.promptListDialog?.open || elements.attachmentTextDialog?.open || elements.skillEditorDialog?.open || document.visibilityState === "hidden") return;
     try {
       elements.promptInput.focus({ preventScroll: true });
     } catch {
@@ -10438,6 +10448,289 @@ function remoteWebuiWidgetLines(lines = []) {
     .map(stripAnsi)
     .map((line) => String(line ?? ""))
     .filter((line, index, array) => line.trim() || (index > 0 && index < array.length - 1));
+}
+
+function remoteWebuiLineUrl(line) {
+  const text = String(line || "").trim();
+  const match = text.match(/https?:\/\/[^\s<>"']+/i);
+  if (!match) return "";
+  const candidate = match[0].replace(/[),.;]+$/, "");
+  return safeHttpUrl(candidate);
+}
+
+function remoteWebuiQrPayload(lines = []) {
+  const cleanLines = remoteWebuiWidgetLines(lines);
+  const url = remoteWebuiLineUrl(cleanLines.find((line) => remoteWebuiLineUrl(line)) || "");
+  const scanIndex = cleanLines.findIndex((line) => /scan with your phone/i.test(line));
+  const urlIndex = cleanLines.findIndex((line, index) => index > scanIndex && remoteWebuiLineUrl(line));
+  const qrStart = scanIndex >= 0 ? scanIndex + 1 : -1;
+  const qrEnd = urlIndex >= 0 ? urlIndex : cleanLines.length;
+  const qrLines = qrStart >= 0
+    ? cleanLines.slice(qrStart, qrEnd).filter((line, index, array) => line.trim() || (index > 0 && index < array.length - 1))
+    : [];
+  const detailLines = cleanLines.filter((line, index) => {
+    if (!line.trim()) return false;
+    if (/^Pi Remote WebUI$/i.test(line.trim())) return false;
+    if (/scan with your phone/i.test(line)) return false;
+    if (qrStart >= 0 && index >= qrStart && index < qrEnd) return false;
+    return true;
+  });
+  return { cleanLines, detailLines, qrLines, url };
+}
+
+function remoteWebuiQrMatrix(qrLines = []) {
+  const lines = qrLines.map((line) => String(line ?? "")).filter((line) => /[█▀▄]/u.test(line));
+  if (!lines.length) return null;
+  const width = Math.max(...lines.map((line) => Array.from(line).length));
+  if (!Number.isFinite(width) || width <= 0) return null;
+
+  const matrix = [];
+  for (const line of lines) {
+    const chars = Array.from(line);
+    while (chars.length < width) chars.push(" ");
+    const top = [];
+    const bottom = [];
+    for (const char of chars) {
+      if (char === "█") {
+        top.push(false);
+        bottom.push(false);
+      } else if (char === "▀") {
+        top.push(false);
+        bottom.push(true);
+      } else if (char === "▄") {
+        top.push(true);
+        bottom.push(false);
+      } else {
+        top.push(true);
+        bottom.push(true);
+      }
+    }
+    matrix.push(top, bottom);
+  }
+
+  while (matrix.length > width && matrix[0]?.every(Boolean)) matrix.shift();
+  while (matrix.length > width && matrix.at(-1)?.every(Boolean)) matrix.pop();
+  if (matrix.length !== width || matrix.some((row) => row.length !== width)) return null;
+  if (!matrix.some((row) => row.some(Boolean))) return null;
+  return matrix;
+}
+
+function remoteWebuiQrSvg(qrLines = []) {
+  const matrix = remoteWebuiQrMatrix(qrLines);
+  if (!matrix) return null;
+  const size = matrix.length;
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "remote-qr-svg");
+  svg.setAttribute("viewBox", `0 0 ${size} ${size}`);
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", "/remote QR code");
+  svg.setAttribute("shape-rendering", "crispEdges");
+  svg.setAttribute("focusable", "false");
+
+  const background = document.createElementNS(svg.namespaceURI, "rect");
+  background.setAttribute("class", "remote-qr-svg-bg");
+  background.setAttribute("width", String(size));
+  background.setAttribute("height", String(size));
+  svg.append(background);
+
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      if (!matrix[y][x]) continue;
+      const rect = document.createElementNS(svg.namespaceURI, "rect");
+      rect.setAttribute("class", "remote-qr-svg-dark");
+      rect.setAttribute("x", String(x));
+      rect.setAttribute("y", String(y));
+      rect.setAttribute("width", "1");
+      rect.setAttribute("height", "1");
+      svg.append(rect);
+    }
+  }
+  return svg;
+}
+
+function closeRemoteWebuiQrPopup() {
+  latestRemoteWebuiQrUrl = "";
+  elements.remoteQrDialog?.classList.remove("is-loading");
+  if (elements.remoteQrDialog?.open) elements.remoteQrDialog.close();
+}
+
+function openRemoteWebuiQrUrl() {
+  const url = latestRemoteWebuiQrUrl;
+  if (!url) return;
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.target = "_blank";
+  anchor.rel = "noopener noreferrer";
+  anchor.hidden = true;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  addEvent("opened /remote URL", "info");
+}
+
+async function copyRemoteWebuiQrUrl() {
+  if (!latestRemoteWebuiQrUrl) return;
+  try {
+    await copyText(latestRemoteWebuiQrUrl);
+    addEvent("copied /remote URL", "info");
+  } catch (error) {
+    addEvent(`copy /remote URL failed: ${error.message || String(error)}`, "error");
+  }
+}
+
+function isLocalWebuiBrowserOrigin() {
+  const host = window.location.hostname.toLowerCase();
+  return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+}
+
+function remoteWebuiQrLinesFromData(data = {}) {
+  const network = data.network || latestNetwork || {};
+  const auth = network.auth || {};
+  const networkUrls = Array.isArray(network.networkUrls) ? network.networkUrls : [];
+  const displayUrl = data.url || networkUrls.find((candidate) => /^https?:\/\//i.test(String(candidate || ""))) || network.localUrl || "";
+  const qrLines = Array.isArray(data.qrLines) ? data.qrLines.map((line) => String(line ?? "")) : [];
+  const hasAutoAuthQr = !!(auth.enabled && auth.pin && data.qrUrl && displayUrl && data.qrUrl !== displayUrl);
+  const authLine = auth.enabled ? `Remote PIN auth: on${auth.pin ? ` · PIN ${auth.pin}` : ""}` : "Remote PIN auth: off";
+  const warningLine = hasAutoAuthQr
+    ? "Trusted LAN only. The QR signs in with the embedded PIN; keep it private."
+    : auth.enabled
+      ? "Trusted LAN only. Anyone with this URL and PIN can control Pi/WebUI."
+      : "Trusted LAN only. Remote PIN auth is off; anyone with this URL can control Pi/WebUI.";
+  return [
+    "Pi Remote WebUI",
+    "",
+    hasAutoAuthQr ? "Scan with your phone (auto-auth QR):" : "Scan with your phone:",
+    "",
+    ...qrLines,
+    "",
+    displayUrl,
+    authLine,
+    "",
+    warningLine,
+    "Close LAN access with: /remote close",
+  ];
+}
+
+function showRemoteWebuiQrLoadingPopup(message = "Opening Remote WebUI QR…") {
+  if (!elements.remoteQrDialog || !elements.remoteQrBody) return;
+  latestRemoteWebuiQrUrl = "";
+  elements.remoteQrDialog.classList.add("is-loading");
+
+  const loading = make("div", "remote-qr-loading");
+  loading.setAttribute("role", "status");
+  loading.setAttribute("aria-live", "polite");
+  const spinner = make("div", "remote-qr-spinner");
+  spinner.setAttribute("aria-hidden", "true");
+  const copy = make("div", "remote-qr-loading-copy");
+  copy.append(
+    make("strong", "", message),
+    make("span", "muted", "Starting /remote and generating a QR code. This can take a moment."),
+  );
+  loading.append(spinner, copy);
+
+  elements.remoteQrBody.replaceChildren(loading);
+  if (elements.remoteQrMessage) elements.remoteQrMessage.textContent = "Preparing trusted-LAN browser access…";
+  if (elements.remoteQrCopyButton) elements.remoteQrCopyButton.disabled = true;
+  if (elements.remoteQrOpenButton) elements.remoteQrOpenButton.disabled = true;
+
+  try {
+    if (!elements.remoteQrDialog.open) elements.remoteQrDialog.showModal();
+  } catch (error) {
+    addEvent(`remote QR loading popup unavailable: ${error.message || String(error)}`, "warn");
+  }
+}
+
+function isRemoteWebuiQrPopupLoading() {
+  return !!elements.remoteQrDialog?.classList.contains("is-loading");
+}
+
+function remoteWebuiStatusLoadingMessage(statusText) {
+  const text = String(statusText || "").toLowerCase();
+  if (text.includes("refresh")) return "Refreshing Remote WebUI QR…";
+  if (text.includes("pin auth")) return "Preparing Remote PIN auth and QR…";
+  return "Opening Remote WebUI QR…";
+}
+
+function handleRemoteWebuiStatus(statusText) {
+  const text = String(statusText || "").toLowerCase();
+  if (text.includes("opening remote webui") || text.includes("refreshing remote qr") || text.includes("enabling remote pin auth")) {
+    showRemoteWebuiQrLoadingPopup(remoteWebuiStatusLoadingMessage(statusText));
+    return;
+  }
+  if (text.includes("closing remote webui")) {
+    closeRemoteWebuiQrPopup();
+    return;
+  }
+  if (!statusText && isRemoteWebuiQrPopupLoading()) closeRemoteWebuiQrPopup();
+}
+
+async function showRemoteWebuiQrPopupFromNetwork({ auto = false } = {}) {
+  if (auto) remoteQrAutoPopupShown = true;
+  showRemoteWebuiQrLoadingPopup("Preparing Remote WebUI QR…");
+  try {
+    const response = await api("/api/network/qr", { scoped: false });
+    openRemoteWebuiQrPopup(remoteWebuiQrLinesFromData(response.data || {}));
+    return true;
+  } catch (error) {
+    if (isRemoteWebuiQrPopupLoading()) closeRemoteWebuiQrPopup();
+    addEvent(`remote QR popup failed: ${error.message || String(error)}`, auto ? "warn" : "error");
+    return false;
+  }
+}
+
+function openRemoteWebuiQrPopup(lines = []) {
+  if (!elements.remoteQrDialog || !elements.remoteQrBody) return;
+  const { cleanLines, detailLines, qrLines, url } = remoteWebuiQrPayload(lines);
+  latestRemoteWebuiQrUrl = url;
+  elements.remoteQrDialog.classList.remove("is-loading");
+
+  const qrText = (qrLines.length ? qrLines : cleanLines).join("\n").trimEnd();
+  const card = make("div", "remote-qr-card");
+  const svgQr = remoteWebuiQrSvg(qrLines);
+  if (svgQr) {
+    card.append(svgQr);
+  } else {
+    const code = make("pre", "remote-qr-code", qrText || "QR code unavailable.");
+    code.setAttribute("aria-label", "/remote QR code");
+    card.append(code);
+  }
+
+  const details = make("div", "remote-qr-details");
+  if (url) {
+    const urlRow = make("div", "remote-qr-url-row");
+    const urlLabel = make("span", "remote-qr-url-label", "URL");
+    const link = make("a", "remote-qr-url", url);
+    link.href = url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    urlRow.append(urlLabel, link);
+    details.append(urlRow);
+  }
+  for (const line of detailLines.filter((line) => !remoteWebuiLineUrl(line))) {
+    details.append(make("p", "remote-qr-note", line));
+  }
+  if (!details.childElementCount) details.append(make("p", "remote-qr-note muted", "Scan from a trusted device on the same local network."));
+
+  elements.remoteQrBody.replaceChildren(card, details);
+  if (elements.remoteQrMessage) {
+    elements.remoteQrMessage.textContent = url
+      ? "Scan this /remote QR code from a trusted local-network device."
+      : "The /remote QR output is ready. Use the transcript if this terminal QR cannot be scanned.";
+  }
+  if (elements.remoteQrCopyButton) elements.remoteQrCopyButton.disabled = !url;
+  if (elements.remoteQrOpenButton) elements.remoteQrOpenButton.disabled = !url;
+
+  try {
+    if (!elements.remoteQrDialog.open) elements.remoteQrDialog.showModal();
+  } catch (error) {
+    addEvent(`remote QR popup unavailable; see /remote output in transcript: ${error.message || String(error)}`, "warn");
+  }
+}
+
+function showRemoteWebuiQrPopup(widgetKey, lines = [], request = {}) {
+  if (widgetKey !== "pi-remote-webui" || !Array.isArray(lines)) return;
+  remoteQrAutoPopupShown = true;
+  openRemoteWebuiQrPopup(lines);
 }
 
 function mirrorRemoteWebuiWidgetToTranscript(widgetKey, lines = [], request = {}) {
@@ -16719,6 +17012,8 @@ function renderNetworkStatus() {
 }
 
 async function refreshNetworkStatus() {
+  const hadNetworkStatus = networkStatusLoaded;
+  const wasOpen = !!latestNetwork?.open;
   try {
     const response = await api("/api/network", { scoped: false });
     latestNetwork = response.data || null;
@@ -16727,6 +17022,22 @@ async function refreshNetworkStatus() {
     latestNetwork = health.network || { open: false, opening: false, localUrl: window.location.origin };
   }
   renderNetworkStatus();
+  networkStatusLoaded = true;
+
+  const open = !!latestNetwork?.open;
+  if (!open) {
+    remoteQrAutoPopupShown = false;
+    return;
+  }
+
+  if (!hadNetworkStatus) {
+    remoteQrAutoPopupShown = true;
+    return;
+  }
+
+  if (!wasOpen && !remoteQrAutoPopupShown && isLocalWebuiBrowserOrigin()) {
+    showRemoteWebuiQrPopupFromNetwork({ auto: true }).catch((error) => addEvent(error.message || String(error), "warn"));
+  }
 }
 
 async function runRemoteWebuiCommand(command) {
@@ -18145,6 +18456,7 @@ function handleExtensionUiRequest(request) {
       }
       if (statusKey === STATS_WEBUI_STATUS_KEY) handleStatsWebuiStatus(request.statusText);
       if (statusKey === BTW_WEBUI_STATUS_KEY) handleBtwWebuiStatus(request.statusText);
+      if (statusKey === "pi-remote-webui") handleRemoteWebuiStatus(request.statusText);
       updateOptionalFeatureAvailability();
       if (statusKey === GIT_FOOTER_WEBUI_STATUS_KEY) {
         if (currentState?.isStreaming || runIndicatorLocallyActive) return;
@@ -18162,7 +18474,12 @@ function handleExtensionUiRequest(request) {
       const widgetKey = request.widgetKey || request.id;
       if (widgetKey === "pi-remote-webui") {
         widgets.delete(widgetKey);
-        if (Array.isArray(request.widgetLines)) mirrorRemoteWebuiWidgetToTranscript(widgetKey, request.widgetLines, request);
+        if (Array.isArray(request.widgetLines)) {
+          mirrorRemoteWebuiWidgetToTranscript(widgetKey, request.widgetLines, request);
+          showRemoteWebuiQrPopup(widgetKey, request.widgetLines, request);
+        } else {
+          closeRemoteWebuiQrPopup();
+        }
       } else if (Array.isArray(request.widgetLines)) {
         widgets.set(widgetKey, request);
       } else {
@@ -18185,6 +18502,7 @@ function handleExtensionUiRequest(request) {
     case "confirm":
     case "input":
     case "editor":
+      if (isRemoteWebuiQrPopupLoading()) closeRemoteWebuiQrPopup();
       if (hasQueuedDialogRequest(request.id)) return;
       if (request.pendingExtensionUiRequestCount === undefined) {
         const tab = tabs.find((item) => item.id === request.tabId);
@@ -19290,6 +19608,14 @@ if (elements.backgroundClearButton) {
 }
 elements.remoteAuthToggle.addEventListener("change", () => toggleRemoteAuth().catch((error) => addEvent(error.message || String(error), "error")));
 elements.openNetworkButton.addEventListener("click", openToNetwork);
+elements.remoteQrCopyButton?.addEventListener("click", () => copyRemoteWebuiQrUrl().catch((error) => addEvent(error.message || String(error), "error")));
+elements.remoteQrOpenButton?.addEventListener("click", openRemoteWebuiQrUrl);
+elements.remoteQrCloseButton?.addEventListener("click", closeRemoteWebuiQrPopup);
+elements.remoteQrCloseMenuButton?.addEventListener("click", closeRemoteWebuiQrPopup);
+elements.remoteQrDialog?.addEventListener("close", () => {
+  latestRemoteWebuiQrUrl = "";
+  elements.remoteQrDialog?.classList.remove("is-loading");
+});
 elements.serverActionSelect.addEventListener("change", updateServerActionButton);
 elements.runServerActionButton.addEventListener("click", () => runSelectedServerAction().catch((error) => addEvent(error.message || String(error), "error")));
 elements.updateNotificationUpdateButton?.addEventListener("click", () => runPiUpdateAndRestart().catch((error) => addEvent(error.message || String(error), "error")));

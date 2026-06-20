@@ -407,6 +407,13 @@ try {
   assert.equal(traversalDelete.status, 403, "session delete outside the session dir must return 403");
   assert.match(String(traversalDelete.body?.error || ""), /session directory/i);
 
+  const networkQr = await request("127.0.0.1", "/api/network/qr");
+  assert.equal(networkQr.status, 200, "localhost can generate a /remote QR payload");
+  assert.equal(networkQr.body?.ok, true);
+  assert.match(String(networkQr.body?.data?.url || ""), /^http:\/\//, "remote QR payload should include a display URL");
+  assert.ok(Array.isArray(networkQr.body?.data?.qrLines), "remote QR payload should include terminal QR lines");
+  assert.equal(networkQr.body?.data?.network?.open, true, "remote QR payload should describe current network state");
+
   const initialAuth = await request("127.0.0.1", "/api/remote-auth");
   assert.equal(initialAuth.status, 200);
   assert.equal(initialAuth.body?.data?.auth?.enabled, false, "remote PIN auth should be off by default");
@@ -431,6 +438,9 @@ try {
 
     const remoteClose = await request(lan, "/api/network/close", { method: "POST" });
     assert.equal(remoteClose.status, 403, "network close must be localhost-only");
+
+    const remoteQr = await request(lan, "/api/network/qr");
+    assert.equal(remoteQr.status, 403, "remote QR generation must be localhost-only because it can embed the PIN");
 
     const enableAuth = await request("127.0.0.1", "/api/remote-auth/settings", { method: "POST", body: { enabled: true } });
     assert.equal(enableAuth.status, 200, "localhost can enable remote PIN auth");

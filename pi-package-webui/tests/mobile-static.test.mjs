@@ -68,6 +68,7 @@ assert.match(html, /id="terminalTabsLayoutSelect"[\s\S]*<option value="left">Lef
 assert.match(html, /id="terminalTabsLayoutStatus"/, "terminal-tabs layout selector should expose status text");
 assert.match(html, /id="nativeCommandDialog"/, "native slash selector UI should have a dedicated dialog");
 assert.match(html, /id="nativeCommandSearch"[^>]*type="search"/, "native slash selector dialog should expose a filter box");
+assert.match(html, /id="remoteQrDialog"[\s\S]*id="remoteQrBody"[\s\S]*id="remoteQrCopyButton"/, "remote WebUI should expose a dedicated QR popup dialog");
 assert.match(html, /id="commandPaletteCloseButton"[^>]*aria-label="Close command palette"[^>]*>Close<\/button>/, "command palette should expose a visible accessible close button");
 assert.match(html, /id="pathPickerCreateNameInput"[^>]*placeholder="New directory name"/, "cwd picker should expose a new-directory name input");
 assert.match(html, /id="pathPickerCreateButton"[^>]*>Create directory<\/button>/, "cwd picker should expose a create-directory action");
@@ -207,9 +208,14 @@ assert.match(css, /\.composer-busy-mode-menu \{[\s\S]*?bottom:\s*calc\(100% \+ 0
 assert.match(css, /\.sticky-user-prompt-button \{[\s\S]*?grid-template-columns:\s*auto minmax\(0, 1fr\) auto/, "last-user-prompt jump control should render as a fixed transcript header");
 assert.match(css, /@media \(max-width: 720px\), \(max-device-width: 720px\), \(pointer: coarse\) and \(hover: none\)[\s\S]*?\.sticky-user-prompt-button \{\n\s+grid-template-columns:\s*minmax\(0, 1fr\) auto;\n\s+min-height:\s*36px;[\s\S]*?\.sticky-user-prompt-text \{[\s\S]*?font-size:\s*0\.72rem/, "mobile last-user-prompt card should use compact height and text");
 assert.match(css, /\.message\.extension,[\s\S]*?\.message\.native/, "extension and native command output should have visible transcript styling");
-assert.match(app, /function mirrorRemoteWebuiWidgetToTranscript\(widgetKey, lines = \[\], request = \{\}\)[\s\S]*?widgetKey !== "pi-remote-webui"[\s\S]*?addTransientMessage\(\{ role: "extension", title: "\/remote"/, "remote WebUI QR widget events should mirror into the active tab transcript");
-assert.match(app, /if \(widgetKey === "pi-remote-webui"\) \{[\s\S]*?widgets\.delete\(widgetKey\);[\s\S]*?mirrorRemoteWebuiWidgetToTranscript/, "remote WebUI QR widget events should not render a Web UI overlay widget");
-assert.doesNotMatch(app, /function renderRemoteWebuiWidget/, "remote WebUI QR should only render in the transcript");
+assert.match(app, /function remoteWebuiQrSvg\(qrLines = \[\]\)[\s\S]*?viewBox[\s\S]*?shape-rendering[\s\S]*?crispEdges/, "remote WebUI QR popup should render terminal QR output as square SVG modules");
+assert.match(app, /function showRemoteWebuiQrLoadingPopup\(message = "Opening Remote WebUI QR…"\)[\s\S]*?remote-qr-loading[\s\S]*?showModal\(\)/, "remote WebUI QR popup should show a loading state while QR generation is pending");
+assert.match(app, /function handleRemoteWebuiStatus\(statusText\)[\s\S]*?opening remote webui[\s\S]*?refreshing remote qr[\s\S]*?enabling remote pin auth[\s\S]*?showRemoteWebuiQrLoadingPopup/, "remote WebUI status updates should open the QR loading popup before widget lines arrive");
+assert.match(app, /case "confirm":[\s\S]*?if \(isRemoteWebuiQrPopupLoading\(\)\) closeRemoteWebuiQrPopup\(\)/, "blocking extension dialogs should close the QR loading popup before opening");
+assert.match(app, /function showRemoteWebuiQrPopup\(widgetKey, lines = \[\], request = \{\}\)[\s\S]*?widgetKey !== "pi-remote-webui"[\s\S]*?openRemoteWebuiQrPopup\(lines\)/, "remote WebUI QR widget events should open the QR popup");
+assert.match(app, /function mirrorRemoteWebuiWidgetToTranscript\(widgetKey, lines = \[\], request = \{\}\)[\s\S]*?widgetKey !== "pi-remote-webui"[\s\S]*?addTransientMessage\(\{ role: "extension", title: "\/remote"/, "remote WebUI QR widget events should still mirror into the active tab transcript");
+assert.match(app, /if \(widgetKey === "pi-remote-webui"\) \{[\s\S]*?widgets\.delete\(widgetKey\);[\s\S]*?showRemoteWebuiQrPopup\(widgetKey, request\.widgetLines, request\)/, "remote WebUI QR widget events should not render in the generic widget area");
+assert.doesNotMatch(app, /function renderRemoteWebuiWidget/, "remote WebUI QR should not render through the generic widget renderer");
 assert.match(css, /\.message\.run-indicator-message \{[\s\S]*?border-color/, "active agent runs should render a visible transcript indicator card");
 assert.match(css, /\.message-copy-button \{[\s\S]*?position:\s*absolute/, "transcript messages should expose a top-right copy button");
 assert.match(css, /\.message\.has-copy-action[\s\S]*?padding-right:\s*3\.1rem/, "copy buttons should reserve space in message cards");
@@ -390,6 +396,11 @@ assert.match(css, /\.extension-dialog[\s\S]*?max-height:\s*calc\(var\(--visual-v
 assert.match(css, /\.extension-dialog[\s\S]*?inset:\s*auto 0 0 0/, "mobile dialogs should behave like bottom sheets");
 assert.match(css, /#dialogMessage \{[\s\S]*?white-space:\s*pre-wrap/, "extension dialog messages should preserve multiline prompts");
 assert.match(css, /\.native-command-dialog \{[\s\S]*?width:\s*min\(56rem/, "native slash selector dialog should have roomy desktop layout");
+assert.match(css, /\.extension-dialog\.remote-qr-dialog \{[\s\S]*?width:\s*min\(34rem/, "remote QR popup should have a bounded modal layout");
+assert.match(css, /\.remote-qr-loading \{[\s\S]*?display:\s*flex/, "remote QR popup should style its loading placeholder");
+assert.match(css, /\.remote-qr-spinner \{[\s\S]*?animation:\s*remote-qr-spinner-spin 900ms linear infinite/, "remote QR popup loading state should include a spinner animation");
+assert.match(css, /\.remote-qr-svg \{[\s\S]*?aspect-ratio:\s*1 \/ 1/, "remote QR popup should render QR modules as a square image");
+assert.match(css, /\.remote-qr-code \{[\s\S]*?white-space:\s*pre/, "remote QR popup should preserve terminal QR whitespace as fallback");
 assert.doesNotMatch(css, /--tree-depth/, "native slash selector choices should not indent tree entries by depth");
 assert.match(css, /\.native-selector-index \{[\s\S]*?font-variant-numeric:\s*tabular-nums/, "native tree selector choices should use numeric prefixes");
 assert.match(css, /\.native-selector-badge\.native-selector-badge-pi-native[\s\S]*?color:\s*var\(--ctp-blue\)/, "Tools Setup should distinguish Pi native tools with a Pi Native tag");
@@ -439,6 +450,8 @@ assert.match(app, /initializeCustomBackground\(\)\.catch/, "startup should resto
 assert.match(app, /Restart Web UI to load themes/, "frontend should explain when a stale server cannot serve the themes endpoint");
 assert.match(app, /themeSelect\.addEventListener\("change"/, "side-panel theme selector should switch themes immediately");
 assert.match(app, /open \? "Close for network" : "Open to network"/, "network button should toggle from open to close action");
+assert.match(app, /let networkStatusLoaded = false;/, "Remote WebUI QR auto-popup state should track the first loaded network status");
+assert.match(app, /const hadNetworkStatus = networkStatusLoaded;[\s\S]*if \(!hadNetworkStatus\) \{\n\s+remoteQrAutoPopupShown = true;\n\s+return;\n\s+\}[\s\S]*if \(!wasOpen && !remoteQrAutoPopupShown && isLocalWebuiBrowserOrigin\(\)\)/, "Remote WebUI QR should auto-open only after network access transitions open, not on initial refresh");
 assert.match(app, /remoteAuthToggle: \$\("#remoteAuthToggle"\)/, "Remote WebUI controls should bind the remote PIN auth toggle");
 assert.match(html, /id="networkControlField"[^>]*hidden/, "Remote WebUI browser controls should be hidden until the optional package is loaded and enabled");
 assert.match(app, /remoteWebuiCommand\(enable \? "authOn" : "authOff"/, "remote PIN auth toggle should dispatch through the Remote WebUI package command");

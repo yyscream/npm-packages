@@ -26,6 +26,7 @@ import {
   guardsForNativeCommand,
   isLocalRequest,
   remoteShellTrustWarning,
+  requireLocalhost,
   requireLocalhostRoute,
 } from "../lib/trust-boundaries.mjs";
 import {
@@ -54,6 +55,7 @@ try {
 }
 const nativeParityMatrix = JSON.parse(await readFile(path.join(packageRoot, "dev", "docs", "WEBUI_TUI_NATIVE_PARITY.json"), "utf8"));
 const webuiDevServer = isTruthyEnv(process.env.PI_WEBUI_DEV) || isSourceCheckout(packageRoot);
+let remoteQrCorePromise = null;
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 31415;
@@ -6977,6 +6979,45 @@ function networkStatus({ includeAuthPin = false } = {}) {
   };
 }
 
+async function loadRemoteQrCore() {
+  if (!remoteQrCorePromise) {
+    remoteQrCorePromise = (async () => {
+      const candidates = [];
+      try {
+        candidates.push(require.resolve("@firstpick/pi-package-remote-webui/lib/remote-core.mjs", { paths: [packageRoot] }));
+      } catch {
+        // Optional companion package is not installed; try the monorepo sibling below.
+      }
+      candidates.push(path.resolve(packageRoot, "..", "pi-package-remote-webui", "lib", "remote-core.mjs"));
+      let lastError;
+      for (const candidate of candidates) {
+        try {
+          await access(candidate);
+          return await import(pathToFileURL(candidate).href);
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      throw lastError || new Error("Remote WebUI QR support is unavailable");
+    })();
+  }
+  return remoteQrCorePromise;
+}
+
+function networkQrDisplayUrl(network) {
+  const urls = Array.isArray(network?.networkUrls) ? network.networkUrls : [];
+  return urls.find((candidate) => typeof candidate === "string" && /^https?:\/\//i.test(candidate)) || network?.localUrl || `http://127.0.0.1:${options.port}/`;
+}
+
+async function remoteNetworkQrPayload() {
+  const network = networkStatus({ includeAuthPin: true });
+  const { generateQrLines, remoteAuthQrUrl } = await loadRemoteQrCore();
+  const displayUrl = networkQrDisplayUrl(network);
+  const qrUrl = remoteAuthQrUrl(displayUrl, network);
+  const qrLines = await generateQrLines(qrUrl);
+  return { url: displayUrl, qrUrl, qrLines, network };
+}
+
 function closeSseClientsForRebind(nextHost) {
   for (const tab of tabs.values()) {
     const rebindEvent = {
@@ -7403,6 +7444,12 @@ const server = createServer(async (req, res) => {
 
     if (url.pathname === "/api/network" && req.method === "GET") {
       sendJson(res, 200, { ok: true, data: networkStatus({ includeAuthPin: isLocalRequest(req) }) });
+      return;
+    }
+
+    if (url.pathname === "/api/network/qr" && req.method === "GET") {
+      requireLocalhost(req, "Remote QR generation is only allowed from localhost");
+      sendJson(res, 200, { ok: true, data: await remoteNetworkQrPayload() });
       return;
     }
 
