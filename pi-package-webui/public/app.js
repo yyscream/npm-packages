@@ -10236,7 +10236,7 @@ function renderGitInitStackInput() {
   elements.gitWorkflowActions.append(row);
 }
 
-function renderGitWorkflowManualCommitInput() {
+function renderGitWorkflowManualCommitInput({ appendCommitButton = true } = {}) {
   const tabId = gitWorkflowActionTabId();
   const workflow = gitWorkflowForTab(tabId, { create: false }) || gitWorkflow;
   const defaultCommitMessage = String(workflow?.manualCommitMessageDefault || "").trim();
@@ -10281,8 +10281,10 @@ function renderGitWorkflowManualCommitInput() {
   loadGitWorkflowDefaultCommitMessage({ runId: workflow?.runId, tabId });
 
   field.append(input);
-  row.append(field, commitButton);
+  row.append(field);
+  if (appendCommitButton) row.append(commitButton);
   elements.gitWorkflowActions.append(row);
+  return commitButton;
 }
 
 function setGitPrDialogStatus(message = "", level = "muted") {
@@ -10621,9 +10623,10 @@ function renderGitWorkflow() {
   if (gitWorkflow.step === "add") {
     addGitWorkflowAction("Run git add .", () => runGitAdd(), "primary", false);
   } else if (gitWorkflow.step === "generate") {
-    renderGitWorkflowManualCommitInput();
+    const commitInputButton = renderGitWorkflowManualCommitInput({ appendCommitButton: false });
     addGitWorkflowAction("Run /git-staged-msg", () => runGitMessagePrompt(), "primary", false);
     addGitWorkflowAction("Preview current message files", () => loadGitWorkflowMessage({ requireFresh: false }), "", false);
+    elements.gitWorkflowActions.append(commitInputButton);
   } else if (gitWorkflow.step === "generating") {
     addGitWorkflowAction("Refresh message preview", () => loadGitWorkflowMessage({ requireFresh: true }), "", false);
   } else if (gitWorkflow.step === "message") {
