@@ -3786,6 +3786,23 @@ function storeDisabledOptionalFeatures() {
   }
 }
 
+function reconcileDisabledOptionalFeaturesFromStorage() {
+  const nextDisabled = new Set(loadDisabledOptionalFeatures());
+  let changed = nextDisabled.size !== disabledOptionalFeatures.size;
+  if (!changed) {
+    for (const featureId of nextDisabled) {
+      if (!disabledOptionalFeatures.has(featureId)) {
+        changed = true;
+        break;
+      }
+    }
+  }
+  if (!changed) return false;
+  disabledOptionalFeatures = nextDisabled;
+  renderOptionalFeatureDependentDisplays();
+  return true;
+}
+
 function isOptionalFeatureDetected(featureId) {
   return optionalFeatureAvailability[featureId] === true;
 }
@@ -3818,6 +3835,7 @@ function setOptionalFeatureDisabled(featureId, disabled) {
   if (!OPTIONAL_FEATURE_BY_ID.has(featureId)) return;
   if (disabled) disabledOptionalFeatures.add(featureId);
   else disabledOptionalFeatures.delete(featureId);
+  if (featureId === "remoteWebui") syncRemoteWebuiControlVisibility(false);
   if (featureId === "gitFooterStatus") {
     statusEntries.delete(GIT_FOOTER_WEBUI_STATUS_KEY);
     clearGitFooterWebuiPayloadCache();
@@ -14572,6 +14590,19 @@ function optionalFeatureStatus(featureId) {
   return { label: "Install needed", className: "missing", detail: installMessage || "Package is not installed or not visible from the Web UI package root" };
 }
 
+function optionalFeatureTooltip(feature, status) {
+  return [
+    feature.label,
+    `Status: ${status.label}`,
+    status.detail,
+    "",
+    feature.description,
+    "",
+    `Check: ${feature.capabilityLabel}`,
+    `Package: ${feature.packageName}`,
+  ].join("\n");
+}
+
 function optionalFeatureWidgetFeatureId(key) {
   if (key.startsWith("btw:")) return "btwCommand";
   if (key.startsWith("release-npm:")) return "releaseNpm";
@@ -14598,26 +14629,17 @@ function renderOptionalFeaturePanel() {
     const packageStatus = optionalFeaturePackageStatus(feature.id);
     const status = optionalFeatureStatus(feature.id);
     const row = make("div", `optional-feature-row ${status.className}`);
+    const tooltip = optionalFeatureTooltip(feature, status);
+    row.dataset.tooltip = tooltip;
+    row.setAttribute("aria-label", tooltip.replace(/\s+/g, " "));
+    row.tabIndex = 0;
 
     const main = make("div", "optional-feature-main");
     const title = make("div", "optional-feature-title");
     title.append(make("strong", undefined, feature.label), make("span", `optional-feature-pill ${status.className}`, status.label));
-    const detail = make("div", "optional-feature-detail", `${status.detail} · checks ${feature.capabilityLabel}`);
-    const description = make("div", "optional-feature-description", feature.description);
-    const packageLine = make("code", "optional-feature-package", feature.packageName);
-    main.append(title, detail, description, packageLine);
+    main.append(title);
 
     const actions = make("div", "optional-feature-actions");
-    if (feature.id === "gitFooterStatus") {
-      const setup = make("button", "optional-feature-action setup", "git-footer-status-setup");
-      setup.type = "button";
-      setup.title = GIT_FOOTER_STATUS_SETUP_TOOLTIP;
-      setup.dataset.tooltip = GIT_FOOTER_STATUS_SETUP_TOOLTIP;
-      setup.disabled = installing;
-      setup.addEventListener("click", () => configureGitFooterStatusSetup({ force: true }));
-      actions.append(setup);
-    }
-
     const action = make("button", "optional-feature-action");
     action.type = "button";
     action.disabled = installing;
@@ -14709,16 +14731,21 @@ function renderOptionalFeatureControls() {
       optionalFeatureUnavailableMessage("remoteWebui"),
     );
   }
-  if (elements.networkControlField) {
-    elements.networkControlField.hidden = !hasRemoteWebuiCommand;
-    elements.networkControlField.classList.toggle("feature-unavailable", !hasRemoteWebuiCommand);
-    const label = elements.networkControlField.querySelector("label");
-    const payload = remoteWebuiControlsPayload();
-    if (label) label.textContent = payload?.title || "Remote WebUI";
-    elements.networkControlField.title = hasRemoteWebuiCommand ? payload?.description || "Remote WebUI controls are provided by @firstpick/pi-package-remote-webui." : optionalFeatureUnavailableMessage("remoteWebui");
-  }
+  syncRemoteWebuiControlVisibility(hasRemoteWebuiCommand);
 
   renderOptionalFeaturePanel();
+}
+
+function syncRemoteWebuiControlVisibility(hasRemoteWebuiCommand = isOptionalFeatureEnabled("remoteWebui") && hasAvailableCommand("remote")) {
+  if (!elements.networkControlField) return;
+  elements.networkControlField.hidden = !hasRemoteWebuiCommand;
+  elements.networkControlField.classList.toggle("feature-unavailable", !hasRemoteWebuiCommand);
+  const label = elements.networkControlField.querySelector("label");
+  const payload = remoteWebuiControlsPayload();
+  if (label) label.textContent = payload?.title || "Remote WebUI";
+  elements.networkControlField.title = hasRemoteWebuiCommand
+    ? payload?.description || "Remote WebUI controls are provided by @firstpick/pi-package-remote-webui."
+    : optionalFeatureUnavailableMessage("remoteWebui");
 }
 
 function commandUnavailableMessage(commandName) {
@@ -16075,6 +16102,7 @@ function renderNetworkStatus() {
   const rebinding = opening || closing;
   const localUrl = network?.localUrl || `${window.location.origin}/`;
   const networkUrls = Array.isArray(network?.networkUrls) ? network.networkUrls : [];
+  syncRemoteWebuiControlVisibility();
   elements.networkStatus.className = `network-status ${opening ? "opening" : closing ? "closing" : open ? "open" : "closed"}`;
   elements.networkStatus.title = closing
     ? "Closing network access and returning to local-only"
@@ -18785,6 +18813,9 @@ document.addEventListener("visibilitychange", () => {
 window.addEventListener("pageshow", () => scheduleForegroundReconcile("page show", 0));
 window.addEventListener("focus", () => scheduleForegroundReconcile("window focus"));
 window.addEventListener("online", () => scheduleForegroundReconcile("network online", 0));
+window.addEventListener("storage", (event) => {
+  if (event.key === OPTIONAL_FEATURES_STORAGE_KEY) reconcileDisabledOptionalFeaturesFromStorage();
+});
 window.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
   if (event.defaultPrevented) return;
