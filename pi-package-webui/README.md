@@ -2,7 +2,7 @@
 
 Local browser UI for [Pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent).
 
-![Pi Web UI workspace dashboard showing the active project, model, session state, and quick actions](https://raw.githubusercontent.com/Firstp1ck/npm-packages/main/pi-package-webui/images/Webui_Workspace_v0.4.8.png)
+![Pi Web UI main window showing multi-tab chat, streaming output, footer status, composer, and side controls](https://raw.githubusercontent.com/Firstp1ck/npm-packages/main/pi-package-webui/images/Webui_MainWindow_v0.4.8.png)
 
 Pi Web UI gives you a local browser companion for Pi: multi-tab chat, streaming output, model controls, uploads, slash-command helpers, workspace navigation, and optional extension widgets.
 
@@ -147,6 +147,13 @@ Environment variables:
 ## v0.4.8 feature gallery
 
 These screenshots show the v0.4.8 Web UI surfaces. Unless noted otherwise, actions apply to the active tab and its current working directory.
+
+### Main window
+
+![Pi Web UI main window showing multi-tab chat, streaming output, footer status, composer, and side controls](https://raw.githubusercontent.com/Firstp1ck/npm-packages/main/pi-package-webui/images/Webui_MainWindow_v0.4.8.png)
+
+- **What it is:** The primary Web UI workspace for Pi, with terminal tabs, chat transcript, live assistant output, footer metrics, prompt composer, attachments, and side-panel controls in one browser view.
+- **What you can do:** Run multiple Pi sessions, send prompts or follow-ups, monitor tokens/cache/cost/context/git/model state, attach files, launch quick actions, and control the active session without returning to the terminal.
 
 ### Workspace dashboard
 
