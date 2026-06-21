@@ -397,7 +397,12 @@ let footerThinkingPickerOpen = false;
 let footerAutoCompactionToggleInFlight = false;
 let footerBranchPickerOpen = false;
 let footerBranchPickerState = { loading: false, error: "", branches: [], current: "", root: "", switching: "", tabId: null };
+let footerBranchCreateDraft = { type: "", name: "" };
 let footerBranchPickerRequestSerial = 0;
+let footerScopedModelDragKey = "";
+let footerScopedModelLastDragOverKey = "";
+let footerScopedModelPointerDrag = null;
+let footerScopedModelSuppressClickUntil = 0;
 let publishMenuOpen = false;
 let maxVisualViewportHeight = 0;
 let abortRequestInFlight = false;
@@ -437,6 +442,8 @@ const SKILL_USAGE_STORAGE_KEY = "pi-webui-skill-usage-v1";
 const TERMINAL_TABS_LAYOUT_STORAGE_KEY = "pi-webui-terminal-tabs-layout";
 const TERMINAL_CUSTOM_GROUPS_STORAGE_KEY = "pi-webui-terminal-custom-groups-v1";
 const TERMINAL_TAB_DRAG_MIME = "application/x-pi-terminal-tab-id";
+const FOOTER_SCOPED_MODEL_ORDER_STORAGE_KEY = "pi-webui-footer-scoped-model-order-v1";
+const FOOTER_SCOPED_MODEL_POINTER_DRAG_THRESHOLD_PX = 6;
 const TOOL_OUTPUT_EXPANDED_STORAGE_KEY = "pi-webui-tool-output-expanded";
 const THEME_STORAGE_KEY = "pi-webui-theme";
 const CUSTOM_BACKGROUND_STORAGE_KEY = "pi-webui-custom-background";
@@ -887,6 +894,7 @@ const GIT_WORKFLOW_MANUAL_BRANCH_TOOLTIP = [
   "5. Return here to commit short, long, or typed input on that branch.",
   "6. Push and Create PR will push upstream, run /pr, let you review, then run gh pr create.",
 ].join("\n");
+const GIT_BRANCH_TYPE_SUGGESTIONS = ["feat", "fix", "change", "perf", "test", "chore", "refactor", "docs", "style", "build", "ci", "revert"];
 const GIT_FOOTER_STATUS_SETUP_TOOLTIP = [
   "git-footer-status-setup:",
   "Store the GitHub username used when the Web UI initializes a no-repo directory.",
@@ -7691,15 +7699,71 @@ function confirmFooterGitBranchAction(branch, { create = false, requireConfirm =
   return window.confirm(message);
 }
 
-function promptFooterGitBranchName() {
-  const value = window.prompt("New git branch name:", "");
-  if (value === null) return "";
-  return cleanStatusText(value);
+function footerBranchCreateType(value = footerBranchCreateDraft.type) {
+  return slugifyGitBranchPart(value);
 }
 
-async function createFooterGitBranch() {
-  const branchName = promptFooterGitBranchName();
-  if (!branchName) return;
+function slugifyGitBranchName(value) {
+  return cleanStatusText(value)
+    .split("/")
+    .map((part) => slugifyGitBranchPart(part))
+    .filter(Boolean)
+    .join("/");
+}
+
+function footerBranchCreateName() {
+  const type = footerBranchCreateType();
+  const rawName = cleanStatusText(footerBranchCreateDraft.name);
+  if (!type || !rawName) return "";
+  return slugifyGitBranchName(`${type}/${rawName}`);
+}
+
+function footerBranchCreatePreviewName() {
+  const type = footerBranchCreateType() || "<type>";
+  const rawName = cleanStatusText(footerBranchCreateDraft.name);
+  const name = rawName ? slugifyGitBranchName(rawName) : "<branch-name>";
+  return `${type}/${name}`;
+}
+
+function updateFooterBranchCreateDraft(patch = {}) {
+  const has = (key) => Object.prototype.hasOwnProperty.call(patch, key);
+  footerBranchCreateDraft = {
+    type: has("type") ? footerBranchCreateType(patch.type) : footerBranchCreateType(),
+    name: has("name") ? String(patch.name || "") : footerBranchCreateDraft.name,
+  };
+}
+
+function quoteGitBranchForDisplay(branch) {
+  return `'${String(branch || "").replace(/'/g, `'\\''`)}'`;
+}
+
+function gitSwitchCreateCommandDisplay(branch) {
+  return `git switch -c ${quoteGitBranchForDisplay(branch)}`;
+}
+
+function footerBranchCreateTooltip(branchName = footerBranchCreateName()) {
+  const command = gitSwitchCreateCommandDisplay(branchName || footerBranchCreatePreviewName());
+  return [
+    "Create new branch",
+    "A branch is a safe workspace for your changes.",
+    "",
+    `This will run: ${command}`,
+    "",
+    "What happens:",
+    "• creates the branch from the current code",
+    "• switches this tab to that branch",
+    "• does not commit, push, or delete anything",
+    "",
+    "Tip: use short lowercase words, e.g. fix/login-button.",
+  ].join("\n");
+}
+
+async function createFooterGitBranch(branch = footerBranchCreateName()) {
+  const branchName = cleanStatusText(branch);
+  if (!branchName) {
+    addEvent("Enter a branch name before creating a new git branch.", "warn");
+    return;
+  }
   const tabContext = activeTabContext();
   if (!confirmFooterGitBranchAction(branchName, { create: true, requireConfirm: true, tabContext })) return;
   await applyFooterGitBranch(branchName, { create: true, tabContext, skipConfirm: true });
@@ -7720,6 +7784,7 @@ async function applyFooterGitBranch(branch, { create = false, tabContext = activ
     footerBranchPickerOpen = false;
     footerBranchPickerRequestSerial += 1;
     footerBranchPickerState = { ...footerBranchPickerState, loading: false, switching: "", current: switchedBranch };
+    if (create) updateFooterBranchCreateDraft({ name: "" });
     applyOptimisticGitFooterBranch(switchedBranch, tabContext);
     addEvent(response.data?.created ? `Created and switched to git branch ${switchedBranch}.` : response.data?.switched === false ? `Already on git branch ${switchedBranch}.` : `Switched git branch to ${switchedBranch}.`, "info");
     requestGitFooterWebuiPayload(tabContext, { force: true });
@@ -7735,6 +7800,124 @@ async function applyFooterGitBranch(branch, { create = false, tabContext = activ
       updateFooterModelPickerPosition();
     }
   }
+}
+
+function renderFooterBranchCreateForm(state = footerBranchPickerState) {
+  const form = make("form", "footer-branch-create-form");
+  form.setAttribute("aria-label", "Create new git branch");
+
+  const header = make("div", "footer-branch-create-header");
+  header.append(make("strong", "footer-branch-create-title", "Create new branch"));
+
+  const fields = make("div", "footer-branch-create-fields");
+  const typeField = make("div", "footer-branch-create-type-field");
+  const typeInput = make("input", "footer-branch-create-dropdown-inputfield");
+  typeInput.type = "text";
+  typeInput.value = footerBranchCreateType();
+  typeInput.placeholder = "type";
+  typeInput.setAttribute("aria-label", "Branch type suggestion or custom prefix");
+  typeInput.setAttribute("aria-haspopup", "listbox");
+  typeInput.autocomplete = "off";
+  typeInput.autocapitalize = "none";
+  typeInput.spellcheck = false;
+
+  const typeSuggestions = make("div", "footer-branch-type-suggestions");
+  typeSuggestions.setAttribute("role", "listbox");
+  typeSuggestions.hidden = true;
+  const renderTypeSuggestions = () => {
+    const filter = slugifyGitBranchPart(typeInput.value);
+    const matches = GIT_BRANCH_TYPE_SUGGESTIONS.filter((type) => !filter || type.includes(filter));
+    const shown = matches.length ? matches : GIT_BRANCH_TYPE_SUGGESTIONS;
+    typeSuggestions.replaceChildren(...shown.map((type) => {
+      const button = make("button", `footer-branch-type-suggestion${footerBranchCreateType(typeInput.value) === type ? " active" : ""}`, type);
+      button.type = "button";
+      button.setAttribute("role", "option");
+      button.setAttribute("aria-selected", footerBranchCreateType(typeInput.value) === type ? "true" : "false");
+      button.addEventListener("pointerdown", (event) => event.preventDefault());
+      button.addEventListener("click", () => {
+        typeInput.value = type;
+        updateFooterBranchCreateDraft({ type });
+        updatePreview();
+        typeSuggestions.hidden = true;
+        nameInput.focus();
+      });
+      return button;
+    }));
+  };
+
+  const slash = make("span", "footer-branch-create-slash", "/");
+
+  const nameInput = make("input", "footer-branch-create-input-field");
+  nameInput.type = "text";
+  nameInput.value = footerBranchCreateDraft.name;
+  nameInput.placeholder = "short-feature-name";
+  nameInput.autocomplete = "off";
+  nameInput.autocapitalize = "none";
+  nameInput.spellcheck = false;
+  nameInput.setAttribute("aria-label", "New branch name");
+
+  const submitButton = make("button", "footer-branch-create-submit", state.switching ? "Creating…" : "Create new branch");
+  submitButton.type = "submit";
+
+  const preview = make("div", "footer-branch-create-preview");
+  const updatePreview = () => {
+    const branchName = footerBranchCreateName();
+    preview.textContent = gitSwitchCreateCommandDisplay(branchName || footerBranchCreatePreviewName());
+    const submitDisabled = Boolean(state.switching) || !branchName;
+    submitButton.disabled = false;
+    submitButton.classList.toggle("footer-branch-create-submit-disabled", submitDisabled);
+    submitButton.setAttribute("aria-disabled", submitDisabled ? "true" : "false");
+    submitButton.dataset.tooltip = footerBranchCreateTooltip(branchName);
+    submitButton.setAttribute("aria-label", branchName ? `Create and switch to ${branchName}` : "Create new branch: enter both a branch type and name first");
+    submitButton.removeAttribute("title");
+  };
+
+  typeInput.addEventListener("focus", () => {
+    renderTypeSuggestions();
+    typeSuggestions.hidden = false;
+  });
+  typeInput.addEventListener("blur", () => {
+    setTimeout(() => { typeSuggestions.hidden = true; }, 120);
+  });
+  typeInput.addEventListener("input", () => {
+    updateFooterBranchCreateDraft({ type: typeInput.value });
+    updatePreview();
+    renderTypeSuggestions();
+    typeSuggestions.hidden = false;
+  });
+  typeInput.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      typeSuggestions.hidden = true;
+      return;
+    }
+    if (event.key !== "/" && event.key !== "Enter") return;
+    event.preventDefault();
+    typeSuggestions.hidden = true;
+    nameInput.focus();
+    nameInput.select();
+  });
+  nameInput.addEventListener("input", () => {
+    updateFooterBranchCreateDraft({ name: nameInput.value });
+    updatePreview();
+  });
+  nameInput.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    form.requestSubmit();
+  });
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (state.switching) return;
+    const branchName = footerBranchCreateName();
+    createFooterGitBranch(branchName).catch((error) => addEvent(error.message || String(error), "error"));
+  });
+
+  updatePreview();
+  renderTypeSuggestions();
+  typeField.append(typeInput, typeSuggestions);
+  fields.append(typeField, slash, nameInput, submitButton);
+  form.append(header, fields, preview);
+  return form;
 }
 
 function renderFooterBranchPicker() {
@@ -7753,7 +7936,7 @@ function renderFooterBranchPicker() {
     return picker;
   }
   if (state.loading && state.branches.length === 0) {
-    picker.append(make("div", "footer-model-picker-empty muted", "Loading local branches…"));
+    picker.append(make("div", "footer-model-picker-empty muted", "Loading existing local branches… New branch creation is available."), renderFooterBranchCreateForm(state));
     return picker;
   }
 
@@ -7761,15 +7944,10 @@ function renderFooterBranchPicker() {
   if (!state.loading && !hasOtherBranches) {
     const empty = make("div", "footer-model-picker-empty muted");
     empty.append(make("strong", undefined, "No other local branches available."), make("span", undefined, " Create a branch from the current HEAD to continue."));
-    const createButton = make("button", "footer-model-option footer-branch-create-option");
-    createButton.type = "button";
-    createButton.append(
-      make("span", "footer-model-option-main", "Create new branch"),
-      make("span", "footer-model-option-name", "prompts for a name, confirms, then runs git switch -c"),
-    );
-    createButton.addEventListener("click", () => createFooterGitBranch().catch((error) => addEvent(error.message || String(error), "error")));
-    picker.append(empty, createButton);
+    picker.append(empty);
   }
+
+  picker.append(renderFooterBranchCreateForm(state));
 
   for (const branch of state.branches) {
     const selected = branch.current || (!!state.current && branch.name === state.current);
@@ -7788,6 +7966,162 @@ function renderFooterBranchPicker() {
     picker.append(button);
   }
   return picker;
+}
+
+function footerScopedModelKey(model) {
+  return model?.provider && model?.id ? `${model.provider}/${model.id}` : "";
+}
+
+function readFooterScopedModelOrder() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(FOOTER_SCOPED_MODEL_ORDER_STORAGE_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed.filter((key) => typeof key === "string" && key.trim()) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeFooterScopedModelOrder(order) {
+  try {
+    localStorage.setItem(FOOTER_SCOPED_MODEL_ORDER_STORAGE_KEY, JSON.stringify([...new Set(order.filter(Boolean))]));
+  } catch {}
+}
+
+function orderedFooterScopedModels() {
+  const order = readFooterScopedModelOrder();
+  if (!order.length) return footerScopedModels;
+  const rank = new Map(order.map((key, index) => [key, index]));
+  return [...footerScopedModels].sort((a, b) => {
+    const aRank = rank.has(footerScopedModelKey(a)) ? rank.get(footerScopedModelKey(a)) : Number.MAX_SAFE_INTEGER;
+    const bRank = rank.has(footerScopedModelKey(b)) ? rank.get(footerScopedModelKey(b)) : Number.MAX_SAFE_INTEGER;
+    return aRank - bRank;
+  });
+}
+
+function commitFooterScopedModelOrder(order, { render = true, focusKey = "" } = {}) {
+  writeFooterScopedModelOrder(order);
+  footerScopedModels = orderedFooterScopedModels();
+  if (render) renderFooter();
+  if (focusKey) {
+    const movedButton = document.querySelector(`[data-footer-model-key="${CSS.escape(focusKey)}"]`);
+    if (movedButton) movedButton.focus();
+  }
+}
+
+function reorderFooterScopedModel(fromKey, toKey, { focus = true } = {}) {
+  if (!fromKey || !toKey || fromKey === toKey) return false;
+  const models = orderedFooterScopedModels();
+  const fromIndex = models.findIndex((model) => footerScopedModelKey(model) === fromKey);
+  const toIndex = models.findIndex((model) => footerScopedModelKey(model) === toKey);
+  if (fromIndex < 0 || toIndex < 0) return false;
+  const [moved] = models.splice(fromIndex, 1);
+  models.splice(toIndex, 0, moved);
+  commitFooterScopedModelOrder(models.map(footerScopedModelKey), { focusKey: focus ? fromKey : "" });
+  return true;
+}
+
+function moveFooterScopedModelByOffset(modelKey, offset) {
+  const models = orderedFooterScopedModels();
+  const fromIndex = models.findIndex((model) => footerScopedModelKey(model) === modelKey);
+  const toIndex = fromIndex + offset;
+  if (fromIndex < 0 || toIndex < 0 || toIndex >= models.length) return false;
+  const [moved] = models.splice(fromIndex, 1);
+  models.splice(toIndex, 0, moved);
+  commitFooterScopedModelOrder(models.map(footerScopedModelKey), { focusKey: modelKey });
+  return true;
+}
+
+function footerScopedModelButtons() {
+  return [...document.querySelectorAll(".footer-model-picker .footer-model-option[data-footer-model-key]")];
+}
+
+function footerScopedModelButtonFromPoint(clientX, clientY) {
+  return document.elementFromPoint(clientX, clientY)?.closest?.(".footer-model-option[data-footer-model-key]") || null;
+}
+
+function clearFooterScopedModelDragMarkers() {
+  for (const button of footerScopedModelButtons()) {
+    button.classList.remove("drag-over", "drag-over-before", "drag-over-after");
+  }
+}
+
+function commitVisibleFooterScopedModelOrder({ render = false, focusKey = "" } = {}) {
+  const order = footerScopedModelButtons().map((button) => button.dataset.footerModelKey).filter(Boolean);
+  if (!order.length) return;
+  commitFooterScopedModelOrder(order, { render, focusKey });
+}
+
+function moveVisibleFooterScopedModel(fromKey, targetButton, clientY) {
+  if (!fromKey || !targetButton) return false;
+  const sourceButton = document.querySelector(`[data-footer-model-key="${CSS.escape(fromKey)}"]`);
+  if (!sourceButton || sourceButton === targetButton) return false;
+  const parent = sourceButton.parentElement;
+  if (!parent || targetButton.parentElement !== parent) return false;
+  const targetKey = targetButton.dataset.footerModelKey || "";
+  const rect = targetButton.getBoundingClientRect();
+  const insertBefore = clientY < rect.top + rect.height / 2;
+
+  clearFooterScopedModelDragMarkers();
+  targetButton.classList.add("drag-over", insertBefore ? "drag-over-before" : "drag-over-after");
+  footerScopedModelLastDragOverKey = `${targetKey}:${insertBefore ? "before" : "after"}`;
+
+  if (insertBefore) parent.insertBefore(sourceButton, targetButton);
+  else parent.insertBefore(sourceButton, targetButton.nextSibling);
+  commitVisibleFooterScopedModelOrder({ render: false });
+  return true;
+}
+
+function beginFooterScopedModelPointerDrag(event, modelKey) {
+  if (event.button !== 0 || !modelKey) return;
+  footerScopedModelPointerDrag = { modelKey, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, active: false };
+  window.addEventListener("pointermove", updateFooterScopedModelPointerDrag, { capture: true });
+  window.addEventListener("pointerup", endFooterScopedModelPointerDrag, { capture: true });
+  window.addEventListener("pointercancel", endFooterScopedModelPointerDrag, { capture: true });
+}
+
+function updateFooterScopedModelPointerDrag(event) {
+  const drag = footerScopedModelPointerDrag;
+  if (!drag || drag.pointerId !== event.pointerId) return;
+  const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+  if (!drag.active && distance < FOOTER_SCOPED_MODEL_POINTER_DRAG_THRESHOLD_PX) return;
+  event.preventDefault();
+  if (!drag.active) {
+    drag.active = true;
+    footerScopedModelDragKey = drag.modelKey;
+    footerScopedModelLastDragOverKey = "";
+    clearTimeout(pointerActivationTimeout);
+    pointerActivationTimeout = null;
+    activePointerActivation = null;
+    deferredUiRenderCallbacks.delete("footer");
+    const sourceButton = document.querySelector(`[data-footer-model-key="${CSS.escape(drag.modelKey)}"]`);
+    if (sourceButton) sourceButton.classList.add("dragging");
+  }
+  const targetButton = footerScopedModelButtonFromPoint(event.clientX, event.clientY);
+  if (!targetButton || targetButton.dataset.footerModelKey === drag.modelKey) return;
+  const rect = targetButton.getBoundingClientRect();
+  const markerKey = `${targetButton.dataset.footerModelKey}:${event.clientY < rect.top + rect.height / 2 ? "before" : "after"}`;
+  if (markerKey === footerScopedModelLastDragOverKey) return;
+  moveVisibleFooterScopedModel(drag.modelKey, targetButton, event.clientY);
+}
+
+function endFooterScopedModelPointerDrag(event) {
+  const drag = footerScopedModelPointerDrag;
+  if (!drag || drag.pointerId !== event.pointerId) return;
+  window.removeEventListener("pointermove", updateFooterScopedModelPointerDrag, { capture: true });
+  window.removeEventListener("pointerup", endFooterScopedModelPointerDrag, { capture: true });
+  window.removeEventListener("pointercancel", endFooterScopedModelPointerDrag, { capture: true });
+  const wasActive = drag.active;
+  const sourceButton = document.querySelector(`[data-footer-model-key="${CSS.escape(drag.modelKey)}"]`);
+  footerScopedModelPointerDrag = null;
+  footerScopedModelDragKey = "";
+  footerScopedModelLastDragOverKey = "";
+  clearFooterScopedModelDragMarkers();
+  if (sourceButton) sourceButton.classList.remove("dragging");
+  if (wasActive) {
+    footerScopedModelSuppressClickUntil = Date.now() + 250;
+    event.preventDefault();
+    commitVisibleFooterScopedModelOrder({ render: false, focusKey: drag.modelKey });
+  }
 }
 
 async function applyFooterModel(model) {
@@ -7815,7 +8149,7 @@ function renderFooterModelPicker() {
   picker.setAttribute("role", "listbox");
   picker.setAttribute("aria-label", "Scoped models");
   picker.append(make("div", "footer-model-picker-title", "Scoped models"));
-  picker.append(make("div", "footer-model-picker-source", footerScopedModelSource === "none" ? "No saved scope" : `Source: ${footerScopedModelSource}${footerScopedModelPatterns.length ? ` · ${footerScopedModelPatterns.join(", ")}` : ""}`));
+  picker.append(make("div", "footer-model-picker-source", "Drag models to reorder · Alt+↑/↓ moves focused model"));
   if (footerScopedModels.length === 0) {
     const empty = make("div", "footer-model-picker-empty muted");
     empty.append(
@@ -7826,10 +8160,16 @@ function renderFooterModelPicker() {
     return picker;
   }
   const current = currentState?.model;
+  footerScopedModels = orderedFooterScopedModels();
   for (const model of footerScopedModels) {
     const selected = current?.provider === model.provider && current?.id === model.id;
-    const button = make("button", `footer-model-option${selected ? " active" : ""}`);
+    const modelKey = footerScopedModelKey(model);
+    const dragging = footerScopedModelDragKey === modelKey;
+    const dragOver = footerScopedModelDragKey && footerScopedModelLastDragOverKey === modelKey;
+    const button = make("button", `footer-model-option${selected ? " active" : ""}${dragging ? " dragging" : ""}${dragOver ? " drag-over" : ""}`);
     button.type = "button";
+    button.draggable = false;
+    button.dataset.footerModelKey = modelKey;
     button.setAttribute("role", "option");
     button.setAttribute("aria-selected", selected ? "true" : "false");
     button.title = `${model.provider}/${model.id}${model.name ? ` · ${model.name}` : ""}`;
@@ -7837,7 +8177,19 @@ function renderFooterModelPicker() {
       make("span", "footer-model-option-main", `${model.provider}/${model.id}`),
       make("span", "footer-model-option-name", model.name || ""),
     );
-    button.addEventListener("click", () => applyFooterModel(model));
+    button.addEventListener("click", (event) => {
+      if (Date.now() < footerScopedModelSuppressClickUntil) {
+        event.preventDefault();
+        return;
+      }
+      applyFooterModel(model);
+    });
+    button.addEventListener("keydown", (event) => {
+      if (!event.altKey || (event.key !== "ArrowUp" && event.key !== "ArrowDown")) return;
+      event.preventDefault();
+      moveFooterScopedModelByOffset(modelKey, event.key === "ArrowUp" ? -1 : 1);
+    });
+    button.addEventListener("pointerdown", (event) => beginFooterScopedModelPointerDrag(event, modelKey));
     picker.append(button);
   }
   return picker;
@@ -17304,6 +17656,7 @@ async function refreshModels(tabContext = activeTabContext()) {
   if (!isCurrentTabContext(tabContext)) return;
   availableModels = models;
   footerScopedModels = scopedModels;
+  footerScopedModels = orderedFooterScopedModels();
   footerScopedModelPatterns = scopedModelPatterns;
   footerScopedModelSource = scopedModelSource;
   if (scopedModelError) addEvent(`failed to load scoped models: ${scopedModelError.message}`, "warn");
