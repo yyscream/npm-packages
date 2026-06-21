@@ -53,7 +53,8 @@
     "test": "node tests/run-all.mjs"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "^0.79.8"
+    "@earendil-works/pi-coding-agent": "^0.79.8",
+    "mermaid": "^11.15.0"
   },
   "optionalDependencies": {
     "@firstpick/pi-extension-btw": "^0.1.0",

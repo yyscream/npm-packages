@@ -214,7 +214,7 @@ assert.match(app, /function handleRemoteWebuiStatus\(statusText\)[\s\S]*?opening
 assert.match(app, /case "confirm":[\s\S]*?if \(isRemoteWebuiQrPopupLoading\(\)\) closeRemoteWebuiQrPopup\(\)/, "blocking extension dialogs should close the QR loading popup before opening");
 assert.match(app, /function showRemoteWebuiQrPopup\(widgetKey, lines = \[\], request = \{\}\)[\s\S]*?widgetKey !== "pi-remote-webui"[\s\S]*?openRemoteWebuiQrPopup\(lines\)/, "remote WebUI QR widget events should open the QR popup");
 assert.match(app, /function mirrorRemoteWebuiWidgetToTranscript\(widgetKey, lines = \[\], request = \{\}\)[\s\S]*?widgetKey !== "pi-remote-webui"[\s\S]*?addTransientMessage\(\{ role: "extension", title: "\/remote"/, "remote WebUI QR widget events should still mirror into the active tab transcript");
-assert.match(app, /if \(widgetKey === "pi-remote-webui"\) \{[\s\S]*?widgets\.delete\(widgetKey\);[\s\S]*?showRemoteWebuiQrPopup\(widgetKey, request\.widgetLines, request\)/, "remote WebUI QR widget events should not render in the generic widget area");
+assert.match(app, /if \(widgetKey === "pi-remote-webui"\) \{[\s\S]*?setWidgetForTab\(requestTabId, widgetKey, \{ \.\.\.request, widgetLines: undefined \}\);[\s\S]*?showRemoteWebuiQrPopup\(widgetKey, request\.widgetLines, request\)/, "remote WebUI QR widget events should not render in the generic widget area");
 assert.doesNotMatch(app, /function renderRemoteWebuiWidget/, "remote WebUI QR should not render through the generic widget renderer");
 assert.match(css, /\.message\.run-indicator-message \{[\s\S]*?border-color/, "active agent runs should render a visible transcript indicator card");
 assert.match(css, /\.message-copy-button \{[\s\S]*?position:\s*absolute/, "transcript messages should expose a top-right copy button");
@@ -250,6 +250,7 @@ assert.match(css, /\.side-panel-section:not\(\.collapsed\) \.side-panel-section-
 assert.match(css, /\.optional-feature-pill\.enabled/, "optional features should visually distinguish enabled state");
 assert.match(css, /\.todo-widget \{[\s\S]*?display:\s*grid/, "todo-progress widget should render as a styled checklist card");
 assert.match(css, /\.todo-widget-summary \{[\s\S]*?cursor:\s*pointer/, "todo-progress widget should expose a compact expandable summary");
+assert.match(css, /\.todo-widget-goal \{[\s\S]*?overflow-wrap:\s*anywhere/, "todo-progress widget should show long goals above progress without layout overflow");
 assert.match(css, /\.todo-widget-body \{[\s\S]*?max-height:/, "expanded todo-progress details should be height-limited");
 assert.match(css, /\.todo-widget-item\.partial \.todo-widget-marker/, "todo-progress partial items should have distinct styling");
 assert.match(css, /\.todo-widget-item\.done \.todo-widget-text[\s\S]*?text-decoration:\s*line-through/, "todo-progress completed items should be visually crossed out");
@@ -519,6 +520,12 @@ assert.match(app, /function messageCopyText\(message, body = null\)/, "frontend 
 assert.match(app, /function attachMessageCopyButton\(bubble, message, body\)/, "frontend should add copy controls to rendered transcript cards");
 assert.match(app, /button\.append\(make\("span", "message-copy-icon", "⧉"\)\)/, "message copy buttons should render as icon-only controls");
 assert.match(app, /copyMessageBubble\(button\)/, "message copy buttons should copy through the shared clipboard helper");
+assert.match(app, /function attachMarkdownCodeCopyButton\(wrapper, label = "Copy"\)/, "frontend should add copy controls to markdown code blocks");
+assert.match(app, /function copyMarkdownCodeBlock\(button\)[\s\S]*?await copyText\(text\)/, "markdown code block copy controls should use the shared clipboard helper");
+assert.match(app, /attachMarkdownCodeCopyButton\(wrapper\);/, "normal fenced code blocks should get copy buttons");
+assert.match(app, /attachMarkdownCodeCopyButton\(wrapper, "Copy source"\);/, "rendered Mermaid blocks should expose source copy buttons");
+assert.match(css, /\.markdown-code-copy-button \{[\s\S]*?position:\s*absolute/, "markdown code blocks should expose positioned copy buttons");
+assert.match(css, /\.markdown-code-block\.has-code-copy-action > \.code-block \{[\s\S]*?padding-top:/, "code block copy buttons should reserve vertical space above source text");
 assert.match(app, /retryServerConnectionButton.*retryServerConnection/s, "backend-offline recovery panel should wire a retry action");
 assert.match(app, /function isChatNearBottom\(/, "chat should detect whether the user is reading above the bottom");
 assert.match(app, /function scheduleChatFollowScroll\(/, "chat auto-follow should retry after layout settles during fast streaming");
@@ -545,6 +552,8 @@ assert.match(app, /case "webui_extension_ui_cancelled":/, "frontend should close
 assert.match(app, /case "webui_extension_ui_resolved":[\s\S]*?removeQueuedDialogRequests\(\[event\.id\]\)/, "frontend should close dialogs resolved by another connected browser");
 assert.match(app, /if \(responseId && activeDialog && String\(activeDialog\.id \|\| ""\) !== responseId\) return;/, "dialog response cleanup should not close the next queued dialog after a resolve-event race");
 assert.match(app, /function parseTodoProgressWidget\(lines\)/, "todo-progress widgets should be parsed from extension widget lines");
+assert.ok(app.includes("const goalLine = cleanLines.find((line) => /^Goal\\s*[:：]/i.test(line));"), "todo-progress parser should preserve an optional Goal line from extension widget lines");
+assert.ok(app.includes("if (todo.goal) summary.append(make(\"div\", \"todo-widget-goal\", `Goal: ${todo.goal}`));"), "todo-progress widget should display the goal above the progress header");
 assert.match(app, /const todoProgressWidgetExpandedByTab = new Map\(\)/, "todo-progress expansion state should survive widget re-renders per tab");
 assert.match(app, /const node = make\("details", "widget todo-widget"\)/, "todo-progress widget should render collapsed by default as expandable details");
 assert.match(app, /Optional feature detection intentionally checks loaded Pi capabilities/, "optional Web UI features should be detected through loaded capabilities, not package folders");
@@ -790,6 +799,8 @@ assert.match(app, /assistantThinkingTextFromMessage\(assistantStreamingMessage\(
 assert.match(app, /if \(typeof partialText === "string"\) streamRawText = partialText;/, "live assistant text should synchronize from partial messages instead of relying only on deltas");
 assert.match(app, /const TODO_PROGRESS_LINE_REGEX = /, "frontend should recognize live todo progress lines that will be moved into the todo widget");
 assert.match(app, /function stripTodoProgressLines\(text, \{ streaming = false \} = \{\}\)/, "live Assistant output should strip todo-progress lines before rendering final-output text");
+assert.match(app, /function syncLiveTodoProgressWidgetFromText\(text, tabId = activeTabId\)/, "live Assistant checklist text should update the todo-progress widget before tool execution events");
+assert.match(app, /syncLiveTodoProgressWidgetFromText\(streamRawText, event\.tabId \|\| activeTabId\)/, "streaming assistant text should feed the live todo-progress widget immediately");
 assert.match(app, /function renderStreamingAssistantText\(\)[\s\S]*?const assistantText = stripTodoProgressLines\(streamRawText, \{ streaming: true \}\)/, "streamed Assistant text should classify from accumulated output without flashing partial todo-progress lines");
 assert.match(app, /function syncStreamingThinkingFormat\(assistantText\)[\s\S]*?splitThinkingFormatText\(assistantText, \{ streaming: true \}\)[\s\S]*?setStreamingThinkingText\(thinking\)/, "tagged <think> streaming output should update the live thinking card instead of flashing raw tags");
 assert.match(app, /const finalText = thinkingFormat\?\.hasThinkingFormat \? stripTodoProgressLines\(thinkingFormat\.finalText, \{ streaming: true \}\) : assistantText;/, "tagged <think> streaming output should render only final response text in the Assistant card");

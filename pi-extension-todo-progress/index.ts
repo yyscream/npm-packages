@@ -3,23 +3,168 @@ import { extractChecklist, stripChecklistLines, type ChecklistItem, type Checkli
 
 type TodoStatus = ChecklistStatus;
 type TodoItem = ChecklistItem;
-type TodoState = { visible: boolean; items: TodoItem[]; offset: number };
+type TodoState = {
+  visible: boolean;
+  items: TodoItem[];
+  offset: number;
+  goal?: string;
+  awaitingGoalCheck: boolean;
+};
+type PersistedTodoState = TodoState & { version: 1 };
 
 const KEY = "todo-progress";
+const STATE_KEY = "todo-progress-state";
+const CONTEXT_KEY = "todo-progress-context";
 const MAX_ROWS = 5;
 const MAX_ITEMS = 12;
+
+const TODO_POLICY = [
+  "",
+  "",
+  "[TODO PROGRESS POLICY] For multi-step work:",
+  "- First formulate a concise one-sentence `Goal: ...` before creating a todo list or starting execution.",
+  "- Create concise, agent-authored checklists with 2-6 short items. Keep the goal separate; the todo list does not need to contain the goal.",
+  "- Before every execution step or tool call, emit the current todo list update as markdown checklist lines exactly like `- [ ] item`, `- [-] item`, or `- [x] item`.",
+  "- Do not copy raw user-prompt lines as todos; rewrite them into clear action items.",
+  "- Update checklist markers as work changes. Mark the active/current step `[-]` when useful and completed steps `[x]`.",
+  "- When every item in the current list is `[x]`, explicitly check whether the goal is reached before doing more work.",
+  "- If the goal is reached, stop creating todo lists and produce the final output. If the goal is not reached, create a new short checklist before the next execution step.",
+  "- Multiple todo lists may be created during one session; each new list replaces the previous list in the progress widget.",
+  "- Todo checklists are session progress: still emit `[x]` updates when possible; the extension keeps the last list visible until it is replaced, dismissed, or a new user task begins.",
+].join("\n");
+
 function statusLabel(status: TodoStatus): string {
   if (status === "done") return "[x]";
   if (status === "partial") return "[-]";
   return "[ ]";
 }
 
-function clear(ctx: ExtensionContext, s: TodoState) {
+function isDoneList(items: TodoItem[]): boolean {
+  return items.length > 0 && items.every((item) => item.status === "done");
+}
+
+function extractChecklistBlocks(text: string): TodoItem[][] {
+  const blocks: TodoItem[][] = [];
+  let current: TodoItem[] = [];
+  let inFence = false;
+
+  for (const line of text.split(/\r?\n/)) {
+    if (/^\s*```/.test(line)) {
+      inFence = !inFence;
+      if (current.length > 0) {
+        blocks.push(current);
+        current = [];
+      }
+      continue;
+    }
+
+    const item = inFence ? undefined : extractChecklist(line)[0];
+    if (item) {
+      current.push(item);
+      continue;
+    }
+
+    if (current.length > 0) {
+      blocks.push(current);
+      current = [];
+    }
+  }
+
+  if (current.length > 0) blocks.push(current);
+  return blocks;
+}
+
+function extractLatestChecklist(texts: string[]): TodoItem[] {
+  const blocks = texts.flatMap((text) => extractChecklistBlocks(text));
+  return blocks.at(-1)?.slice(0, MAX_ITEMS) ?? [];
+}
+
+function cleanGoalText(value: string | undefined): string | undefined {
+  const goal = value
+    ?.replace(/^\s*(?:`+|\*+|_+)+/, "")
+    .replace(/(?:`+|\*+|_+)+\s*$/, "")
+    .trim()
+    .replace(/\s+/g, " ");
+  return goal || undefined;
+}
+
+function extractGoal(text: string): string | undefined {
+  let inFence = false;
+
+  for (const line of text.split(/\r?\n/)) {
+    if (/^\s*```/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+
+    const match = /^\s*(?:[-*+]\s*)?(?:>\s*)?(?:\*\*|__)?\s*Goal\s*(?:\*\*|__)?\s*[:：—–-]\s*(.+)$/i.exec(line);
+    const goal = cleanGoalText(match?.[1]);
+    if (goal) return goal;
+  }
+
+  return undefined;
+}
+
+function fallbackGoalFromPrompt(prompt: string): string | undefined {
+  const explicit = extractGoal(prompt);
+  if (explicit) return explicit;
+
+  const firstMeaningfulLine = prompt
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line && !line.startsWith("/") && !line.startsWith("[TODO PROGRESS CONTEXT]"));
+
+  return cleanGoalText(firstMeaningfulLine)?.slice(0, 160);
+}
+
+function clear(ctx: ExtensionContext, s: TodoState, options: { keepGoal?: boolean } = {}) {
   const hadWidget = s.visible || s.items.length > 0;
+  const goal = s.goal;
   s.visible = false;
   s.items = [];
   s.offset = 0;
+  s.goal = options.keepGoal ? goal : undefined;
+  s.awaitingGoalCheck = false;
   if (ctx.hasUI && hadWidget) ctx.ui.setWidget(KEY, undefined);
+}
+
+function hideWidget(ctx: ExtensionContext) {
+  if (ctx.hasUI) ctx.ui.setWidget(KEY, undefined);
+}
+
+function snapshotState(s: TodoState): PersistedTodoState {
+  return {
+    version: 1,
+    visible: s.visible,
+    items: s.items.map((item) => ({ ...item })),
+    offset: s.offset,
+    goal: s.goal,
+    awaitingGoalCheck: s.awaitingGoalCheck,
+  };
+}
+
+function isTodoStatus(value: unknown): value is TodoStatus {
+  return value === "todo" || value === "partial" || value === "done";
+}
+
+function restoreSnapshot(data: unknown): TodoState | undefined {
+  if (!data || typeof data !== "object") return undefined;
+  const snapshot = data as Partial<PersistedTodoState>;
+  if (snapshot.version !== 1 || !Array.isArray(snapshot.items)) return undefined;
+
+  const items = snapshot.items.flatMap((item: any) => {
+    if (!item || typeof item.text !== "string" || !isTodoStatus(item.status)) return [];
+    return [{ text: item.text, status: item.status }];
+  });
+
+  return {
+    visible: Boolean(snapshot.visible) && items.length > 0,
+    items: items.slice(0, MAX_ITEMS),
+    offset: Math.max(0, Math.min(Number(snapshot.offset) || 0, Math.max(0, items.length - MAX_ROWS))),
+    goal: typeof snapshot.goal === "string" && snapshot.goal.trim() ? snapshot.goal : undefined,
+    awaitingGoalCheck: Boolean(snapshot.awaitingGoalCheck),
+  };
 }
 
 function render(ctx: ExtensionContext, s: TodoState) {
@@ -30,33 +175,104 @@ function render(ctx: ExtensionContext, s: TodoState) {
   }
 
   const done = s.items.filter((i) => i.status === "done").length;
-  if (done === s.items.length) {
-    clear(ctx, s);
-    return;
-  }
-
   const partial = s.items.filter((i) => i.status === "partial").length;
+  const allDone = done === s.items.length;
   const top = s.items.slice(s.offset, s.offset + MAX_ROWS);
-  const lines = [ctx.ui.theme.fg("accent", `Todo ${done}/${s.items.length} done${partial ? `, ${partial} partial` : ""}`)];
+  const title = allDone
+    ? `Todo ${done}/${s.items.length} done · check goal`
+    : `Todo ${done}/${s.items.length} done${partial ? `, ${partial} partial` : ""}`;
+  const lines = [ctx.ui.theme.fg("accent", `Goal: ${s.goal ?? "not formulated yet"}`)];
+  lines.push(ctx.ui.theme.fg(allDone ? "success" : "accent", title));
   for (const item of top) lines.push(`${statusLabel(item.status)} ${item.text}`);
   if (s.items.length > MAX_ROWS) lines.push(ctx.ui.theme.fg("dim", `Scroll ${s.offset + 1}-${Math.min(s.offset + MAX_ROWS, s.items.length)} of ${s.items.length}`));
   ctx.ui.setWidget(KEY, lines);
 }
 
+function buildInjectedContext(s: TodoState): string {
+  const lines = ["[TODO PROGRESS CONTEXT]"];
+  lines.push(s.goal ? `Goal: ${s.goal}` : "Goal: not formulated yet. Formulate `Goal: ...` before creating the first checklist or starting work.");
+
+  if (s.items.length > 0) {
+    lines.push("", "Current todo list injected before the next step:");
+    for (const item of s.items) lines.push(`- ${statusLabel(item.status)} ${item.text}`);
+  }
+
+  if (s.awaitingGoalCheck || isDoneList(s.items)) {
+    lines.push(
+      "",
+      "The current todo list is complete. Before any additional tool call or execution step, check whether the goal is reached.",
+      "If the goal is reached, produce the final output and stop creating todo lists. If not, create a new 2-6 item checklist first.",
+    );
+  } else if (s.items.length > 0) {
+    lines.push(
+      "",
+      "Before the next execution step or tool call, emit the current checklist update first so the progress widget stays ahead of the step.",
+    );
+  }
+
+  return lines.join("\n");
+}
+
 export default function todoProgress(pi: ExtensionAPI) {
-  const state: TodoState = { visible: false, items: [], offset: 0 };
+  const state: TodoState = { visible: false, items: [], offset: 0, awaitingGoalCheck: false };
+
+  function persistState() {
+    pi.appendEntry(STATE_KEY, snapshotState(state));
+  }
+
+  function restoreState(ctx: ExtensionContext) {
+    const entries = ctx.sessionManager.getBranch();
+    const saved = entries
+      .filter((entry: any) => entry.type === "custom" && entry.customType === STATE_KEY)
+      .map((entry: any) => restoreSnapshot(entry.data))
+      .filter((snapshot): snapshot is TodoState => Boolean(snapshot))
+      .at(-1);
+
+    if (!saved) {
+      clear(ctx, state);
+      return;
+    }
+
+    state.visible = saved.visible;
+    state.items = saved.items;
+    state.offset = saved.offset;
+    state.goal = saved.goal;
+    state.awaitingGoalCheck = saved.awaitingGoalCheck;
+    render(ctx, state);
+  }
 
   pi.on("before_agent_start", async (event, ctx) => {
     clear(ctx, state);
+    state.goal = fallbackGoalFromPrompt(event.prompt);
+    persistState();
+    return { systemPrompt: event.systemPrompt + TODO_POLICY };
+  });
+
+  pi.on("context", async (event) => {
+    const messages = event.messages.filter((message: any) => message?.customType !== CONTEXT_KEY);
+    if (!state.goal && state.items.length === 0) {
+      return messages.length === event.messages.length ? undefined : { messages };
+    }
+
     return {
-      systemPrompt:
-        event.systemPrompt +
-        "\n\n[TODO PROGRESS POLICY] For multi-step work, create a concise agent-authored checklist with 2-6 short items. Do not copy raw user-prompt lines as todos; rewrite them into clear action items. Emit todo updates as markdown checklist lines exactly like `- [ ] item`, `- [-] item`, or `- [x] item`; do not use raw user prompt lines as todos. Update checklist markers as work changes. Todo checklists are live-turn progress only: still emit `[x]` updates when possible, but the extension will close the widget deterministically when the agent turn ends.",
+      messages: [
+        ...messages,
+        {
+          role: "custom",
+          customType: CONTEXT_KEY,
+          content: buildInjectedContext(state),
+          display: false,
+          timestamp: Date.now(),
+        } as any,
+      ],
     };
   });
 
   pi.on("input", async (event, ctx) => {
-    if (!event.text.startsWith("/")) clear(ctx, state);
+    if (!event.text.startsWith("/")) {
+      clear(ctx, state);
+      persistState();
+    }
     return { action: "continue" as const };
   });
 
@@ -64,14 +280,19 @@ export default function todoProgress(pi: ExtensionAPI) {
     if (event.message.role !== "assistant") return;
 
     const textParts = event.message.content.filter((c: any) => c.type === "text");
-    const checklist = textParts.flatMap((c: any) => extractChecklist(c.text));
+    const texts = textParts.map((c: any) => c.text);
+    const goal = texts.map(extractGoal).find(Boolean);
+    if (goal) state.goal = goal;
 
+    const checklist = extractLatestChecklist(texts);
     if (checklist.length === 0) return;
 
-    state.items = checklist.slice(0, MAX_ITEMS);
+    state.items = checklist;
+    state.awaitingGoalCheck = isDoneList(state.items);
     state.offset = Math.min(state.offset, Math.max(0, state.items.length - MAX_ROWS));
     state.visible = true;
     render(ctx, state);
+    persistState();
 
     return {
       message: {
@@ -82,39 +303,43 @@ export default function todoProgress(pi: ExtensionAPI) {
   });
 
   pi.on("agent_end", async (_event, ctx) => {
-    // The widget represents live progress for the active turn, not persistent task state.
-    // Do not leave stale partial/todo items visible if the model forgets a final update.
-    clear(ctx, state);
+    // Keep the last list visible after the run finishes so terminal redraws/tab switches
+    // still have a current widget to render. A new non-command input or manual dismiss clears it.
+    render(ctx, state);
+    persistState();
   });
 
-  pi.on("session_shutdown", async (_event, ctx) => clear(ctx, state));
+  pi.on("session_shutdown", async () => persistState());
   pi.on("session_before_switch", async (_event, ctx) => {
-    clear(ctx, state);
+    persistState();
+    hideWidget(ctx);
     return undefined;
   });
   pi.on("session_before_fork", async (_event, ctx) => {
-    clear(ctx, state);
+    persistState();
+    hideWidget(ctx);
     return undefined;
   });
-  pi.on("session_tree", async (_event, ctx) => clear(ctx, state));
+  pi.on("session_tree", async (_event, ctx) => restoreState(ctx));
 
   pi.registerShortcut("ctrl+alt+x", {
     description: "Dismiss completed todo widget",
     handler: async (ctx) => {
       clear(ctx, state);
+      persistState();
       ctx.ui.notify("Todo widget dismissed", "info");
     },
   });
 
-  pi.registerShortcut("ctrl+alt+j", { description: "Todo scroll down", handler: async (ctx) => { state.offset = Math.min(Math.max(0, state.items.length - MAX_ROWS), state.offset + 1); render(ctx, state); } });
-  pi.registerShortcut("ctrl+alt+k", { description: "Todo scroll up", handler: async (ctx) => { state.offset = Math.max(0, state.offset - 1); render(ctx, state); } });
+  pi.registerShortcut("ctrl+alt+j", { description: "Todo scroll down", handler: async (ctx) => { state.offset = Math.min(Math.max(0, state.items.length - MAX_ROWS), state.offset + 1); render(ctx, state); persistState(); } });
+  pi.registerShortcut("ctrl+alt+k", { description: "Todo scroll up", handler: async (ctx) => { state.offset = Math.max(0, state.offset - 1); render(ctx, state); persistState(); } });
 
   pi.registerCommand("todo-progress-status", {
     description: "Show todo-progress widget extension status",
     handler: async (_args, ctx) => {
-      ctx.ui.notify(`todo-progress loaded · visible ${state.visible ? "yes" : "no"} · items ${state.items.length}`, "info");
+      ctx.ui.notify(`todo-progress loaded · visible ${state.visible ? "yes" : "no"} · items ${state.items.length} · goal ${state.goal ? "yes" : "no"}`, "info");
     },
   });
 
-  pi.on("session_start", async (_event, ctx) => clear(ctx, state));
+  pi.on("session_start", async (_event, ctx) => restoreState(ctx));
 }

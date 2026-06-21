@@ -541,6 +541,7 @@ const mobileViewMedia = window.matchMedia?.(MOBILE_VIEW_QUERY) || null;
 const sidePanelOverlayMedia = window.matchMedia?.(SIDE_PANEL_OVERLAY_QUERY) || mobileViewMedia;
 const statusEntries = new Map();
 const widgets = new Map();
+const widgetsByTab = new Map();
 const todoProgressWidgetExpandedByTab = new Map();
 const releaseNpmOutputExpandedByTab = new Map();
 const appRunnerDataByTab = new Map();
@@ -926,6 +927,12 @@ const GIT_INIT_STACK_TOOLTIP = [
   "Choose a known stack or type one. The value is saved in this browser.",
   "If left blank, Pi will inspect the codebase and fall back to sane default .gitignore patterns.",
 ].join("\n");
+const MERMAID_MODULE_URL = "/vendor/mermaid/mermaid.esm.min.mjs";
+const MERMAID_LANGUAGES = new Set(["mermaid", "mmd"]);
+const MERMAID_MAX_TEXT_SIZE = 100_000;
+let mermaidModulePromise = null;
+let mermaidThemeSignature = "";
+let mermaidRenderSequence = 0;
 
 function make(tag, className, text) {
   const node = document.createElement(tag);
@@ -4456,6 +4463,7 @@ function syncTabMetadata(nextTabs = []) {
       actionFeedbackByTab.delete(tabId);
       skillUsageByTab.delete(tabId);
       tabMessagesCache.delete(tabId);
+      widgetsByTab.delete(tabId);
       clearGitWorkflowForTab(tabId);
     }
   }
@@ -4718,6 +4726,55 @@ function cancelPendingDialogs() {
   if (elements.dialog.open) elements.dialog.close();
 }
 
+function widgetCacheForTab(tabId = activeTabId, { create = true } = {}) {
+  if (!tabId) return null;
+  let cache = widgetsByTab.get(tabId);
+  if (!cache && create) {
+    cache = new Map();
+    widgetsByTab.set(tabId, cache);
+  }
+  return cache || null;
+}
+
+function cacheWidgetsForTab(tabId = activeTabId) {
+  if (!tabId) return;
+  if (widgets.size === 0) {
+    widgetsByTab.delete(tabId);
+    return;
+  }
+  widgetsByTab.set(tabId, new Map(widgets));
+}
+
+function restoreWidgetsForActiveTab() {
+  widgets.clear();
+  const cache = widgetCacheForTab(activeTabId, { create: false });
+  if (!cache) return;
+  for (const [key, value] of cache) widgets.set(key, value);
+}
+
+function setWidgetForTab(tabId, widgetKey, request) {
+  if (!widgetKey) return;
+  const targetTabId = tabId || activeTabId;
+  const cache = widgetCacheForTab(targetTabId);
+  const hasLines = Array.isArray(request?.widgetLines);
+
+  if (cache) {
+    if (hasLines) cache.set(widgetKey, request);
+    else cache.delete(widgetKey);
+    if (cache.size === 0) widgetsByTab.delete(targetTabId);
+  }
+
+  if (targetTabId === activeTabId) {
+    if (hasLines) widgets.set(widgetKey, request);
+    else widgets.delete(widgetKey);
+  }
+}
+
+function clearWidgetsForTab(tabId = activeTabId) {
+  if (tabId) widgetsByTab.delete(tabId);
+  if (!tabId || tabId === activeTabId) widgets.clear();
+}
+
 function resetActiveTabUi() {
   clearRefreshTimers();
   clearLiveToolRenderQueue();
@@ -4735,7 +4792,7 @@ function resetActiveTabUi() {
   latestMessagesSessionKey = "";
   clearRunIndicatorActivity({ render: false });
   statusEntries.clear();
-  widgets.clear();
+  restoreWidgetsForActiveTab();
   transientMessages = [];
   liveToolRuns.clear();
   liveToolCards.clear();
@@ -5116,6 +5173,7 @@ async function switchTab(tabId) {
   footerBranchPickerRequestSerial += 1;
   saveActiveDraft();
   cacheMessagesForTab(activeTabId);
+  cacheWidgetsForTab(activeTabId);
   const tabContext = setActiveTabId(tabId, { remember: true });
   resetActiveTabUi();
   renderTabs();
@@ -9005,8 +9063,79 @@ function stripTodoProgressLines(text, { streaming = false } = {}) {
   return kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
+function parseTodoProgressItemLine(line) {
+  const match = String(line || "").match(/^\s*(?:(?:[-*]|\d+[.)])\s*)?\[( |x|X|-)\]\s+(.+)$/);
+  if (!match) return null;
+  const mark = match[1].toLowerCase();
+  return { status: mark === "x" ? "done" : mark === "-" ? "partial" : "todo", text: match[2].trim() };
+}
+
+function todoProgressStatusLabel(status) {
+  if (status === "done") return "[x]";
+  if (status === "partial") return "[-]";
+  return "[ ]";
+}
+
+function liveTodoProgressWidgetLinesFromText(text) {
+  if (!isOptionalFeatureEnabled("todoProgressWidget")) return null;
+  const raw = String(text || "");
+  if (!raw.trim()) return null;
+
+  let inFence = false;
+  let goal = "";
+  let current = [];
+  const blocks = [];
+  const flush = () => {
+    if (current.length) blocks.push(current);
+    current = [];
+  };
+
+  for (const line of raw.split(/\r?\n/)) {
+    if (/^\s*```/.test(line)) {
+      inFence = !inFence;
+      flush();
+      continue;
+    }
+    if (inFence) continue;
+
+    const clean = stripAnsi(line).trim();
+    const goalMatch = clean.match(/^Goal\s*[:：]\s*(.+)$/i);
+    if (goalMatch?.[1]?.trim()) goal = goalMatch[1].trim();
+
+    const item = parseTodoProgressItemLine(clean);
+    if (item) {
+      current.push(item);
+      continue;
+    }
+    flush();
+  }
+  flush();
+
+  const items = blocks.at(-1) || [];
+  if (!items.length) return null;
+
+  const done = items.filter((item) => item.status === "done").length;
+  const partial = items.filter((item) => item.status === "partial").length;
+  const lines = [];
+  if (goal) lines.push(`Goal: ${goal}`);
+  lines.push(`Todo ${done}/${items.length} done${partial ? `, ${partial} partial` : ""}`);
+  for (const item of items) lines.push(`${todoProgressStatusLabel(item.status)} ${item.text}`);
+  return lines;
+}
+
+function syncLiveTodoProgressWidgetFromText(text, tabId = activeTabId) {
+  const lines = liveTodoProgressWidgetLinesFromText(text);
+  if (!lines) return false;
+  setWidgetForTab(tabId, "todo-progress", { method: "setWidget", widgetKey: "todo-progress", widgetLines: lines, tabId, live: true });
+  updateOptionalFeatureAvailability();
+  if (tabId === activeTabId) renderWidgets();
+  return true;
+}
+
 function parseTodoProgressWidget(lines) {
   const cleanLines = lines.map(stripAnsi).map((line) => line.trim()).filter(Boolean);
+  const goalLine = cleanLines.find((line) => /^Goal\s*[:：]/i.test(line));
+  const goal = goalLine ? goalLine.replace(/^Goal\s*[:：]\s*/i, "").trim() : "";
   const headerIndex = cleanLines.findIndex((line) => /^Todo\s+\d+\/\d+\s+done/i.test(line));
   if (headerIndex === -1) return null;
 
@@ -9017,16 +9146,16 @@ function parseTodoProgressWidget(lines) {
   const items = [];
   let footer = "";
   for (const line of cleanLines.slice(headerIndex + 1)) {
-    const item = line.match(/^\[( |x|X|-)\]\s+(.+)$/);
+    const item = parseTodoProgressItemLine(line);
     if (item) {
-      const mark = item[1].toLowerCase();
-      items.push({ status: mark === "x" ? "done" : mark === "-" ? "partial" : "todo", text: item[2].trim() });
+      items.push(item);
     } else if (/^Scroll\s+/i.test(line)) {
       footer = line;
     }
   }
 
   return {
+    goal,
     done: Number.parseInt(match[1], 10) || 0,
     total: Number.parseInt(match[2], 10) || items.length,
     partial: Number.parseInt(match[3] || "0", 10) || 0,
@@ -9061,6 +9190,7 @@ function renderTodoProgressWidget(_key, lines) {
   const fill = make("span", "todo-widget-progress-fill");
   fill.style.width = `${percent}%`;
   progress.append(fill);
+  if (todo.goal) summary.append(make("div", "todo-widget-goal", `Goal: ${todo.goal}`));
   summary.append(header, progress);
 
   const body = make("div", "todo-widget-body");
@@ -13240,14 +13370,201 @@ function appendMarkdownParagraph(parent, lines) {
   parent.append(paragraph);
 }
 
-function appendMarkdownCodeBlock(parent, code, language = "") {
+function setMarkdownCodeCopyButtonState(button, copied) {
+  clearTimeout(button._markdownCodeCopyResetTimer);
+  const label = button._markdownCodeCopyDefaultLabel || "Copy";
+  button.classList.toggle("copied", copied);
+  button.textContent = copied ? "Copied" : label;
+  button.title = copied ? "Copied code block" : `${label} code block`;
+  button.setAttribute("aria-label", button.title);
+  if (copied) {
+    button._markdownCodeCopyResetTimer = setTimeout(() => setMarkdownCodeCopyButtonState(button, false), 1400);
+  }
+}
+
+async function copyMarkdownCodeBlock(button) {
+  const wrapper = button.closest(".markdown-code-block");
+  const codeNode = wrapper?.querySelector(":scope > pre.markdown-code > code, :scope > details.markdown-mermaid-source pre.markdown-code > code");
+  const text = codeNode?.textContent || "";
+  if (!text) {
+    addEvent("code block has no text to copy", "warn");
+    return;
+  }
+  button.disabled = true;
+  try {
+    await copyText(text);
+    setMarkdownCodeCopyButtonState(button, true);
+  } catch (error) {
+    addEvent(`code block copy failed: ${error.message || String(error)}`, "warn");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function attachMarkdownCodeCopyButton(wrapper, label = "Copy") {
+  if (!wrapper) return null;
+  const existing = wrapper.querySelector(":scope > .markdown-code-copy-button");
+  if (existing) return existing;
+  const button = make("button", "markdown-code-copy-button", label);
+  button.type = "button";
+  button._markdownCodeCopyDefaultLabel = label;
+  setMarkdownCodeCopyButtonState(button, false);
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    copyMarkdownCodeBlock(button);
+  });
+  wrapper.classList.add("has-code-copy-action");
+  wrapper.append(button);
+  return button;
+}
+
+function normalizedMarkdownLanguage(language) {
+  return String(language || "").trim().toLowerCase();
+}
+
+function isMermaidLanguage(language) {
+  return MERMAID_LANGUAGES.has(normalizedMarkdownLanguage(language));
+}
+
+function mermaidCssVar(styles, name, fallback) {
+  return styles.getPropertyValue(name).trim() || fallback;
+}
+
+function mermaidConfig() {
+  const styles = getComputedStyle(document.documentElement);
+  const text = mermaidCssVar(styles, "--ctp-text", "#cdd6f4");
+  const subtext = mermaidCssVar(styles, "--ctp-subtext", "#bac2de");
+  const surface = mermaidCssVar(styles, "--ctp-surface", "#313244");
+  const base = mermaidCssVar(styles, "--ctp-base", "#1e1e2e");
+  const crust = mermaidCssVar(styles, "--ctp-crust", "#11111b");
+  const mauve = mermaidCssVar(styles, "--ctp-mauve", "#cba6f7");
+  const blue = mermaidCssVar(styles, "--ctp-blue", "#89b4fa");
+  const teal = mermaidCssVar(styles, "--ctp-teal", "#94e2d5");
+  const yellow = mermaidCssVar(styles, "--ctp-yellow", "#f9e2af");
+  const red = mermaidCssVar(styles, "--ctp-red", "#f38ba8");
+  return {
+    startOnLoad: false,
+    securityLevel: "strict",
+    logLevel: "error",
+    maxTextSize: MERMAID_MAX_TEXT_SIZE,
+    theme: "base",
+    flowchart: { htmlLabels: false },
+    themeVariables: {
+      darkMode: true,
+      background: "transparent",
+      mainBkg: base,
+      secondBkg: surface,
+      primaryColor: surface,
+      primaryTextColor: text,
+      primaryBorderColor: mauve,
+      secondaryColor: base,
+      secondaryTextColor: text,
+      secondaryBorderColor: blue,
+      tertiaryColor: crust,
+      tertiaryTextColor: text,
+      tertiaryBorderColor: teal,
+      lineColor: subtext,
+      textColor: text,
+      titleColor: teal,
+      nodeTextColor: text,
+      clusterBkg: crust,
+      clusterBorder: mauve,
+      edgeLabelBackground: base,
+      noteBkgColor: crust,
+      noteTextColor: text,
+      noteBorderColor: yellow,
+      errorBkgColor: crust,
+      errorTextColor: red,
+      fontFamily: 'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    },
+  };
+}
+
+function initializeMermaid(mermaid) {
+  const config = mermaidConfig();
+  const signature = JSON.stringify(config);
+  if (signature !== mermaidThemeSignature) {
+    mermaid.initialize(config);
+    mermaidThemeSignature = signature;
+  }
+}
+
+async function loadMermaid() {
+  if (!mermaidModulePromise) {
+    mermaidModulePromise = import(MERMAID_MODULE_URL)
+      .then((module) => module.default || module)
+      .catch((error) => {
+        mermaidModulePromise = null;
+        throw error;
+      });
+  }
+  const mermaid = await mermaidModulePromise;
+  initializeMermaid(mermaid);
+  return mermaid;
+}
+
+function mermaidRenderErrorMessage(error) {
+  return String(error?.str || error?.message || error || "Unknown Mermaid render error").trim();
+}
+
+async function renderMermaidDiagram(diagram, status, source) {
+  const token = `${Date.now().toString(36)}-${++mermaidRenderSequence}`;
+  diagram.dataset.mermaidRenderToken = token;
+  try {
+    if (source.length > MERMAID_MAX_TEXT_SIZE) throw new Error(`Mermaid diagram is too large (${source.length} characters, max ${MERMAID_MAX_TEXT_SIZE}).`);
+    const mermaid = await loadMermaid();
+    const id = `mermaid-${token.replace(/[^a-z0-9_-]/gi, "-")}`;
+    const { svg, bindFunctions } = await mermaid.render(id, source);
+    if (!diagram.isConnected || diagram.dataset.mermaidRenderToken !== token) return;
+    diagram.innerHTML = svg;
+    bindFunctions?.(diagram);
+    diagram.classList.add("rendered");
+    status.textContent = "";
+    status.hidden = true;
+  } catch (error) {
+    if (!diagram.isConnected || diagram.dataset.mermaidRenderToken !== token) return;
+    diagram.classList.add("render-error");
+    status.hidden = false;
+    status.classList.add("error");
+    status.textContent = `Mermaid render failed: ${mermaidRenderErrorMessage(error)}`;
+  }
+}
+
+function appendMarkdownMermaidBlock(parent, code) {
+  const source = String(code || "").replace(/\n+$/g, "");
+  const wrapper = make("div", "markdown-code-block markdown-mermaid-block");
+  wrapper.append(make("div", "markdown-code-language", "mermaid"));
+  const diagram = make("div", "markdown-mermaid-diagram");
+  diagram.setAttribute("role", "img");
+  diagram.setAttribute("aria-label", "Mermaid diagram");
+  const status = make("div", "markdown-mermaid-status muted", "Rendering Mermaid diagram…");
+  const sourceDetails = make("details", "markdown-mermaid-source");
+  sourceDetails.append(make("summary", undefined, "Mermaid source"));
+  const pre = make("pre", "code-block markdown-code");
+  const codeNode = make("code", "language-mermaid");
+  codeNode.textContent = source;
+  pre.append(codeNode);
+  sourceDetails.append(pre);
+  wrapper.append(diagram, status, sourceDetails);
+  attachMarkdownCodeCopyButton(wrapper, "Copy source");
+  parent.append(wrapper);
+  queueMicrotask(() => renderMermaidDiagram(diagram, status, source));
+}
+
+function appendMarkdownCodeBlock(parent, code, language = "", { closed = true } = {}) {
+  if (closed && isMermaidLanguage(language)) {
+    appendMarkdownMermaidBlock(parent, code);
+    return;
+  }
   const wrapper = make("div", "markdown-code-block");
   if (language) wrapper.append(make("div", "markdown-code-language", language));
   const pre = make("pre", "code-block markdown-code");
   const codeNode = make("code", language ? `language-${language.replace(/[^a-z0-9_-]/gi, "")}` : "");
-  codeNode.textContent = code.replace(/\n+$/g, "");
+  codeNode.textContent = String(code || "").replace(/\n+$/g, "");
   pre.append(codeNode);
   wrapper.append(pre);
+  attachMarkdownCodeCopyButton(wrapper);
   parent.append(wrapper);
 }
 
@@ -13345,8 +13662,9 @@ function renderMarkdownInto(parent, text) {
         codeLines.push(lines[index]);
         index += 1;
       }
-      if (index < lines.length) index += 1;
-      appendMarkdownCodeBlock(parent, codeLines.join("\n"), language);
+      const closed = index < lines.length;
+      if (closed) index += 1;
+      appendMarkdownCodeBlock(parent, codeLines.join("\n"), language, { closed });
       continue;
     }
     if (markdownTableSeparator(lines[index + 1]) && line.includes("|")) {
@@ -17343,6 +17661,7 @@ function handleMessageUpdate(event) {
     if (typeof partialText === "string") streamRawText = partialText;
     else if (update.type === "text_end" && typeof update.content === "string") streamRawText = update.content;
     else streamRawText += delta;
+    syncLiveTodoProgressWidgetFromText(streamRawText, event.tabId || activeTabId);
     setRunIndicatorActivity("Writing response…", { scroll: false });
     if (streamToolCallSeen || streamBubble) renderStreamingAssistantText();
     else scheduleStreamingAssistantTextRender();
@@ -18958,18 +19277,17 @@ function handleExtensionUiRequest(request) {
     }
     case "setWidget": {
       const widgetKey = request.widgetKey || request.id;
+      const requestTabId = request.tabId || activeTabId;
       if (widgetKey === "pi-remote-webui") {
-        widgets.delete(widgetKey);
+        setWidgetForTab(requestTabId, widgetKey, { ...request, widgetLines: undefined });
         if (Array.isArray(request.widgetLines)) {
           mirrorRemoteWebuiWidgetToTranscript(widgetKey, request.widgetLines, request);
           showRemoteWebuiQrPopup(widgetKey, request.widgetLines, request);
         } else {
           closeRemoteWebuiQrPopup();
         }
-      } else if (Array.isArray(request.widgetLines)) {
-        widgets.set(widgetKey, request);
       } else {
-        widgets.delete(widgetKey);
+        setWidgetForTab(requestTabId, widgetKey, request);
       }
       updateOptionalFeatureAvailability();
       renderWidgets();
@@ -19146,7 +19464,7 @@ function handleEvent(event) {
       addTransientMessage({ role: "native", title: "/reload", content: `${event.tabTitle || "terminal"} reloaded. Keybindings, extensions, skills, prompts, and themes were refreshed by restarting the RPC tab${event.sessionFile ? ` and resuming ${event.sessionFile}` : ""}.`, level: "info" });
       clearContextUsageUnknownAfterCompaction(event.tabId || activeTabId);
       statusEntries.clear();
-      widgets.clear();
+      clearWidgetsForTab(event.tabId || activeTabId);
       latestBtwWidgetPayload = null;
       btwWidgetDismissedId = "";
       btwWidgetComposerOpen = false;

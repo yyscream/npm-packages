@@ -200,6 +200,7 @@ const MIME_TYPES = new Map([
   [".html", "text/html; charset=utf-8"],
   [".jsonl", "application/x-ndjson; charset=utf-8"],
   [".js", "text/javascript; charset=utf-8"],
+  [".mjs", "text/javascript; charset=utf-8"],
   [".css", "text/css; charset=utf-8"],
   [".svg", "image/svg+xml"],
   [".png", "image/png"],
@@ -4056,6 +4057,15 @@ function normalizeStaticPath(urlPath) {
   return name;
 }
 
+function mermaidStaticPath(urlPath) {
+  const prefix = "/vendor/mermaid/";
+  if (!String(urlPath || "").startsWith(prefix)) return undefined;
+  const relative = urlPath.slice(prefix.length);
+  if (relative === "mermaid.esm.min.mjs") return path.join(packageRoot, "node_modules", "mermaid", "dist", relative);
+  if (/^chunks\/mermaid\.esm\.min\/[A-Za-z0-9._-]+\.mjs$/.test(relative)) return path.join(packageRoot, "node_modules", "mermaid", "dist", relative);
+  return undefined;
+}
+
 const compressWithBrotli = promisify(brotliCompress);
 const compressWithGzip = promisify(gzip);
 const STATIC_COMPRESSIBLE_EXTENSIONS = new Set([".html", ".css", ".js", ".mjs", ".svg", ".json", ".webmanifest"]);
@@ -4096,9 +4106,8 @@ function requestEtagMatches(req, etag) {
 async function serveStatic(req, res, url) {
   if (req.method !== "GET") return false;
   const staticName = normalizeStaticPath(url.pathname);
-  if (!staticName) return false;
-
-  const filePath = path.join(publicDir, staticName);
+  const filePath = staticName ? path.join(publicDir, staticName) : mermaidStaticPath(url.pathname);
+  if (!filePath) return false;
   const ext = path.extname(filePath);
   const asset = await loadStaticAsset(filePath);
   const headers = {
