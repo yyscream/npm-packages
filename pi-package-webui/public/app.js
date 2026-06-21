@@ -389,6 +389,7 @@ const contextUsageUnknownAfterCompactionByTab = new Map();
 let autoFollowChat = true;
 let chatFollowFrame = null;
 let chatFollowSettleTimer = null;
+let liveWidgetRenderFrame = null;
 let lastChatProgrammaticScrollAt = 0;
 let chatUserScrollIntentUntil = 0;
 let mobileFooterExpanded = false;
@@ -9123,12 +9124,33 @@ function liveTodoProgressWidgetLinesFromText(text) {
   return lines;
 }
 
+// Coalesce live widget rebuilds to one per animation frame. The streaming
+// output handler calls into here on every text token, but the widget area
+// must not be torn down/rebuilt per token (that is UI reacting to the agent
+// output stream). One render per frame keeps streaming transcript-local.
+function scheduleLiveWidgetRender() {
+  if (liveWidgetRenderFrame !== null) return;
+  if (typeof requestAnimationFrame !== "function") {
+    renderWidgets();
+    return;
+  }
+  liveWidgetRenderFrame = requestAnimationFrame(() => {
+    liveWidgetRenderFrame = null;
+    renderWidgets();
+  });
+}
+
 function syncLiveTodoProgressWidgetFromText(text, tabId = activeTabId) {
   const lines = liveTodoProgressWidgetLinesFromText(text);
   if (!lines) return false;
+  // liveTodoProgressWidgetLinesFromText already short-circuits unless the
+  // feature is enabled, so detection is settled here. Do NOT run
+  // updateOptionalFeatureAvailability() per token: it triggers git-footer
+  // payload reconciliation and a full optional-feature control rebuild.
+  // Availability is reconciled on command/state refreshes and RPC widget
+  // updates instead, keeping streaming output decoupled from chrome UI.
   setWidgetForTab(tabId, "todo-progress", { method: "setWidget", widgetKey: "todo-progress", widgetLines: lines, tabId, live: true });
-  updateOptionalFeatureAvailability();
-  if (tabId === activeTabId) renderWidgets();
+  if (tabId === activeTabId) scheduleLiveWidgetRender();
   return true;
 }
 
